@@ -817,6 +817,23 @@ class SetupActivity : AppCompatActivity() {
             file.delete()
             return
         }
+        // Double-check install permission at runtime (may have been revoked or not granted yet)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && !packageManager.canRequestPackageInstalls()) {
+            AlertDialog.Builder(this)
+                .setTitle("⚠️ Permesso mancante")
+                .setMessage("Per installare il Gateway è necessario abilitare \"Installa app sconosciute\" per questa app.\n\nTocca OK per aprire le impostazioni.")
+                .setPositiveButton("OK") { _, _ ->
+                    pendingInstallFile = file
+                    @Suppress("DEPRECATION")
+                    startActivityForResult(
+                        Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:$packageName")),
+                        INSTALL_PERM_REQUEST
+                    )
+                }
+                .setNegativeButton("Annulla", null)
+                .show()
+            return
+        }
         installWithPackageInstaller(file, GATEWAY_PACKAGE)
     }
 
@@ -897,6 +914,14 @@ class SetupActivity : AppCompatActivity() {
                             val msg = intent?.getStringExtra(
                                 android.content.pm.PackageInstaller.EXTRA_STATUS_MESSAGE
                             ) ?: "status=$status"
+                            val diagInfo = buildString {
+                                appendLine("Status: $status")
+                                appendLine("Msg: $msg")
+                                appendLine("PKG: $targetPkg")
+                                appendLine("APK: ${file.length() / 1024} KB")
+                                appendLine("Android: ${Build.VERSION.SDK_INT} (${Build.VERSION.RELEASE})")
+                                appendLine("Device: ${Build.MANUFACTURER} ${Build.MODEL}")
+                            }
                             setGatewayUI("❌", getString(R.string.install_error_install),
                                 msg, 0xFFf87171.toInt())
                             ErrorReporter.reportMessage(
@@ -907,13 +932,30 @@ class SetupActivity : AppCompatActivity() {
                                     "status"  to status,
                                     "msg"     to msg,
                                     "apk_kb"  to (file.length() / 1024),
-                                    "android" to Build.VERSION.SDK_INT
+                                    "android" to Build.VERSION.SDK_INT,
+                                    "device"  to "${Build.MANUFACTURER} ${Build.MODEL}"
                                 )
                             )
                             val pkgInstalled = try {
                                 packageManager.getPackageInfo(targetPkg, 0); true
                             } catch (_: Exception) { false }
-                            if (pkgInstalled) runOnUiThread { offerUninstallAndRetry(file, targetPkg) }
+                            runOnUiThread {
+                                if (pkgInstalled) {
+                                    offerUninstallAndRetry(file, targetPkg)
+                                } else {
+                                    // Show diagnostic dialog with Retry button
+                                    AlertDialog.Builder(this@SetupActivity)
+                                        .setTitle("❌ Installazione fallita (status=$status)")
+                                        .setMessage(diagInfo.trim())
+                                        .setPositiveButton("Riprova") { _, _ ->
+                                            installWithPackageInstaller(file, targetPkg)
+                                        }
+                                        .setNeutralButton("Salta") { _, _ ->
+                                            checkGatewayStatus()
+                                        }
+                                        .show()
+                                }
+                            }
                         }
                     }
                 }
@@ -1012,7 +1054,15 @@ class SetupActivity : AppCompatActivity() {
         super.onActivityResult(requestCode, resultCode, data)
         when (requestCode) {
             INSTALL_PERM_REQUEST -> {
-                if (pendingApkDownloadUrl.isNotEmpty()) triggerApkDownload(pendingApkDownloadUrl)
+                // Returned from "Install unknown apps" settings for this app.
+                // pendingInstallFile is set when coming from installApk() permission check,
+                // pendingApkDownloadUrl is set when coming from triggerApkDownload().
+                val pendingFile = pendingInstallFile
+                if (pendingFile != null && pendingFile.exists()) {
+                    installApk(pendingFile)
+                } else if (pendingApkDownloadUrl.isNotEmpty()) {
+                    triggerApkDownload(pendingApkDownloadUrl)
+                }
             }
             INSTALL_CONFIRM_REQUEST -> {
                 // On Android 11+ the final install result (STATUS_SUCCESS / STATUS_FAILURE)
