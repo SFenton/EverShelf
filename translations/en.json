@@ -594,6 +594,9 @@
             "label": "🌐 Language",
             "restart_notice": "The page will reload to apply the new language."
         },
+        "screensaver": {
+            "label": "Enable screensaver"
+        },
         "scale": {
             "title": "⚖️ Smart Scale",
             "hint": "Connect a Bluetooth scale via the Android gateway to automatically read weight.",

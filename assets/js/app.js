@@ -1101,6 +1101,9 @@ function translatePage() {
 // Populate the language selector dropdown
 function _populateLanguageSelector() {
     const sel = document.getElementById('setting-language');
+    // Screensaver toggle
+    const ssEl = document.getElementById('setting-screensaver-enabled');
+    if (ssEl) ssEl.checked = s.screensaver_enabled === true;
     if (!sel) return;
     sel.innerHTML = '';
     for (const [code, name] of Object.entries(_SUPPORTED_LANGS)) {
@@ -2124,6 +2127,9 @@ async function saveSettings() {
     s.dietary = document.getElementById('setting-dietary').value.trim();
     // Camera
     s.camera_facing = document.getElementById('setting-camera-facing').value;
+    // Screensaver
+    const ssEl = document.getElementById('setting-screensaver-enabled');
+    if (ssEl) s.screensaver_enabled = ssEl.checked;
     // Meal plan enabled toggle
     const mpEnabledEl = document.getElementById('setting-meal-plan-enabled');
     if (mpEnabledEl) s.meal_plan_enabled = mpEnabledEl.checked;
@@ -11691,6 +11697,8 @@ function initScreensaverShortcuts() {
 }
 
 function initInactivityWatcher() {
+    const s = getSettings();
+    if (!s.screensaver_enabled) return; // disabled by default
     const events = ['pointerdown', 'pointermove', 'keydown', 'scroll', 'touchstart'];
     events.forEach(evt => {
         document.addEventListener(evt, () => {

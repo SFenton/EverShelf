@@ -594,6 +594,9 @@
             "label": "🌐 Lingua",
             "restart_notice": "La pagina verrà ricaricata per applicare la nuova lingua."
         },
+        "screensaver": {
+            "label": "Attiva salvaschermo"
+        },
         "scale": {
             "title": "⚖️ Bilancia Smart",
             "hint": "Collega una bilancia Bluetooth tramite il gateway Android per leggere il peso automaticamente.",

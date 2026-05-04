@@ -595,6 +595,9 @@
             "label": "🌐 Sprache",
             "restart_notice": "Die Seite wird neu geladen, um die neue Sprache anzuwenden."
         },
+        "screensaver": {
+            "label": "Bildschirmschoner aktivieren"
+        },
         "scale": {
             "title": "⚖️ Smart-Waage",
             "hint": "Verbinde eine Bluetooth-Waage über das Android-Gateway, um das Gewicht automatisch auszulesen.",
