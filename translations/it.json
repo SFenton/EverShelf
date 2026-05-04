@@ -325,6 +325,7 @@
     "shopping": {
         "title": "🛒 Lista della Spesa",
         "bring_loading": "Connessione a Bring!...",
+        "bring_not_configured": "Bring! non è configurato. Aggiungi email e password nelle <a href='#' onclick=\"showPage('settings');return false;\">impostazioni</a>.",
         "tab_to_buy": "🛍️ Da comprare",
         "tab_forecast": "🧠 In previsione",
         "total_label": "💰 Totale stimato",
@@ -595,7 +596,9 @@
             "restart_notice": "La pagina verrà ricaricata per applicare la nuova lingua."
         },
         "screensaver": {
-            "label": "Attiva salvaschermo"
+            "label": "Attiva salvaschermo",
+            "card_title": "🌙 Salvaschermo",
+            "card_hint": "Mostra un orologio con fatti utili dopo 5 minuti di inattività. Di default è disattivato."
         },
         "scale": {
             "title": "⚖️ Bilancia Smart",
