@@ -12,7 +12,6 @@ import android.content.SharedPreferences
 import android.content.pm.PackageManager
 import android.content.res.Configuration
 import android.net.Uri
-import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
@@ -30,11 +29,17 @@ import androidx.core.content.ContextCompat
 import com.google.android.material.button.MaterialButton
 import com.google.android.material.switchmaterial.SwitchMaterial
 import java.net.HttpURLConnection
+import java.net.InetSocketAddress
+import java.net.NetworkInterface
+import java.net.Socket
 import java.net.URL
 import java.util.Locale
+import java.util.concurrent.ExecutorCompletionService
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
 import javax.net.ssl.HttpsURLConnection
 import javax.net.ssl.SSLContext
 import javax.net.ssl.TrustManager
@@ -502,7 +507,6 @@ class SetupActivity : AppCompatActivity() {
 
     // ── Auto-Discover ─────────────────────────────────────────────────────
 
-    @Suppress("DEPRECATION")
     private fun autoDiscover() {
         discoverCancelled.set(false)
         btnDiscover.isEnabled = false
@@ -511,92 +515,125 @@ class SetupActivity : AppCompatActivity() {
         discoverStatus.text = getString(R.string.setup_discovering_detail)
         discoverStatus.setTextColor(0xFF94a3b8.toInt())
 
-        // Determine local subnet
-        val wifiMgr  = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
-        val ipInt    = wifiMgr.connectionInfo.ipAddress
-        val subnets  = mutableListOf<String>()
-        if (ipInt != 0) {
-            val a = (ipInt shr  0) and 0xFF
-            val b = (ipInt shr  8) and 0xFF
-            val c = (ipInt shr 16) and 0xFF
-            subnets += "$a.$b.$c"
-        }
-        // Always include common subnets as fallback
-        for (s in listOf("192.168.1", "192.168.0", "192.168.2", "10.0.0")) {
-            if (!subnets.contains(s)) subnets += s
-        }
-
-        val ports = listOf(80, 8080)
-        val paths = listOf(
-            "/api/index.php?action=get_settings",
-            "/dispensa/api/index.php?action=get_settings",
-            "/evershelf/api/index.php?action=get_settings"
-        )
-        val executor = Executors.newFixedThreadPool(40)
-        val found    = AtomicBoolean(false)
-
         Thread {
-            val futures = mutableListOf<java.util.concurrent.Future<String?>>()
-            outer@ for (subnet in subnets) {
-                for (i in 1..254) {
-                    if (discoverCancelled.get() || found.get()) break@outer
-                    val ip = "$subnet.$i"
-                    for (port in ports) {
-                        if (discoverCancelled.get() || found.get()) break@outer
-                        futures += executor.submit<String?> submit@{
-                            if (discoverCancelled.get() || found.get()) return@submit null
-                            val scheme = if (port == 443 || port == 8443) "https" else "http"
-                            for (path in paths) {
-                                val urlStr = "$scheme://$ip:$port$path"
-                                try {
-                                    val conn = openConn(urlStr) ?: continue
-                                    val code = conn.responseCode
-                                    if (code in 200..399) {
-                                        val body = conn.inputStream.bufferedReader().readText()
-                                        conn.disconnect()
-                                        if (body.contains("gemini_key_set") || body.contains("\"success\"")) {
-                                            val base = urlStr.substringBefore("/api/")
-                                            return@submit "$base/"
-                                        }
-                                    } else conn.disconnect()
-                                } catch (_: Exception) {}
-                            }
-                            null
+            // ── 1. Detect subnets via NetworkInterface (not deprecated WifiManager) ──
+            val subnets = mutableListOf<String>()
+            try {
+                val interfaces = NetworkInterface.getNetworkInterfaces()
+                while (interfaces != null && interfaces.hasMoreElements()) {
+                    val intf = interfaces.nextElement()
+                    if (!intf.isUp || intf.isLoopback) continue
+                    for (addr in intf.interfaceAddresses) {
+                        val ip = addr.address
+                        if (ip is java.net.Inet4Address && !ip.isLoopbackAddress) {
+                            val parts = ip.hostAddress?.split(".") ?: continue
+                            if (parts.size == 4) subnets += "${parts[0]}.${parts[1]}.${parts[2]}"
                         }
                     }
                 }
+            } catch (_: Exception) {}
+            // Append common fallback subnets (deduped)
+            for (s in listOf("192.168.1", "192.168.0", "192.168.2", "10.0.0", "10.0.1")) {
+                if (!subnets.contains(s)) subnets += s
             }
 
-            // Collect results
-            for (f in futures) {
-                if (discoverCancelled.get()) break
-                val result = try { f.get(4, TimeUnit.SECONDS) } catch (_: Exception) { null }
-                if (result != null && found.compareAndSet(false, true)) {
-                    runOnUiThread {
-                        urlEdit.setText(result)
-                        discoverStatus.text = "✅ ${getString(R.string.setup_server_found)}: $result"
-                        discoverStatus.setTextColor(0xFF34d399.toInt())
-                        showUrlStatus("✅ ${getString(R.string.setup_server_found)}", true)
-                        btnDiscover.isEnabled = true
-                        btnDiscover.text = getString(R.string.setup_discover_btn)
+            val ports = listOf(80, 8080)
+            val paths = listOf(
+                "/api/index.php?action=get_settings",
+                "/dispensa/api/index.php?action=get_settings",
+                "/evershelf/api/index.php?action=get_settings",
+            )
+
+            // Build full task list: subnet-first ordering ensures local subnet is scanned first
+            val allTargets = mutableListOf<Pair<String, Int>>()
+            for (subnet in subnets.distinct()) {
+                for (i in 1..254) {
+                    for (port in ports) {
+                        allTargets += "$subnet.$i" to port
                     }
+                }
+            }
+
+            val executor = Executors.newFixedThreadPool(60)
+            val cs = ExecutorCompletionService<String?>(executor)
+            val found = AtomicBoolean(false)
+            val scanned = AtomicInteger(0)
+            val total = allTargets.size
+            val lastUiMs = AtomicLong(0L)
+
+            // ── 2. Submit all tasks ─────────────────────────────────────────────
+            for ((ip, port) in allTargets) {
+                cs.submit {
+                    if (discoverCancelled.get() || found.get()) return@submit null
+
+                    val n = scanned.incrementAndGet()
+                    // Update status ~8 fps (every 120 ms) without hammering the UI thread
+                    val now = System.currentTimeMillis()
+                    if (now - lastUiMs.get() > 120) {
+                        lastUiMs.set(now)
+                        runOnUiThread {
+                            discoverStatus.text = "🔍  $ip:$port  ($n / $total)"
+                        }
+                    }
+
+                    // TCP pre-check (600 ms) — skips unreachable hosts instantly
+                    val reachable = try {
+                        Socket().use { s -> s.connect(InetSocketAddress(ip, port), 600); true }
+                    } catch (_: Exception) { false }
+
+                    if (!reachable || discoverCancelled.get() || found.get()) return@submit null
+
+                    // Full HTTP probe on reachable host
+                    val scheme = if (port == 443 || port == 8443) "https" else "http"
+                    for (path in paths) {
+                        if (discoverCancelled.get() || found.get()) break
+                        val urlStr = "$scheme://$ip:$port$path"
+                        try {
+                            val conn = openConn(urlStr) ?: continue
+                            val code = conn.responseCode
+                            if (code in 200..399) {
+                                val body = conn.inputStream.bufferedReader().readText()
+                                conn.disconnect()
+                                if (body.contains("gemini_key_set") || body.contains("\"success\"")) {
+                                    return@submit urlStr.substringBefore("/api/") + "/"
+                                }
+                            } else conn.disconnect()
+                        } catch (_: Exception) {}
+                    }
+                    null
+                }
+            }
+
+            // ── 3. Collect results as they complete (not in submission order) ────
+            var result: String? = null
+            var collected = 0
+            while (collected < total && !discoverCancelled.get()) {
+                val future = cs.poll(3, TimeUnit.SECONDS) ?: break
+                collected++
+                val r = try { future.get() } catch (_: Exception) { null }
+                if (r != null && found.compareAndSet(false, true)) {
+                    result = r
                     break
                 }
             }
-            executor.shutdown()
+            executor.shutdownNow()
 
-            if (!found.get() && !discoverCancelled.get()) {
-                runOnUiThread {
-                    discoverStatus.text = getString(R.string.setup_discover_not_found)
-                    discoverStatus.setTextColor(0xFFf87171.toInt())
-                    btnDiscover.isEnabled = true
-                    btnDiscover.text = getString(R.string.setup_discover_btn)
+            val finalResult = result
+            runOnUiThread {
+                when {
+                    finalResult != null -> {
+                        urlEdit.setText(finalResult)
+                        discoverStatus.text = "✅ ${getString(R.string.setup_server_found)}: $finalResult"
+                        discoverStatus.setTextColor(0xFF34d399.toInt())
+                        showUrlStatus("✅ ${getString(R.string.setup_server_found)}", true)
+                    }
+                    !discoverCancelled.get() -> {
+                        discoverStatus.text = getString(R.string.setup_discover_not_found)
+                        discoverStatus.setTextColor(0xFFf87171.toInt())
+                    }
                 }
-            } else if (!found.get()) {
-                runOnUiThread {
-                    btnDiscover.isEnabled = true
-                    btnDiscover.text = getString(R.string.setup_discover_btn)
-                }
+                btnDiscover.isEnabled = true
+                btnDiscover.text = getString(R.string.setup_discover_btn)
             }
         }.start()
     }
