@@ -96,6 +96,7 @@ class KioskActivity : AppCompatActivity() {
         private const val KEY_URL = "evershelf_url"
         private const val KEY_SETUP_COMPLETE = "setup_complete"
         private const val KEY_HAS_SCALE = "has_scale"
+        private const val KEY_SCREENSAVER = "screensaver_enabled"
         private const val GATEWAY_PACKAGE = "it.dadaloop.evershelf.scalegate"
         private const val GATEWAY_DOWNLOAD_URL = "https://github.com/dadaloop82/EverShelf/releases/latest/download/evershelf-scale-gateway.apk"
         private const val KIOSK_DOWNLOAD_URL = "https://github.com/dadaloop82/EverShelf/releases/latest/download/evershelf-kiosk.apk"
@@ -428,7 +429,15 @@ class KioskActivity : AppCompatActivity() {
         webView.loadUrl(url)
 
         launchGatewayInBackground()
-        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        applyScreensaverFlag()
+    }
+
+    private fun applyScreensaverFlag() {
+        if (prefs.getBoolean(KEY_SCREENSAVER, false)) {
+            window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        } else {
+            window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        }
     }
 
     // ── Inject kiosk overlay (exit + refresh buttons) ────────────────────
@@ -778,6 +787,8 @@ class KioskActivity : AppCompatActivity() {
         if (prefs.getBoolean(KEY_SETUP_COMPLETE, false) && webView.visibility == View.VISIBLE) {
             val url = prefs.getString(KEY_URL, "") ?: ""
             if (url.isNotEmpty() && webView.url != url) webView.loadUrl(url)
+            // Re-apply screensaver flag in case the user changed it in Settings
+            applyScreensaverFlag()
         }
     }
 

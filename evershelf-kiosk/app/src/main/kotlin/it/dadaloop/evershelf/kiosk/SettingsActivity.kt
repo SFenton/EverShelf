@@ -6,11 +6,13 @@ import android.content.SharedPreferences
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Bundle
+import android.view.WindowManager
 import android.widget.EditText
 import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import com.google.android.material.button.MaterialButton
+import com.google.android.material.switchmaterial.SwitchMaterial
 import java.net.URL
 import javax.net.ssl.HttpsURLConnection
 import javax.net.ssl.SSLContext
@@ -26,6 +28,7 @@ class SettingsActivity : AppCompatActivity() {
         private const val PREFS_NAME = "evershelf_kiosk"
         private const val KEY_URL = "evershelf_url"
         private const val KEY_SETUP_COMPLETE = "setup_complete"
+        private const val KEY_SCREENSAVER = "screensaver_enabled"
         private const val GATEWAY_PACKAGE = "it.dadaloop.evershelf.scalegate"
     }
 
@@ -37,6 +40,10 @@ class SettingsActivity : AppCompatActivity() {
         urlEdit = findViewById(R.id.urlEdit)
 
         urlEdit.setText(prefs.getString(KEY_URL, "") ?: "")
+
+        // Screensaver toggle (default OFF = keep screen on)
+        val switchScreensaver = findViewById<SwitchMaterial>(R.id.switchScreensaver)
+        switchScreensaver.isChecked = prefs.getBoolean(KEY_SCREENSAVER, false)
 
         // Gateway status
         val gatewayInstalled = try {
@@ -77,8 +84,18 @@ class SettingsActivity : AppCompatActivity() {
                 Toast.makeText(this, "URL cannot be empty", Toast.LENGTH_SHORT).show()
                 return@setOnClickListener
             }
-            prefs.edit().putString(KEY_URL, url).apply()
-            Toast.makeText(this, "Settings saved", Toast.LENGTH_SHORT).show()
+            val screensaverOn = switchScreensaver.isChecked
+            prefs.edit()
+                .putString(KEY_URL, url)
+                .putBoolean(KEY_SCREENSAVER, screensaverOn)
+                .apply()
+            // Apply FLAG_KEEP_SCREEN_ON immediately based on new setting
+            if (screensaverOn) {
+                window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            } else {
+                window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            }
+            Toast.makeText(this, "Impostazioni salvate", Toast.LENGTH_SHORT).show()
             finish()
         }
     }
