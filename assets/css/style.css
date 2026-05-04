@@ -4248,19 +4248,19 @@ body.cooking-mode-active .app-header {
 
 .btn-log-undo {
     flex-shrink: 0;
-    background: none;
-    border: 1px solid var(--border);
-    color: var(--text-muted);
+    background: rgba(248, 113, 113, 0.12);
+    border: 1px solid rgba(248, 113, 113, 0.4);
+    color: #f87171;
     border-radius: 6px;
-    padding: 3px 8px;
-    font-size: 0.85rem;
+    padding: 5px 10px;
+    font-size: 1rem;
     cursor: pointer;
     line-height: 1.4;
     transition: background 0.15s, color 0.15s;
 }
 .btn-log-undo:hover {
-    background: rgba(255,255,255,0.08);
-    color: var(--text);
+    background: rgba(248, 113, 113, 0.25);
+    color: #fca5a5;
 }
 
 
