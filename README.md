@@ -12,7 +12,7 @@
 &nbsp;·&nbsp;
 [🌐 Project Website](https://evershelfproject.dadaloop.it/)
 &nbsp;·&nbsp;
-[📖 Wiki](docs/wiki/Home.md)
+[📖 Wiki](https://github.com/dadaloop82/EverShelf/wiki)
 
 *The demo runs with mock pantry data. AI features are fully enabled. All write operations are safely sandboxed.*
 
