@@ -39,6 +39,7 @@ function initializeDB(PDO $db): void {
             unit TEXT DEFAULT 'pz',
             default_quantity REAL DEFAULT 1,
             notes TEXT DEFAULT '',
+            shopping_name TEXT DEFAULT '',
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
         );
@@ -79,6 +80,9 @@ function migrateDB(PDO $db): void {
     $colNames = array_column($cols, 'name');
     if (!in_array('package_unit', $colNames)) {
         $db->exec("ALTER TABLE products ADD COLUMN package_unit TEXT DEFAULT ''");
+    }
+    if (!in_array('shopping_name', $colNames)) {
+        $db->exec("ALTER TABLE products ADD COLUMN shopping_name TEXT DEFAULT ''");
     }
 
     // Migrate transactions CHECK constraint to allow 'waste' type

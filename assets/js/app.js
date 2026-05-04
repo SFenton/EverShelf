@@ -110,6 +110,26 @@ function _updateGeminiButtonState() {
     }
 }
 
+function _applyDemoModeUI() {
+    if (!_demoMode) return;
+    // Hide the settings ⚙️ nav button
+    document.querySelectorAll('.nav-btn[data-page="settings"]').forEach(btn => {
+        btn.style.display = 'none';
+    });
+    // Prevent the setup wizard from showing
+    const wizard = document.getElementById('setup-wizard');
+    if (wizard) wizard.style.display = 'none';
+    // Optionally show a small demo badge in the header
+    const headerLeft = document.getElementById('header-left');
+    if (headerLeft && !document.getElementById('_demo_badge')) {
+        const badge = document.createElement('span');
+        badge.id = '_demo_badge';
+        badge.textContent = 'DEMO';
+        badge.style.cssText = 'font-size:0.6rem;font-weight:800;letter-spacing:0.08em;background:rgba(251,191,36,0.35);color:#fef3c7;border:1px solid rgba(251,191,36,0.5);border-radius:4px;padding:2px 5px;white-space:nowrap;';
+        headerLeft.appendChild(badge);
+    }
+}
+
 function _checkWebappUpdate() {
     const STORAGE_KEY  = '_evershelf_update_checked_at';
     const SEEN_KEY     = '_evershelf_update_seen_ts';
@@ -1812,6 +1832,7 @@ async function syncSettingsFromDB() {
         _geminiAvailable = !!(serverSettings.gemini_key_set);
         _demoMode = !!serverSettings.demo_mode;
         _updateGeminiButtonState();
+        _applyDemoModeUI();
         const s = getSettings();
         const serverKeys = ['default_persons','pref_veloce','pref_pocafame','pref_scadenze',
             'pref_healthy','pref_opened','pref_zerowaste','dietary','appliances',
@@ -1980,18 +2001,18 @@ async function loadSettingsUI() {
 }
 
 // ── Kiosk overlay: X (close) + ↻ (refresh) buttons ───────────────────
-// Injected inside the header-content div, BEFORE the title.
+// Injected into #header-left (left zone of the 3-column header).
 // Only shown when _kioskBridge JS interface is available (Android WebView).
 function _injectKioskOverlay() {
     if (typeof _kioskBridge === 'undefined') return;
     if (document.getElementById('_kiosk_overlay')) return;
 
-    const headerContent = document.querySelector('.header-content');
-    if (!headerContent) return;
+    const headerLeft = document.getElementById('header-left');
+    if (!headerLeft) return;
 
     const wrap = document.createElement('div');
     wrap.id = '_kiosk_overlay';
-    wrap.style.cssText = 'display:flex;gap:6px;align-items:center;margin-right:8px;flex-shrink:0;';
+    wrap.style.cssText = 'display:flex;gap:6px;align-items:center;';
 
     const btnStyle = 'background:rgba(255,255,255,0.2);border:none;color:#fff;width:34px;height:34px;border-radius:50%;font-size:15px;cursor:pointer;display:flex;align-items:center;justify-content:center;-webkit-tap-highlight-color:transparent;touch-action:manipulation;';
 
@@ -2019,7 +2040,7 @@ function _injectKioskOverlay() {
 
     wrap.appendChild(exitBtn);
     wrap.appendChild(refBtn);
-    headerContent.insertBefore(wrap, headerContent.firstChild);
+    headerLeft.appendChild(wrap);
 }
 
 function renderAppliances(appliances) {
@@ -11926,8 +11947,9 @@ async function _initApp() {
         _geminiAvailable = !!(serverSettings.gemini_key_set);
         _demoMode = !!serverSettings.demo_mode;
         _updateGeminiButtonState();
+        _applyDemoModeUI();
         const missing = _getMissingSetupSteps(serverSettings);
-        if (missing.length > 0) {
+        if (missing.length > 0 && !_demoMode) {
             showSetupWizard(missing);
         }
     }

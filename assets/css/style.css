@@ -105,17 +105,23 @@ body {
 }
 
 .header-content {
-    position: relative;
     display: flex;
     align-items: center;
-    justify-content: flex-end;
     width: 100%;
+    gap: 0;
+}
+
+/* Left zone: kiosk-only buttons (exit, refresh) — empty on normal browser */
+.header-left {
+    flex: 1 1 0;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
 }
 
 .header-title {
-    position: absolute;
-    left: 50%;
-    transform: translateX(-50%);
+    flex: 0 1 auto;
     font-size: 1.3rem;
     font-weight: 700;
     cursor: pointer;
@@ -123,9 +129,10 @@ body {
     align-items: baseline;
     gap: 6px;
     white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
     pointer-events: auto;
-    /* prevent title overlapping action buttons on small screens */
-    max-width: calc(100% - 200px);
+    text-align: center;
 }
 
 .header-version {
@@ -209,9 +216,12 @@ body {
 }
 
 .header-actions {
+    flex: 1 1 0;
     display: flex;
     gap: 10px;
     align-items: center;
+    justify-content: flex-end;
+    min-width: 0;
 }
 
 /* ── Smart Scale status indicator in header ─────────────────────────── */
