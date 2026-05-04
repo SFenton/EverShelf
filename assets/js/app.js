@@ -5743,27 +5743,105 @@ function selectThrowLocation(btn, loc) {
     document.getElementById('throw-location').value = loc;
 }
 
+/**
+ * Show a destructive-action confirmation modal with a 5-second auto-confirm countdown.
+ * The user can tap "Annulla" to cancel or "Conferma" (or wait) to proceed.
+ * @param {string}   title     — Modal title
+ * @param {string}   msg       — Explanatory text
+ * @param {Function} onConfirm — Called when confirmed (by user or countdown)
+ * @param {string}   [confirmLabel] — Override confirm button label
+ */
+function _showDestructiveConfirm(title, msg, onConfirm, confirmLabel) {
+    const DURATION = 5000;
+    const btnLabel = confirmLabel || t('confirm.proceed') || 'Conferma';
+    const cancelLabel = t('confirm.cancel') || 'Annulla';
+    let rafHandle = null;
+    let timerHandle = null;
+    let resolved = false;
+
+    const overlayEl = document.getElementById('modal-overlay');
+    const contentEl = document.getElementById('modal-content');
+    const confirmBtnId = '_destConfirmBtn_' + Date.now();
+    const barId       = '_destConfirmBar_' + Date.now();
+
+    contentEl.innerHTML = `
+        <div class="modal-header">
+            <h3>${escapeHtml(title)}</h3>
+        </div>
+        <p style="margin:12px 0 18px;color:var(--text-muted);font-size:0.95rem">${escapeHtml(msg)}</p>
+        <div style="height:4px;background:var(--border);border-radius:2px;overflow:hidden;margin-bottom:16px">
+            <div id="${barId}" style="height:100%;width:100%;background:var(--danger);transition:none"></div>
+        </div>
+        <div style="display:flex;gap:10px">
+            <button class="btn btn-secondary" style="flex:1" id="_destCancelBtn">${escapeHtml(cancelLabel)}</button>
+            <button class="btn btn-danger" style="flex:1" id="${confirmBtnId}">${escapeHtml(btnLabel)}</button>
+        </div>
+    `;
+    overlayEl.style.display = 'flex';
+
+    function cleanup() {
+        if (rafHandle)   cancelAnimationFrame(rafHandle);
+        if (timerHandle) clearTimeout(timerHandle);
+        rafHandle = timerHandle = null;
+    }
+    function doConfirm() {
+        if (resolved) return;
+        resolved = true;
+        cleanup();
+        closeModal();
+        onConfirm();
+    }
+    function doCancel() {
+        if (resolved) return;
+        resolved = true;
+        cleanup();
+        closeModal();
+    }
+
+    document.getElementById(confirmBtnId).addEventListener('click', doConfirm);
+    document.getElementById('_destCancelBtn').addEventListener('click', doCancel);
+
+    // Countdown animation
+    const barEl = document.getElementById(barId);
+    const start = performance.now();
+    function tick() {
+        const pct = Math.min(100, (performance.now() - start) / DURATION * 100);
+        if (barEl) barEl.style.width = (100 - pct) + '%';
+        if (pct < 100) { rafHandle = requestAnimationFrame(tick); }
+    }
+    rafHandle = requestAnimationFrame(tick);
+    timerHandle = setTimeout(doConfirm, DURATION);
+}
+
 async function throwAll() {
     closeModal();
-    showLoading(true);
-    try {
-        const result = await api('inventory_use', {}, 'POST', {
-            product_id: currentProduct.id,
-            use_all: true,
-            location: '__all__',
-            notes: 'Buttato'
-        });
-        showLoading(false);
-        if (result.success) {
-            showToast(t('toast.thrown_away', { name: currentProduct.name }), 'success');
-            showPage('dashboard');
-        } else {
-            showToast(result.error || 'Errore', 'error');
-        }
-    } catch(e) {
-        showLoading(false);
-        showToast(t('error.connection'), 'error');
-    }
+    const name = currentProduct ? currentProduct.name : '';
+    _showDestructiveConfirm(
+        t('use.throw_all_confirm_title') || '🗑️ Butta tutto',
+        (t('use.throw_all_confirm_msg') || 'Vuoi davvero buttare via tutto il prodotto?') + (name ? `\n"${name}"` : ''),
+        async () => {
+            showLoading(true);
+            try {
+                const result = await api('inventory_use', {}, 'POST', {
+                    product_id: currentProduct.id,
+                    use_all: true,
+                    location: '__all__',
+                    notes: 'Buttato'
+                });
+                showLoading(false);
+                if (result.success) {
+                    showToast(t('toast.thrown_away', { name: currentProduct.name }), 'success');
+                    showPage('dashboard');
+                } else {
+                    showToast(result.error || 'Errore', 'error');
+                }
+            } catch(e) {
+                showLoading(false);
+                showToast(t('error.connection'), 'error');
+            }
+        },
+        t('use.throw_all_confirm_btn') || '🗑️ Sì, butta'
+    );
 }
 
 async function throwPartial() {
@@ -7124,9 +7202,24 @@ async function confirmMoveAfterUse(productId, fromLoc, toLoc, openedId) {
 }
 
 async function submitUseAll() {
+    // Gate: show a countdown-confirmation before the destructive use_all call
+    const name = currentProduct ? currentProduct.name : '';
+    const items0 = _useCurrentItems ? _useCurrentItems.filter(i => parseFloat(i.quantity) > 0) : [];
+    const totalQty = items0.reduce((s, i) => s + parseFloat(i.quantity || 0), 0);
+    const unit = items0[0]?.unit || 'pz';
+    const qtyStr = formatQuantity(totalQty, unit, items0[0]?.default_quantity, items0[0]?.package_unit);
+    _showDestructiveConfirm(
+        t('use.use_all_confirm_title') || '✅ Finisci tutto',
+        `${t('use.use_all_confirm_msg') || 'Conferma che hai finito tutto il prodotto:'} "${name}" (${qtyStr})`,
+        _doSubmitUseAll,
+        t('use.use_all_confirm_btn') || '✅ Sì, finito'
+    );
+}
+
+async function _doSubmitUseAll() {
     showLoading(true);
     try {
-        const currentLoc = document.getElementById('use-location').value;
+        const currentLoc = document.getElementById('use-location')?.value || '__all__';
         const items = _useCurrentItems.filter(i => parseFloat(i.quantity) > 0);
 
         const openedAtCurrentLoc = items.find(i => i.location === currentLoc && _isOpenedInventoryItem(i));
@@ -9372,7 +9465,15 @@ async function loadLog(more = false) {
 
 async function undoTransactionEntry(id, type, name) {
     const action = type === 'in' ? t('log.undo_action_remove') : t('log.undo_action_restore');
-    if (!confirm(t('log.undo_confirm').replace('{action}', action).replace('{name}', name))) return;
+    const msg = t('log.undo_confirm').replace('{action}', action).replace('{name}', name);
+    _showDestructiveConfirm(
+        t('log.undo_title') || '↩ Annulla operazione',
+        msg,
+        () => _doUndoTransaction(id, type, name)
+    );
+}
+
+async function _doUndoTransaction(id, type, name) {
     try {
         const res = await api('transaction_undo', {}, 'POST', { id });
         if (res.success) {
