@@ -13,7 +13,7 @@
 // source or git history (prevents GitHub secret scanning from revoking it).
 // Scoped only to Issues (R+W) on this single repository.
 // Defined at the very top so the global exception handler can use it.
-define('_GH_TK_ENC', '23580718460c2c444031290243627e7971622b29035e2a647726407d194f61440b6e05246a0c067c79730e77114b774501730043433d1866682225511b5443417170444443142941673c4046086c05737363293e7821006e470a466a1d');
+define('_GH_TK_ENC', '23580718460c2c444031290243627e7971622b29030a3e4d50001e45261659420b6e110a423f30447133205b425a577971561f32762b0b034e0b3e56106d5945020406254a3a4647592a1a611c66687a0b672043700f34757900014004');
 define('_GH_TK_KEY', 'D1sp3ns4!Ev3r#26');
 define('GH_REPO',    'dadaloop82/EverShelf');
 
