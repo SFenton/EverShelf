@@ -60,4 +60,15 @@
     <string name="wizard_server_ok_detail">Segnalazione errori attiva — i problemi di installazione vengono inviati automaticamente alle GitHub Issues.</string>
     <string name="wizard_server_error">Server non raggiungibile ⚠️</string>
     <string name="wizard_server_error_detail">Gli errori non raggiungeranno GitHub Issues. Verifica l\'URL inserito al passaggio 2.</string>
+    <!-- Passo salvaschermo -->
+    <string name="setup_screensaver_title">Salvaschermo</string>
+    <string name="setup_screensaver_desc">Mostra un orologio con fatti utili dopo 5 minuti di inattività. Di default è disattivato (lo schermo resta sempre acceso).</string>
+    <string name="setup_screensaver_toggle_label">Attiva salvaschermo</string>
+    <string name="setup_screensaver_toggle_hint">Se disattivo, lo schermo resta sempre acceso.</string>
+
+    <!-- Riepilogo -->
+    <string name="summary_lang">Lingua</string>
+    <string name="summary_scale_skip">Bilancia: non configurata</string>
+    <string name="summary_screensaver_on">Salvaschermo: attivo</string>
+    <string name="summary_screensaver_off">Schermo sempre acceso (salvaschermo disattivato)</string>
 </resources>

@@ -59,7 +59,68 @@
             android:paddingBottom="40dp">
 
             <!-- ════════════════════════════════════════════
-                 STEP 0 — Welcome / Intro / Privacy
+                 STEP 0 — Language selection
+                 ════════════════════════════════════════════ -->
+            <LinearLayout
+                android:id="@+id/stepLanguage"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:gravity="center_horizontal"
+                android:visibility="visible">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="🌐"
+                    android:textSize="64sp"
+                    android:layout_marginBottom="16dp" />
+
+                <!-- Title shown in all 3 languages so it's always readable -->
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="Scegli la lingua\nChoose your language\nSprache wählen"
+                    android:textColor="#f1f5f9"
+                    android:textSize="22sp"
+                    android:textStyle="bold"
+                    android:gravity="center"
+                    android:lineSpacingExtra="4dp"
+                    android:layout_marginBottom="40dp" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/btnLangIt"
+                    android:layout_width="match_parent"
+                    android:layout_height="64dp"
+                    android:text="🇮🇹   Italiano"
+                    android:textSize="18sp"
+                    android:textAllCaps="false"
+                    android:backgroundTint="#7c3aed"
+                    android:layout_marginBottom="16dp" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/btnLangEn"
+                    android:layout_width="match_parent"
+                    android:layout_height="64dp"
+                    android:text="🇬🇧   English"
+                    android:textSize="18sp"
+                    android:textAllCaps="false"
+                    android:backgroundTint="#1e40af"
+                    android:layout_marginBottom="16dp" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/btnLangDe"
+                    android:layout_width="match_parent"
+                    android:layout_height="64dp"
+                    android:text="🇩🇪   Deutsch"
+                    android:textSize="18sp"
+                    android:textAllCaps="false"
+                    android:backgroundTint="#b91c1c" />
+
+            </LinearLayout>
+
+            <!-- ════════════════════════════════════════════
+                 STEP 1 — Welcome / Intro / Privacy
                  ════════════════════════════════════════════ -->
             <LinearLayout
                 android:id="@+id/stepWelcome"
@@ -880,7 +941,119 @@
             </LinearLayout>
 
             <!-- ════════════════════════════════════════════
-                 STEP 4 — Done
+                 STEP 5 — Screensaver
+                 ════════════════════════════════════════════ -->
+            <LinearLayout
+                android:id="@+id/stepScreensaver"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:gravity="center_horizontal"
+                android:visibility="gone">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="🌙"
+                    android:textSize="52sp"
+                    android:layout_marginBottom="12dp" />
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:id="@+id/tvScreensaverTitle"
+                    android:text="@string/setup_screensaver_title"
+                    android:textColor="#f1f5f9"
+                    android:textSize="24sp"
+                    android:textStyle="bold"
+                    android:layout_marginBottom="8dp" />
+
+                <TextView
+                    android:id="@+id/tvScreensaverDesc"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="Mostra un orologio con fatti utili dopo 5 minuti di inattività. Di default è disattivato (lo schermo resta sempre acceso)."
+                    android:textColor="#94a3b8"
+                    android:textSize="15sp"
+                    android:gravity="center"
+                    android:lineSpacingExtra="4dp"
+                    android:layout_marginBottom="28dp" />
+
+                <!-- Toggle card -->
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="horizontal"
+                    android:background="@drawable/card_background"
+                    android:padding="20dp"
+                    android:gravity="center_vertical"
+                    android:layout_marginBottom="32dp">
+
+                    <LinearLayout
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:orientation="vertical">
+
+                        <TextView
+                            android:id="@+id/tvScreensaverToggleLabel"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:text="@string/setup_screensaver_toggle_label"
+                            android:textColor="#f1f5f9"
+                            android:textSize="16sp"
+                            android:textStyle="bold"
+                            android:layout_marginBottom="4dp" />
+
+                        <TextView
+                            android:id="@+id/tvScreensaverToggleHint"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:text="@string/setup_screensaver_toggle_hint"
+                            android:textColor="#64748b"
+                            android:textSize="13sp" />
+                    </LinearLayout>
+
+                    <com.google.android.material.switchmaterial.SwitchMaterial
+                        android:id="@+id/setupSwitchScreensaver"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:checked="false" />
+                </LinearLayout>
+
+                <!-- Navigation -->
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="horizontal">
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/btnScreensaverBack"
+                        android:layout_width="0dp"
+                        android:layout_height="48dp"
+                        android:layout_weight="1"
+                        android:text="← Indietro"
+                        android:textSize="14sp"
+                        android:textAllCaps="false"
+                        style="@style/Widget.MaterialComponents.Button.OutlinedButton"
+                        android:strokeColor="#334155"
+                        android:textColor="#64748b"
+                        android:layout_marginEnd="10dp" />
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/btnScreensaverNext"
+                        android:layout_width="0dp"
+                        android:layout_height="48dp"
+                        android:layout_weight="2"
+                        android:text="Avanti →"
+                        android:textSize="15sp"
+                        android:textAllCaps="false"
+                        android:backgroundTint="#7c3aed" />
+                </LinearLayout>
+            </LinearLayout>
+
+            <!-- ════════════════════════════════════════════
+                 STEP 6 — Done
                  ════════════════════════════════════════════ -->
             <LinearLayout
                 android:id="@+id/stepDone"

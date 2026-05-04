@@ -10,6 +10,7 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.content.SharedPreferences
 import android.content.pm.PackageManager
+import android.content.res.Configuration
 import android.net.Uri
 import android.net.wifi.WifiManager
 import android.os.Build
@@ -27,8 +28,10 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import com.google.android.material.button.MaterialButton
+import com.google.android.material.switchmaterial.SwitchMaterial
 import java.net.HttpURLConnection
 import java.net.URL
+import java.util.Locale
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
@@ -42,11 +45,13 @@ import javax.net.ssl.X509TrustManager
  * The user can always exit (finishAffinity) via the ✕ button.
  *
  * Steps:
- *  0 — Welcome / intro / privacy
- *  1 — Permissions rationale + grant
- *  2 — Server URL + auto-discovery + connection test
- *  3 — Smart scale question → gateway info + install
- *  4 — Done
+ *  0 — Language selection (NEW — always first)
+ *  1 — Welcome / intro / privacy
+ *  2 — Permissions rationale + grant
+ *  3 — Server URL + auto-discovery + connection test
+ *  4 — Smart scale question → gateway info + install
+ *  5 — Screensaver toggle (NEW)
+ *  6 — Done
  */
 class SetupActivity : AppCompatActivity() {
 
@@ -54,10 +59,12 @@ class SetupActivity : AppCompatActivity() {
     private var currentStep = 0
 
     // Step containers
+    private lateinit var stepLanguage:    LinearLayout
     private lateinit var stepWelcome:     LinearLayout
     private lateinit var stepPermissions: LinearLayout
     private lateinit var stepServer:      LinearLayout
     private lateinit var stepScale:       LinearLayout
+    private lateinit var stepScreensaver: LinearLayout
     private lateinit var stepDone:        LinearLayout
 
     // Progress dots
@@ -82,6 +89,9 @@ class SetupActivity : AppCompatActivity() {
     private lateinit var gatewayProgressText: TextView
     private lateinit var step3NextButtons:   LinearLayout
 
+    // Screensaver step
+    private lateinit var setupSwitchScreensaver: SwitchMaterial
+
     // Done step
     private lateinit var summaryText: TextView
 
@@ -99,17 +109,35 @@ class SetupActivity : AppCompatActivity() {
     private val discoverCancelled = AtomicBoolean(false)
 
     companion object {
-        private const val PREFS_NAME   = "evershelf_kiosk"
-        private const val KEY_URL      = "evershelf_url"
+        private const val PREFS_NAME         = "evershelf_kiosk"
+        private const val KEY_URL            = "evershelf_url"
         private const val KEY_SETUP_COMPLETE = "setup_complete"
         private const val KEY_HAS_SCALE      = "has_scale"
-        private const val GATEWAY_PACKAGE = "it.dadaloop.evershelf.scalegate"
+        private const val KEY_LANGUAGE       = "kiosk_language"
+        private const val KEY_SCREENSAVER    = "screensaver_enabled"
+        private const val GATEWAY_PACKAGE    = "it.dadaloop.evershelf.scalegate"
         private const val GATEWAY_DOWNLOAD_URL =
             "https://github.com/dadaloop82/EverShelf/releases/latest/download/evershelf-scale-gateway.apk"
         private const val INSTALL_PERM_REQUEST    = 2001
         private const val INSTALL_CONFIRM_REQUEST = 2002
         private const val UNINSTALL_REQUEST       = 2003
         private const val PERMISSION_REQUEST_CODE = 2004
+
+        fun applyLocale(base: Context, lang: String): Context {
+            val locale = Locale(lang)
+            Locale.setDefault(locale)
+            val config = Configuration(base.resources.configuration)
+            config.setLocale(locale)
+            return base.createConfigurationContext(config)
+        }
+    }
+
+    // ── Locale wrapping ───────────────────────────────────────────────────
+
+    override fun attachBaseContext(newBase: Context) {
+        val lang = newBase.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getString(KEY_LANGUAGE, null)
+        super.attachBaseContext(if (lang != null) applyLocale(newBase, lang) else newBase)
     }
 
     // ── Lifecycle ─────────────────────────────────────────────────────────
@@ -119,12 +147,25 @@ class SetupActivity : AppCompatActivity() {
         setContentView(R.layout.activity_setup)
         prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         bindViews()
-        showStep(0)
+        // Restore step from instance state (e.g. after recreate() for locale change)
+        val savedStep = savedInstanceState?.getInt("step", -1) ?: -1
+        val langAlreadySet = prefs.getString(KEY_LANGUAGE, null) != null
+        showStep(when {
+            savedStep >= 0    -> savedStep
+            langAlreadySet    -> 1
+            else              -> 0
+        })
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        outState.putInt("step", currentStep)
     }
 
     override fun onBackPressed() {
         when (currentStep) {
             0 -> confirmExit()
+            1 -> showStep(0)  // back to language
             else -> showStep(currentStep - 1)
         }
     }
@@ -139,10 +180,12 @@ class SetupActivity : AppCompatActivity() {
 
     private fun bindViews() {
         progressDots     = findViewById(R.id.setupProgressDots)
+        stepLanguage     = findViewById(R.id.stepLanguage)
         stepWelcome      = findViewById(R.id.stepWelcome)
         stepPermissions  = findViewById(R.id.stepPermissions)
         stepServer       = findViewById(R.id.stepServer)
         stepScale        = findViewById(R.id.stepScale)
+        stepScreensaver  = findViewById(R.id.stepScreensaver)
         stepDone         = findViewById(R.id.stepDone)
 
         // Server step
@@ -164,6 +207,11 @@ class SetupActivity : AppCompatActivity() {
         gatewayProgressText = findViewById(R.id.gatewayProgressText)
         step3NextButtons    = findViewById(R.id.step3NextButtons)
 
+        // Screensaver step
+        setupSwitchScreensaver = findViewById(R.id.setupSwitchScreensaver)
+        // Pre-fill saved screensaver pref
+        setupSwitchScreensaver.isChecked = prefs.getBoolean(KEY_SCREENSAVER, false)
+
         // Done step
         summaryText = findViewById(R.id.setupSummaryText)
 
@@ -174,19 +222,26 @@ class SetupActivity : AppCompatActivity() {
         val savedUrl = prefs.getString(KEY_URL, "") ?: ""
         if (savedUrl.isNotEmpty()) urlEdit.setText(savedUrl)
 
+        // ── Language ─────────────────────────────────────────────────────
+        // Highlight already-selected language button
+        highlightSelectedLang()
+        findViewById<MaterialButton>(R.id.btnLangIt).setOnClickListener { selectLanguage("it") }
+        findViewById<MaterialButton>(R.id.btnLangEn).setOnClickListener { selectLanguage("en") }
+        findViewById<MaterialButton>(R.id.btnLangDe).setOnClickListener { selectLanguage("de") }
+
         // ── Welcome ──────────────────────────────────────────────────────
         findViewById<MaterialButton>(R.id.btnSetupExit).setOnClickListener { confirmExit() }
-        findViewById<MaterialButton>(R.id.btnWelcomeStart).setOnClickListener { showStep(1) }
+        findViewById<MaterialButton>(R.id.btnWelcomeStart).setOnClickListener { showStep(2) }
 
         // ── Permissions ──────────────────────────────────────────────────
         findViewById<MaterialButton>(R.id.btnGrantPerms).setOnClickListener  { requestPermissions() }
-        findViewById<MaterialButton>(R.id.btnPermsBack).setOnClickListener   { showStep(0) }
-        findViewById<MaterialButton>(R.id.btnPermsNext).setOnClickListener   { showStep(2) }
+        findViewById<MaterialButton>(R.id.btnPermsBack).setOnClickListener   { showStep(1) }
+        findViewById<MaterialButton>(R.id.btnPermsNext).setOnClickListener   { showStep(3) }
 
         // ── Server ───────────────────────────────────────────────────────
         btnDiscover.setOnClickListener { autoDiscover() }
         btnTestUrl.setOnClickListener  { testConnection() }
-        findViewById<MaterialButton>(R.id.btnServerBack).setOnClickListener { showStep(1) }
+        findViewById<MaterialButton>(R.id.btnServerBack).setOnClickListener { showStep(2) }
         findViewById<MaterialButton>(R.id.btnServerNext).setOnClickListener {
             val url = urlEdit.text.toString().trim()
             if (url.isEmpty()) {
@@ -195,7 +250,7 @@ class SetupActivity : AppCompatActivity() {
             }
             prefs.edit().putString(KEY_URL, url).apply()
             ErrorReporter.init(this, url)
-            showStep(3)
+            showStep(4)
         }
 
         // ── Scale ─────────────────────────────────────────────────────────
@@ -208,36 +263,67 @@ class SetupActivity : AppCompatActivity() {
         }
         findViewById<MaterialButton>(R.id.btnScaleNo).setOnClickListener {
             prefs.edit().putBoolean(KEY_HAS_SCALE, false).apply()
-            showStep(4)
+            showStep(5)
         }
         btnInstallGateway.setOnClickListener {
             pendingApkDownloadUrl = GATEWAY_DOWNLOAD_URL
             triggerApkDownload(GATEWAY_DOWNLOAD_URL)
         }
-        findViewById<MaterialButton>(R.id.btnScaleBack).setOnClickListener { showStep(2) }
+        findViewById<MaterialButton>(R.id.btnScaleBack).setOnClickListener { showStep(3) }
         findViewById<MaterialButton>(R.id.btnScaleNext).setOnClickListener {
             prefs.edit().putBoolean(KEY_HAS_SCALE, true).apply()
-            showStep(4)
+            showStep(5)
+        }
+
+        // ── Screensaver ───────────────────────────────────────────────────
+        findViewById<MaterialButton>(R.id.btnScreensaverBack).setOnClickListener { showStep(4) }
+        findViewById<MaterialButton>(R.id.btnScreensaverNext).setOnClickListener {
+            prefs.edit().putBoolean(KEY_SCREENSAVER, setupSwitchScreensaver.isChecked).apply()
+            showStep(6)
         }
 
         // ── Done ──────────────────────────────────────────────────────────
         findViewById<MaterialButton>(R.id.btnLaunch).setOnClickListener { finishSetup() }
     }
 
+    // ── Language selection ────────────────────────────────────────────────
+
+    private fun selectLanguage(lang: String) {
+        prefs.edit().putString(KEY_LANGUAGE, lang).apply()
+        // Save step=1 so after recreate we land on Welcome
+        currentStep = 1
+        recreate()
+    }
+
+    private fun highlightSelectedLang() {
+        val saved = prefs.getString(KEY_LANGUAGE, null) ?: return
+        val (btnIt, btnEn, btnDe) = Triple(
+            findViewById<MaterialButton>(R.id.btnLangIt),
+            findViewById<MaterialButton>(R.id.btnLangEn),
+            findViewById<MaterialButton>(R.id.btnLangDe)
+        )
+        // Add checkmark to selected
+        btnIt.text = if (saved == "it") "✅  🇮🇹   Italiano" else "🇮🇹   Italiano"
+        btnEn.text = if (saved == "en") "✅  🇬🇧   English"  else "🇬🇧   English"
+        btnDe.text = if (saved == "de") "✅  🇩🇪   Deutsch"  else "🇩🇪   Deutsch"
+    }
+
     // ── Step navigation ───────────────────────────────────────────────────
 
     private fun showStep(step: Int) {
         currentStep = step
-        stepWelcome.visibility     = if (step == 0) View.VISIBLE else View.GONE
-        stepPermissions.visibility = if (step == 1) View.VISIBLE else View.GONE
-        stepServer.visibility      = if (step == 2) View.VISIBLE else View.GONE
-        stepScale.visibility       = if (step == 3) View.VISIBLE else View.GONE
-        stepDone.visibility        = if (step == 4) View.VISIBLE else View.GONE
+        stepLanguage.visibility    = if (step == 0) View.VISIBLE else View.GONE
+        stepWelcome.visibility     = if (step == 1) View.VISIBLE else View.GONE
+        stepPermissions.visibility = if (step == 2) View.VISIBLE else View.GONE
+        stepServer.visibility      = if (step == 3) View.VISIBLE else View.GONE
+        stepScale.visibility       = if (step == 4) View.VISIBLE else View.GONE
+        stepScreensaver.visibility = if (step == 5) View.VISIBLE else View.GONE
+        stepDone.visibility        = if (step == 6) View.VISIBLE else View.GONE
 
         updateProgressDots()
 
         // Reset scale step when entering it
-        if (step == 3) {
+        if (step == 4) {
             scaleQuestionCard.visibility  = View.VISIBLE
             gatewayInfoCard.visibility    = View.GONE
             gatewayInstallCard.visibility = View.GONE
@@ -245,10 +331,10 @@ class SetupActivity : AppCompatActivity() {
         }
 
         // Build summary when entering done step
-        if (step == 4) buildSummary()
+        if (step == 6) buildSummary()
 
         // Cancel auto-discover when leaving server step
-        if (step != 2) discoverCancelled.set(true)
+        if (step != 3) discoverCancelled.set(true)
 
         // Scroll to top
         try { findViewById<ScrollView>(R.id.setupScrollView).scrollTo(0, 0) } catch (_: Exception) {}
@@ -256,10 +342,11 @@ class SetupActivity : AppCompatActivity() {
 
     private fun updateProgressDots() {
         progressDots.removeAllViews()
-        // 4 dots (steps 1–4); step 0 welcome uses no dots
-        val active = maxOf(currentStep, 1)
+        // Show 5 dots for steps 1-5; step 0 (language) and step 6 (done) have no dots
+        if (currentStep == 0 || currentStep == 6) return
+        val active  = currentStep  // 1..5
         val density = resources.displayMetrics.density
-        for (i in 1..4) {
+        for (i in 1..5) {
             val dot = View(this)
             val sizeDp = if (i == active) 10 else 7
             val px = (sizeDp * density).toInt()
@@ -753,16 +840,21 @@ class SetupActivity : AppCompatActivity() {
     // ── Summary / Finish ─────────────────────────────────────────────────
 
     private fun buildSummary() {
-        val url      = prefs.getString(KEY_URL, "") ?: ""
-        val hasScale = prefs.getBoolean(KEY_HAS_SCALE, false)
-        val gwOk     = hasScale && isGatewayInstalled()
+        val url       = prefs.getString(KEY_URL, "") ?: ""
+        val hasScale  = prefs.getBoolean(KEY_HAS_SCALE, false)
+        val screensOn = setupSwitchScreensaver.isChecked
+        val gwOk      = hasScale && isGatewayInstalled()
+        val lang      = prefs.getString(KEY_LANGUAGE, "it") ?: "it"
+        val langLabel = when (lang) { "en" -> "English 🇬🇧"; "de" -> "Deutsch 🇩🇪"; else -> "Italiano 🇮🇹" }
         val sb = StringBuilder()
-        if (url.isNotEmpty()) sb.appendLine("🌐 Server: $url")
+        sb.appendLine("🌐 ${getString(R.string.summary_lang)}: $langLabel")
+        if (url.isNotEmpty()) sb.appendLine("🖥️ Server: $url")
         sb.appendLine(when {
-            gwOk     -> "✅ Scale Gateway: installato"
-            hasScale -> "⚠️ Scale Gateway: non ancora installato"
-            else     -> "⏭ Bilancia: non configurata"
+            gwOk     -> "✅ Scale Gateway: ${getString(R.string.wizard_gateway_installed)}"
+            hasScale -> "⚠️ Scale Gateway: ${getString(R.string.wizard_gateway_not_installed)}"
+            else     -> "⏭ ${getString(R.string.summary_scale_skip)}"
         })
+        sb.appendLine(if (screensOn) "🌙 ${getString(R.string.summary_screensaver_on)}" else "💡 ${getString(R.string.summary_screensaver_off)}")
         summaryText.text = sb.toString().trimEnd()
     }
 

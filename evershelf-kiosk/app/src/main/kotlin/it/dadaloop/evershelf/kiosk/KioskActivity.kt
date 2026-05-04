@@ -104,6 +104,12 @@ class KioskActivity : AppCompatActivity() {
         private const val GITHUB_RELEASES_API = "https://api.github.com/repos/dadaloop82/EverShelf/releases/latest"
     }
 
+    override fun attachBaseContext(newBase: Context) {
+        val lang = newBase.getSharedPreferences("evershelf_kiosk", Context.MODE_PRIVATE)
+            .getString("kiosk_language", null)
+        super.attachBaseContext(if (lang != null) SetupActivity.applyLocale(newBase, lang) else newBase)
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_kiosk)

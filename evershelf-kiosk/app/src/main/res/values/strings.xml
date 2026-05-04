@@ -59,4 +59,15 @@
     <string name="wizard_server_ok_detail">Error reporting is active — install failures will be sent to GitHub Issues automatically.</string>
     <string name="wizard_server_error">Server not reachable ⚠️</string>
     <string name="wizard_server_error_detail">Install errors won\'t reach GitHub Issues. Check the URL entered in step 2.</string>
+    <!-- Screensaver step -->
+    <string name="setup_screensaver_title">Screensaver</string>
+    <string name="setup_screensaver_desc">Shows a clock with useful facts after 5 minutes of inactivity. Off by default (screen stays always on).</string>
+    <string name="setup_screensaver_toggle_label">Enable screensaver</string>
+    <string name="setup_screensaver_toggle_hint">If disabled, the screen stays always on.</string>
+
+    <!-- Summary -->
+    <string name="summary_lang">Language</string>
+    <string name="summary_scale_skip">Scale: not configured</string>
+    <string name="summary_screensaver_on">Screensaver: enabled</string>
+    <string name="summary_screensaver_off">Screen always on (screensaver disabled)</string>
 </resources>

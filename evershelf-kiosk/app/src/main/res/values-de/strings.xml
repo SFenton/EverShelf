@@ -60,4 +60,15 @@
     <string name="wizard_server_ok_detail">Fehlerberichterstattung aktiv — Installationsfehler werden automatisch an GitHub Issues gesendet.</string>
     <string name="wizard_server_error">Server nicht erreichbar ⚠️</string>
     <string name="wizard_server_error_detail">Fehler werden GitHub Issues nicht erreichen. URL in Schritt 2 prüfen.</string>
+    <!-- Bildschirmschoner-Schritt -->
+    <string name="setup_screensaver_title">Bildschirmschoner</string>
+    <string name="setup_screensaver_desc">Zeigt nach 5 Minuten Inaktivität eine Uhr mit nützlichen Fakten. Standardmäßig deaktiviert (Bildschirm bleibt immer an).</string>
+    <string name="setup_screensaver_toggle_label">Bildschirmschoner aktivieren</string>
+    <string name="setup_screensaver_toggle_hint">Wenn deaktiviert, bleibt der Bildschirm immer an.</string>
+
+    <!-- Zusammenfassung -->
+    <string name="summary_lang">Sprache</string>
+    <string name="summary_scale_skip">Waage: nicht konfiguriert</string>
+    <string name="summary_screensaver_on">Bildschirmschoner: aktiv</string>
+    <string name="summary_screensaver_off">Bildschirm immer an (Bildschirmschoner deaktiviert)</string>
 </resources>

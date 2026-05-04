@@ -32,6 +32,12 @@ class SettingsActivity : AppCompatActivity() {
         private const val GATEWAY_PACKAGE = "it.dadaloop.evershelf.scalegate"
     }
 
+    override fun attachBaseContext(newBase: Context) {
+        val lang = newBase.getSharedPreferences("evershelf_kiosk", Context.MODE_PRIVATE)
+            .getString("kiosk_language", null)
+        super.attachBaseContext(if (lang != null) SetupActivity.applyLocale(newBase, lang) else newBase)
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_settings)
