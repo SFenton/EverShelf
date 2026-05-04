@@ -102,6 +102,7 @@ class SetupActivity : AppCompatActivity() {
 
     // Permissions step
     private lateinit var permsGrantedCard: LinearLayout
+    private lateinit var btnGrantPerms:    MaterialButton
 
     // APK install state (for gateway)
     private var pendingApkDownloadUrl = ""
@@ -221,7 +222,8 @@ class SetupActivity : AppCompatActivity() {
         summaryText = findViewById(R.id.setupSummaryText)
 
         // Permissions step
-        permsGrantedCard = findViewById(R.id.permsGrantedCard)
+        permsGrantedCard  = findViewById(R.id.permsGrantedCard)
+        btnGrantPerms     = findViewById(R.id.btnGrantPerms)
 
         // Pre-fill saved URL
         val savedUrl = prefs.getString(KEY_URL, "") ?: ""
@@ -239,7 +241,7 @@ class SetupActivity : AppCompatActivity() {
         findViewById<MaterialButton>(R.id.btnWelcomeStart).setOnClickListener { showStep(2) }
 
         // ── Permissions ──────────────────────────────────────────────────
-        findViewById<MaterialButton>(R.id.btnGrantPerms).setOnClickListener  { requestPermissions() }
+        btnGrantPerms.setOnClickListener { requestPermissions() }
         findViewById<MaterialButton>(R.id.btnPermsBack).setOnClickListener   { showStep(1) }
         findViewById<MaterialButton>(R.id.btnPermsNext).setOnClickListener   { showStep(3) }
 
@@ -408,8 +410,7 @@ class SetupActivity : AppCompatActivity() {
                 needed.add(Manifest.permission.READ_EXTERNAL_STORAGE)
         }
         if (needed.isEmpty()) {
-            // Already granted — show confirmation and allow next
-            permsGrantedCard.visibility = View.VISIBLE
+            onPermissionsGranted()
         } else {
             ActivityCompat.requestPermissions(this, needed.toTypedArray(), PERMISSION_REQUEST_CODE)
         }
@@ -418,10 +419,16 @@ class SetupActivity : AppCompatActivity() {
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         if (requestCode == PERMISSION_REQUEST_CODE) {
-            permsGrantedCard.visibility = View.VISIBLE
-            // Proceed to next step regardless — user can always grant later
-            Handler(Looper.getMainLooper()).postDelayed({ showStep(2) }, 600)
+            onPermissionsGranted()
         }
+    }
+
+    private fun onPermissionsGranted() {
+        permsGrantedCard.visibility = View.GONE
+        btnGrantPerms.text = getString(R.string.setup_perms_granted_next)
+        btnGrantPerms.backgroundTintList = android.content.res.ColorStateList.valueOf(0xFF34d399.toInt())
+        btnGrantPerms.setTextColor(0xFF0f172a.toInt())
+        btnGrantPerms.setOnClickListener { showStep(3) }
     }
 
     // ── Connection Test ───────────────────────────────────────────────────
@@ -516,26 +523,46 @@ class SetupActivity : AppCompatActivity() {
         discoverStatus.setTextColor(0xFF94a3b8.toInt())
 
         Thread {
-            // ── 1. Detect subnets via NetworkInterface (not deprecated WifiManager) ──
-            val subnets = mutableListOf<String>()
+            // ── 1. Detect subnets — prefer Wi-Fi/Ethernet, skip VPN/cellular ──────
+            // Prefixes to skip: VPN tunnels, cellular data, hotspot virtuals, etc.
+            val skipPrefixes = listOf("tun", "ppp", "rmnet", "pdp", "ccmni",
+                "dummy", "sit", "gre", "v4-", "v6-", "p2p", "ham", "nordlynx")
+            val wifiSubnets  = mutableListOf<String>()  // wlan/eth — highest priority
+            val otherSubnets = mutableListOf<String>()  // everything else that is real
             try {
                 val interfaces = NetworkInterface.getNetworkInterfaces()
                 while (interfaces != null && interfaces.hasMoreElements()) {
                     val intf = interfaces.nextElement()
-                    if (!intf.isUp || intf.isLoopback) continue
+                    if (!intf.isUp || intf.isLoopback || intf.isVirtual) continue
+                    val name = intf.name.lowercase()
+                    if (skipPrefixes.any { name.startsWith(it) }) continue
                     for (addr in intf.interfaceAddresses) {
                         val ip = addr.address
                         if (ip is java.net.Inet4Address && !ip.isLoopbackAddress) {
                             val parts = ip.hostAddress?.split(".") ?: continue
-                            if (parts.size == 4) subnets += "${parts[0]}.${parts[1]}.${parts[2]}"
+                            if (parts.size == 4) {
+                                val subnet = "${parts[0]}.${parts[1]}.${parts[2]}"
+                                if (name.startsWith("wlan") || name.startsWith("eth")) {
+                                    if (!wifiSubnets.contains(subnet)) wifiSubnets += subnet
+                                } else {
+                                    if (!otherSubnets.contains(subnet)) otherSubnets += subnet
+                                }
+                            }
                         }
                     }
                 }
             } catch (_: Exception) {}
-            // Append common fallback subnets (deduped)
+            // WiFi first, then others, then hardcoded fallbacks (deduped)
+            val subnets = (wifiSubnets + otherSubnets).toMutableList()
             for (s in listOf("192.168.1", "192.168.0", "192.168.2", "10.0.0", "10.0.1")) {
                 if (!subnets.contains(s)) subnets += s
             }
+
+            // Show detected subnets in status
+            val detectedLabel = if (wifiSubnets.isNotEmpty())
+                wifiSubnets.joinToString(", ") { "$it.x" }
+            else getString(R.string.setup_discovering_detail)
+            runOnUiThread { discoverStatus.text = "📡  $detectedLabel" }
 
             val ports = listOf(80, 8080)
             val paths = listOf(

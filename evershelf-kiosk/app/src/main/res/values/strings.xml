@@ -7,8 +7,7 @@
     <string name="setup_server_found">EverShelf server found and API active!</string>
     <string name="setup_api_not_found">Server reachable but EverShelf API not found. Check the path.</string>
     <string name="setup_unreachable">Cannot reach server</string>
-    <string name="setup_discover_btn">🔍  Search local network</string>
-    <string name="setup_discovering">Scanning…</string>
+    <string name="setup_discover_btn">🔍  Search local network</string>    <string name="setup_perms_granted_next">✅ Permissions granted — Continue →</string>    <string name="setup_discovering">Scanning…</string>
     <string name="setup_discovering_detail">Searching for EverShelf servers on the local network…</string>
     <string name="setup_discover_not_found">No EverShelf server found automatically. Enter the URL manually.</string>
     <string name="setup_exit_title">Exit setup?</string>
