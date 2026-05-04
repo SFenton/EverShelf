@@ -325,6 +325,7 @@
     "shopping": {
         "title": "🛒 Shopping List",
         "bring_loading": "Connecting to Bring!...",
+        "bring_not_configured": "Bring! is not configured. Add your email and password in <a href='#' onclick=\"showPage('settings');return false;\">settings</a>.",
         "tab_to_buy": "🛍️ To buy",
         "tab_forecast": "🧠 Forecast",
         "total_label": "💰 Estimated total",
@@ -595,7 +596,9 @@
             "restart_notice": "The page will reload to apply the new language."
         },
         "screensaver": {
-            "label": "Enable screensaver"
+            "label": "Enable screensaver",
+            "card_title": "🌙 Screensaver",
+            "card_hint": "Shows a clock with useful facts after 5 minutes of inactivity. Disabled by default."
         },
         "scale": {
             "title": "⚖️ Smart Scale",

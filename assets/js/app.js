@@ -112,6 +112,9 @@ function _updateGeminiButtonState() {
 
 function _applyDemoModeUI() {
     if (!_demoMode) return;
+    // In demo mode Gemini is always "available" — no real key needed
+    _geminiAvailable = true;
+    _updateGeminiButtonState();
     // Hide the settings ⚙️ nav button
     document.querySelectorAll('.nav-btn[data-page="settings"]').forEach(btn => {
         btn.style.display = 'none';
@@ -119,7 +122,7 @@ function _applyDemoModeUI() {
     // Prevent the setup wizard from showing
     const wizard = document.getElementById('setup-wizard');
     if (wizard) wizard.style.display = 'none';
-    // Optionally show a small demo badge in the header
+    // Show a small demo badge in the header
     const headerLeft = document.getElementById('header-left');
     if (headerLeft && !document.getElementById('_demo_badge')) {
         const badge = document.createElement('span');
@@ -2233,6 +2236,17 @@ function togglePasswordVisibility(inputId) {
 
 // ===== API HELPER =====
 async function api(action, params = {}, method = 'GET', body = null, extraHeaders = {}) {
+    // In demo mode, all Bring! write operations are no-ops
+    if (_demoMode) {
+        const BRING_WRITE_ACTIONS = ['bring_add', 'bring_remove', 'bring_migrate_names', 'bring_set_spec'];
+        if (BRING_WRITE_ACTIONS.includes(action)) {
+            return { success: true, added: 0, removed: 0, skipped: 0, _demo: true };
+        }
+        // bring_list returns the in-memory demo list
+        if (action === 'bring_list') {
+            return { success: true, purchase: shoppingItems, listUUID: 'demo-list', _demo: true };
+        }
+    }
     let url = `${API_BASE}?action=${action}`;
     if (method === 'GET') {
         Object.entries(params).forEach(([k, v]) => {
@@ -8636,6 +8650,28 @@ async function loadShoppingList() {
     statusEl.innerHTML = `<div class="bring-loading"><div class="loading-spinner"></div> ${t('shopping.bring_loading')}</div>`;
     currentEl.style.display = 'none';
     suggestionsEl.style.display = 'none';
+
+    // ── Demo mode: show placeholder list, skip all Bring! API calls ──────────
+    if (_demoMode) {
+        statusEl.style.display = 'none';
+        shoppingListUUID = 'demo-list';
+        shoppingItems = [
+            { name: 'Latte', specification: '🟠 presto · 1L', rawName: 'Latte' },
+            { name: 'Pane', specification: '', rawName: 'Pane' },
+            { name: 'Uova', specification: '⚡ urgente', rawName: 'Uova' },
+            { name: 'Pasta', specification: '500g', rawName: 'Pasta' },
+            { name: 'Pomodori', specification: '1kg', rawName: 'Pomodori' },
+        ];
+        renderShoppingItems();
+        currentEl.style.display = 'block';
+        loadSmartShopping().then(() => {
+            _syncOnBringFlags();
+            renderSmartShopping();
+            updateShoppingTabCounts();
+            renderShoppingItems();
+        });
+        return;
+    }
     
     try {
         const data = await api('bring_list');
@@ -8643,7 +8679,12 @@ async function loadShoppingList() {
         
         if (!data.success) {
             statusEl.style.display = 'block';
-            statusEl.innerHTML = `<div class="bring-error">⚠️ ${escapeHtml(data.error || t('error.bring_connection'))}</div>`;
+            const isMissingCreds = data.error && data.error.toLowerCase().includes('credenziali bring');
+            if (isMissingCreds) {
+                statusEl.innerHTML = `<div class="bring-error">🔑 ${t('shopping.bring_not_configured') || 'Bring! non è configurato. Aggiungi email e password nelle <a href="#" onclick="showPage(\'settings\');return false;">impostazioni</a>.'}</div>`;
+            } else {
+                statusEl.innerHTML = `<div class="bring-error">⚠️ ${escapeHtml(data.error || t('error.bring_connection'))}</div>`;
+            }
             return;
         }
         
