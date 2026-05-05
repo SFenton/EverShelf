@@ -866,7 +866,10 @@ class SetupActivity : AppCompatActivity() {
                     val body = buildString {
                         append("{\"screensaver_enabled\":$screensaver")
                         if (hasScale) {
-                            append(",\"scale_enabled\":true,\"scale_gateway_url\":\"ws://127.0.0.1:8765\"")
+                            // Use the tablet's actual LAN IP so the EverShelf server
+                            // (potentially on a different machine) can reach the gateway.
+                            val lanIp = getDeviceLanIp() ?: "127.0.0.1"
+                            append(",\"scale_enabled\":true,\"scale_gateway_url\":\"ws://$lanIp:8765\"")
                         }
                         append("}")
                     }
@@ -885,5 +888,33 @@ class SetupActivity : AppCompatActivity() {
         }
         setResult(RESULT_OK)
         finish()
+    }
+
+    /**
+     * Returns the device's best LAN IPv4 address (Wi-Fi/Ethernet preferred).
+     * Skips loopback, VPN tunnels, and cellular interfaces.
+     */
+    private fun getDeviceLanIp(): String? {
+        val skipPrefixes = listOf("tun", "ppp", "rmnet", "pdp", "v4-", "v6-", "ccmni", "sit", "gre")
+        var fallback: String? = null
+        try {
+            val ifaces = NetworkInterface.getNetworkInterfaces() ?: return null
+            while (ifaces.hasMoreElements()) {
+                val intf = ifaces.nextElement()
+                if (!intf.isUp || intf.isLoopback) continue
+                val name = intf.name.lowercase()
+                if (skipPrefixes.any { name.startsWith(it) }) continue
+                for (addr in intf.interfaceAddresses) {
+                    val ip = addr.address
+                    if (ip is java.net.Inet4Address && !ip.isLoopbackAddress) {
+                        val ipStr = ip.hostAddress ?: continue
+                        // Wi-Fi/Ethernet first
+                        if (name.startsWith("wlan") || name.startsWith("eth")) return ipStr
+                        if (fallback == null) fallback = ipStr
+                    }
+                }
+            }
+        } catch (_: Exception) {}
+        return fallback
     }
 }

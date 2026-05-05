@@ -17,21 +17,21 @@
     <string name="setup_exit_cancel">Continua</string>
 
     <!-- Wizard Step 3: Bilancia smart -->
-    <string name="wizard_step3_title">Bilancia Smart (Opzionale)</string>
-    <string name="wizard_step3_description">Per usare una bilancia da cucina Bluetooth, devi installare l\'app EverShelf Scale Gateway separatamente.</string>
+    <string name="wizard_step3_title">Bilancia Smart</string>
+    <string name="wizard_step3_description">EverShelf Kiosk include un gateway Bluetooth integrato — nessuna app esterna necessaria. Seleziona la tua bilancia qui sotto.</string>
     <string name="wizard_step3_question">Hai una bilancia smart Bluetooth?</string>
     <string name="wizard_step3_yes">✅  Sì, ho una bilancia</string>
     <string name="wizard_step3_no">➡️  No, salta questo passaggio</string>
 
     <!-- Messaggi stato gateway -->
-    <string name="wizard_gateway_installed">Scale Gateway installato ✅</string>
-    <string name="wizard_gateway_installed_detail">Verrà avviato in background quando procedi.</string>
-    <string name="wizard_gateway_not_installed">Scale Gateway non installato</string>
-    <string name="wizard_gateway_not_installed_detail">Installa l\'app Scale Gateway per usare una bilancia Bluetooth.</string>
-    <string name="wizard_gateway_checking">Controllo aggiornamenti…</string>
-    <string name="wizard_gateway_up_to_date">Scale Gateway è aggiornato.</string>
-    <string name="wizard_gateway_update_available">Aggiornamento disponibile per Scale Gateway</string>
-    <string name="wizard_gateway_update_detail">Tocca il pulsante qui sotto per aggiornarlo ora.</string>
+    <string name="wizard_gateway_installed">Bilancia salvata ✅</string>
+    <string name="wizard_gateway_installed_detail">Il gateway BLE integrato si collegherà automaticamente all\'avvio.</string>
+    <string name="wizard_gateway_not_installed">Nessuna bilancia selezionata</string>
+    <string name="wizard_gateway_not_installed_detail">Scansiona le bilance BLE nelle vicinanze e tocca una per selezionarla.</string>
+    <string name="wizard_gateway_checking">Scansione bilance BLE in corso…</string>
+    <string name="wizard_gateway_up_to_date">Servizio BLE bilancia pronto.</string>
+    <string name="wizard_gateway_update_available">Bilancia BLE trovata</string>
+    <string name="wizard_gateway_update_detail">Tocca la bilancia nell\'elenco per connettersi.</string>
 
     <!-- Stati scaricamento / installazione -->
     <string name="install_downloading">Scaricamento in corso…</string>

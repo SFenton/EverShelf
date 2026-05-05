@@ -76,8 +76,12 @@
         <!-- Actions — fixed set of icon buttons, all same size -->
         <div class="header-actions">
             <button id="scale-status-indicator" class="header-btn scale-status-indicator scale-status-disconnected"
-                    style="display:none" data-i18n-title="scale.status_disconnected" title="⚖️ Bilancia">
-                <span class="scale-dot"></span>
+                    style="display:none" data-i18n-title="scale.status_disconnected" title="⚖️ Bilancia"
+                    onclick="_scaleShowInfo()">
+                <span class="scale-icon-wrapper">
+                    <span class="scale-icon-emoji">⚖️</span>
+                    <span class="scale-status-dot"></span>
+                </span>
             </button>
             <button class="header-btn header-gemini-btn" onclick="showPage('chat')" title="Chat con Gemini" data-i18n-title="chat.title">
                 <svg class="gemini-icon" viewBox="0 0 24 24" width="24" height="24" fill="white"><path d="M12 0C12 6.627 6.627 12 0 12c6.627 0 12 5.373 12 12 0-6.627 5.373-12 12-12-6.627 0-12-5.373-12-12z"/></svg>

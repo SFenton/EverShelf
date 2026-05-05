@@ -260,26 +260,46 @@ body {
 }
 
 /* ── Smart Scale status indicator ───────────────────────────────────── */
-/* Same shape as .header-btn but non-interactive — shows colored dot */
+/* Scale emoji with a small colored status dot in the lower-right corner */
 .scale-status-indicator {
-    cursor: default;
+    cursor: pointer;
+}
+.scale-icon-wrapper {
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+}
+.scale-icon-emoji {
+    font-size: 20px;
+    line-height: 1;
+    transition: filter 0.3s, opacity 0.3s;
+}
+.scale-status-dot {
+    position: absolute;
+    bottom: 1px;
+    right: 0px;
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+    border: 1.5px solid #0f172a;
+    background: #475569;
+    transition: background 0.4s, box-shadow 0.4s;
     pointer-events: none;
 }
-.scale-dot {
-    width: 12px;
-    height: 12px;
-    border-radius: 50%;
-    background: rgba(255,255,255,0.3);
-    transition: background 0.4s, box-shadow 0.4s;
-    flex-shrink: 0;
-}
-.scale-status-connected    .scale-dot { background: #22c55e; box-shadow: 0 0 6px #22c55eaa; }
-.scale-status-searching    .scale-dot { background: #f59e0b; animation: scaleStatusPulse 1.4s infinite; }
-.scale-status-disconnected .scale-dot { background: rgba(255,255,255,0.25); }
-.scale-status-error        .scale-dot { background: #ef4444; box-shadow: 0 0 4px #ef4444aa; }
+.scale-status-connected    .scale-status-dot { background: #22c55e; box-shadow: 0 0 5px #22c55eaa; }
+.scale-status-connected    .scale-icon-emoji  { filter: none; opacity: 1; }
+.scale-status-searching    .scale-status-dot { background: #f59e0b; animation: scaleStatusPulse 1.4s infinite; }
+.scale-status-searching    .scale-icon-emoji  { filter: none; opacity: 0.85; }
+.scale-status-disconnected .scale-status-dot { background: #475569; }
+.scale-status-disconnected .scale-icon-emoji  { filter: grayscale(0.5); opacity: 0.55; }
+.scale-status-error        .scale-status-dot { background: #ef4444; box-shadow: 0 0 5px #ef4444aa; }
+.scale-status-error        .scale-icon-emoji  { filter: none; opacity: 1; }
 @keyframes scaleStatusPulse {
-    0%, 100% { box-shadow: 0 0 4px #f59e0b88; }
-    50%       { box-shadow: 0 0 10px #f59e0bcc; }
+    0%, 100% { box-shadow: 0 0 3px #f59e0b88; }
+    50%       { box-shadow: 0 0 9px #f59e0bcc; }
 }
 
 /* ── Scale read button (add/use forms) ──────────────────────────────── */

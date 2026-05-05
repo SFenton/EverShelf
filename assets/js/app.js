@@ -806,6 +806,23 @@ function _scaleUpdateStatus(state) {
 }
 
 /**
+ * Show a brief toast with the current scale connection status when the icon is tapped.
+ */
+function _scaleShowInfo() {
+    const state = _scaleConnected ? 'connected' : 'disconnected';
+    const msgs = {
+        connected:    `⚖️ ${t('scale.status_connected')}${_scaleDevice ? ': ' + _scaleDevice : ''}${_scaleBattery != null ? ' 🔋' + _scaleBattery + '%' : ''}`,
+        searching:    `⚖️ ${t('scale.status_searching')}`,
+        disconnected: `⚖️ ${t('scale.status_disconnected')}`,
+        error:        `⚖️ ${t('scale.status_error')}`,
+    };
+    const el = document.getElementById('scale-status-indicator');
+    const cls = el ? [...el.classList].find(c => c.startsWith('scale-status-') && c !== 'scale-status-indicator') : null;
+    const key = cls ? cls.replace('scale-status-', '') : state;
+    showToast(msgs[key] || msgs[state], key === 'connected' ? 'success' : 'info');
+}
+
+/**
  * Show the scale reading modal and wait for a stable weight, then populate the input.
  * @param {string} targetInputId  — ID of the <input> to fill
  * @param {Function} getUnit      — function that returns the current unit string ('g', 'ml', 'kg')
