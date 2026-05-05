@@ -6774,16 +6774,16 @@ function switchUseUnit(mode) {
         _useConfMode._activeUnit = 'sub';
         const step = getSubUnitStep(_useConfMode.packageUnit);
         qtyInput.value = step;
-        qtyInput.step = step;
-        qtyInput.min = step;
+        qtyInput.step = 'any';
+        qtyInput.min = 1;
         hint.textContent = t('recipes.quantity_in_total', { unit: _useConfMode.subLabel, total: `${Math.round(_useConfMode.totalSub)}${_useConfMode.subLabel}` });
     } else {
         confBtn.classList.add('active');
         subBtn.classList.remove('active');
         _useConfMode._activeUnit = 'conf';
         qtyInput.value = 1;
-        qtyInput.step = 0.5;
-        qtyInput.min = 0.5;
+        qtyInput.step = 'any';
+        qtyInput.min = 0.1;
         hint.textContent = t('recipes.packs_of_have', { size: `${_useConfMode.packageSize}${_useConfMode.subLabel}`, count: _useConfMode.totalConf.toFixed(1) });
     }
 }
