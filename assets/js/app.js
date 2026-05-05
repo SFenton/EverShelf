@@ -12177,13 +12177,14 @@ async function _initApp() {
         localStorage.removeItem('_bgBringSyncTs');
         localStorage.setItem('_bgBringSyncReset_v1', '1');
     }
-    syncSettingsFromDB();
+    syncSettingsFromDB().then(() => {
+        scaleInit(); // connect to smart scale gateway if configured (needs settings)
+    });
     showPage('dashboard');
     initInactivityWatcher();
     initSpesaMode();
     initScreensaverShortcuts();
     startBgShoppingRefresh();
-    scaleInit(); // connect to smart scale gateway if configured
     _injectKioskOverlay(); // kiosk X / refresh buttons (only when running inside Android WebView)
 
     // Hide preloader once the dashboard is rendered
