@@ -87,17 +87,26 @@ class SetupActivity : AppCompatActivity() {
 
     // Scale step (BLE)
     private lateinit var scaleQuestionCard: LinearLayout
+    private lateinit var scalePowerOnCard:  LinearLayout
     private lateinit var bleSetupCard:      LinearLayout
+    private lateinit var scaleTestCard:     LinearLayout
     private lateinit var tvScanStatus:      TextView
     private lateinit var btnScanBle:        MaterialButton
     private lateinit var tvSelectedScale:   TextView
     private lateinit var rvScaleDevices:    RecyclerView
     private lateinit var step3NextButtons:  LinearLayout
+    private lateinit var tvTestStatus:      TextView
+    private lateinit var tvTestWeight:      TextView
+    private lateinit var testWeightBox:     android.widget.LinearLayout
 
     private var bleManager: BleScaleManager? = null
     private val discoveredDevices = mutableListOf<BleDeviceInfo>()
     private var selectedDevice: BleDeviceInfo? = null
     private var deviceAdapter: DeviceAdapter? = null
+
+    // Test-mode state
+    private var isInTestMode = false
+    private var testHasWeight = false
 
     // Screensaver step
     private lateinit var setupSwitchScreensaver: SwitchMaterial
@@ -176,14 +185,15 @@ class SetupActivity : AppCompatActivity() {
     override fun onDestroy() {
         bleManager?.stopScan()
         bleManager?.disconnect()
+        isInTestMode = false
         discoverCancelled.set(true)
         super.onDestroy()
     }
 
     override fun onResume() {
         super.onResume()
-        // If we're on step 4 with a saved device, reflect it in the UI
-        if (currentStep == 4) {
+        // If we're on step 4 with a saved device and not in test mode, reflect it in the UI
+        if (currentStep == 4 && !isInTestMode) {
             val savedName = bleManager?.getSavedDeviceName()
             if (savedName != null) {
                 tvSelectedScale.text = "✅ $savedName"
@@ -214,12 +224,17 @@ class SetupActivity : AppCompatActivity() {
 
         // Scale step
         scaleQuestionCard  = findViewById(R.id.scaleQuestionCard)
+        scalePowerOnCard   = findViewById(R.id.scalePowerOnCard)
         bleSetupCard       = findViewById(R.id.bleSetupCard)
+        scaleTestCard      = findViewById(R.id.scaleTestCard)
         tvScanStatus       = findViewById(R.id.tvScanStatus)
         btnScanBle         = findViewById(R.id.btnScanBle)
         tvSelectedScale    = findViewById(R.id.tvSelectedScale)
         rvScaleDevices     = findViewById(R.id.rvScaleDevices)
         step3NextButtons   = findViewById(R.id.step3NextButtons)
+        tvTestStatus       = findViewById(R.id.tvTestStatus)
+        tvTestWeight       = findViewById(R.id.tvTestWeight)
+        testWeightBox      = findViewById(R.id.testWeightBox)
 
         // Screensaver step
         setupSwitchScreensaver = findViewById(R.id.setupSwitchScreensaver)
@@ -279,9 +294,16 @@ class SetupActivity : AppCompatActivity() {
         findViewById<MaterialButton>(R.id.btnScaleYes).setOnClickListener {
             prefs.edit().putBoolean(KEY_HAS_SCALE, true).apply()
             scaleQuestionCard.visibility = View.GONE
+            // Show power-on instruction first
+            scalePowerOnCard.visibility  = View.VISIBLE
+        }
+
+        // "Bilancia accesa — Cerca" button
+        findViewById<MaterialButton>(R.id.btnPowerOnReady).setOnClickListener {
+            scalePowerOnCard.visibility  = View.GONE
             bleSetupCard.visibility      = View.VISIBLE
             step3NextButtons.visibility  = View.VISIBLE
-            // Disable Next until device selected
+            // Disable Next until device confirmed
             val savedName = bleManager?.getSavedDeviceName()
             if (savedName != null) {
                 tvSelectedScale.text       = "✅ $savedName"
@@ -300,11 +322,61 @@ class SetupActivity : AppCompatActivity() {
         btnScanBle.setOnClickListener { startBleScan() }
         findViewById<MaterialButton>(R.id.btnScaleBack).setOnClickListener {
             bleManager?.stopScan()
+            bleManager?.disconnect()
+            isInTestMode = false
             showStep(3)
         }
         findViewById<MaterialButton>(R.id.btnScaleNext).setOnClickListener {
             bleManager?.stopScan()
+            bleManager?.disconnect()
             showStep(5)
+        }
+
+        // Test card buttons
+        findViewById<MaterialButton>(R.id.btnTestConfirm).setOnClickListener {
+            // User confirms weight matches → scale is good, proceed
+            isInTestMode = false
+            bleManager?.stopScan()
+            bleManager?.disconnect()
+            scaleTestCard.visibility = View.GONE
+            bleSetupCard.visibility  = View.GONE
+            step3NextButtons.visibility = View.VISIBLE
+            val name = selectedDevice?.name ?: bleManager?.getSavedDeviceName() ?: "Bilancia"
+            tvSelectedScale.text       = "✅ $name"
+            tvSelectedScale.visibility = View.VISIBLE
+            findViewById<MaterialButton>(R.id.btnScaleNext).isEnabled = true
+            // Put scan card back (hidden) and show only nav buttons
+            bleSetupCard.visibility = View.GONE
+        }
+        findViewById<MaterialButton>(R.id.btnTestRetry).setOnClickListener {
+            // User says weight doesn't match → disconnect, go back to scan
+            isInTestMode = false
+            testHasWeight = false
+            bleManager?.disconnect()
+            selectedDevice = null
+            bleManager?.clearSavedDevice()
+            scaleTestCard.visibility   = View.GONE
+            testWeightBox.visibility   = View.GONE
+            bleSetupCard.visibility    = View.VISIBLE
+            tvSelectedScale.text       = ""
+            tvSelectedScale.visibility = View.GONE
+            tvScanStatus.text          = "Bilancia non confermata. Riprova la scansione."
+            tvScanStatus.setTextColor(0xFFfbbf24.toInt())
+            btnScanBle.isEnabled       = true
+            btnScanBle.text            = "🔍  Cerca bilancia"
+            findViewById<MaterialButton>(R.id.btnScaleNext).isEnabled = false
+        }
+        findViewById<MaterialButton>(R.id.btnTestSkip).setOnClickListener {
+            // User skips test — trust the selection
+            isInTestMode = false
+            bleManager?.disconnect()
+            scaleTestCard.visibility = View.GONE
+            bleSetupCard.visibility  = View.GONE
+            step3NextButtons.visibility = View.VISIBLE
+            val name = selectedDevice?.name ?: bleManager?.getSavedDeviceName() ?: "Bilancia"
+            tvSelectedScale.text       = "✅ $name"
+            tvSelectedScale.visibility = View.VISIBLE
+            findViewById<MaterialButton>(R.id.btnScaleNext).isEnabled = true
         }
 
         // ── Screensaver ───────────────────────────────────────────────────
@@ -356,10 +428,15 @@ class SetupActivity : AppCompatActivity() {
 
         // Reset scale step when entering it
         if (step == 4) {
+            isInTestMode = false
+            testHasWeight = false
+            scaleTestCard.visibility  = View.GONE
+            testWeightBox.visibility  = View.GONE
             val hasScaleYes = prefs.contains(KEY_HAS_SCALE) && prefs.getBoolean(KEY_HAS_SCALE, false)
             if (hasScaleYes) {
-                // Already said YES — go straight to BLE scan card
+                // Already said YES — skip power-on card, go straight to BLE scan
                 scaleQuestionCard.visibility = View.GONE
+                scalePowerOnCard.visibility  = View.GONE
                 bleSetupCard.visibility      = View.VISIBLE
                 step3NextButtons.visibility  = View.VISIBLE
                 val savedName = bleManager?.getSavedDeviceName()
@@ -374,6 +451,7 @@ class SetupActivity : AppCompatActivity() {
                 }
             } else {
                 scaleQuestionCard.visibility = View.VISIBLE
+                scalePowerOnCard.visibility  = View.GONE
                 bleSetupCard.visibility      = View.GONE
                 step3NextButtons.visibility  = View.GONE
             }
@@ -751,15 +829,33 @@ class SetupActivity : AppCompatActivity() {
         bleManager?.saveDevice(info.device.address, info.name)
         tvSelectedScale.text       = "✅ ${info.name}"
         tvSelectedScale.visibility = View.VISIBLE
-        tvScanStatus.text = "Bilancia selezionata. Premi Avanti per continuare."
-        tvScanStatus.setTextColor(0xFF34d399.toInt())
         btnScanBle.isEnabled = true
         btnScanBle.text = "🔄  Scansiona di nuovo"
-        findViewById<MaterialButton>(R.id.btnScaleNext).isEnabled = true
+        // Start connection test
+        startScaleTest(info)
+    }
+
+    private fun startScaleTest(info: BleDeviceInfo) {
+        isInTestMode = true
+        testHasWeight = false
+        // Show test card, hide scan card
+        bleSetupCard.visibility  = View.GONE
+        scaleTestCard.visibility = View.VISIBLE
+        testWeightBox.visibility = View.GONE
+        step3NextButtons.visibility = View.GONE
+        tvTestStatus.text = "🔗 Connessione a ${info.name}…"
+        tvTestStatus.setTextColor(0xFF94a3b8.toInt())
+        tvTestWeight.text = "— g"
+        // Disable confirm/retry until we have data
+        findViewById<MaterialButton>(R.id.btnTestConfirm).isEnabled = false
+        findViewById<MaterialButton>(R.id.btnTestRetry).isEnabled   = false
+        bleManager?.connect(info.device)
     }
 
     private fun makeBleListener() = object : BleScaleListener {
         override fun onDeviceFound(info: BleDeviceInfo) {
+            // Only show devices that look like scales (positive score)
+            if (info.scaleScore <= 0) return
             val existing = discoveredDevices.indexOfFirst { it.device.address == info.device.address }
             if (existing >= 0) {
                 discoveredDevices[existing] = info
@@ -769,12 +865,50 @@ class SetupActivity : AppCompatActivity() {
                 deviceAdapter?.notifyItemInserted(discoveredDevices.size - 1)
             }
         }
-        override fun onConnecting(device: BluetoothDevice) {}
-        override fun onConnected(deviceName: String) {}
-        override fun onDisconnected() {}
-        override fun onWeightReceived(reading: WeightReading) {}
+        override fun onConnecting(device: BluetoothDevice) {
+            if (!isInTestMode) return
+            tvTestStatus.text = "🔗 Connessione in corso…"
+            tvTestStatus.setTextColor(0xFF94a3b8.toInt())
+        }
+        override fun onConnected(deviceName: String) {
+            if (!isInTestMode) return
+            tvTestStatus.text = "⚖️ Connesso! Posiziona un oggetto sulla bilancia…"
+            tvTestStatus.setTextColor(0xFF34d399.toInt())
+            testWeightBox.visibility = View.VISIBLE
+            findViewById<MaterialButton>(R.id.btnTestRetry).isEnabled = true
+        }
+        override fun onDisconnected() {
+            if (!isInTestMode) return
+            tvTestStatus.text = "⚠️ Connessione persa. Riprova."
+            tvTestStatus.setTextColor(0xFFfbbf24.toInt())
+            testWeightBox.visibility = View.GONE
+            testHasWeight = false
+            findViewById<MaterialButton>(R.id.btnTestConfirm).isEnabled = false
+        }
+        override fun onWeightReceived(reading: WeightReading) {
+            if (!isInTestMode) return
+            testHasWeight = true
+            val display = if (reading.unit == "kg")
+                "%.3f kg".format(reading.value)
+            else
+                "%g ${reading.unit}".format(reading.value)
+            tvTestWeight.text = display
+            testWeightBox.visibility = View.VISIBLE
+            tvTestStatus.text = "Peso ricevuto — coincide con quello sulla bilancia?"
+            tvTestStatus.setTextColor(0xFF94a3b8.toInt())
+            findViewById<MaterialButton>(R.id.btnTestConfirm).isEnabled = true
+            findViewById<MaterialButton>(R.id.btnTestRetry).isEnabled   = true
+        }
         override fun onBatteryReceived(level: Int) {}
         override fun onError(message: String) {
+            if (isInTestMode) {
+                tvTestStatus.text = "⚠️ $message"
+                tvTestStatus.setTextColor(0xFFf87171.toInt())
+                testWeightBox.visibility = View.GONE
+                testHasWeight = false
+                findViewById<MaterialButton>(R.id.btnTestRetry).isEnabled = true
+                return
+            }
             tvScanStatus.text = "⚠️ $message"
             tvScanStatus.setTextColor(0xFFf87171.toInt())
             btnScanBle.isEnabled = true
@@ -782,7 +916,7 @@ class SetupActivity : AppCompatActivity() {
         override fun onScanStopped() {
             btnScanBle.isEnabled = true
             if (discoveredDevices.isEmpty()) {
-                tvScanStatus.text = "Nessuna bilancia trovata. Assicurati che sia accesa e vicina."
+                tvScanStatus.text = "Nessuna bilancia trovata. Assicurati che sia accesa e vicina, poi riprova."
                 tvScanStatus.setTextColor(0xFFfbbf24.toInt())
             } else {
                 tvScanStatus.text = "Seleziona la tua bilancia dall'elenco."
