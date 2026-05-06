@@ -2077,6 +2077,7 @@ function getServerSettings(): void {
         'scale_enabled' => env('SCALE_ENABLED', 'false') === 'true',
         'scale_gateway_url' => env('SCALE_GATEWAY_URL', ''),
         'meal_plan_enabled' => env('MEAL_PLAN_ENABLED', 'false') === 'true',
+        'screensaver_enabled' => env('SCREENSAVER_ENABLED', 'false') === 'true',
     ]);
 }
 
@@ -2122,6 +2123,7 @@ function saveSettings(): void {
         'pref_zerowaste'  => 'PREF_ZEROWASTE',
         'scale_enabled'   => 'SCALE_ENABLED',
         'meal_plan_enabled' => 'MEAL_PLAN_ENABLED',
+        'screensaver_enabled' => 'SCREENSAVER_ENABLED',
     ];
     // Integer keys
     $intMap = [

@@ -1855,7 +1855,8 @@ async function syncSettingsFromDB() {
             'pref_healthy','pref_opened','pref_zerowaste','dietary','appliances',
             'camera_facing','scale_enabled','scale_gateway_url',
             'meal_plan_enabled','tts_enabled','tts_url','tts_token',
-            'tts_method','tts_auth_type','tts_content_type','tts_payload_key'];
+            'tts_method','tts_auth_type','tts_content_type','tts_payload_key',
+            'screensaver_enabled'];
         for (const key of serverKeys) {
             if (serverSettings[key] !== undefined && serverSettings[key] !== null && serverSettings[key] !== '') {
                 s[key] = serverSettings[key];
@@ -2193,9 +2194,9 @@ async function saveSettings() {
         const settingsToken = document.getElementById('setting-settings-token')?.value.trim() || '';
         const tokenHeader = settingsToken ? { 'X-Settings-Token': settingsToken } : {};
         const result = await api('save_settings', {}, 'POST', {
-            gemini_key: s.gemini_key,
+            ...(s.gemini_key ? { gemini_key: s.gemini_key } : {}),
             bring_email: s.bring_email,
-            bring_password: s.bring_password,
+            ...(s.bring_password ? { bring_password: s.bring_password } : {}),
             default_persons: s.default_persons,
             pref_veloce: s.pref_veloce,
             pref_pocafame: s.pref_pocafame,
@@ -2209,6 +2210,7 @@ async function saveSettings() {
             scale_enabled: s.scale_enabled,
             scale_gateway_url: s.scale_gateway_url,
             meal_plan_enabled: s.meal_plan_enabled,
+            screensaver_enabled: s.screensaver_enabled,
             tts_enabled: s.tts_enabled,
             tts_url: s.tts_url,
             tts_token: s.tts_token,
@@ -12179,9 +12181,9 @@ async function _initApp() {
     }
     syncSettingsFromDB().then(() => {
         scaleInit(); // connect to smart scale gateway if configured (needs settings)
+        initInactivityWatcher();
     });
     showPage('dashboard');
-    initInactivityWatcher();
     initSpesaMode();
     initScreensaverShortcuts();
     startBgShoppingRefresh();
