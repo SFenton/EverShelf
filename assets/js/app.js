@@ -2239,6 +2239,8 @@ async function saveSettings() {
         statusEl.style.display = 'block';
         setTimeout(() => statusEl.style.display = 'none', 4000);
     }
+    // Re-init screensaver watcher in case it was just enabled
+    initInactivityWatcher();
 }
 
 function switchSettingsTab(btn, tabId) {
@@ -11890,20 +11892,26 @@ function initScreensaverShortcuts() {
     _initScreensaverShortcutBtn('screensaver-recipe-btn', 'recipe', null);
 }
 
+let _inactivityListenersAttached = false;
+
 function initInactivityWatcher() {
-    const s = getSettings();
-    if (!s.screensaver_enabled) return; // disabled by default
-    const events = ['pointerdown', 'pointermove', 'keydown', 'scroll', 'touchstart'];
-    events.forEach(evt => {
-        document.addEventListener(evt, () => {
-            if (_screensaverActive) {
-                dismissScreensaver();
-            } else {
-                resetInactivityTimer();
-            }
-        }, { passive: true });
-    });
-    resetInactivityTimer();
+    if (!_inactivityListenersAttached) {
+        const events = ['pointerdown', 'pointermove', 'keydown', 'scroll', 'touchstart'];
+        events.forEach(evt => {
+            document.addEventListener(evt, () => {
+                if (!getSettings().screensaver_enabled) return;
+                if (_screensaverActive) {
+                    dismissScreensaver();
+                } else {
+                    resetInactivityTimer();
+                }
+            }, { passive: true });
+        });
+        _inactivityListenersAttached = true;
+    }
+    if (getSettings().screensaver_enabled) {
+        resetInactivityTimer();
+    }
 }
 
 // ===== INITIALIZATION =====
