@@ -58,6 +58,7 @@ class SettingsActivity : AppCompatActivity() {
         val statusView  = findViewById<TextView>(R.id.scaleGatewayStatus)
         val deviceView  = findViewById<TextView>(R.id.scaleDeviceInfo)
         val btnScaleAction = findViewById<MaterialButton>(R.id.btnConfigureGateway)
+        val btnReconfigureScale = findViewById<MaterialButton>(R.id.btnReconfigureScale)
 
         when {
             !hasScale || deviceAddr == null -> {
@@ -82,6 +83,20 @@ class SettingsActivity : AppCompatActivity() {
                     GatewayService.stop(this)
                     GatewayService.start(this)
                     Toast.makeText(this, "Servizio bilancia riavviato", Toast.LENGTH_SHORT).show()
+                }
+                btnReconfigureScale.visibility = android.view.View.VISIBLE
+                btnReconfigureScale.setOnClickListener {
+                    GatewayService.stop(this)
+                    prefs.edit()
+                        .remove("scale_device_address")
+                        .remove("scale_device_name")
+                        .putBoolean(KEY_HAS_SCALE, false)
+                        .putBoolean(KEY_SETUP_COMPLETE, false)
+                        .apply()
+                    val intent = Intent(this, SetupActivity::class.java)
+                    intent.putExtra("start_step", 4)
+                    startActivity(intent)
+                    finish()
                 }
                 // Probe WebSocket port to show live status
                 Thread {

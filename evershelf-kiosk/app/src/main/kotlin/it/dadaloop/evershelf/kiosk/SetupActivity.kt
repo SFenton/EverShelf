@@ -161,9 +161,11 @@ class SetupActivity : AppCompatActivity() {
         bindViews()
         // Restore step from instance state (e.g. after recreate() for locale change)
         val savedStep = savedInstanceState?.getInt("step", -1) ?: -1
+        val startStepExtra = intent.getIntExtra("start_step", -1)
         val langAlreadySet = prefs.getString(KEY_LANGUAGE, null) != null
         showStep(when {
             savedStep >= 0    -> savedStep
+            startStepExtra >= 0 -> startStepExtra
             langAlreadySet    -> 1
             else              -> 0
         })
