@@ -137,20 +137,27 @@ body {
     z-index: 1;
 }
 
-/* Title wrap — absolutely centered in the full header width */
+/* Title wrap — left-aligned by default; centered in kiosk mode */
 .header-title-wrap {
-    position: absolute;
-    left: 0;
-    right: 0;
+    flex: 1 1 0;
     display: flex;
-    justify-content: center;
     align-items: center;
     gap: 8px;
-    pointer-events: none;
+    min-width: 0;
     overflow: hidden;
 }
 .header-title-wrap > * {
     pointer-events: auto;
+}
+
+/* Kiosk mode: center title absolutely across full header width */
+.kiosk-mode .header-title-wrap {
+    position: absolute;
+    left: 0;
+    right: 0;
+    flex: unset;
+    justify-content: center;
+    pointer-events: none;
 }
 
 .header-title {

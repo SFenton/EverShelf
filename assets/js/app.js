@@ -2027,6 +2027,10 @@ function _injectKioskOverlay() {
     if (typeof _kioskBridge === 'undefined') return;
     if (document.getElementById('_kiosk_overlay')) return;
 
+    // Mark header so CSS can center the title
+    const appHeader = document.querySelector('.app-header');
+    if (appHeader) appHeader.classList.add('kiosk-mode');
+
     const headerLeft = document.getElementById('header-left');
     if (!headerLeft) return;
 
