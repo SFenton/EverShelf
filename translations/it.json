@@ -242,7 +242,13 @@
         "toast_opened_finished": "🔓 Confezione aperta di {name} finita!",
         "disambiguation_hint": "Cosa intendi con \"finito tutto\"?",
         "disambiguation_all": "🗑️ Finito TUTTO ({qty})",
-        "error_exceeds_stock": "⚠️ Non puoi usare più di quanto hai disponibile!"
+        "error_exceeds_stock": "⚠️ Non puoi usare più di quanto hai disponibile!",
+        "use_all_confirm_title": "✅ Finisci tutto",
+        "use_all_confirm_msg": "Conferma che hai finito tutto il prodotto:",
+        "use_all_confirm_btn": "✅ Sì, finito",
+        "throw_all_confirm_title": "🗑️ Butta tutto",
+        "throw_all_confirm_msg": "Vuoi davvero buttare via tutto il prodotto?",
+        "throw_all_confirm_btn": "🗑️ Sì, butta"
     },
     "product": {
         "title_new": "Nuovo Prodotto",
@@ -745,7 +751,14 @@
     },
     "confirm": {
         "remove_item": "Vuoi davvero rimuovere questo prodotto dall'inventario?",
-        "kiosk_exit": "Uscire dalla modalità kiosk?"
+        "kiosk_exit": "Uscire dalla modalità kiosk?",
+        "cancel": "Annulla",
+        "proceed": "Conferma"
+    },
+    "location": {
+        "dispensa": "Dispensa",
+        "frigo": "Frigo",
+        "freezer": "Freezer"
     },
     "edit": {
         "title": "Modifica {name}",
