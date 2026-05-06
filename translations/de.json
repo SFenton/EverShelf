@@ -243,7 +243,13 @@
         "toast_opened_finished": "🔓 Geöffnete Packung von {name} aufgebraucht!",
         "disambiguation_hint": "Was meinst du mit \"alles aufgebraucht\"?",
         "disambiguation_all": "🗑️ ALLES verbraucht ({qty})",
-        "error_exceeds_stock": "⚠️ Du kannst nicht mehr verwenden als du verfügbar hast!"
+        "error_exceeds_stock": "⚠️ Du kannst nicht mehr verwenden als du verfügbar hast!",
+        "use_all_confirm_title": "✅ Alles aufbrauchen",
+        "use_all_confirm_msg": "Bestätige, dass du das Produkt vollständig aufgebraucht hast:",
+        "use_all_confirm_btn": "✅ Ja, aufgebraucht",
+        "throw_all_confirm_title": "🗑️ Alles entsorgen",
+        "throw_all_confirm_msg": "Möchtest du wirklich das gesamte Produkt entsorgen?",
+        "throw_all_confirm_btn": "🗑️ Ja, entsorgen"
     },
     "product": {
         "title_new": "Neues Produkt",
@@ -746,7 +752,14 @@
     },
     "confirm": {
         "remove_item": "Möchtest du dieses Produkt wirklich aus dem Bestand entfernen?",
-        "kiosk_exit": "Kioskmodus verlassen?"
+        "kiosk_exit": "Kioskmodus verlassen?",
+        "cancel": "Abbrechen",
+        "proceed": "Bestätigen"
+    },
+    "location": {
+        "dispensa": "Vorratskammer",
+        "frigo": "Kühlschrank",
+        "freezer": "Gefrierschrank"
     },
     "edit": {
         "title": "{name} bearbeiten",

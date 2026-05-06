@@ -242,7 +242,13 @@
         "toast_opened_finished": "🔓 Opened package of {name} finished!",
         "disambiguation_hint": "What do you mean by \"all done\"?",
         "disambiguation_all": "🗑️ Finish EVERYTHING ({qty})",
-        "error_exceeds_stock": "⚠️ You cannot use more than you have available!"
+        "error_exceeds_stock": "⚠️ You cannot use more than you have available!",
+        "use_all_confirm_title": "✅ Finish everything",
+        "use_all_confirm_msg": "Confirm that you have finished the product:",
+        "use_all_confirm_btn": "✅ Yes, finished",
+        "throw_all_confirm_title": "🗑️ Discard everything",
+        "throw_all_confirm_msg": "Do you really want to throw away the whole product?",
+        "throw_all_confirm_btn": "🗑️ Yes, discard"
     },
     "product": {
         "title_new": "New Product",
@@ -745,7 +751,14 @@
     },
     "confirm": {
         "remove_item": "Do you really want to remove this product from inventory?",
-        "kiosk_exit": "Exit kiosk mode?"
+        "kiosk_exit": "Exit kiosk mode?",
+        "cancel": "Cancel",
+        "proceed": "Confirm"
+    },
+    "location": {
+        "dispensa": "Pantry",
+        "frigo": "Fridge",
+        "freezer": "Freezer"
     },
     "edit": {
         "title": "Edit {name}",

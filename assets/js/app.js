@@ -7234,21 +7234,12 @@ async function _doSubmitUseAll() {
         const currentLoc = document.getElementById('use-location')?.value || '__all__';
         const items = _useCurrentItems.filter(i => parseFloat(i.quantity) > 0);
 
-        const openedAtCurrentLoc = items.find(i => i.location === currentLoc && _isOpenedInventoryItem(i));
         const allOpened = items.filter(_isOpenedInventoryItem);
 
         let useLocation;
 
-        if (openedAtCurrentLoc) {
-            // Opened package at the currently selected location → finish only the opened item.
-            // The PHP backend fetches fractional (opened) rows first, so use_all on a specific
-            // location will clear the opened row and leave sealed packages untouched.
-            useLocation = currentLoc;
-        } else if (allOpened.length === 1) {
-            // One opened package somewhere else → almost certainly this is what the user means
-            useLocation = allOpened[0].location;
-        } else if (allOpened.length > 1) {
-            // Multiple opened packages at different locations → ask the user
+        if (allOpened.length >= 1) {
+            // One or more opened packages → always ask the user what they mean
             showLoading(false);
             _showUseAllDisambiguation(allOpened, items);
             return;
