@@ -2,9 +2,7 @@ name: Build & Release Kiosk APK
 
 on:
   push:
-    branches:
-      - main
-      - develop
+    branches: [main]
     paths:
       - 'evershelf-kiosk/**'
   workflow_dispatch:
@@ -30,7 +28,14 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v3
         with:
-          gradle-version: '8.4'
+          gradle-version: '8.6'
+
+      - name: Get version name
+        id: version
+        run: |
+          VERSION=$(grep 'versionName' evershelf-kiosk/app/build.gradle.kts | grep -oP '"\K[^"]+')
+          echo "name=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Kiosk version: $VERSION"
 
       - name: Build debug APK
         run: gradle assembleDebug --no-daemon
@@ -41,29 +46,33 @@ jobs:
           mkdir -p artifacts
           cp evershelf-kiosk/app/build/outputs/apk/debug/app-debug.apk artifacts/evershelf-kiosk.apk
 
-      - name: Get version name
-        id: version
-        run: |
-          VERSION=$(grep 'versionName' evershelf-kiosk/app/build.gradle.kts | grep -oP '"\K[^"]+')
-          echo "name=$VERSION" >> "$GITHUB_OUTPUT"
-
-      - name: Delete existing kiosk release
+      # Publish with a semver-compatible tag so the in-app update check can
+      # compare versions numerically (tag "kiosk-1.7.0" → norm → "1.7.0").
+      # Also update the "kiosk-latest" tag so the hardcoded download URL still works.
+      - name: Create versioned release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release delete kiosk-latest --yes || true
-          sleep 5
+          TAG="kiosk-${{ steps.version.outputs.name }}"
+          # Delete old release with same tag if it exists (e.g. re-run on same version)
+          gh release delete "$TAG" --yes 2>/dev/null || true
+          git push --delete origin "$TAG" 2>/dev/null || true
+          gh release create "$TAG" \
+            --title "EverShelf Kiosk v${{ steps.version.outputs.name }}" \
+            --notes "Kiosk mode app. Scarica e installa su Android 7.0+. L'aggiornamento OTA è automatico." \
+            --latest \
+            artifacts/evershelf-kiosk.apk
 
-      - name: Create GitHub Release and upload APK
+      - name: Update kiosk-latest tag (for hardcoded download URL)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          for i in 1 2 3; do
-            gh release create kiosk-latest \
-              --title "EverShelf Kiosk v${{ steps.version.outputs.name }}" \
-              --notes "Kiosk mode app with embedded BLE scale gateway. Install on your Android device (7.0+)." \
-              --prerelease \
-              artifacts/evershelf-kiosk.apk && break
-            echo "Attempt $i failed, retrying in 10s..."
-            sleep 10
-          done
+          gh release delete kiosk-latest --yes 2>/dev/null || true
+          git push --delete origin kiosk-latest 2>/dev/null || true
+          sleep 3
+          gh release create kiosk-latest \
+            --title "EverShelf Kiosk Latest" \
+            --notes "Alias automatico → kiosk-${{ steps.version.outputs.name }}" \
+            --prerelease \
+            artifacts/evershelf-kiosk.apk
+

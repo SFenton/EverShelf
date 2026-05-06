@@ -555,8 +555,10 @@ class KioskActivity : AppCompatActivity() {
                     packageManager.getPackageInfo(packageName, 0).versionName ?: ""
                 } catch (_: Exception) { "" }
 
-                val norm = { v: String -> v.trimStart('v') }
-                val isSemver = latestTag.trimStart('v').matches(Regex("\\d+\\.\\d+.*"))
+                // Strip any non-numeric prefix so "kiosk-1.7.0", "v1.7.0", "kiosk-v1.7.1"
+                // all normalise to "1.7.0" / "1.7.1" for comparison.
+                val norm = { v: String -> v.replace(Regex("^[^0-9]*"), "") }
+                val isSemver = norm(latestTag).matches(Regex("\\d+\\.\\d+.*"))
 
                 // Compare semver: returns true if `remote` is strictly greater than `local`
                 fun semverNewer(remote: String, local: String): Boolean {
@@ -583,8 +585,12 @@ class KioskActivity : AppCompatActivity() {
                 }
                 if (kioskApkUrl.isEmpty()) kioskApkUrl = KIOSK_DOWNLOAD_URL
 
+                // Only flag an update when the remote tag is parseable as semver AND
+                // the remote version is strictly greater than the installed version.
+                // Non-semver tags (e.g. "kiosk-latest", "rolling") cannot be compared
+                // numerically → treat as "no update" to avoid false positives.
                 val kioskNeedsUpdate = currentKiosk.isNotEmpty() &&
-                    (!isSemver || semverNewer(norm(latestTag), norm(currentKiosk)))
+                    isSemver && semverNewer(norm(latestTag), norm(currentKiosk))
 
                 val result = JSONObject()
                     .put("has_update", kioskNeedsUpdate)
