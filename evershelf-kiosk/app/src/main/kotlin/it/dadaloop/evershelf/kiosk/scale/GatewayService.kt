@@ -183,7 +183,10 @@ class GatewayService : Service(), BleScaleListener, ServerEventListener {
         scheduleReconnect()
     }
 
-    override fun onScanStopped() { /* auto-reconnect handles retries */ }
+    override fun onScanStopped() {
+        // If not connected yet, schedule a retry so we keep searching after the scale powers on
+        if (!bleManager.isConnected) scheduleReconnect()
+    }
 
     override fun onDebugEvent(message: String) {
         Log.d(TAG, message)

@@ -154,6 +154,19 @@
                 android:textColor="#34d399"
                 android:layout_marginTop="12dp"
                 android:visibility="gone" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnReconfigureScale"
+                android:layout_width="match_parent"
+                android:layout_height="40dp"
+                android:text="🔄  Riconfigura bilancia"
+                android:textSize="13sp"
+                android:textAllCaps="false"
+                style="@style/Widget.MaterialComponents.Button.OutlinedButton"
+                android:strokeColor="#fbbf24"
+                android:textColor="#fbbf24"
+                android:layout_marginTop="8dp"
+                android:visibility="gone" />
         </LinearLayout>
 
         <!-- Screensaver Section -->
