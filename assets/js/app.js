@@ -8772,6 +8772,11 @@ function _buildPricePayload() {
             if (qtyMatch) {
                 quantity = parseFloat(qtyMatch[1].replace(',', '.'));
                 unit = qtyMatch[2].toLowerCase();
+            } else {
+                // Manually-added item with no spec: assume 1 confezione
+                // (most grocery items are bought as a single pack)
+                quantity = 1;
+                unit = 'conf';
             }
         }
 
@@ -8785,9 +8790,11 @@ function _buildPricePayload() {
  * @param {string} sym    — currency symbol like "€"
  */
 function _buildPriceBadgeHTML(entry, sym) {
-    const mainLabel = entry.estimated_total != null
-        ? `${sym}${entry.estimated_total.toFixed(2)}`
-        : `${sym}${entry.price_per_unit.toFixed(2)}`;
+    const isApprox = (entry.source_note || '').startsWith('~');
+    const mainLabel = (isApprox ? '~' : '')
+        + (entry.estimated_total != null
+            ? `${sym}${entry.estimated_total.toFixed(2)}`
+            : `${sym}${entry.price_per_unit.toFixed(2)}`);
     const unitLabel = entry.unit_label || '';
     const unitLine = unitLabel && entry.price_per_unit != null
         ? `${sym}${entry.price_per_unit.toFixed(2)}/${unitLabel}`

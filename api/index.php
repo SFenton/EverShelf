@@ -6488,7 +6488,7 @@ function _savePriceCache(array $data): void {
  * Bump version suffix when AI prompt format changes to auto-invalidate old entries.
  */
 function _priceKey(string $name, string $country): string {
-    return md5(mb_strtolower(trim($name)) . '|' . mb_strtolower(trim($country)) . '|v2');
+    return md5(mb_strtolower(trim($name)) . '|' . mb_strtolower(trim($country)) . '|v3');
 }
 
 /**
@@ -6505,20 +6505,22 @@ function _fetchPriceFromAI(string $name, string $country, string $currency, stri
     $prompt = <<<PROMPT
 You are a grocery price assistant. Estimate the typical retail price for "{$name}" in {$country}, currency {$currency}.
 
-Return the price for the MOST NATURAL RETAIL UNIT — that is, the smallest standard unit a shopper would actually buy:
-- Products in standard packages (pasta, flour, frozen food, yogurt, canned goods): price per typical package (e.g. "pacco 500g", "barattolo 400g", "confezione")
-- Products sold by the piece or bunch (fresh herbs, eggs, individual fruits/vegetables, single portions): price per piece/bunch (e.g. "mazzo", "uovo", "pz")
+Return the price for the MOST NATURAL RETAIL UNIT — the smallest standard unit a shopper would actually buy:
+- Standard packages (pasta, flour, frozen food, yogurt, canned goods, biscuits): price per typical package (e.g. "pacco 500g", "barattolo 400g", "confezione")
+- Sold by piece or bunch (fresh herbs, eggs, individual fruit/vegetables, single portions): price per piece/bunch (e.g. "mazzo", "uovo", "pz")
 - Liquids in bottles or cartons: price per typical container (e.g. "bottiglia 1L", "brick 1L")
-- Deli counter items sold loose by weight (prosciutto, salami, fresh fish): price per kg
+- Deli items sold loose by weight: price per kg
 
 Rules:
 1. Use mid-range supermarket prices (not premium, not discount).
 2. Round to 2 decimal places.
 3. NEVER return per-kg for items normally sold in packages or by the piece.
-4. Respond ONLY with valid JSON — no markdown, no explanation:
+4. ALWAYS return your best estimate — even for generic or unusual items. Use a typical grocery item if uncertain.
+5. Respond ONLY with valid JSON — no markdown, no explanation:
 {"price_per_unit": 1.50, "unit_label": "mazzo", "currency": "{$currency}", "source_note": "Basilico fresco ~€1.50/mazzo in {$country}"}
 
-If truly unknown, return: {"price_per_unit": null, "unit_label": null, "currency": "{$currency}", "source_note": "prezzo non disponibile"}
+If you are genuinely unsure, return a rough estimate for 1 typical package with a "~" in source_note:
+{"price_per_unit": 2.00, "unit_label": "confezione", "currency": "{$currency}", "source_note": "~ stima generica confezione in {$country}"}
 PROMPT;
 
     $payload = ['contents' => [['parts' => [['text' => $prompt]]]]];
