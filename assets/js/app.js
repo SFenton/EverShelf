@@ -8874,7 +8874,7 @@ async function fetchAllPrices(forceRefresh = false) {
     if (fetchBtn) fetchBtn.disabled = true;
     if (refreshBtn) { refreshBtn.disabled = true; refreshBtn.textContent = '⏳'; }
 
-    if (_pricesFetching) return; // already running — buttons will be re-enabled by active fetch
+    if (_pricesFetching) return;
     if (!shoppingItems.length) {
         if (fetchBtn) fetchBtn.disabled = false;
         if (refreshBtn) { refreshBtn.disabled = false; refreshBtn.textContent = '🔄'; }
@@ -8890,119 +8890,80 @@ async function fetchAllPrices(forceRefresh = false) {
 
     _pricesFetching = true;
 
-    const priceBar = document.getElementById('shopping-price-bar');
+    const priceBar  = document.getElementById('shopping-price-bar');
     const loadingBar = document.getElementById('price-loading-bar');
     const loadingInner = loadingBar ? loadingBar.querySelector('.price-loading-inner') : null;
-    const totalEl = document.getElementById('price-total-value');
+    const totalEl   = document.getElementById('price-total-value');
 
     if (priceBar) priceBar.style.display = 'block';
 
+    const sym = _currencySymbol(s.price_currency || 'EUR');
+
     if (forceRefresh) {
-        // Full refresh: clear in-memory + sessionStorage cache, reset all badges to loading
         _cachedPrices = {};
-        try { sessionStorage.removeItem('_pricecache'); } catch { /* ignore */ }
+        try { sessionStorage.removeItem('_pricecache'); sessionStorage.removeItem('_pricetotal'); } catch { /* ignore */ }
         shoppingItems.forEach((_, idx) => {
             const badge = document.getElementById(`price-badge-${idx}`);
             if (badge) badge.innerHTML = `<span class="price-col-loading">…</span>`;
         });
         if (totalEl) totalEl.textContent = t('shopping.price_loading');
         if (loadingBar) loadingBar.style.display = 'block';
-        if (loadingInner) { loadingInner.style.transition = 'none'; loadingInner.style.width = '0%'; }
+        if (loadingInner) { loadingInner.style.transition = 'none'; loadingInner.style.width = '5%'; }
     } else {
-        // Incremental: apply cached prices instantly, mark uncached as loading
-        const { total: cachedTotal, count: cachedCount } = _applyPriceBadgesFromCache();
-        shoppingItems.forEach((item, idx) => {
-            if (!_cachedPrices[item.name]) {
-                const badge = document.getElementById(`price-badge-${idx}`);
-                if (badge) badge.innerHTML = `<span class="price-col-loading">…</span>`;
-            }
-        });
-        const uncachedCount = shoppingItems.filter(i => !_cachedPrices[i.name]).length;
-        if (uncachedCount === 0) {
-            // All already cached — just show total and done
-            if (totalEl && cachedCount > 0) totalEl.textContent = `ca. ${_currencySymbol(s.price_currency || 'EUR')}${cachedTotal.toFixed(2)}`;
-            _pricesFetching = false;
-            if (fetchBtn) fetchBtn.disabled = false;
-            if (refreshBtn) { refreshBtn.disabled = false; refreshBtn.textContent = '🔄'; }
-            return;
-        }
-        if (totalEl && cachedCount > 0) totalEl.textContent = `ca. ${_currencySymbol(s.price_currency || 'EUR')}${cachedTotal.toFixed(2)}`;
+        // Show cached prices instantly while the server call is in flight
+        _applyPriceBadgesFromCache();
         if (loadingBar) loadingBar.style.display = 'block';
-        if (loadingInner) { loadingInner.style.transition = 'none'; loadingInner.style.width = '0%'; }
+        if (loadingInner) { loadingInner.style.transition = 'none'; loadingInner.style.width = '5%'; }
     }
 
-    const lang = s.language || 'it';
-    const country = s.price_country || 'Italia';
+    const lang     = s.language    || 'it';
+    const country  = s.price_country  || 'Italia';
     const currency = s.price_currency || 'EUR';
-    const sym = _currencySymbol(currency);
-    const items = _buildPricePayload();
-    const total = items.length;
-    // Running totals: only count items in the CURRENT shopping list with matching qty
-    let runningTotal = shoppingItems.reduce((sum, item) => {
-        const e = _cachedPrices[item.name];
-        const pi = items.find(x => x.name === item.name);
-        if (!e || !pi || e._qty !== pi.quantity || e._unit !== pi.unit) return sum;
-        return sum + (e?.estimated_total || 0);
-    }, 0);
-    let pricesFound = shoppingItems.filter(i => {
-        const e = _cachedPrices[i.name];
-        const pi = items.find(x => x.name === i.name);
-        return e && pi && e._qty === pi.quantity && e._unit === pi.unit && e.estimated_total != null;
-    }).length;
-    let processed = 0;
 
+    // Send only item names — server resolves qty/unit from smart_shopping_cache
+    const itemsPayload = shoppingItems.map(i => ({ name: i.name }));
+
+    let serverTotal = null;
     try {
-        for (let i = 0; i < items.length; i++) {
-            if (!_pricesFetching) break; // guard: list was reloaded mid-fetch
+        const data = await api('get_all_shopping_prices', {}, 'POST', {
+            items: itemsPayload,
+            country, currency, lang,
+            force_refresh: forceRefresh,
+        });
 
-            const item = items[i];
-            const badge = document.getElementById(`price-badge-${i}`);
-
-            // Skip if already cached with same qty/unit (and not forceRefresh)
-            const cached = _cachedPrices[item.name];
-            if (!forceRefresh && cached && cached._qty === item.quantity && cached._unit === item.unit) {
-                processed++;
-                const progress = Math.round((processed / total) * 100);
-                if (loadingInner) { loadingInner.style.transition = 'width 0.3s ease'; loadingInner.style.width = `${progress}%`; }
-                continue;
-            }
-
-            try {
-                const data = await api('get_shopping_price', {}, 'POST', {
-                    ...item, country, currency, lang, force_refresh: forceRefresh,
-                });
-
-                if (data && data.success) {
-                    _cachedPrices[item.name] = { ...data, _qty: item.quantity, _unit: item.unit };
-                    if (badge) badge.innerHTML = _buildPriceBadgeHTML(data, sym);
-                    if (data.estimated_total != null) {
-                        runningTotal += data.estimated_total;
-                        pricesFound++;
-                    }
-                    // Update dashboard stat card in real-time as each price arrives
-                    _updateDashboardPriceTotal();
-                } else {
-                    if (badge) badge.innerHTML = `<span class="price-col-error">–</span>`;
+        if (data && data.success) {
+            const prices = data.prices || {};
+            // Apply each item's result to badges and update in-memory cache
+            shoppingItems.forEach((item, idx) => {
+                const entry = prices[item.name];
+                const badge = document.getElementById(`price-badge-${idx}`);
+                if (entry && !entry.error && entry.estimated_total != null) {
+                    // Store in client cache keyed by whatever qty the server used
+                    _cachedPrices[item.name] = {
+                        ...entry,
+                        _qty:  entry._qty  ?? entry.quantity  ?? 1,
+                        _unit: entry._unit ?? entry.unit      ?? 'conf',
+                    };
+                    if (badge) badge.innerHTML = _buildPriceBadgeHTML(entry, sym);
+                } else if (badge) {
+                    badge.innerHTML = `<span class="price-col-error">–</span>`;
                 }
-            } catch (_err) {
-                if (badge) badge.innerHTML = `<span class="price-col-error">–</span>`;
-            }
+            });
 
-            processed++;
-            const progress = Math.round((processed / total) * 100);
-            if (loadingInner) { loadingInner.style.transition = 'width 0.3s ease'; loadingInner.style.width = `${progress}%`; }
-            if (totalEl) {
-                totalEl.textContent = pricesFound > 0
-                    ? `ca. ${sym}${runningTotal.toFixed(2)}`
-                    : t('shopping.price_loading');
+            // Server is the source of truth for the total
+            serverTotal = data.total ?? null;
+            if (serverTotal != null && totalEl) {
+                totalEl.textContent = `ca. ${sym}${Number(serverTotal).toFixed(2)}`;
             }
         }
+    } catch (_err) {
+        // On network error fall back to whatever we have in cache
+        const { total: ct, count: cc } = _applyPriceBadgesFromCache();
+        if (cc > 0 && totalEl) totalEl.textContent = `ca. ${sym}${ct.toFixed(2)}`;
     } finally {
         _pricesFetching = false;
-        // Persist to sessionStorage so prices survive page navigation
         try { sessionStorage.setItem('_pricecache', JSON.stringify(_cachedPrices)); } catch { /* quota */ }
-        if (loadingBar) loadingBar.style.display = 'none';
-        if (totalEl) totalEl.textContent = pricesFound > 0 ? `ca. ${sym}${runningTotal.toFixed(2)}` : '–';
+        if (loadingBar) { if (loadingInner) loadingInner.style.width = '100%'; setTimeout(() => { loadingBar.style.display = 'none'; }, 300); }
         if (fetchBtn) fetchBtn.disabled = false;
         if (refreshBtn) { refreshBtn.disabled = false; refreshBtn.textContent = '🔄'; }
         _updateDashboardPriceTotal();
@@ -9239,35 +9200,25 @@ function _updateDashboardPriceTotal() {
     const s = getSettings();
     if (!s.price_enabled) { el.style.display = 'none'; return; }
 
-    // If shoppingItems are loaded, compute fresh total and persist it
-    if (shoppingItems.length > 0) {
-        const sym = _currencySymbol(s.price_currency || 'EUR');
-        const items = _buildPricePayload();
-        let total = 0, count = 0;
-        for (const item of items) {
-            const e = _cachedPrices[item.name];
-            if (e && e._qty === item.quantity && e._unit === item.unit && e.estimated_total != null) {
-                total += e.estimated_total;
-                count++;
-            }
-        }
-        if (count > 0) {
-            const text = `ca. ${sym}${total.toFixed(2)}`;
-            el.textContent = text;
-            el.style.display = '';
-            try { sessionStorage.setItem('_pricetotal', text); } catch { /* quota */ }
-            return;
-        }
+    // Compute total from cached prices (server is source of truth — entries set by batch call)
+    const sym = _currencySymbol(s.price_currency || 'EUR');
+    let total = 0, count = 0;
+    for (const item of shoppingItems) {
+        const e = _cachedPrices[item.name];
+        if (e && e.estimated_total != null) { total += e.estimated_total; count++; }
+    }
+    if (count > 0) {
+        const text = `ca. ${sym}${total.toFixed(2)}`;
+        el.textContent = text;
+        el.style.display = '';
+        try { sessionStorage.setItem('_pricetotal', text); } catch { /* quota */ }
+        return;
     }
 
-    // Fallback: restore last known total saved in sessionStorage (dashboard before visiting shopping tab)
+    // Fallback: restore last known total from sessionStorage
     const saved = sessionStorage.getItem('_pricetotal');
-    if (saved) {
-        el.textContent = saved;
-        el.style.display = '';
-    } else {
-        el.style.display = 'none';
-    }
+    if (saved) { el.textContent = saved; el.style.display = ''; }
+    else el.style.display = 'none';
 }
 
 /**
@@ -9995,11 +9946,10 @@ async function renderShoppingItems() {
         document.getElementById('btn-fetch-prices').style.display = 'inline-flex';
         // Allow a new fetch (re-render may have happened while old fetch was running)
         _pricesFetching = false;
-        // Check if ALL items are already cached with matching qty/unit
-        const _pItems = _buildPricePayload();
-        const _allCached = _pItems.length > 0 && _pItems.every(item => {
+        // Check if ALL items are already cached (server already returned prices for them)
+        const _allCached = shoppingItems.length > 0 && shoppingItems.every(item => {
             const e = _cachedPrices[item.name];
-            return e && e._qty === item.quantity && e._unit === item.unit && e.estimated_total != null;
+            return e && e.estimated_total != null;
         });
         if (_allCached) {
             // Prices are fully fresh — apply instantly, no loading state
@@ -10018,9 +9968,8 @@ async function renderShoppingItems() {
             // once we have real qty/unit data. Just apply whatever is cached silently.
             _applyPriceBadgesFromCache();
         } else {
-            // Immediately apply any prices already fetched this session — no flicker for cached items
+            // Apply any cached prices instantly while batch fetch runs
             _applyPriceBadgesFromCache();
-            // Fetch only items not yet priced (or stale)
             fetchAllPrices(false);
         }
     } else {
