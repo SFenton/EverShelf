@@ -8901,7 +8901,7 @@ async function fetchAllPrices(forceRefresh = false) {
 
     if (forceRefresh) {
         _cachedPrices = {};
-        try { sessionStorage.removeItem('_pricecache'); sessionStorage.removeItem('_pricetotal'); } catch { /* ignore */ }
+        try { sessionStorage.removeItem('_pricecache'); sessionStorage.removeItem('_pricetotal'); sessionStorage.removeItem('_pricecachets'); } catch { /* ignore */ }
         shoppingItems.forEach((_, idx) => {
             const badge = document.getElementById(`price-badge-${idx}`);
             if (badge) badge.innerHTML = `<span class="price-col-loading">…</span>`;
@@ -8962,7 +8962,10 @@ async function fetchAllPrices(forceRefresh = false) {
         if (cc > 0 && totalEl) totalEl.textContent = `ca. ${sym}${ct.toFixed(2)}`;
     } finally {
         _pricesFetching = false;
-        try { sessionStorage.setItem('_pricecache', JSON.stringify(_cachedPrices)); } catch { /* quota */ }
+        try {
+            sessionStorage.setItem('_pricecache', JSON.stringify(_cachedPrices));
+            sessionStorage.setItem('_pricecachets', String(Date.now()));
+        } catch { /* quota */ }
         if (loadingBar) { if (loadingInner) loadingInner.style.width = '100%'; setTimeout(() => { loadingBar.style.display = 'none'; }, 300); }
         if (fetchBtn) fetchBtn.disabled = false;
         if (refreshBtn) { refreshBtn.disabled = false; refreshBtn.textContent = '🔄'; }
@@ -9946,13 +9949,17 @@ async function renderShoppingItems() {
         document.getElementById('btn-fetch-prices').style.display = 'inline-flex';
         // Allow a new fetch (re-render may have happened while old fetch was running)
         _pricesFetching = false;
-        // Check if ALL items are already cached (server already returned prices for them)
-        const _allCached = shoppingItems.length > 0 && shoppingItems.every(item => {
+        // Trust client cache only if a batch call was made recently (< 5 min).
+        // This aligns with the server-side 5-minute total cache and prevents stale
+        // per-item data (from the old approach) from being shown as authoritative.
+        const _cacheTs = parseInt(sessionStorage.getItem('_pricecachets') || '0');
+        const _cacheAge = Date.now() - _cacheTs;
+        const _allCached = _cacheAge < 5 * 60 * 1000 && shoppingItems.length > 0 && shoppingItems.every(item => {
             const e = _cachedPrices[item.name];
             return e && e.estimated_total != null;
         });
         if (_allCached) {
-            // Prices are fully fresh — apply instantly, no loading state
+            // Server batch was called recently — apply instantly, no new network call
             const { total: ct, count: cc } = _applyPriceBadgesFromCache();
             const sym = _currencySymbol(s2.price_currency || 'EUR');
             const totalEl = document.getElementById('price-total-value');
