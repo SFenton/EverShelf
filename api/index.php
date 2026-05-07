@@ -6497,44 +6497,69 @@ function _priceKey(string $name, string $country): string {
  * { price_per_unit, unit_label, currency, source_note } or null on failure.
  */
 function _fetchPriceFromAI(string $name, string $country, string $currency, string $lang): ?array {
-    $apiKey = env('GEMINI_API_KEY');
-    if (empty($apiKey)) return null;
+    $result = _fetchPricesBatchFromAI([$name], $country, $currency, $lang);
+    return $result[$name] ?? null;
+}
 
-    $langLabel = match($lang) { 'en' => 'English', 'de' => 'German', default => 'Italian' };
+/**
+ * Ask Gemini to price multiple items in a SINGLE API call.
+ * Returns: { name => { price_per_unit, unit_label, currency, source_note } }
+ * Items that could not be priced are omitted from the result.
+ */
+function _fetchPricesBatchFromAI(array $names, string $country, string $currency, string $lang): array {
+    $apiKey = env('GEMINI_API_KEY');
+    if (empty($apiKey) || empty($names)) return [];
+
+    // Build a numbered list for the prompt
+    $list = '';
+    foreach ($names as $i => $n) {
+        $list .= ($i + 1) . '. ' . $n . "\n";
+    }
 
     $prompt = <<<PROMPT
-You are a grocery price assistant. Estimate the typical retail price for "{$name}" in {$country}, currency {$currency}.
+You are a grocery price assistant. Estimate typical retail prices for the following items in {$country}, currency {$currency}.
 
-Return the price for the MOST NATURAL RETAIL UNIT — the smallest standard unit a shopper would actually buy:
-- Standard packages (pasta, flour, frozen food, yogurt, canned goods, biscuits): price per typical package (e.g. "pacco 500g", "barattolo 400g", "confezione")
-- Sold by piece or bunch (fresh herbs, eggs, individual fruit/vegetables, single portions): price per piece/bunch (e.g. "mazzo", "uovo", "pz")
+Items:
+{$list}
+For each item return the price for the MOST NATURAL RETAIL UNIT — the smallest standard unit a shopper buys:
+- Standard packages (pasta, flour, frozen food, biscuits, canned goods): price per typical package (e.g. "pacco 500g", "barattolo 400g", "confezione")
+- Sold by piece or bunch (fresh herbs, eggs, individual fruit/veg, single portions): price per piece/bunch (e.g. "mazzo", "uovo", "pz")
 - Liquids in bottles or cartons: price per typical container (e.g. "bottiglia 1L", "brick 1L")
 - Deli items sold loose by weight: price per kg
 
 Rules:
-1. Use mid-range supermarket prices (not premium, not discount).
+1. Mid-range supermarket prices (not premium, not discount).
 2. Round to 2 decimal places.
-3. NEVER return per-kg for items normally sold in packages or by the piece.
-4. ALWAYS return your best estimate — even for generic or unusual items. Use a typical grocery item if uncertain.
-5. Respond ONLY with valid JSON — no markdown, no explanation:
-{"price_per_unit": 1.50, "unit_label": "mazzo", "currency": "{$currency}", "source_note": "Basilico fresco ~€1.50/mazzo in {$country}"}
-
-If you are genuinely unsure, return a rough estimate for 1 typical package with a "~" in source_note:
-{"price_per_unit": 2.00, "unit_label": "confezione", "currency": "{$currency}", "source_note": "~ stima generica confezione in {$country}"}
+3. NEVER use per-kg for items normally sold in packages or by piece.
+4. ALWAYS return a best estimate — even for branded or unusual items. Use the closest generic equivalent if needed.
+5. Respond ONLY with a valid JSON object keyed by the EXACT item name from the list above. No markdown, no explanation:
+{
+  "Item Name 1": {"price_per_unit": 1.50, "unit_label": "mazzo", "currency": "{$currency}", "source_note": "..."},
+  "Item Name 2": {"price_per_unit": 2.80, "unit_label": "kg", "currency": "{$currency}", "source_note": "..."}
+}
 PROMPT;
 
     $payload = ['contents' => [['parts' => [['text' => $prompt]]]]];
-    $result  = callGeminiWithFallback($apiKey, $payload, 20);
+    // Allow more time for batch (max 45s)
+    $result  = callGeminiWithFallback($apiKey, $payload, 45);
 
-    if ($result['http_code'] !== 200) return null;
+    if ($result['http_code'] !== 200) return [];
 
     $text = trim($result['data']['candidates'][0]['content']['parts'][0]['text'] ?? '');
     $text = preg_replace('/^```json\s*/i', '', $text);
     $text = preg_replace('/\s*```$/i', '', $text);
     $data = json_decode(trim($text), true);
 
-    if (!$data || !isset($data['price_per_unit'])) return null;
-    return $data;
+    if (!is_array($data)) return [];
+
+    // Validate and return only items with valid price
+    $out = [];
+    foreach ($data as $name => $entry) {
+        if (isset($entry['price_per_unit']) && is_numeric($entry['price_per_unit'])) {
+            $out[$name] = $entry;
+        }
+    }
+    return $out;
 }
 
 /**
@@ -6712,36 +6737,45 @@ function getAllShoppingPrices(PDO $db): void {
         $missing[] = $item;
     }
 
-    // Second pass: fetch missing from AI (sequential to avoid rate limits)
-    foreach ($missing as $item) {
-        $name    = $item['name'];
-        $qty     = $item['quantity'];
-        $unit    = $item['unit'];
-        $defQty  = $item['default_quantity'];
-        $pkgUnit = $item['package_unit'];
-        $key     = _priceKey($name, $country);
+    // Second pass: fetch ALL missing items in ONE batch Gemini call
+    if (!empty($missing)) {
+        $missingNames = array_column($missing, 'name');
+        $batchPrices  = _fetchPricesBatchFromAI($missingNames, $country, $currency, $lang);
 
-        $priceData = _fetchPriceFromAI($name, $country, $currency, $lang);
-        if ($priceData && $priceData['price_per_unit'] !== null) {
-            $entry = [
-                'name'           => $name,
-                'price_per_unit' => (float)$priceData['price_per_unit'],
-                'unit_label'     => $priceData['unit_label'] ?? 'pz',
-                'currency'       => $currency,
-                'source_note'    => $priceData['source_note'] ?? '',
-                'country'        => $country,
-                'cached_at'      => $now,
-            ];
-            $priceCache[$key] = $entry;
-            $est = _calcEstimatedTotal($entry['price_per_unit'], $entry['unit_label'], $qty, $unit, $defQty, $pkgUnit);
-            $prices[$name] = array_merge($entry, [
-                'estimated_total'       => $est,
-                'estimated_total_label' => _formatPrice($est, $currency),
-                'from_cache'            => false,
-            ]);
-            $total += $est ?? 0;
-        } else {
-            $prices[$name] = ['name' => $name, 'error' => 'not_found', 'estimated_total' => null];
+        // Build a lookup from item name → item params
+        $missingByName = [];
+        foreach ($missing as $item) $missingByName[$item['name']] = $item;
+
+        foreach ($missingNames as $name) {
+            $item    = $missingByName[$name];
+            $qty     = $item['quantity'];
+            $unit    = $item['unit'];
+            $defQty  = $item['default_quantity'];
+            $pkgUnit = $item['package_unit'];
+            $key     = _priceKey($name, $country);
+
+            $priceData = $batchPrices[$name] ?? null;
+            if ($priceData && isset($priceData['price_per_unit'])) {
+                $entry = [
+                    'name'           => $name,
+                    'price_per_unit' => (float)$priceData['price_per_unit'],
+                    'unit_label'     => $priceData['unit_label'] ?? 'pz',
+                    'currency'       => $currency,
+                    'source_note'    => $priceData['source_note'] ?? '',
+                    'country'        => $country,
+                    'cached_at'      => $now,
+                ];
+                $priceCache[$key] = $entry;
+                $est = _calcEstimatedTotal($entry['price_per_unit'], $entry['unit_label'], $qty, $unit, $defQty, $pkgUnit);
+                $prices[$name] = array_merge($entry, [
+                    'estimated_total'       => $est,
+                    'estimated_total_label' => _formatPrice($est, $currency),
+                    'from_cache'            => false,
+                ]);
+                $total += $est ?? 0;
+            } else {
+                $prices[$name] = ['name' => $name, 'error' => 'not_found', 'estimated_total' => null];
+            }
         }
     }
 
