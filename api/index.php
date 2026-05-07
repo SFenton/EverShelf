@@ -115,11 +115,17 @@ function checkRateLimit(string $action): void {
     $loginActions = [];
     $recipeActions = ['generate_recipe', 'generate_recipe_stream'];
     $errorActions = ['report_error', 'check_update'];
+    $priceActions = ['get_shopping_price', 'get_all_shopping_prices'];
 
     if (in_array($action, $aiActions)) {
         $limit = 15;
         $window = 60;
         $bucket = 'ai';
+    } elseif (in_array($action, $priceActions)) {
+        // Price lookups: up to 30 items × a few retries per minute, shared bucket
+        $limit = 60;
+        $window = 60;
+        $bucket = 'price';
     } elseif (in_array($action, $recipeActions)) {
         $limit = 5;
         $window = 60;
