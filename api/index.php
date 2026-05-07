@@ -2305,7 +2305,11 @@ function getOpenedShelfLifeDays(string $name, string $category, string $location
             // Reject AI values if they are suspiciously low compared to the rule-based estimate
             // (protects against Gemini hallucinations like "1 day for butter").
             $ruleMin = estimateOpenedExpiryDaysPHP($name, $category, $location);
-            if ($parsed > 0 && $parsed <= 3650 && $parsed >= max(1, (int)floor($ruleMin * 0.5))) {
+            // Accept AI value only if within a reasonable multiple of the rule estimate.
+            // Upper bound: 4× rule (or 30 days minimum ceiling) — blocks Gemini hallucinations
+            // like "60 days for yogurt" (rule=5 → max allowed = 20).
+            $aiMax = max($ruleMin * 4, 30);
+            if ($parsed > 0 && $parsed <= $aiMax && $parsed >= max(1, (int)floor($ruleMin * 0.5))) {
                 $days = $parsed;
             }
         }
@@ -5356,6 +5360,87 @@ function smartShopping(PDO $db): void {
             continue;
         }
 
+        // --- Suggested purchase quantity (based on 14-day consumption) ---
+        // Rules:
+        //   unit='conf'                              → conf count from dailyRate directly
+        //   unit=g/ml/pz + package_unit non-empty   → # confezioni (definitive)
+        //   unit=g/ml + defQty > 0 (no pkg_unit)    → round to nearest defQty multiple (approx)
+        //   unit=g/ml, no defQty, no pkg_unit        → raw amount, rounded to sensible step
+        //   unit=pz, no pkg_unit                     → raw pz count (approx)
+        //   dailyRate=0                              → null (no data)
+        $suggestedQty    = null;
+        $suggestedUnit   = $unit;
+        $suggestedApprox = false; // true = show "almeno" in badge
+
+        $pkgUnit = trim($p['package_unit'] ?? ''); // non-empty only when user set a real package
+
+        if ($dailyRate > 0) {
+            $need14 = $dailyRate * 14;
+
+            if ($unit === 'conf') {
+                // dailyRate already in conf/day
+                $suggestedQty   = (int) max(1, min(20, (int)($need14 + 0.3)));
+                $suggestedUnit  = 'conf';
+
+            } elseif ($pkgUnit !== '' && $defQty > 0) {
+                // Real package info available → express in confezioni (definitive)
+                $pkgs           = (int) max(1, min(20, (int)($need14 / $defQty + 0.3)));
+                $suggestedQty   = $pkgs;
+                $suggestedUnit  = 'conf';
+
+            } elseif (($unit === 'g' || $unit === 'ml') && $defQty > 0) {
+                // defQty known but no pkg_unit (e.g. Pomodorini 400g, Salame 100g) →
+                // use defQty as the minimum purchase unit and round to nearest multiple.
+                // This ensures we never suggest less than one "reference pack".
+                $pkgs           = (int) max(1, (int)($need14 / $defQty + 0.3));
+                $pkgs           = min(20, $pkgs);
+                $suggestedQty   = $pkgs * (int)$defQty;
+                $suggestedUnit  = $unit;
+                $suggestedApprox = true; // always "almeno" — no confirmed pkg size
+
+            } elseif ($unit === 'g' || $unit === 'ml') {
+                // No reference at all → raw amount, approximate
+                // Skip if consumption is negligible (< 30 units/14gg)
+                if ($need14 >= 30) {
+                    if ($need14 < 500) {
+                        $rounded = (int) max(100, round($need14 / 100) * 100);
+                    } elseif ($need14 < 2000) {
+                        $rounded = (int) max(250, round($need14 / 250) * 250);
+                    } else {
+                        $rounded = (int) max(500, round($need14 / 500) * 500);
+                    }
+                    $suggestedQty    = $rounded;
+                    $suggestedUnit   = $unit;
+                    $suggestedApprox = true;
+                }
+
+            } elseif ($unit === 'pz') {
+                // No package info → raw pz count, approximate
+                $suggestedQty    = (int) max(1, min(20, (int)($need14 + 0.3)));
+                $suggestedUnit   = 'pz';
+                $suggestedApprox = ($suggestedQty > 1);
+            }
+        }
+
+        // If stock is still >50% just suggest the minimum sensible purchase (don't over-stock)
+        if ($suggestedQty !== null && $pctLeft > 50) {
+            if ($suggestedUnit === 'conf') {
+                $suggestedQty    = 1;
+                $suggestedApprox = false;
+            } elseif ($suggestedUnit === 'pz') {
+                $suggestedQty    = 1;
+                $suggestedApprox = false;
+            } else {
+                // g/ml with >50% stock: suggest minimum reference pack or skip
+                if ($defQty > 0) {
+                    $suggestedQty    = (int)$defQty;
+                    $suggestedApprox = true;
+                } else {
+                    $suggestedQty = null;
+                }
+            }
+        }
+
         $items[] = [
             'product_id' => $pid,
             'name' => $p['name'],
@@ -5382,6 +5467,9 @@ function smartShopping(PDO $db): void {
             'on_bring' => $onBring,
             'locations' => $inv ? $inv['locations'] : '',
             'variants' => [],
+            'suggested_qty'   => $suggestedQty,   // null = no badge
+            'suggested_unit'  => $suggestedUnit,
+            'suggested_approx' => $suggestedApprox, // true = show "almeno" prefix
         ];
     }
 
@@ -5425,7 +5513,7 @@ function smartShopping(PDO $db): void {
 }
 
 function bringSuggestItems(PDO $db): void {
-    // Offline: derive suggestions from smart shopping cache (no AI needed)
+    $apiKey = env('GEMINI_API_KEY');
 
     // 1. Load smart shopping data from cache or compute fresh
     $cacheFile = __DIR__ . '/../data/smart_shopping_cache.json';
@@ -5450,13 +5538,36 @@ function bringSuggestItems(PDO $db): void {
     // 2. Get Bring! listUUID for response
     $listUUID = '';
     $auth = bringAuth();
-    if ($auth) {
-        $listUUID = $auth['bringListUUID'] ?? '';
-    }
+    if ($auth) $listUUID = $auth['bringListUUID'] ?? '';
 
     // 3. Convert smart shopping items → suggestions (alta/media priority only, skip on_bring)
     $suggestions = [];
-    $seasonalTips = [
+    $knownNames  = []; // names already in suggestion list (to deduplicate AI output)
+
+    foreach ($smartItems as $item) {
+        if ($item['on_bring'] ?? false) continue;
+        $urgency = $item['urgency'] ?? 'low';
+        if ($urgency === 'low') continue;
+
+        $priority = ($urgency === 'critical' || $urgency === 'high') ? 'alta' : 'media';
+        $reasons  = $item['reasons'] ?? [];
+        $reason   = !empty($reasons) ? implode(', ', $reasons) : 'Scorte basse';
+
+        $suggestions[]  = [
+            'name'          => $item['name'],
+            'specification' => '',
+            'reason'        => $reason,
+            'category'      => $item['category'] ?: 'altro',
+            'priority'      => $priority,
+            'source'        => 'stock',
+        ];
+        $knownNames[] = mb_strtolower($item['name']);
+
+        if (count($suggestions) >= 15) break;
+    }
+
+    // 4. Seasonal tip (fallback static, overridden by Gemini below)
+    $monthTips = [
         1  => 'Gennaio: arance, mandarini, kiwi, carciofi e verze sono di stagione.',
         2  => 'Febbraio: radicchio, finocchi, pere e agrumi da non perdere.',
         3  => 'Marzo: arrivano gli asparagi! Ottimo anche con piselli freschi e spinaci.',
@@ -5470,27 +5581,97 @@ function bringSuggestItems(PDO $db): void {
         11 => 'Novembre: cachi, melograni, cavoli, broccoli e radicchio tardivo.',
         12 => 'Dicembre: arance, mandarini, cachi, verze e cavolfiori.',
     ];
-    $seasonalTip = $seasonalTips[(int)date('n')] ?? '';
+    $seasonalTip = $monthTips[(int)date('n')] ?? '';
 
-    foreach ($smartItems as $item) {
-        if ($item['on_bring'] ?? false) continue; // already on shopping list
+    // 5. Try to enrich with Gemini: generate ADDITIONAL seasonal / complementary suggestions
+    if (!empty($apiKey)) {
+        // Cache key: month + list of known names (so it refreshes each month)
+        $gemCacheFile = __DIR__ . '/../data/food_facts_cache.json';
+        $gemCache     = file_exists($gemCacheFile) ? (json_decode(file_get_contents($gemCacheFile), true) ?: []) : [];
+        $gemCacheKey  = 'suggest_ai_' . date('Y-m') . '_' . md5(implode('|', $knownNames));
 
-        $urgency = $item['urgency'] ?? 'low';
-        if ($urgency === 'low') continue; // not urgent enough to suggest
+        // Cache valid for 6 hours
+        $cached = $gemCache[$gemCacheKey] ?? null;
+        $cacheTs = $gemCache[$gemCacheKey . '_ts'] ?? 0;
+        $cacheValid = $cached && (time() - $cacheTs < 21600);
 
-        $priority = ($urgency === 'critical' || $urgency === 'high') ? 'alta' : 'media';
-        $reasons = $item['reasons'] ?? [];
-        $reason = !empty($reasons) ? implode(', ', $reasons) : 'Scorte basse';
+        if ($cacheValid) {
+            $aiResult = $cached;
+        } else {
+            // Build inventory snapshot for Gemini (what the user already has)
+            $inStockNames = array_map(fn($i) => $i['name'], array_filter($smartItems, fn($i) => ($i['current_qty'] ?? 0) > 0));
+            $dietary  = trim(env('DIETARY') ?? '');
+            $monthName = [1=>'Gennaio',2=>'Febbraio',3=>'Marzo',4=>'Aprile',5=>'Maggio',6=>'Giugno',
+                          7=>'Luglio',8=>'Agosto',9=>'Settembre',10=>'Ottobre',11=>'Novembre',12=>'Dicembre'][(int)date('n')];
+            $inStockJson  = json_encode(array_values(array_slice($inStockNames, 0, 40)), JSON_UNESCAPED_UNICODE);
+            $alreadyJson  = json_encode(array_values($knownNames), JSON_UNESCAPED_UNICODE);
+            $dietaryLine  = $dietary ? "- Dietary preferences: {$dietary}" : '';
 
-        $suggestions[] = [
-            'name'          => $item['name'],
-            'specification' => '',
-            'reason'        => $reason,
-            'category'      => $item['category'] ?: 'altro',
-            'priority'      => $priority,
-        ];
+            $prompt = "You are a helpful Italian household shopping assistant.\n"
+                . "Today is {$monthName} " . date('Y') . ".\n"
+                . "The user already has these products in stock: {$inStockJson}\n"
+                . "The following products are already in the shopping list: {$alreadyJson}\n"
+                . ($dietaryLine ? $dietaryLine . "\n" : '')
+                . "\nTask: suggest 3 to 6 additional products the user should buy this month.\n"
+                . "Focus on:\n"
+                . "  a) Seasonal Italian fruits and vegetables for {$monthName}\n"
+                . "  b) Complementary staples that pair well with what the user has\n"
+                . "  c) Anything commonly forgotten but regularly needed\n"
+                . "Do NOT suggest products already in stock or already in the shopping list.\n"
+                . "Also write one short seasonal tip (max 15 words) in Italian.\n"
+                . "\nReply ONLY with valid JSON in this exact format (no markdown):\n"
+                . "{\"seasonal_tip\":\"...\",\"suggestions\":[{\"name\":\"...\",\"reason\":\"...\",\"category\":\"...\",\"priority\":\"bassa\"}]}\n"
+                . "Category must be one of: frutta,verdura,latticini,carne,pesce,pane,cereali,condimenti,bevande,surgelati,altro\n"
+                . "Priority must be: bassa\n"
+                . "Name and reason must be in Italian. Reason max 8 words.";
 
-        if (count($suggestions) >= 12) break;
+            $payload   = ['contents' => [['parts' => [['text' => $prompt]]]]];
+            $gemResult = callGeminiWithFallback($apiKey, $payload, 20);
+
+            $aiResult = null;
+            if ($gemResult['http_code'] === 200) {
+                $text = $gemResult['data']['candidates'][0]['content']['parts'][0]['text'] ?? '';
+                $text = preg_replace('/^```json\s*/i', '', trim($text));
+                $text = preg_replace('/\s*```$/i', '', $text);
+                $parsed = json_decode(trim($text), true);
+                if (is_array($parsed) && isset($parsed['suggestions'])) {
+                    $aiResult = $parsed;
+                    // Cache result
+                    $gemCache[$gemCacheKey]       = $aiResult;
+                    $gemCache[$gemCacheKey . '_ts'] = time();
+                    file_put_contents($gemCacheFile, json_encode($gemCache, JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT));
+                }
+            }
+        }
+
+        if ($aiResult) {
+            // Override seasonal tip with AI-generated one
+            if (!empty($aiResult['seasonal_tip'])) {
+                $seasonalTip = $aiResult['seasonal_tip'];
+            }
+            // Append AI suggestions (deduplicate against stock-based ones)
+            foreach ($aiResult['suggestions'] ?? [] as $ai) {
+                $aiName = mb_strtolower(trim($ai['name'] ?? ''));
+                if (!$aiName) continue;
+                // Skip if already in list (first-token check)
+                $aiFirst = explode(' ', $aiName)[0];
+                $isDup = false;
+                foreach ($knownNames as $kn) {
+                    if (str_starts_with($kn, $aiFirst)) { $isDup = true; break; }
+                }
+                if ($isDup) continue;
+
+                $suggestions[] = [
+                    'name'          => ucfirst(trim($ai['name'])),
+                    'specification' => '',
+                    'reason'        => trim($ai['reason'] ?? 'Stagionale'),
+                    'category'      => $ai['category'] ?? 'altro',
+                    'priority'      => 'bassa',
+                    'source'        => 'ai',
+                ];
+                $knownNames[] = $aiName;
+            }
+        }
     }
 
     echo json_encode([
