@@ -8979,6 +8979,8 @@ async function fetchAllPrices(forceRefresh = false) {
                         runningTotal += data.estimated_total;
                         pricesFound++;
                     }
+                    // Update dashboard stat card in real-time as each price arrives
+                    _updateDashboardPriceTotal();
                 } else {
                     if (badge) badge.innerHTML = `<span class="price-col-error">–</span>`;
                 }
