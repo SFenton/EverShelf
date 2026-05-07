@@ -440,7 +440,7 @@
         "use_data_no_barcode": "✅ KI-Daten verwenden (ohne Barcode)"
     },
     "log": {
-        "title": "� Verlauf",
+        "title": "📒 Verlauf",
         "type_added": "Hinzugefügt",
         "type_waste": "Entsorgt",
         "type_used": "Verwendet",

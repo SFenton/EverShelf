@@ -9001,6 +9001,7 @@ async function fetchAllPrices(forceRefresh = false) {
         if (totalEl) totalEl.textContent = pricesFound > 0 ? `ca. ${sym}${runningTotal.toFixed(2)}` : '–';
         if (fetchBtn) fetchBtn.disabled = false;
         if (refreshBtn) { refreshBtn.disabled = false; refreshBtn.textContent = '🔄'; }
+        _updateDashboardPriceTotal();
     }
 }
 
@@ -9225,6 +9226,29 @@ function _updateSmartUrgencyBadge() {
         urgentEl.style.display = '';
     } else {
         urgentEl.style.display = 'none';
+    }
+}
+
+function _updateDashboardPriceTotal() {
+    const el = document.getElementById('stat-price-total');
+    if (!el) return;
+    const s = getSettings();
+    if (!s.price_enabled || !shoppingItems.length) { el.style.display = 'none'; return; }
+    const sym = _currencySymbol(s.price_currency || 'EUR');
+    const items = _buildPricePayload();
+    let total = 0, count = 0;
+    for (const item of items) {
+        const e = _cachedPrices[item.name];
+        if (e && e._qty === item.quantity && e._unit === item.unit && e.estimated_total != null) {
+            total += e.estimated_total;
+            count++;
+        }
+    }
+    if (count > 0) {
+        el.textContent = `ca. ${sym}${total.toFixed(2)}`;
+        el.style.display = '';
+    } else {
+        el.style.display = 'none';
     }
 }
 
@@ -9579,6 +9603,7 @@ async function loadShoppingCount() {
             }
         } catch { /* ignore */ }
     }
+    _updateDashboardPriceTotal();
 }
 
 /**
