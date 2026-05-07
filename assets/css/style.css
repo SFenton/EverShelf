@@ -294,7 +294,9 @@ body {
 .scale-icon-emoji {
     font-size: 20px;
     line-height: 1;
-    transition: filter 0.3s, opacity 0.3s;
+    /* Force white icon regardless of connection status — only the dot changes color */
+    filter: brightness(0) invert(1);
+    opacity: 0.9;
 }
 .scale-status-dot {
     position: absolute;
@@ -310,13 +312,10 @@ body {
 }
 /* Connected: white fill + bright-green border ring — clearly visible on any dark/green bg */
 .scale-status-connected    .scale-status-dot { background: #ffffff; border-color: #4ade80; box-shadow: 0 0 0 1px rgba(0,0,0,0.25), 0 0 8px #4ade80cc, 0 0 2px #fff; }
-.scale-status-connected    .scale-icon-emoji  { filter: none; opacity: 1; }
 .scale-status-searching    .scale-status-dot { background: #f59e0b; border-color: rgba(0,0,0,0.35); animation: scaleStatusPulse 1.4s infinite; }
-.scale-status-searching    .scale-icon-emoji  { filter: none; opacity: 0.85; }
 .scale-status-disconnected .scale-status-dot { background: #64748b; border-color: rgba(0,0,0,0.35); }
-.scale-status-disconnected .scale-icon-emoji  { filter: grayscale(0.5); opacity: 0.55; }
+.scale-status-disconnected .scale-icon-emoji  { opacity: 0.55; }
 .scale-status-error        .scale-status-dot { background: #ef4444; border-color: rgba(0,0,0,0.35); box-shadow: 0 0 5px #ef4444aa; }
-.scale-status-error        .scale-icon-emoji  { filter: none; opacity: 1; }
 @keyframes scaleStatusPulse {
     0%, 100% { box-shadow: 0 0 3px #f59e0b88; }
     50%       { box-shadow: 0 0 9px #f59e0bcc; }
@@ -2194,6 +2193,11 @@ body {
     background: #ecfdf5;
     color: #059669;
 }
+.priority-ai {
+    background: #f0f4ff;
+    color: #4338ca;
+    font-style: italic;
+}
 
 .suggestion-actions {
     margin-top: 12px;
@@ -2387,6 +2391,18 @@ body {
 .smart-freq-badge.freq-low {
     background: #f0fdf4;
     color: #15803d;
+}
+
+.smart-freq-badge.freq-suggest {
+    background: #e0f2fe;
+    color: #0369a1;
+    font-weight: 600;
+}
+.smart-freq-badge.freq-suggest-approx {
+    background: #f0f9ff;
+    color: #0284c7;
+    font-weight: 500;
+    font-style: italic;
 }
 
 .smart-pred-badge {
@@ -4915,6 +4931,12 @@ body.cooking-mode-active .app-header {
 }
 .banner-anomaly .alert-banner-title { color: #9a3412; }
 .banner-anomaly .alert-banner-counter .banner-dot.active { background: #ea580c; }
+.alert-banner.banner-no-expiry {
+    background: linear-gradient(135deg, #f0fdf4 0%, #bbf7d0 100%);
+    border-color: #16a34a;
+}
+.banner-no-expiry .alert-banner-title { color: #14532d; }
+.banner-no-expiry .alert-banner-counter .banner-dot.active { background: #16a34a; }
 .alert-banner-inner {
     display: flex;
     align-items: flex-start;

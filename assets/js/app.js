@@ -1234,7 +1234,7 @@ function mapToLocalCategory(ofCategory, productName) {
     if (/sweetener|dolcific/.test(cat)) return 'condimenti';
     
     // Specific tag patterns
-    if (/dairy|lait|cheese|fromage|yoghurt|milk|latticin|latte/.test(cat)) return 'latticini';
+    if (/dairy|lait|cheese|fromage|yoghurt|milk|latticin|latte|egg|uova|uovo|poultry-egg/.test(cat)) return 'latticini';
     if (/meat|viande|carne|sausage|salum|prosciutt/.test(cat)) return 'carne';
     if (/fish|poisson|pesce|seafood|tuna|tonno|salmone/.test(cat)) return 'pesce';
     if (/fruit|frutta|juice|succo|apple|banana/.test(cat)) return 'frutta';
@@ -1263,20 +1263,20 @@ function guessCategoryFromName(name) {
     if (/pane\b|fette biscottate|grissini|cracker|toast|piadina|piadelle|focaccia|panini|sandwich|taralli/.test(n)) return 'pane';
     // Conserve
     if (/passata|pelati|pomodoro|sugo|polpa di pomod|marmellata|miele|legumi|ceci|fagioli|lenticchie|olive/.test(n)) return 'conserve';
-    // Condimenti
-    if (/olio\b|aceto|sale\b|pepe\b|zucchero|zuccher|farina|maionese|ketchup|senape|salsa/.test(n)) return 'condimenti';
+    // Condimenti (include spezie, farine, zucchero)
+    if (/olio\b|aceto|sale\b|pepe\b|zucchero|zuccher|farina|maionese|ketchup|senape|salsa|paprika|curry|cannella|noce moscata|origano|rosmarino|timo|basilico|prezzemolo|curcuma|cumino|cardamomo|vaniglia|lievito|bicarbonato|amido|maizena|semola/.test(n)) return 'condimenti';
     // Bevande
     if (/acqua|birra|vino|succo|spremuta|coca.cola|aranciata|caffè|tè\b|tea\b|latte\b/.test(n)) return 'bevande';
-    // Latticini
-    if (/latte\b|yogurt|formaggio|mozzarella|burro|panna|ricotta|mascarpone|gorgonzola|parmigiano|grana\b/.test(n)) return 'latticini';
-    // Carne
-    if (/pollo|manzo|maiale|vitello|tacchino|prosciutto|salame|bresaola|mortadella|wurstel|speck/.test(n)) return 'carne';
+    // Latticini  (include eggs/uova)
+    if (/latte\b|yogurt|yaourt|formaggio|mozzarella|burro|panna|ricotta|mascarpone|gorgonzola|parmigiano|grana\b|uova\b|uovo\b|egg/.test(n)) return 'latticini';
+    // Carne (include salumi)
+    if (/pollo|manzo|maiale|vitello|tacchino|prosciutto|salame|bresaola|mortadella|wurstel|speck|pancetta|nduja|guanciale|cotechino|salsiccia/.test(n)) return 'carne';
     // Pesce
-    if (/tonno|salmone|merluzzo|pesce|sgombro|gamberi|acciughe/.test(n)) return 'pesce';
+    if (/tonno|salmone|merluzzo|pesce|sgombro|gamberi|acciughe|baccalà|vongole|cozze|calamari|surimi/.test(n)) return 'pesce';
     // Frutta
-    if (/mela|mele|banana|arancia|pera|fragola|uva|kiwi|limone|frutta/.test(n)) return 'frutta';
+    if (/mela|mele|banana|arancia|pera|fragola|uva|kiwi|limone|frutta|mandarino|clementina|pompelmo|avocado|mango|ananas|melone|anguria|susina|prugna|ciliegia|albicocca|pesca|nettarina|fico|melograno/.test(n)) return 'frutta';
     // Verdura
-    if (/insalata|zucchina|pomodor|cipolla|carota|spinaci|rucola|peperoni|melanzane|broccoli|patata/.test(n)) return 'verdura';
+    if (/insalata|zucchina|pomodor|cipolla|carota|spinaci|rucola|peperoni|melanzane|broccoli|patata|finocchio|sedano|porro|scalogno|cavolo|cavolfiore|asparagi|funghi|courgette|lattuga|bietola|radicchio|carciofo|fagiolini|piselli|mais|zucca|aglio/.test(n)) return 'verdura';
     // Surgelati
     if (/surgelat|frozen|findus|4.salti|gelato/.test(n)) return 'surgelati';
     // Snack
@@ -1636,6 +1636,11 @@ function estimateOpenedExpiryDays(product, location) {
         if (/\b(confettura|marmellata)\b/.test(name)) return 90;
         if (/\b(nutella|cioccolat)\b/.test(name)) return 90;
         if (/\bpane\b/.test(name)) return 4;
+        // Dairy opened outside fridge: spoils very quickly at room temperature
+        if (/\bpanna\b/.test(name)) return 3;
+        if (/\b(yogurt|yaourt|yoghurt)\b/.test(name)) return 2;
+        if (/\blatte\b/.test(name)) return 1;
+        if (/\bformaggio\b/.test(name)) return 2;
         return 60;
     }
 
@@ -1644,7 +1649,7 @@ function estimateOpenedExpiryDays(product, location) {
     // Long-life mountain/brand milks stored in pantry before use (UHT)
     if (/latte.*(montagna|alta\s+qual|parmalat|granarolo|esselunga|conservaz|microfiltrat)/i.test(name)) return 7;
     if (/\blatte\b/.test(name)) return 4;
-    if (/\byogurt\b/.test(name)) return 5;
+    if (/\b(yogurt|yaourt|yoghurt)\b/.test(name)) return 5;
     if (/mozzarella|burrata|stracciatella/.test(name)) return 3;
     if (/philadelphia|spalmabile/.test(name)) return 7;
     if (/formaggio.*(fresco|ricotta|mascarpone|stracchino|crescenza)/.test(name)) return 5;
@@ -2744,7 +2749,8 @@ function _renderAntiWasteSection(used30, wasted30, usedP30, wastedP30, usedP60, 
     const section = document.getElementById('waste-chart-section');
     const total30 = used30 + wasted30;
     if (total30 === 0) { section.style.display = 'none'; return; }
-    section.style.display = 'block';
+    // Show only if the alternation phase allows it (or before alternation starts)
+    section.style.display = (!_insightPhase || _insightPhase === 'waste') ? 'block' : 'none';
 
     const bm      = WASTE_BENCHMARKS[_currentLang] || WASTE_BENCHMARKS['it'];
     const country = t(bm.countryKey);
@@ -3247,28 +3253,36 @@ async function loadDashboard() {
 
                 if (item.unit === 'conf') {
                     const pkgUnit = item.package_unit;
-                    const pkgLabel = unitLabels[pkgUnit] || pkgUnit;
+                    const pkgLabel = (pkgUnit && pkgUnit !== '') ? (unitLabels[pkgUnit] || pkgUnit) : '';
                     const wholeConf = Math.floor(qty + 0.001);
                     const frac = Math.round((qty - wholeConf) * 1000) / 1000;
-                    const remainderAmt = frac * pkgSize;
-                    const remainderText = formatSubRemainder(remainderAmt, pkgUnit);
-                    if (wholeConf > 0 && remainderAmt >= 1) {
-                        qtyText = `${wholeConf} conf (da ${pkgSize}${pkgLabel}) + ${remainderText}`;
+                    const remainderAmt = pkgSize > 0 ? frac * pkgSize : 0;
+                    // Only show remainder if it rounds to at least 1 unit
+                    const remainderText = remainderAmt >= 0.5 ? formatSubRemainder(remainderAmt, pkgUnit) : '';
+                    if (wholeConf > 0 && remainderText) {
+                        qtyText = `${wholeConf} conf${pkgLabel ? ` (da ${pkgSize}${pkgLabel})` : ''} + ${remainderText}`;
                     } else if (wholeConf > 0) {
-                        qtyText = `${wholeConf} conf (da ${pkgSize}${pkgLabel})`;
+                        qtyText = `${wholeConf} conf${pkgLabel ? ` (da ${pkgSize}${pkgLabel})` : ''}`;
+                    } else if (remainderText) {
+                        qtyText = remainderAmt >= 1 ? remainderText : t('inventory.qty_trace') || '< 1' + (pkgLabel || '');
                     } else {
-                        qtyText = remainderText;
+                        qtyText = `${qty} conf`;
                     }
                 } else {
                     const unitLabel = unitLabels[item.unit] || item.unit || '';
-                    const wholePackages = Math.floor(qty / pkgSize + 0.001);
-                    const remainder = Math.round((qty - wholePackages * pkgSize) * 100) / 100;
-                    if (wholePackages > 0 && remainder > 0.01) {
-                        qtyText = `${wholePackages} × ${pkgSize}${unitLabel} + ${Math.round(remainder)}${unitLabel} ${t('inventory.qty_remainder_suffix')}`;
-                    } else if (remainder > 0.01) {
-                        qtyText = `${Math.round(remainder)}${unitLabel} / ${pkgSize}${unitLabel}`;
-                    } else {
+                    if (!pkgSize || pkgSize <= 0) {
+                        // No package size — just show raw quantity
                         qtyText = `${qty}${unitLabel}`;
+                    } else {
+                        const wholePackages = Math.floor(qty / pkgSize + 0.001);
+                        const remainder = Math.round((qty - wholePackages * pkgSize) * 100) / 100;
+                        if (wholePackages > 0 && remainder >= 1) {
+                            qtyText = `${wholePackages} × ${pkgSize}${unitLabel} + ${Math.round(remainder)}${unitLabel} ${t('inventory.qty_remainder_suffix')}`;
+                        } else if (remainder >= 1) {
+                            qtyText = `${Math.round(remainder)}${unitLabel} / ${pkgSize}${unitLabel}`;
+                        } else {
+                            qtyText = `${qty}${unitLabel}`;
+                        }
                     }
                 }
 
@@ -3375,6 +3389,17 @@ function setReviewConfirmed(inventoryId) {
     c[inventoryId] = Date.now();
     _reviewConfirmedCache = c;
     api('app_settings_save', {}, 'POST', { settings: { review_confirmed: c } }).catch(() => {});
+}
+
+/** Return map of product IDs the user has marked as "no expiry needed". */
+function _getNoExpiryDismissed() {
+    try { return JSON.parse(localStorage.getItem('_noExpiryDismissed') || '{}'); } catch { return {}; }
+}
+/** Permanently mark a product as "no expiry needed" for this browser. */
+function _dismissNoExpiry(productId) {
+    const m = _getNoExpiryDismissed();
+    m[String(productId)] = Date.now();
+    localStorage.setItem('_noExpiryDismissed', JSON.stringify(m));
 }
 
 // === ALERT BANNER SYSTEM (replaces old review table) ===
@@ -3510,6 +3535,23 @@ async function loadBannerAlerts() {
             _bannerQueue.push({ type: 'finished', data: fin });
         });
 
+        // 7. Products with no expiry date set (and not permanently dismissed)
+        const noExpiryDismissed = _getNoExpiryDismissed();
+        const PERISHABLE_CATS = ['latticini','carne','pesce','salumi','fresco','verdura','frutta','surgelati',
+                                  'dairy','meat','fish','fresh','vegetables','fruit','frozen'];
+        items.forEach(item => {
+            if (item.expiry_date) return;               // already has expiry
+            if (parseFloat(item.quantity) <= 0) return; // no stock
+            const pid = String(item.product_id || item.id);
+            if (noExpiryDismissed[pid]) return;         // user said "no expiry needed"
+            // Only flag perishable-looking categories or items with opened_at
+            const cat = (item.category || '').toLowerCase();
+            const likelyPerishable = item.opened_at ||
+                PERISHABLE_CATS.some(c => cat.includes(c));
+            if (!likelyPerishable) return;
+            _bannerQueue.push({ type: 'no_expiry', data: item });
+        });
+
         // Sort by priority (highest first)
         _bannerQueue.sort((a, b) => _bannerPriority(b) - _bannerPriority(a));
 
@@ -3563,6 +3605,8 @@ function _bannerPriority(entry) {
         }
         case 'finished':
             return 600; // product ran out — confirm before removing from DB
+        case 'no_expiry':
+            return 30; // low priority: informational, show after everything else
         default:
             return 0;
     }
@@ -3724,6 +3768,17 @@ function renderBannerItem() {
             btns += `<button class="btn-banner btn-banner-ai" onclick="explainBannerAnomaly()" title="Chiedi a Gemini una spiegazione">\ud83e\udd16 Spiega</button>`;
         }
         actionsEl.innerHTML = btns;
+
+    } else if (entry.type === 'no_expiry') {
+        const item = entry.data;
+        banner.className = 'alert-banner banner-no-expiry';
+        iconEl.textContent = '📅';
+        titleEl.textContent = t('dashboard.banner_no_expiry_title').replace('{name}', item.name + (item.brand ? ' (' + item.brand + ')' : ''));
+        detailEl.textContent = t('dashboard.banner_no_expiry_detail');
+        const pid = item.product_id || item.id;
+        let btns = `<button class="btn-banner btn-banner-edit" onclick="editBannerNoExpiry()">${t('dashboard.banner_no_expiry_action_set')}</button>`;
+        btns += `<button class="btn-banner btn-banner-ok" onclick="confirmNoExpiryNeeded(${pid})">${t('dashboard.banner_no_expiry_action_dismiss')}</button>`;
+        actionsEl.innerHTML = btns;
     }
 
     if (_bannerQueue.length > 1) {
@@ -3755,6 +3810,19 @@ function confirmBannerReview() {
     setReviewConfirmed(entry.data.id);
     showToast(t('toast.quantity_confirmed'), 'success');
     dismissBannerItem();
+}
+
+function confirmNoExpiryNeeded(productId) {
+    _dismissNoExpiry(productId);
+    showToast(t('dashboard.banner_no_expiry_toast_dismissed'), 'success');
+    dismissBannerItem();
+}
+
+function editBannerNoExpiry() {
+    const entry = _bannerQueue[_bannerIndex];
+    if (!entry || entry.type !== 'no_expiry') return;
+    _bannerEditPending = true;
+    openEditInventoryModal(entry.data.id);
 }
 
 function editBannerReview() {
@@ -7469,6 +7537,10 @@ async function addLowStockToBring() {
         if (shoppingListUUID) payload.listUUID = shoppingListUUID;
         const data = await api('bring_add', {}, 'POST', payload);
         if (data.success && data.added > 0) {
+            // Pin as user-added so cleanup never auto-removes it
+            const pinned = JSON.parse(localStorage.getItem('_userPinnedBring') || '{}');
+            pinned[bringName.toLowerCase()] = Date.now();
+            localStorage.setItem('_userPinnedBring', JSON.stringify(pinned));
             showToast(t('shopping.added_to_bring').replace('{n}', data.added), 'success');
         } else if (data.success && data.skipped > 0) {
             showToast(t('shopping.already_in_list_short'), 'info');
@@ -8462,6 +8534,35 @@ function _urgencyToSpec(urgency, brand) {
     return brand || '';
 }
 
+/**
+ * Track items auto-added by autoAddCriticalItems so the cleanup
+ * function only ever removes those, never manually-added ones.
+ */
+function _getAutoAddedBring() {
+    try {
+        const raw = localStorage.getItem('_autoAddedBring');
+        const map = raw ? JSON.parse(raw) : {};
+        const now = Date.now();
+        let changed = false;
+        for (const k of Object.keys(map)) {
+            if (now - map[k] > 30 * 24 * 60 * 60 * 1000) { delete map[k]; changed = true; }
+        }
+        if (changed) localStorage.setItem('_autoAddedBring', JSON.stringify(map));
+        return map;
+    } catch(e) { return {}; }
+}
+function _markAutoAddedBring(names) {
+    const map = _getAutoAddedBring();
+    const now = Date.now();
+    for (const n of names) map[n.toLowerCase()] = now;
+    localStorage.setItem('_autoAddedBring', JSON.stringify(map));
+}
+function _unmarkAutoAddedBring(names) {
+    const map = _getAutoAddedBring();
+    for (const n of names) delete map[n.toLowerCase()];
+    localStorage.setItem('_autoAddedBring', JSON.stringify(map));
+}
+
 // ===== BRING! PURCHASED BLOCKLIST =====
 // When an item disappears from Bring (user bought it), we block auto-re-add for 4h.
 const _BRING_PURCHASED_TTL = 4 * 60 * 60 * 1000; // 4 hours
@@ -8529,6 +8630,8 @@ async function autoAddCriticalItems() {
     try {
         const result = await api('bring_add', {}, 'POST', { items: itemsToAdd, listUUID: shoppingListUUID });
         if (result.success && result.added > 0) {
+            // Track these as auto-added so cleanupObsoleteBringItems can safely remove them later
+            _markAutoAddedBring(itemsToAdd.map(i => i.name));
             showToast(t('shopping.add_urgent_toast', { n: result.added }), 'success');
             logOperation('bring_auto_add', { added: itemsToAdd.map(i => i.name) });
             loadShoppingList();
@@ -8544,11 +8647,12 @@ async function autoAddCriticalItems() {
 async function forceSyncBring() {
     const btn = document.getElementById('btn-force-sync');
     if (btn) { btn.disabled = true; btn.textContent = `⏳ ${t('shopping.syncing')}`; }
-    // Clear all guards so the next run is unconditional
+    // Clear auto-add/cleanup guards so the next run is unconditional.
+    // Do NOT clear _userPinnedBring — items the user manually added must stay protected.
     localStorage.removeItem('_bringPurchasedBlocklist');
     localStorage.removeItem('_autoAddedCriticalTs');
     localStorage.removeItem('_bringCleanupTs');
-    localStorage.removeItem('_userPinnedBring');
+    localStorage.removeItem('_autoAddedBring');
     logOperation('force_sync_bring', {});
     // Reload everything from scratch
     await loadShoppingList();
@@ -8588,20 +8692,23 @@ async function cleanupObsoleteBringItems() {
         }
     }
 
-    // Build: any matching token → smart item (any urgency — all predictions are protected)
-    const smartByToken = new Map();
+    // Build: first token of smart item name → smart item
+    const smartByFirstToken = new Map();
     for (const si of smartShoppingItems) {
-        for (const tok of _nameTokens(si.name)) {
-            if (!smartByToken.has(tok)) smartByToken.set(tok, si);
+        const first = _nameTokens(si.name)[0];
+        if (first && !smartByFirstToken.has(first)) smartByFirstToken.set(first, si);
+        // Also index shopping_name first token
+        if (si.shopping_name) {
+            const sFirst = _nameTokens(si.shopping_name)[0];
+            if (sFirst && !smartByFirstToken.has(sFirst)) smartByFirstToken.set(sFirst, si);
         }
     }
 
-    // User-pinned: items manually added via the suggestions panel — never auto-remove
+    // User-pinned: items manually added via any path — never auto-remove
     let userPinned;
     try {
         const raw = localStorage.getItem('_userPinnedBring');
         const map = raw ? JSON.parse(raw) : {};
-        // Prune entries older than 30 days
         const now = Date.now();
         let changed = false;
         for (const k of Object.keys(map)) {
@@ -8611,25 +8718,39 @@ async function cleanupObsoleteBringItems() {
         userPinned = map;
     } catch(e) { userPinned = {}; }
 
+    // Auto-added set: only items the app itself auto-added are candidates for cleanup
+    const autoAdded = _getAutoAddedBring();
+
     const toRemove = [];
     for (const item of shoppingItems) {
-        // Check if any significant token of this Bring item has stock in inventory
-        const itemTokens = _nameTokens(item.name);
-        const stockQty = itemTokens.reduce((sum, tok) => sum + (stockByAnyToken.get(tok) || 0), 0);
+        const nameLower = item.name.toLowerCase();
+        const itemFirst = _nameTokens(item.name)[0];
 
-        // No inventory stock for any related product → nothing to remove
-        if (stockQty <= 0) continue;
+        // Safety: only clean up items the app auto-added — NEVER remove manually-added ones
+        const isAutoAdded = !!(autoAdded[nameLower] ||
+            (itemFirst && Object.keys(autoAdded).some(k => _nameTokens(k)[0] === itemFirst)));
+        if (!isAutoAdded) continue;
 
-        // Never remove items the user explicitly pinned from suggestions
-        if (userPinned[item.name.toLowerCase()]) continue;
+        // User explicitly pinned this item → skip
+        if (userPinned[nameLower]) continue;
 
-        // Check if smart shopping flags something with a matching token as needed (any urgency)
-        const smartSi = itemTokens.map(tok => smartByToken.get(tok)).find(Boolean);
-        if (smartSi) {
-            // Smart still predicts this item will be needed and it has remaining stock → keep it
-            if (smartSi.current_qty > 0) continue;
-        }
+        // Find smart item by first-token match (strict — avoids "latte" matching "latte di soia")
+        const smartSi = itemFirst ? smartByFirstToken.get(itemFirst) : undefined;
 
+        // Smart still considers this critical or high urgency → keep it on the list
+        if (smartSi && (smartSi.urgency === 'critical' || smartSi.urgency === 'high')) continue;
+
+        // Out of stock → the user still needs to buy it, keep it
+        if (smartSi && (smartSi.current_qty ?? 0) <= 0) continue;
+
+        // Smart predicts medium urgency AND stock < 60% → keep it
+        if (smartSi && smartSi.urgency === 'medium' && (smartSi.pct_left ?? 100) < 60) continue;
+
+        // Check actual inventory stock for this exact item (first-token match)
+        const stockQty = itemFirst ? (stockByAnyToken.get(itemFirst) || 0) : 0;
+        if (stockQty <= 0) continue; // no related stock → don't remove
+
+        // All guards passed: item is auto-added, stock is sufficient, not urgently needed
         toRemove.push(item);
     }
 
@@ -8649,6 +8770,7 @@ async function cleanupObsoleteBringItems() {
     }
 
     if (removed > 0) {
+        _unmarkAutoAddedBring(removedNames);
         showToast(t('shopping.removed_sufficient', { removed }), 'info');
         logOperation('bring_cleanup', { removed: removedNames });
         loadShoppingList();
@@ -8924,6 +9046,21 @@ function renderSmartItem(item) {
         else if (item.use_count >= 4) freqBadge = `<span class="smart-freq-badge freq-med">${t('shopping.freq_regular')}</span>`;
         else if (item.use_count >= 2) freqBadge = `<span class="smart-freq-badge freq-low">${t('shopping.freq_occasional')}</span>`;
 
+        // Suggested purchase quantity badge
+        let suggestBadge = '';
+        const sqtyFormatted = _formatSuggestQty(item.suggested_qty, item.suggested_unit || item.unit);
+        if (!item.on_bring && sqtyFormatted) {
+            const approx = !!item.suggested_approx;
+            const tKey = approx ? 'shopping.suggest_buy_approx' : 'shopping.suggest_buy';
+            const tTip = approx ? 'shopping.suggest_buy_approx_tip' : 'shopping.suggest_buy_tip';
+            const suggestLabel = t(tKey).replace('{qty} {unit}', sqtyFormatted);
+            const suggestLabelFinal = suggestLabel.includes('{qty}')
+                ? t(tKey).replace('{qty}', item.suggested_qty).replace('{unit}', item.suggested_unit || item.unit)
+                : suggestLabel;
+            const extraClass = approx ? ' freq-suggest-approx' : '';
+            suggestBadge = `<span class="smart-freq-badge freq-suggest${extraClass}" title="${t(tTip)}">${suggestLabelFinal}</span>`;
+        }
+
         // Days left prediction
         let predBadge = '';
         if (item.days_left <= 3 && item.days_left > 0 && item.current_qty > 0) {
@@ -8951,7 +9088,7 @@ function renderSmartItem(item) {
                     <div class="smart-item-reasons">${item.reasons.map(r => `<span>${escapeHtml(r)}</span>`).join(' · ')}</div>
                     <div class="smart-item-badges">
                         <span class="smart-urgency-badge" style="color:${u.color}">${u.icon} ${u.label}</span>
-                        ${freqBadge}${predBadge}${expiryBadge}
+                        ${freqBadge}${predBadge}${expiryBadge}${suggestBadge}
                         ${item.is_opened ? `<span class="smart-freq-badge freq-low">${t('inventory.opened_badge')}</span>` : ''}
                         ${item.on_bring ? `<span class="smart-bring-badge">${t('shopping.bring_badge')}</span>` : ''}
                     </div>
@@ -9002,10 +9139,15 @@ async function addSmartToBring() {
         if (item) {
             const shoppingName = item.shopping_name || item.name;
             const isGeneric = shoppingName !== item.name;
-            // When generic, use specific product name + brand as the specification
-            const spec = isGeneric
+            // Specific product/brand prefix (used when item is grouped under a generic name)
+            const productPrefix = isGeneric
                 ? (item.name + (item.brand ? ` · ${item.brand}` : ''))
-                : _urgencyToSpec(item.urgency, item.brand);
+                : '';
+            // Full spec = urgency+qty from _buildSmartSpec, with product prefix prepended if needed
+            const smartSpec = _buildSmartSpec(item);
+            const spec = productPrefix
+                ? (smartSpec ? `${productPrefix} · ${smartSpec}` : productPrefix)
+                : smartSpec;
             itemsToAdd.push({
                 name: shoppingName,
                 specification: spec,
@@ -9109,27 +9251,65 @@ function _syncTagsFromBringSpec() {
  * This makes urgency visible in the native Bring app via the item specification field.
  * Only updates if the spec has changed (to avoid unnecessary API calls).
  */
+/**
+ * Format a suggested purchase quantity into a human-readable string.
+ * - conf/pz: returned as-is ("2 conf", "3 pz")
+ * - g ≥ 1000 → kg ("1.5 kg")
+ * - ml ≥ 1000 → l ("2 l")
+ * Returns null if qty is null/zero (badge should be hidden).
+ */
+function _formatSuggestQty(qty, unit) {
+    if (!qty || qty <= 0) return null;
+    if (unit === 'conf') return `${qty} conf`;
+    if (unit === 'pz') return `${qty} pz`;
+    if (unit === 'g' && qty >= 1000) {
+        const kg = qty / 1000;
+        return `${Number.isInteger(kg) ? kg : parseFloat(kg.toFixed(1))} kg`;
+    }
+    if (unit === 'ml' && qty >= 1000) {
+        const l = qty / 1000;
+        return `${Number.isInteger(l) ? l : parseFloat(l.toFixed(1))} l`;
+    }
+    return `${qty} ${unit}`;
+}
+
+/**
+ * Build the full Bring! specification string for a matched smart item.
+ * Combines urgency label + suggested quantity so both appear in the Bring app.
+ * Returns empty string for low/medium urgency items with no useful extra info.
+ */
+function _buildSmartSpec(smartMatch) {
+    const urgPart = _urgencyToSpec(smartMatch.urgency, '');
+    let qtyPart = '';
+    const qtyFormatted = _formatSuggestQty(smartMatch.suggested_qty, smartMatch.suggested_unit || smartMatch.unit);
+    if (qtyFormatted) {
+        const approx = !!smartMatch.suggested_approx;
+        const tKey = approx ? 'shopping.suggest_buy_approx' : 'shopping.suggest_buy';
+        qtyPart = t(tKey).replace('{qty} {unit}', qtyFormatted);
+        // Fallback if the key uses separate {qty} and {unit} placeholders
+        if (qtyPart.includes('{qty}')) {
+            qtyPart = t(tKey)
+                .replace('{qty}', smartMatch.suggested_qty)
+                .replace('{unit}', smartMatch.suggested_unit || smartMatch.unit);
+        }
+    }
+    const parts = [urgPart, qtyPart].filter(Boolean);
+    return parts.join(' · ');
+}
+
 async function autoSyncUrgencySpecs() {
     if (!shoppingListUUID || !smartShoppingItems.length) return;
     const toUpdate = [];
     for (const item of shoppingItems) {
         const smartMatch = _matchBringToSmart(item.name, smartShoppingItems);
         if (!smartMatch) continue;
-        const expectedSpec = _urgencyToSpec(smartMatch.urgency, '');
-        const currentSpec = (item.specification || '').toLowerCase();
-        // Only update if urgency marker changed (don't clobber user-set spec info that isn't urgency)
-        const currentHasUrgencyMarker = currentSpec.includes('urgente') || currentSpec.includes('presto');
-        const needsUpdate = expectedSpec && !currentHasUrgencyMarker;
-        const needsClear = !expectedSpec && currentHasUrgencyMarker;
-        // Also update if urgency level changed (e.g. medium→high or high→critical)
-        const currentIsHigh = currentSpec.includes('urgente');
-        const newIsHigh = (expectedSpec || '').toLowerCase().includes('urgente');
-        const urgencyEscalated = expectedSpec && currentHasUrgencyMarker && (currentIsHigh !== newIsHigh);
-        if (needsUpdate || needsClear || urgencyEscalated) {
-            toUpdate.push({ name: item.name, specification: expectedSpec, update_spec: true });
-            // Optimistically update local item so re-render is immediate
-            item.specification = expectedSpec;
-        }
+        const targetSpec    = _buildSmartSpec(smartMatch);
+        const currentSpec   = (item.specification || '').trim();
+        // Normalise for comparison: ignore case and leading/trailing whitespace
+        if (targetSpec.toLowerCase() === currentSpec.toLowerCase()) continue;
+        toUpdate.push({ name: item.name, specification: targetSpec, update_spec: true });
+        // Optimistically update local item so re-render doesn't flicker
+        item.specification = targetSpec;
     }
     if (toUpdate.length === 0) return;
     try {
@@ -9209,7 +9389,11 @@ async function loadShoppingList() {
             updateShoppingTabCounts();    // update tab badges with corrected counts
             autoAddCriticalItems();
             cleanupObsoleteBringItems();
-            renderShoppingItems();        // re-render shopping tab with urgency badges
+            // Re-render shopping items ONLY if the user is not currently browsing the suggestions panel.
+            // Avoids interrupting the user mid-selection while background data loads.
+            if (suggestionsEl.style.display === 'none') {
+                renderShoppingItems();    // re-render shopping tab with urgency badges
+            }
         });
 
     } catch (err) {
@@ -9408,7 +9592,17 @@ async function generateSuggestions() {
             return;
         }
         
-        suggestionItems = (data.suggestions || []).map(s => ({ ...s, selected: true }));
+        suggestionItems = (data.suggestions || []).map(s => ({ ...s, selected: true }))
+            // Exclude items already present in the current Bring shopping list
+            .filter(s => {
+                const sFirst = _nameTokens(s.name)[0];
+                const sLower = s.name.toLowerCase();
+                return !shoppingItems.some(bi => {
+                    const bLower = bi.name.toLowerCase();
+                    const bFirst = _nameTokens(bi.name)[0];
+                    return bLower === sLower || (sFirst && bFirst && bFirst === sFirst);
+                });
+            });
         
         // Show seasonal tip
         const tipEl = document.getElementById('seasonal-tip');
@@ -9447,18 +9641,20 @@ function renderSuggestions() {
     
     container.innerHTML = sorted.map((item, idx) => {
         const catIcon = CATEGORY_ICONS[item.category] || '🛒';
+        const isAi = item.source === 'ai';
         const priorityBadge = {
             'alta': `<span class="priority-badge priority-high">${t('shopping.priority_high')}</span>`,
             'media': `<span class="priority-badge priority-med">${t('shopping.priority_medium')}</span>`,
             'bassa': `<span class="priority-badge priority-low">${t('shopping.priority_low')}</span>`,
         }[item.priority] || '';
+        const aiBadge = isAi ? `<span class="priority-badge priority-ai">🤖 AI</span>` : '';
         
         return `
         <div class="suggestion-item ${item.selected ? 'selected' : ''}" onclick="toggleSuggestion(${idx})" data-suggestion-name="${escapeHtml(item.name)}">
             <div class="suggestion-check">${item.selected ? '☑️' : '⬜'}</div>
             <span class="shopping-item-icon">${catIcon}</span>
             <div class="suggestion-info">
-                <div class="suggestion-name">${escapeHtml(item.name)}${item.specification ? ` <small>(${escapeHtml(item.specification)})</small>` : ''} ${priorityBadge}</div>
+                <div class="suggestion-name">${escapeHtml(item.name)}${item.specification ? ` <small>(${escapeHtml(item.specification)})</small>` : ''} ${priorityBadge}${aiBadge}</div>
                 <div class="suggestion-reason">${escapeHtml(item.reason)}</div>
             </div>
         </div>`;
