@@ -6679,7 +6679,24 @@ function getAllShoppingPrices(PDO $db): void {
     foreach ($clientItems as $ci) {
         $name = trim($ci['name'] ?? '');
         if ($name === '') continue;
+
+        // 1) Exact match by name or shopping_name
         $si = $smartByName[mb_strtolower($name)] ?? null;
+
+        // 2) Prefix-word fallback: "Salame" → "Salame Paesano", "Penne" → "Penne rigate"
+        //    Match when the Bring! name is a word-prefix of a smart key (case-insensitive).
+        if ($si === null) {
+            $nameLower = mb_strtolower($name);
+            foreach ($smartByName as $smartKey => $candidate) {
+                // smartKey starts with the Bring! name (exact word boundary)
+                if (str_starts_with($smartKey, $nameLower)
+                    && (strlen($smartKey) === strlen($nameLower) || $smartKey[strlen($nameLower)] === ' ')) {
+                    $si = $candidate;
+                    break;
+                }
+            }
+        }
+
         $items[] = [
             'name'             => $name,
             'quantity'         => (float)(($si['suggested_qty']  ?? $si['buy_qty'] ?? null) ?? ($ci['quantity'] ?? 1)),
@@ -6827,14 +6844,15 @@ function _calcEstimatedTotal(float $pricePerUnit, string $priceUnitLabel, float 
             $sub = strtolower($pkgUnit);
             if ($sub === 'g')  $weightKg = $qty * $defQty / 1000.0;
             elseif ($sub === 'kg') $weightKg = $qty * $defQty;
+        } elseif (($unit === 'conf' || $unit === 'pz') && $defQty > 0 && empty($pkgUnit)) {
+            // pkgUnit not recorded in DB — for /kg prices assume defQty is in grams
+            // (vast majority of grocery packages: pancetta 80g, formaggio 200g, etc.)
+            $weightKg = $qty * $defQty / 1000.0;
         } elseif ($unit === 'g')  {
             $weightKg = $qty / 1000.0;
         } elseif ($unit === 'kg') {
             $weightKg = $qty;
         }
-        // Cannot convert unit to kg → return null instead of misleadingly using
-        // price_per_unit as total (which would inflate estimates for items like
-        // "3 pz Salame" priced at €21.50/kg, returning €21.50 for just ~300g).
         if ($weightKg <= 0) return null;
         return round($pricePerUnit * $weightKg, 2);
     }
@@ -6846,6 +6864,9 @@ function _calcEstimatedTotal(float $pricePerUnit, string $priceUnitLabel, float 
             $sub = strtolower($pkgUnit);
             if ($sub === 'ml') $volumeL = $qty * $defQty / 1000.0;
             elseif ($sub === 'l') $volumeL = $qty * $defQty;
+        } elseif (($unit === 'conf' || $unit === 'pz') && $defQty > 0 && empty($pkgUnit)) {
+            // pkgUnit not recorded — for /L prices assume defQty is in ml
+            $volumeL = $qty * $defQty / 1000.0;
         } elseif ($unit === 'ml') {
             $volumeL = $qty / 1000.0;
         } elseif ($unit === 'l') {
