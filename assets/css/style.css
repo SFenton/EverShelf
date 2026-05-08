@@ -1924,10 +1924,9 @@ body {
     white-space: nowrap;
     line-height: 1.25;
 }
-.price-col-qty {
-    font-size: 0.72rem;
-    font-weight: 400;
+.price-col-main.price-col-approx {
     color: #64748b;
+    font-weight: 600;
 }
 .price-col-unit {
     font-size: 0.62rem;

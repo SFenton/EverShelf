@@ -8795,23 +8795,19 @@ function _buildPricePayload() {
  * @param {string} sym    — currency symbol like "€"
  */
 function _buildPriceBadgeHTML(entry, sym) {
-    const isApprox = (entry.source_note || '').startsWith('~');
+    const hasTotal = entry.estimated_total != null;
+    const isApprox = !hasTotal || (entry.source_note || '').startsWith('~');
     const mainLabel = (isApprox ? '~' : '')
-        + (entry.estimated_total != null
+        + (hasTotal
             ? `${sym}${entry.estimated_total.toFixed(2)}`
             : `${sym}${entry.price_per_unit.toFixed(2)}`);
     const unitLabel = entry.unit_label || '';
     const unitLine = unitLabel && entry.price_per_unit != null
         ? `${sym}${entry.price_per_unit.toFixed(2)}/${unitLabel}`
         : '';
-    // Show resolved qty so user can verify the computation
-    const resolvedQty  = entry._resolved_qty  ?? null;
-    const resolvedUnit = entry._resolved_unit ?? null;
-    const qtyLine = (resolvedQty != null && resolvedQty !== 1)
-        ? `${resolvedQty}\u202f${resolvedUnit}`
-        : '';
     const title = entry.source_note || '';
-    return `<div class="price-col-main" title="${escapeHtml(title)}">${mainLabel}${qtyLine ? `<span class=\"price-col-qty\">\u00a0·\u00a0${escapeHtml(qtyLine)}</span>` : ''}</div>`
+    const approxClass = isApprox ? ' price-col-approx' : '';
+    return `<div class="price-col-main${approxClass}" title="${escapeHtml(title)}">${mainLabel}</div>`
          + (unitLine ? `<div class="price-col-unit">${unitLine}</div>` : '');
 }
 
@@ -8940,7 +8936,7 @@ async function fetchAllPrices(forceRefresh = false) {
             shoppingItems.forEach((item, idx) => {
                 const entry = prices[item.name];
                 const badge = document.getElementById(`price-badge-${idx}`);
-                if (entry && !entry.error && entry.estimated_total != null) {
+                if (entry && !entry.error && entry.price_per_unit != null) {
                     // Store with server-resolved qty/unit for correct cache validation
                     _cachedPrices[item.name] = {
                         ...entry,
@@ -8949,8 +8945,6 @@ async function fetchAllPrices(forceRefresh = false) {
                     };
                     if (badge) badge.innerHTML = _buildPriceBadgeHTML(entry, sym);
                 } else {
-                    // Item has no estimate (unit conversion impossible or not found)
-                    // Keep any old cache entry but don't update badge to stale value
                     if (badge) badge.innerHTML = `<span class="price-col-error">–</span>`;
                 }
             });

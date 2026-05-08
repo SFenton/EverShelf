@@ -6866,11 +6866,18 @@ function _calcEstimatedTotal(float $pricePerUnit, string $priceUnitLabel, float 
         if ($defQty > 0 && !empty($pkgUnit) && strtolower($pkgUnit) === strtolower($unit)) {
             $pkgWeight = $defQty;
         }
-        // 2) Extract weight from label: "confezione 250g", "vasetto 125ml", "pacco 500g"
+        // 2) Extract weight/volume from label: "confezione 250g", "vasetto 125ml", "pacco 500g",
+        //    "pacco 1kg" (convert kg→g), "bottiglia 1.5L" (convert L→ml)
         if ($pkgWeight <= 0) {
-            if (preg_match('/\b(\d+(?:[.,]\d+)?)\s*(g|ml)\b/i', $priceUnitLabel, $m)) {
-                if (strtolower($m[2]) === strtolower($unit)) {
-                    $pkgWeight = (float)str_replace(',', '.', $m[1]);
+            if (preg_match('/\b(\d+(?:[.,]\d+)?)\s*(g|ml|kg|l|lt)\b/i', $priceUnitLabel, $m)) {
+                $rawVal = (float)str_replace(',', '.', $m[1]);
+                $rawUnit = strtolower($m[2]);
+                if ($rawUnit === strtolower($unit)) {
+                    $pkgWeight = $rawVal;
+                } elseif ($rawUnit === 'kg' && strtolower($unit) === 'g') {
+                    $pkgWeight = $rawVal * 1000.0;
+                } elseif (in_array($rawUnit, ['l', 'lt']) && strtolower($unit) === 'ml') {
+                    $pkgWeight = $rawVal * 1000.0;
                 }
             }
         }
@@ -6884,6 +6891,33 @@ function _calcEstimatedTotal(float $pricePerUnit, string $priceUnitLabel, float 
         }
         // No conversion possible → return single-unit price (1 package minimum)
         return round($pricePerUnit, 2);
+    }
+
+    // Special case: unit='pz' (individual pieces) vs. container retail unit.
+    // If the AI priced per-container and the user requested individual pieces,
+    // buy ceil(qty / piecesPerContainer) containers — or just 1 if unknown.
+    if (strtolower($unit) === 'pz') {
+        static $containerKw = [
+            'confezione', 'pacco', 'pack', 'busta', 'sacchetto', 'vasetto',
+            'barattolo', 'rete', 'casco', 'mazzo', 'bottiglia', 'brick',
+            'lattina', 'latta', 'vaschetta', 'scatola', 'tray',
+        ];
+        $isContainer = false;
+        foreach ($containerKw as $kw) {
+            if (str_contains($label, $kw)) { $isContainer = true; break; }
+        }
+        if ($isContainer) {
+            // Try to extract pieces-per-container from label (e.g. "confezione 6 uova" → 6).
+            // Ignore numbers followed by a weight/volume unit (e.g. "rete 1kg" → 0).
+            $pcsPerContainer = 0;
+            if (preg_match('/\b(\d+)\b(?!\s*(?:g|kg|ml|l|lt|cl|gr)\b)/i', $priceUnitLabel, $pm)) {
+                $pcsPerContainer = (int)$pm[1];
+            }
+            $containers = ($pcsPerContainer >= 2)
+                ? (int) max(1, ceil($qty / $pcsPerContainer))
+                : 1;
+            return round($pricePerUnit * $containers, 2);
+        }
     }
 
     $buyQty = max(1.0, $qty);
