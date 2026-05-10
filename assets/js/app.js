@@ -624,8 +624,9 @@ function _scaleAutoFillRecipeUse(msg) {
         return;
     }
 
-    // Reject if weight hasn't changed enough from last confirmed reading
-    if (_scaleLastConfirmedGrams !== null && Math.abs(grams - _scaleLastConfirmedGrams) < 10) {
+    // Reject if weight hasn't changed enough from last confirmed reading.
+    // Threshold: 5g — gives enough time to tare after opening the modal.
+    if (_scaleLastConfirmedGrams !== null && Math.abs(grams - _scaleLastConfirmedGrams) < 5) {
         return;
     }
 
@@ -7651,8 +7652,8 @@ function showLowStockBringPrompt(result, afterCallback) {
         // configured, or product already on list), silently attempt it from JS.
         if (!result.added_to_bring && shoppingName) {
             // Fire-and-forget — don't block the callback
-            // Use generic shopping name; specific name goes into specification.
-            const spec = shoppingName !== name ? name + (result.product_brand ? ` · ${result.product_brand}` : '') : '';
+            // Use generic shopping name; specific name + 🛒 marker in spec so cron cleanup can auto-remove.
+            const spec = (shoppingName !== name ? name + (result.product_brand ? ` · ${result.product_brand}` : '') : name) + ' · 🛒 Esaurito';
             (async () => {
                 try {
                     const payload = { items: [{ name: shoppingName, specification: spec }] };
@@ -11150,7 +11151,16 @@ async function useRecipeIngredient(idx, productId, location, qtyNumber, btn, rec
     
     _recipeUseContext = { idx, productId, btn, qtyNumber, recipeQty };
     _recipeUseConfMode = null;
-    
+
+    // Reset scale state: set the current weight as baseline so only a *change*
+    // of ≥5g after the modal opens triggers auto-fill (allows time to tare).
+    _cancelScaleAutoConfirm(false);
+    _scaleRecipeAutoFillPaused = false;
+    if (_scaleLatestWeight) {
+        const _baseline = _scaleToGrams(parseFloat(_scaleLatestWeight.value), _scaleLatestWeight.unit);
+        if (_baseline !== null && _baseline >= 5) _scaleLastConfirmedGrams = _baseline;
+    }
+
     // Fetch inventory to build the modal
     try {
         const data = await api('inventory_list');
