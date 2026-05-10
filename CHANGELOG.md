@@ -5,6 +5,22 @@ All notable changes to EverShelf will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.6] - 2026-05-10
+
+### Fixed
+- **`shopping_name` troncato (Piadina)** — Il prodotto "Piadine medie" aveva `shopping_name='Pi'` (troncato), non veniva aggruppato correttamente nella famiglia. Corretto in `Piadina`.
+- **Family merges DB** — Grana Padano ora sotto `Formaggio` (era `Grana` singleton), Prosciutto cotto ora sotto `Affettato`, Panna acida ora sotto `Panna`.
+- **`daily_rate` su periodo effettivo** — Il tasso di consumo giornaliero usava `first_in → now` come finestra, diluendo il rate con periodi in cui il prodotto era già esaurito (es. aglio esaurito a 34gg veniva calcolato su 60+). Ora usa `first_in → last_activity` (ultimo acquisto o ultimo uso), più preciso per le previsioni di riordino.
+- **Anomaly dismiss key stabile** — La chiave di dismiss usava `product_id + round(expected)` che cambiava ad ogni nuova transazione, causando la ricomparsa delle anomalie già chiuse. Ora usa `product_id + direction` (phantom/missing/untracked) — stabile finché la direzione non cambia.
+- **Smart shopping: prodotti esauriti < 14 giorni** — Prodotti terminati negli ultimi 14 giorni non vengono più soppressi dal check token-coverage o shopping_name-family: se li hai appena finiti, è probabile tu voglia ricomprarli indipendentemente dalla presenza di equivalenti in stock.
+- **Chat pruning** — `chatSave()` ora esegue `DELETE` dei messaggi oltre i 200 più recenti dopo ogni salvataggio, evitando crescita illimitata della tabella `chat_messages`.
+- **`getStats()` query consolidate** — Le 5 query separate (COUNT products, SUM inventory, COUNT locations, COUNT recent_in, COUNT recent_out) sono ora una sola query con subselect, riducendo i round-trip SQLite da 5 a 1.
+- **Bring! cleanup rate-limiting** — Aggiunto `usleep(300ms)` tra le rimozioni multiple per evitare di sovraccaricare l'API Bring! in burst.
+- **Indici compositi su `transactions`** — Aggiunti `idx_transactions_type_date(type, created_at)` (per `getStats`) e `idx_transactions_pid_type_undone(product_id, type, undone)` (per `smartShopping`), con migration automatica per DB esistenti.
+
+### Security
+- **CSRF protection** — Le action di scrittura (inventory_add, bring_add, product_save, ecc.) richiedono ora `X-EverShelf-Request: 1` oppure `Content-Type: application/json`. Il frontend `api()` invia sempre il header su POST. Questo previene attacchi CSRF cross-site tramite form HTML.
+
 ## [1.7.5] - 2026-05-10
 
 ### Added

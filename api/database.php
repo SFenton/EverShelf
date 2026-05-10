@@ -74,6 +74,11 @@ function initializeDB(PDO $db): void {
         CREATE INDEX IF NOT EXISTS idx_inventory_location ON inventory(location);
         CREATE INDEX IF NOT EXISTS idx_transactions_product ON transactions(product_id);
         CREATE INDEX IF NOT EXISTS idx_transactions_date ON transactions(created_at);
+        -- Composite indexes for hot queries
+        -- getStats(): WHERE type IN (...) AND created_at >= ...
+        CREATE INDEX IF NOT EXISTS idx_transactions_type_date ON transactions(type, created_at);
+        -- smartShopping(): GROUP BY product_id filtering on type+undone
+        CREATE INDEX IF NOT EXISTS idx_transactions_pid_type_undone ON transactions(product_id, type, undone);
     ");
 }
 
@@ -108,6 +113,8 @@ function migrateDB(PDO $db): void {
         $db->exec("DROP TABLE transactions_old");
         $db->exec("CREATE INDEX IF NOT EXISTS idx_transactions_product ON transactions(product_id)");
         $db->exec("CREATE INDEX IF NOT EXISTS idx_transactions_date ON transactions(created_at)");
+        $db->exec("CREATE INDEX IF NOT EXISTS idx_transactions_type_date ON transactions(type, created_at)");
+        $db->exec("CREATE INDEX IF NOT EXISTS idx_transactions_pid_type_undone ON transactions(product_id, type, undone)");
     }
 
     // --- New shared tables ---
@@ -192,6 +199,10 @@ function migrateDB(PDO $db): void {
     if (!in_array('undone', $txColNames)) {
         $db->exec("ALTER TABLE transactions ADD COLUMN undone INTEGER DEFAULT 0");
     }
+
+    // Ensure composite indexes exist (added in v1.7.5 for performance)
+    $db->exec("CREATE INDEX IF NOT EXISTS idx_transactions_type_date ON transactions(type, created_at)");
+    $db->exec("CREATE INDEX IF NOT EXISTS idx_transactions_pid_type_undone ON transactions(product_id, type, undone)");
 }
 
 /**

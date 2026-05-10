@@ -183,6 +183,27 @@ if ($rateLimitAction) {
     checkRateLimit($rateLimitAction);
 }
 
+// CSRF guard for write actions: POST requests that modify data must include
+// either X-EverShelf-Request: 1 (webapp) or Content-Type: application/json.
+// This prevents cross-site HTML form submissions from triggering mutations.
+// JSON Content-Type already requires a CORS preflight which provides a baseline;
+// the explicit header is an additional defence-in-depth check for POST writes.
+$_writeActions = [
+    'inventory_add','inventory_use','inventory_update','inventory_remove',
+    'product_save','product_delete','product_merge',
+    'bring_add','bring_remove','bring_sync','bring_set_spec','bring_migrate_names',
+    'dismiss_anomaly','save_settings',
+];
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && in_array($rateLimitAction, $_writeActions, true)) {
+    $csrfHeader  = $_SERVER['HTTP_X_EVERSHELF_REQUEST'] ?? '';
+    $contentType = $_SERVER['CONTENT_TYPE'] ?? '';
+    if ($csrfHeader !== '1' && stripos($contentType, 'application/json') === false) {
+        http_response_code(403);
+        echo json_encode(['success' => false, 'error' => 'csrf_rejected']);
+        exit;
+    }
+}
+
 try {
     $db = getDB();
 } catch (Exception $e) {
@@ -1715,8 +1736,13 @@ function getInventoryAnomalies(PDO $db): void {
         $threshold = max(1.0, $invQty * 0.20);
         if (abs($diff) <= $threshold || abs($diff) <= 50) continue;
 
-        // Dismiss key: product_id + rounded expected (so re-adding stock resets the alert)
-        $key = 'a_' . $r['product_id'] . '_' . round($expected);
+        // Dismiss key: stable identifier based on product_id + direction.
+        // Previously used round($expected) which changed whenever transactions were added,
+        // causing dismissed anomalies to reappear. Now anchored to direction only,
+        // so it stays dismissed until the user explicitly resets or the direction changes.
+        // An inventory correction (bringing qty closer to expected) will flip the direction
+        // or drop below threshold — naturally clearing the dismissed state.
+        $key = 'a_' . $r['product_id'] . '_' . $direction;
         if (!empty($dismissed[$key])) continue;
 
         $direction = $diff > 0 ? 'phantom' : 'missing';
@@ -1769,11 +1795,22 @@ function dismissInventoryAnomaly(): void {
 }
 
 function getStats(PDO $db): void {
-    $totalProducts = $db->query("SELECT COUNT(*) FROM products")->fetchColumn();
-    $totalItems = $db->query("SELECT COALESCE(SUM(quantity), 0) FROM inventory")->fetchColumn();
-    $locations = $db->query("SELECT COUNT(DISTINCT location) FROM inventory")->fetchColumn();
-    $recentIn = $db->query("SELECT COUNT(*) FROM transactions WHERE type='in' AND created_at >= datetime('now', '-7 days')")->fetchColumn();
-    $recentOut = $db->query("SELECT COUNT(*) FROM transactions WHERE type='out' AND created_at >= datetime('now', '-7 days')")->fetchColumn();
+    // Consolidated summary query: totals + 7-day activity in a single round-trip
+    $summary = $db->query("
+        SELECT
+            (SELECT COUNT(*) FROM products)                              AS total_products,
+            (SELECT COALESCE(SUM(quantity),0) FROM inventory)           AS total_items,
+            (SELECT COUNT(DISTINCT location) FROM inventory)            AS total_locations,
+            (SELECT COUNT(*) FROM transactions
+             WHERE type='in'  AND created_at >= datetime('now','-7 days')) AS recent_in,
+            (SELECT COUNT(*) FROM transactions
+             WHERE type='out' AND created_at >= datetime('now','-7 days')) AS recent_out
+    ")->fetch(PDO::FETCH_ASSOC);
+    $totalProducts = (int)$summary['total_products'];
+    $totalItems    = (float)$summary['total_items'];
+    $locations     = (int)$summary['total_locations'];
+    $recentIn      = (int)$summary['recent_in'];
+    $recentOut     = (int)$summary['recent_out'];
     
     // Expiring soonest (next 4 items to expire)
     $expiring = $db->query("
@@ -4909,7 +4946,10 @@ function bringCleanupObsolete(PDO $db): array {
         }
 
         if ($result !== null) $removed++;
-        else $errors++;
+        else { $errors++; }
+
+        // Small delay between removals to avoid hammering the Bring! API
+        if (count($toRemove) > 3) usleep(300_000); // 300ms
     }
 
     return ['candidates' => count($toRemove), 'removed' => $removed, 'errors' => $errors];
@@ -5530,8 +5570,15 @@ function smartShopping(PDO $db): void {
         $lastOut = $tx && $tx['last_out'] ? strtotime($tx['last_out']) : null;
         $daysSinceFirst = $firstIn ? max(1, ($now - $firstIn) / 86400) : 999;
 
-        // Average daily consumption rate
-        $dailyRate = $daysSinceFirst < 999 && $totalUsed > 0 ? $totalUsed / $daysSinceFirst : 0;
+        // Average daily consumption rate.
+        // Use the "effective tracking period" (first purchase → last activity) rather than
+        // first purchase → now, so idle periods after last use don't deflate the rate.
+        // Example: Aglio bought 60 days ago but last used 34 days ago → use 34-day window.
+        $lastActivity = max($lastIn ?? 0, $lastOut ?? 0);
+        $effectiveDays = ($firstIn && $lastActivity > $firstIn)
+            ? max(1, ($lastActivity - $firstIn) / 86400)
+            : $daysSinceFirst;
+        $dailyRate = $effectiveDays < 999 && $totalUsed > 0 ? $totalUsed / $effectiveDays : 0;
 
         // Days of stock remaining
         $daysLeft = ($dailyRate > 0 && $qty > 0) ? $qty / $dailyRate : ($qty > 0 ? 999 : 0);
@@ -5595,14 +5642,21 @@ function smartShopping(PDO $db): void {
                                 'bianco','rosso','nero','giallo','verde','misto','dolce','light'];
             $pToks = array_diff($nameTokens($p['name']), $coverageGeneric);
             $coveredByEquivalent = false;
-            foreach ($pToks as $tok) {
-                if (($stockByAnyToken[$tok] ?? 0) > 0) { $coveredByEquivalent = true; break; }
+            // Products exhausted within the last 14 days bypass token-based suppression:
+            // if the user just finished a specific product, they likely need to restock it
+            // regardless of whether a vague equivalent token exists in another product.
+            $recentlyExhausted = $lastOut && ($now - $lastOut) / 86400 <= 14;
+            if (!$recentlyExhausted) {
+                foreach ($pToks as $tok) {
+                    if (($stockByAnyToken[$tok] ?? 0) > 0) { $coveredByEquivalent = true; break; }
+                }
             }
             // Also check shopping_name coverage: if this depleted product has a generic name
             // (e.g. "Formaggio") and there's stock of ANY product with the same generic name,
             // the need is covered. This catches "Bel Paese" → covered by "Formaggio Gouda" in stock,
             // "Biscotti Pastefrolle" → covered by "Frollini..." (both shopping_name="Biscotti"), etc.
-            if (!$coveredByEquivalent) {
+            // Exception: recently exhausted products (< 14 days) skip this suppression too.
+            if (!$coveredByEquivalent && !$recentlyExhausted) {
                 $sName = strtolower(trim($p['shopping_name'] ?? ''));
                 if ($sName !== '' && ($stockByShoppingName[$sName] ?? 0) > 0) {
                     $coveredByEquivalent = true;
@@ -6213,6 +6267,8 @@ function chatSave(PDO $db): void {
             $stmt->execute([$msg['role'], $msg['text']]);
         }
     }
+    // Prune: keep only the last 200 messages (cap to avoid unbounded growth)
+    $db->exec("DELETE FROM chat_messages WHERE id NOT IN (SELECT id FROM chat_messages ORDER BY id DESC LIMIT 200)");
     echo json_encode(['success' => true]);
 }
 

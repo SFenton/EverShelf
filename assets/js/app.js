@@ -2502,7 +2502,7 @@ async function api(action, params = {}, method = 'GET', body = null, extraHeader
     }
     const opts = { method, cache: 'no-store' };
     if (body) {
-        opts.headers = { 'Content-Type': 'application/json', ...extraHeaders };
+        opts.headers = { 'Content-Type': 'application/json', 'X-EverShelf-Request': '1', ...extraHeaders };
         opts.body = JSON.stringify(body);
     } else if (Object.keys(extraHeaders).length > 0) {
         opts.headers = { ...extraHeaders };
@@ -9264,10 +9264,13 @@ async function cleanupObsoleteBringItems() {
 function logOperation(action, details) {
     try {
         const log = JSON.parse(localStorage.getItem('_opLog') || '[]');
-        log.push({ ts: new Date().toISOString(), action, details });
-        // Keep last 200 entries
-        if (log.length > 200) log.splice(0, log.length - 200);
-        localStorage.setItem('_opLog', JSON.stringify(log));
+        const now = Date.now();
+        log.push({ ts: new Date(now).toISOString(), action, details });
+        // Prune: keep only last 200 entries AND entries newer than 30 days
+        const cutoff = now - 30 * 24 * 60 * 60 * 1000;
+        const pruned = log.filter(e => new Date(e.ts).getTime() >= cutoff);
+        const final = pruned.length > 200 ? pruned.slice(pruned.length - 200) : pruned;
+        localStorage.setItem('_opLog', JSON.stringify(final));
     } catch (e) { /* ignore */ }
 }
 
