@@ -6075,12 +6075,22 @@ function smartShopping(PDO $db): void {
             }
         }
 
-        // Almost finished — only flag if usage frequency justifies it
-        if ($qty > 0 && $pctLeft <= 15 && $isRegular) {
+        // Almost finished — only flag if usage frequency justifies it.
+        // Suppress if the same shopping_name family has adequate stock from OTHER products
+        // (e.g. "Burro g" at 12% but "Burro conf" at 99% → no need to flag).
+        $sNameLow = strtolower(trim($p['shopping_name'] ?? ''));
+        $familyOtherStock = ($sNameLow !== '') ? max(0, ($stockByShoppingName[$sNameLow] ?? 0) - $qty) : 0;
+        // For g/ml/kg/l: any conf/pz family stock ≥ 0.5 means a package is available.
+        // For conf/pz: needs at least 1 full unit from other family products.
+        $familyCovered = $sNameLow !== '' && $qty > 0 && (
+            (!in_array($unit, ['conf', 'pz']) && $familyOtherStock >= 0.5) ||
+            (in_array($unit, ['conf', 'pz']) && $familyOtherStock >= 1.0)
+        );
+        if (!$familyCovered && $qty > 0 && $pctLeft <= 15 && $isRegular) {
             $urgency = $isFrequent ? 'high' : 'medium';
             $reasons[] = 'Quasi finito (' . round($pctLeft) . '%)';
             $score += 80;
-        } elseif ($qty > 0 && $pctLeft <= 30 && $isRegular) {
+        } elseif (!$familyCovered && $qty > 0 && $pctLeft <= 30 && $isRegular) {
             if ($dailyRate > 0 && $daysLeft <= 5 && $isFrequent) {
                 $urgency = 'high';
                 $reasons[] = 'Finisce tra ~' . round($daysLeft) . 'gg';

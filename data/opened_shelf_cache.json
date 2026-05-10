@@ -152,5 +152,19 @@
         "name": "Pancetta Dolce",
         "location": "frigo",
         "ts": 1778419507
+    },
+    "9e4189bd3f8cb1121e7389967dd4f74c": {
+        "days": 180,
+        "source": "rule",
+        "name": "Farina di grano tenero tipo rossa",
+        "location": "dispensa",
+        "ts": 1778427005
+    },
+    "e3472dd051ed13ae18fc96bbebedc1ba": {
+        "days": 60,
+        "source": "rule",
+        "name": "Lievito di birra",
+        "location": "dispensa",
+        "ts": 1778427005
     }
 }

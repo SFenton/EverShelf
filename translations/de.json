@@ -478,7 +478,6 @@
         "transferred": "Zu Rezepten hinzugefügt!",
         "open_recipe": "Rezept öffnen"
     },
-    "action": {
     "cooking": {
         "close": "Schließen",
         "tts_btn": "Vorlesen",

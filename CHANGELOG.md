@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - **Trasferisci a Ricette dalla chat** — Quando la chat con Gemini Chef genera una ricetta, compare il bottone "📥 Trasferisci a Ricette". Premendolo, Gemini converte il testo in JSON strutturato completo (titolo, pasti, ingredienti, passi), il backend arricchisce ogni ingrediente con product_id e location via fuzzy-match (identico a generateRecipe), la ricetta viene salvata in archivio e si apre direttamente nella sezione Ricette con tutti i pulsanti "Usa" e la modalità cottura completa.
+- **Bottone "Apri la ricetta"** — Dopo un trasferimento riuscito, il bottone "📥 Trasferisci a Ricette" si trasforma direttamente in "📖 Apri la ricetta" (stesso elemento DOM), evitando problemi di sovrapposizione.
+- **Crea una ricetta per ingrediente** — Nel pannello azione di ogni alimento in inventario compare il bottone "👨‍🍳 Crea una ricetta con questo" (teal, larghezza piena). Premendolo, Gemini genera una ricetta italiana usando quell'alimento come protagonista (stesso pipeline di chatToRecipe: arricchimento fuzzy-match inventario, meal=null, 8192 token max).
+- **meal non auto-categorizzato** — Le ricette generate da chat o da ingrediente non vengono più auto-categorizzate (meal rimane null); il tag pasto nell'UI viene mostrato solo se valorizzato.
+
+### Fixed
+- **Smart shopping: falso positivo "quasi finito"** — Se un prodotto in grammi/ml era quasi esaurito (es. Burro 30g = 12%) ma lo stesso prodotto era disponibile anche come confezione (Burro 1 conf = 99%), il sistema segnalava ugualmente "sta finendo". Ora verifica se la famiglia `shopping_name` ha scorte da altri prodotti: se sì, l'alert viene soppresso. (Esempio: 30g di Burro + 1 conf di Burro → nessun alert.)
+- **Traduzioni JSON corrotte** — La sezione `action` era duplicata nei file `de.json`, `en.json` e `it.json`, causando errori di parsing che bloccavano la CI/CD. Rimossa la sezione spuria.
 
 ## [1.7.7] - 2026-05-10
 

@@ -478,7 +478,6 @@
         "transferred": "Added to Recipes!",
         "open_recipe": "Open recipe"
     },
-    "action": {
     "cooking": {
         "close": "Close",
         "tts_btn": "Read aloud",
