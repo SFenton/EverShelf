@@ -7798,16 +7798,19 @@ function startMoveModalCountdown(btnId, onExpire) {
     }, duration);
 }
 
-function showMoveAfterUseModal(product, fromLoc, remaining, openedId) {
+function showMoveAfterUseModal(product, fromLoc, remaining, openedId, openedVacuumSealed, unit) {
     const otherLocs = Object.entries(LOCATIONS).filter(([k]) => k !== fromLoc);
     const locButtons = otherLocs.map(([k, v]) =>
         `<button type="button" class="loc-btn" onclick="clearMoveModalTimer();confirmMoveAfterUse(${product.id}, '${fromLoc}', '${k}', ${openedId || 0})">${v.icon} ${v.label}</button>`
     ).join('');
-    const wasVacuum = !!product.vacuum_sealed;
-    const vacuumRow = wasVacuum ? `
+    // Show vacuum checkbox for any container-type unit or if the item was previously vacuum sealed.
+    // Pre-checked when it was already sealed (semi-automatic: if you sealed it last time, you likely will again).
+    const wasVacuum = !!(openedVacuumSealed ?? product.vacuum_sealed);
+    const isContainer = ['conf','g','kg','ml','l'].includes(unit || product.unit || '') || wasVacuum;
+    const vacuumRow = isContainer ? `
         <label style="display:flex;align-items:center;gap:8px;margin-top:12px;cursor:pointer">
-            <input type="checkbox" id="move-vacuum-check" checked>
-            <span>${t('move.vacuum_restore')}</span>
+            <input type="checkbox" id="move-vacuum-check" ${wasVacuum ? 'checked' : ''}>
+            <span>🔒 Metti <b>sotto vuoto</b> il resto${wasVacuum ? ' (era già sigillato)' : ''}</span>
         </label>` : '';
     document.getElementById('modal-content').innerHTML = `
         <div class="modal-header">
@@ -7818,11 +7821,24 @@ function showMoveAfterUseModal(product, fromLoc, remaining, openedId) {
             <p style="margin-bottom:12px">${t('move.question').replace('{thing}', openedId ? t('move.thing_opened') : t('move.thing_rest')).replace('{name}', `<strong>${escapeHtml(product.name)}</strong>`)}</p>
             <div class="location-selector">${locButtons}</div>
             ${vacuumRow}
-            <button type="button" id="btn-move-stay" class="btn btn-secondary full-width move-countdown-btn" style="margin-top:12px" onclick="clearMoveModalTimer();closeModal();showPage('dashboard')">${t('move.stay_btn').replace('{location}', LOCATIONS[fromLoc]?.label || fromLoc)}</button>
+            <button type="button" id="btn-move-stay" class="btn btn-secondary full-width move-countdown-btn" style="margin-top:12px" onclick="clearMoveModalTimer();_saveVacuumAndStay(${openedId || 0});">${t('move.stay_btn').replace('{location}', LOCATIONS[fromLoc]?.label || fromLoc)}</button>
         </div>
     `;
     document.getElementById('modal-overlay').style.display = 'flex';
-    startMoveModalCountdown('btn-move-stay', () => { closeModal(); showPage('dashboard'); });
+    startMoveModalCountdown('btn-move-stay', () => { _saveVacuumAndStay(openedId || 0); });
+}
+
+/** Save vacuum state when user chooses to keep the item at the current location. */
+async function _saveVacuumAndStay(openedId) {
+    closeModal();
+    if (openedId) {
+        const isVacuum = document.getElementById('move-vacuum-check')?.checked ? 1 : 0;
+        try {
+            await api('inventory_update', {}, 'POST', { id: openedId, vacuum_sealed: isVacuum });
+            if (isVacuum) showToast('🔒 Sotto vuoto registrato', 'success');
+        } catch (_) {}
+    }
+    showPage('dashboard');
 }
 
 async function confirmMoveAfterUse(productId, fromLoc, toLoc, openedId) {
@@ -8054,20 +8070,12 @@ async function submitUse(e) {
             // If there's remaining quantity, offer to move to another location
             const usedFrom = document.getElementById('use-location').value;
             _recordUseLocationChoice(currentProduct.id, usedFrom); // track for preferred-location feature
-            const moveCallback = result.remaining > 0
-                ? () => showMoveAfterUseModal(currentProduct, usedFrom, result.remaining, result.opened_id)
-                : () => showPage('dashboard');
-            // Check low stock → Bring! prompt, then vacuum seal prompt if product was opened
-            const afterLowStock = moveCallback;
-            showLowStockBringPrompt(result, afterLowStock);
-            // Show vacuum sealed prompt when some stock remains and it's a container type
-            // (conf/weighted units) or the item was previously vacuum sealed.
-            // Skip for pz "counting" items (e.g. 3 mele → 2 mele: no vacuum concept).
             const _vacUnit = result.product_unit || currentProduct?.unit || '';
-            const _vacContainer = ['conf','g','kg','ml','l'].includes(_vacUnit) || !!(result.opened_vacuum_sealed);
-            if (result.opened_id && result.remaining > 0 && _vacContainer) {
-                setTimeout(() => _showVacuumPrompt(result.opened_id, result.opened_vacuum_sealed ?? 0), 600);
-            }
+            const moveCallback = result.remaining > 0
+                ? () => showMoveAfterUseModal(currentProduct, usedFrom, result.remaining, result.opened_id, result.opened_vacuum_sealed ?? 0, _vacUnit)
+                : () => showPage('dashboard');
+            // Check low stock → Bring! prompt, then move/vacuum modal
+            showLowStockBringPrompt(result, moveCallback);
         } else if (result.duplicate) {
             // Silently ignore: this was a scale double-trigger, not a real error
         } else {
