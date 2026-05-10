@@ -12424,6 +12424,37 @@ function _looksLikeRecipe(text) {
     return hasIngredients && (hasPreparation || hasStepNumbers);
 }
 
+async function chatTransferToRecipes(btn, replyText) {
+    btn.disabled = true;
+    btn.textContent = '⏳ ' + (t('chat.transferring') || 'Trasferimento in corso...');
+    try {
+        const settings = getSettings();
+        const result = await api('chat_to_recipe', {}, 'POST', {
+            text: replyText,
+            lang: settings.lang || 'it'
+        });
+        if (!result.success || !result.recipe) {
+            btn.disabled = false;
+            btn.textContent = '📥 ' + (t('chat.transfer_to_recipes') || 'Trasferisci a Ricette');
+            showToast('⚠️ ' + (result.error || t('error.generic')), 'error');
+            return;
+        }
+        const recipe = result.recipe;
+        await saveRecipeToArchive(recipe);
+        _cachedRecipe = { meal: recipe.meal || 'pranzo', recipe };
+        renderRecipe(recipe);
+        document.getElementById('recipe-overlay').style.display = 'flex';
+        document.getElementById('recipe-ask').style.display = 'none';
+        document.getElementById('recipe-loading').style.display = 'none';
+        document.getElementById('recipe-result').style.display = '';
+        btn.textContent = '✅ ' + (t('chat.transferred') || 'Aggiunta alle Ricette!');
+    } catch (err) {
+        btn.disabled = false;
+        btn.textContent = '📥 ' + (t('chat.transfer_to_recipes') || 'Trasferisci a Ricette');
+        showToast('⚠️ ' + (t('error.connection') || 'Errore di connessione'), 'error');
+    }
+}
+
 async function sendChatMessage() {
     const input = document.getElementById('chat-input');
     const text = input.value.trim();
