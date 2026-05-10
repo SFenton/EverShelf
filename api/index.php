@@ -2848,17 +2848,8 @@ REGOLE:
 PROMPT;
 
     // Build conversation for Gemini
+    // systemInstruction is passed separately in the payload; contents only contains the actual chat turns.
     $contents = [];
-
-    // System instruction as first user+model turn
-    $contents[] = [
-        'role' => 'user',
-        'parts' => [['text' => $systemPrompt]]
-    ];
-    $contents[] = [
-        'role' => 'model',
-        'parts' => [['text' => 'Ciao! Sono il tuo assistente cucina. Conosco tutto quello che hai in dispensa e sono pronto ad aiutarti. Cosa ti va di preparare? 😊']]
-    ];
 
     // Add conversation history
     foreach ($history as $msg) {
@@ -2877,13 +2868,16 @@ PROMPT;
 
     $payload = [
         'contents' => $contents,
+        'systemInstruction' => [
+            'parts' => [['text' => $systemPrompt]]
+        ],
         'generationConfig' => [
             'temperature' => 0.8,
-            'maxOutputTokens' => 1500
+            'maxOutputTokens' => 4096
         ]
     ];
 
-    $result   = callGeminiWithFallback($apiKey, $payload, 60);
+    $result   = callGeminiWithFallback($apiKey, $payload, 90);
     $httpCode = $result['http_code'];
 
     if ($httpCode !== 200) {
