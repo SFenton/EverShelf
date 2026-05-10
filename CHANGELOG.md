@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [1.7.8] - 2026-05-10
 
 ### Added
-- **Usa ingredienti dalla chat** — Quando la chat con Gemini Chef genera una ricetta, compare il bottone "🥄 Usa ingredienti" sotto la risposta. Premendolo, il backend analizza la ricetta e abbina gli ingredienti all'inventario tramite fuzzy matching (stessa logica della sezione Ricette). Vengono mostrati i pulsanti "📦 Usa" per ogni ingrediente disponibile in dispensa, con posizione e scadenza. Il flusso di scalatura inventario è identico a quello della sezione Ricette.
+- **Trasferisci a Ricette dalla chat** — Quando la chat con Gemini Chef genera una ricetta, compare il bottone "📥 Trasferisci a Ricette". Premendolo, Gemini converte il testo in JSON strutturato completo (titolo, pasti, ingredienti, passi), il backend arricchisce ogni ingrediente con product_id e location via fuzzy-match (identico a generateRecipe), la ricetta viene salvata in archivio e si apre direttamente nella sezione Ricette con tutti i pulsanti "Usa" e la modalità cottura completa.
 
 ## [1.7.7] - 2026-05-10
 

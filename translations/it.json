@@ -472,8 +472,9 @@
         "suggestion_juice_text": "Fammi un succo o frullato con quello che ho",
         "suggestion_light_text": "Ho fame ma voglio qualcosa di leggero",
         "suggestion_expiry_text": "Cosa sta per scadere e come posso usarlo?",
-        "use_ingredients_btn": "Usa ingredienti",
-        "recipe_ingredients_from_pantry": "Ingredienti trovati in dispensa"
+        "transfer_to_recipes": "Trasferisci a Ricette",
+        "transferring": "Trasferimento in corso...",
+        "transferred": "Aggiunta alle Ricette!"
     },
     "cooking": {
         "close": "Chiudi",
