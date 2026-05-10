@@ -1374,6 +1374,26 @@ function useFromInventory(PDO $db): void {
             $product = $stmt->fetch();
             
             if ($product) {
+                // Before adding to Bring!, check if the shopping_name family already
+                // has adequate stock from OTHER products (e.g. "Sale marino iodato" depleted
+                // but "Sale alimentare" has 1kg → no need to add to shopping list).
+                $sNameKey = strtolower(trim($product['shopping_name'] ?? ''));
+                $familyCoverage = 0;
+                if ($sNameKey !== '') {
+                    $covStmt = $db->prepare("
+                        SELECT SUM(i.quantity)
+                        FROM inventory i
+                        JOIN products p ON i.product_id = p.id
+                        WHERE LOWER(TRIM(p.shopping_name)) = ? AND i.product_id != ? AND i.quantity > 0
+                    ");
+                    $covStmt->execute([$sNameKey, $productId]);
+                    $familyCoverage = (float)($covStmt->fetchColumn() ?: 0);
+                }
+                if ($familyCoverage > 0) {
+                    // Family has stock — no need to restock, suppress Bring! add.
+                    // Set addedToBring=true so the JS fallback is also suppressed.
+                    $addedToBring = true;
+                } else {
                 try {
                     $auth = bringAuth();
                     if ($auth) {
@@ -1399,9 +1419,10 @@ function useFromInventory(PDO $db): void {
                             $addedToBring = false;
                         } else {
                         // Specification: specific product name (and brand) so the user knows which variant
+                        // Add 🛒 marker so the cron cleanup can auto-remove if no longer needed.
                         $spec = $genericName !== $product['name']
-                            ? $product['name'] . ($product['brand'] ? ' · ' . $product['brand'] : '')
-                            : ($product['brand'] ?: $product['name']);
+                            ? $product['name'] . ($product['brand'] ? ' · ' . $product['brand'] : '') . ' · 🛒 Esaurito'
+                            : ($product['brand'] ?: $product['name']) . ' · 🛒 Esaurito';
                         $body = http_build_query([
                             'uuid' => $listUUID,
                             'purchase' => $bringName,
@@ -1420,6 +1441,7 @@ function useFromInventory(PDO $db): void {
                 } catch (Exception $e) {
                     // Silently fail — don't block inventory operation
                 }
+                } // end else (family not covered)
             }
         }
     }
