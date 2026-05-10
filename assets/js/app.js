@@ -12427,20 +12427,23 @@ function _looksLikeRecipe(text) {
 async function chatTransferToRecipes(btn, replyText) {
     btn.disabled = true;
     btn.textContent = '⏳ ' + (t('chat.transferring') || 'Trasferimento in corso...');
+    const resetBtn = () => {
+        btn.disabled = false;
+        btn.textContent = '📥 ' + (t('chat.transfer_to_recipes') || 'Trasferisci a Ricette');
+    };
     try {
         const settings = getSettings();
         const result = await api('chat_to_recipe', {}, 'POST', {
             text: replyText,
             lang: settings.lang || 'it'
         });
-        if (!result.success || !result.recipe) {
-            btn.disabled = false;
-            btn.textContent = '📥 ' + (t('chat.transfer_to_recipes') || 'Trasferisci a Ricette');
-            showToast('⚠️ ' + (result.error || t('error.generic')), 'error');
+        if (!result || !result.success || !result.recipe) {
+            resetBtn();
+            showToast('⚠️ ' + (result?.error || t('error.generic') || 'Errore'), 'error');
             return;
         }
         const recipe = result.recipe;
-        // Normalize field names: renderRecipe expects `persons`, Gemini might return `servings`
+        // renderRecipe expects `persons`; Gemini might return `servings`
         if (!recipe.persons && recipe.servings) recipe.persons = recipe.servings;
         if (!recipe.persons) recipe.persons = 2;
         await saveRecipeToArchive(recipe);
@@ -12451,10 +12454,11 @@ async function chatTransferToRecipes(btn, replyText) {
         document.getElementById('recipe-loading').style.display = 'none';
         document.getElementById('recipe-result').style.display = '';
         btn.textContent = '✅ ' + (t('chat.transferred') || 'Aggiunta alle Ricette!');
+        showToast('✅ ' + (t('chat.transferred') || 'Aggiunta alle Ricette!'), 'success');
     } catch (err) {
-        btn.disabled = false;
-        btn.textContent = '📥 ' + (t('chat.transfer_to_recipes') || 'Trasferisci a Ricette');
-        showToast('⚠️ ' + (t('error.connection') || 'Errore di connessione'), 'error');
+        console.error('[chatTransferToRecipes]', err);
+        resetBtn();
+        showToast('⚠️ ' + (err.message || t('error.connection') || 'Errore di connessione'), 'error');
     }
 }
 
@@ -12496,15 +12500,17 @@ async function sendChatMessage() {
         
         if (result.success) {
             chatHistory.push({ role: 'gemini', text: result.reply });
-            const bubble = appendChatBubble('gemini', formatChatReply(result.reply));
-            // If reply looks like a recipe, append "Trasferisci a Ricette" button
+            appendChatBubble('gemini', formatChatReply(result.reply));
+            // If reply looks like a recipe, add transfer button as SEPARATE element below bubble
             if (_looksLikeRecipe(result.reply)) {
                 const replyText = result.reply;
+                const container = document.getElementById('chat-messages');
                 const transferBtn = document.createElement('button');
                 transferBtn.className = 'btn-chat-use-recipe';
                 transferBtn.textContent = '📥 ' + (t('chat.transfer_to_recipes') || 'Trasferisci a Ricette');
                 transferBtn.onclick = () => chatTransferToRecipes(transferBtn, replyText);
-                bubble.appendChild(transferBtn);
+                container.appendChild(transferBtn);
+                scrollChatBottom();
             }
         } else {
             const errMsg = result.error === 'no_api_key' ? 'Configura la chiave API Gemini nelle impostazioni.' : (result.error || 'Errore nella risposta');
