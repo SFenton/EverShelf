@@ -111,7 +111,7 @@ function checkRateLimit(string $action): void {
     }
 
     // Determine limit based on action
-    $aiActions = ['gemini_readExpiry', 'gemini_chat', 'gemini_identify', 'gemini_suggest_shopping', 'chat_extract_recipe'];
+    $aiActions = ['gemini_readExpiry', 'gemini_chat', 'gemini_identify', 'gemini_suggest_shopping', 'chat_to_recipe'];
     $loginActions = [];
     $recipeActions = ['generate_recipe', 'generate_recipe_stream'];
     $errorActions = ['report_error', 'check_update'];
@@ -335,8 +335,8 @@ try {
             geminiChat($db);
             break;
 
-        case 'chat_extract_recipe':
-            chatExtractRecipe($db);
+        case 'chat_to_recipe':
+            chatToRecipe($db);
             break;
 
         // ===== BRING! SHOPPING LIST =====
@@ -3595,8 +3595,8 @@ PROMPT;
     }
 }
 
-// ===== CHAT: EXTRACT RECIPE INGREDIENTS =====
-function chatExtractRecipe(PDO $db): void {
+// ===== CHAT: CONVERT CHAT RECIPE TO STRUCTURED RECIPE =====
+function chatToRecipe(PDO $db): void {
     $apiKey = env('GEMINI_API_KEY');
     if (empty($apiKey)) {
         echo json_encode(['success' => false, 'error' => 'no_api_key']);
@@ -3605,6 +3605,7 @@ function chatExtractRecipe(PDO $db): void {
 
     $input = json_decode(file_get_contents('php://input'), true);
     $replyText = trim($input['text'] ?? '');
+    $lang = recipeNormalizeLang($input['lang'] ?? 'it');
 
     if (empty($replyText)) {
         echo json_encode(['success' => false, 'error' => 'empty_text']);
@@ -3622,9 +3623,25 @@ function chatExtractRecipe(PDO $db): void {
     ");
     $items = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
-    // --- Gemini call: extract ingredient list only (no inventory in prompt → tiny output) ---
-    // The PHP fuzzy-matching below does all the inventory matching, exactly like generateRecipe.
-    $prompt = "Extract all ingredients from the recipe text below.\nReturn ONLY a compact JSON array — no markdown, no extra text.\nEach element: {\"name\":\"...\",\"qty\":\"...\",\"qty_number\":0.0,\"unit\":\"g|ml|pz|conf|kg|l\"}\n\nRECIPE:\n{$replyText}";
+    // Ask Gemini to convert the chat recipe text into the full structured recipe JSON.
+    // Prompt is tiny — no inventory sent to Gemini (PHP does all the matching below).
+    $prompt = <<<PROMPT
+Convert the recipe text below to a JSON object. Return ONLY the JSON, no markdown.
+
+Fields:
+- title: string
+- meal: one of "colazione","pranzo","cena","dolce","succo" (infer from context, default "pranzo")
+- servings: integer (default 2 if not mentioned)
+- prep_time: string or null
+- cook_time: string or null
+- ingredients: array of {"name":"...","qty":"...","qty_number":0.0,"unit":"g|ml|pz|conf|kg|l","from_pantry":true}
+  — set from_pantry=true for ALL ingredients (pantry matching is done server-side)
+- steps: array of strings (one string per step, plain text without step numbers)
+- nutrition_note: string or null
+
+RECIPE TEXT:
+{$replyText}
+PROMPT;
 
     $payload = [
         'contents' => [['role' => 'user', 'parts' => [['text' => $prompt]]]],
@@ -3644,34 +3661,24 @@ function chatExtractRecipe(PDO $db): void {
         return;
     }
 
-    // Strip markdown code fences if present
     $text = preg_replace('/^```(?:json)?\s*/i', '', $text);
     $text = preg_replace('/\s*```$/i', '', $text);
     $text = trim($text);
 
-    $ingredients = json_decode($text, true);
-    if (!is_array($ingredients) || empty($ingredients)) {
+    $recipe = json_decode($text, true);
+    if (!is_array($recipe) || empty($recipe['title'])) {
         echo json_encode(['success' => false, 'error' => 'parse_error', 'raw' => mb_substr($text, 0, 500)]);
         return;
     }
 
-    // Mark all extracted ingredients as from_pantry=true so the enrichment logic tries to match them all
-    foreach ($ingredients as &$ing) {
-        $ing['from_pantry'] = true;
-    }
-    unset($ing);
-
-    // PHP fuzzy-match against full inventory — same logic as generateRecipe
-    _enrichChatIngredients($ingredients, $items);
-
-    // Extract recipe title from the reply text (look for bold title at start)
-    $recipeTitle = '';
-    if (preg_match('/\*\*([^*\n]{3,60})\*\*/u', $replyText, $m)) {
-        $recipeTitle = trim($m[1]);
+    // Enrich ingredients with product_id/location — same fuzzy-match as generateRecipe
+    if (!empty($recipe['ingredients'])) {
+        _enrichChatIngredients($recipe['ingredients'], $items);
     }
 
-    echo json_encode(['success' => true, 'ingredients' => $ingredients, 'title' => $recipeTitle]);
+    echo json_encode(['success' => true, 'recipe' => $recipe]);
 }
+
 
 function _enrichChatIngredients(array &$ingredients, array $items): void {
     if (empty($ingredients) || empty($items)) return;
