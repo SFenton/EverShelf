@@ -9,7 +9,37 @@
 
 define('DB_PATH', __DIR__ . '/../data/evershelf.db');
 
+/**
+ * Ensure the data directory exists and is writable by the web-server user.
+ * This is needed when a Docker volume is first mounted: the image's chown
+ * step is applied to the image layer, but a fresh named volume starts empty
+ * (owned by root), making SQLite's PDO::__construct fail with HY000[14].
+ */
+function _ensureDataDir(): void {
+    $dir = dirname(DB_PATH);
+    if (!is_dir($dir)) {
+        if (!mkdir($dir, 0775, true) && !is_dir($dir)) {
+            throw new \RuntimeException("Cannot create data directory: $dir");
+        }
+    }
+    if (!is_writable($dir)) {
+        // Try to fix permissions (only works when running as root, e.g. first boot)
+        @chmod($dir, 0775);
+        if (!is_writable($dir)) {
+            throw new \RuntimeException(
+                "Data directory is not writable: $dir — run: chown -R www-data:www-data $dir"
+            );
+        }
+    }
+    // Ensure backups sub-directory exists too
+    $backups = $dir . '/backups';
+    if (!is_dir($backups)) {
+        @mkdir($backups, 0775, true);
+    }
+}
+
 function getDB(): PDO {
+    _ensureDataDir();
     $isNew = !file_exists(DB_PATH);
     $db = new PDO('sqlite:' . DB_PATH);
     $db->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
