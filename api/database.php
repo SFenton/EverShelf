@@ -365,7 +365,7 @@ function estimateOpenedExpiryDaysPHP(string $name, string $category, string $loc
     if (preg_match('/latte\s+(uht|a\s+lunga)/', $n)) return 7;
     // Long-life mountain/brand milks stored in pantry before use (UHT)
     if (preg_match('/latte.*(montagna|alta\s+qual|parmalat|granarolo|esselunga|conservaz|microfiltrat)/i', $n)) return 7;
-    if (preg_match('/\blatte\b/', $n)) return 4;
+    if (preg_match('/\blatte\b/', $n)) return 7; // generic: default to UHT (most common in IT households)
     if (preg_match('/\b(yogurt|yaourt|yoghurt)\b/', $n)) return 5;
     if (preg_match('/mozzarella|burrata|stracciatella/', $n)) return 3;
     if (preg_match('/philadelphia|spalmabile/', $n)) return 7;
