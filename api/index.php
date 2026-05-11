@@ -2144,45 +2144,23 @@ function getConsumptionPredictions(PDO $db): void {
 
         $restockDate = strtotime($restock['created_at']);
 
-        // Sum ALL 'in' transactions within 24h of the last restock (= one shopping session).
-        // Using only the last single transaction as restockQty causes false positives when
-        // the user scans multiple items separately (e.g. 3 mozzarelle one by one).
-        $sessionIn = $db->prepare("
-            SELECT SUM(quantity) as total
+        // Baseline = current inventory + what was consumed since the last restock.
+        // This avoids false positives when pre-existing stock + new restock exceeds
+        // what the model expected from the restock alone.
+        $consumedSinceRestock = $db->prepare("
+            SELECT COALESCE(SUM(quantity), 0)
             FROM transactions
-            WHERE product_id = ? AND location = ? AND type = 'in' AND undone = 0
-              AND created_at >= datetime(?, '-24 hours')
+            WHERE product_id = ? AND location = ? AND type = 'out' AND undone = 0
+              AND created_at >= datetime(?, 'unixepoch')
         ");
-        $sessionIn->execute([$pid, $loc, $restock['created_at']]);
-        $restockQty = floatval($sessionIn->fetchColumn() ?: $restock['quantity']);
+        $consumedSinceRestock->execute([$pid, $loc, $restockDate]);
+        $usedSinceRestock = floatval($consumedSinceRestock->fetchColumn() ?: 0);
 
-        // If inventory was manually edited (updated_at > last restock), use the
-        // manual update as baseline instead — otherwise the prediction is comparing
-        // against a stale restock quantity that no longer reflects reality.
-        $lastManualUpdate = strtotime($item['updated_at']);
-        if ($lastManualUpdate > $restockDate) {
-            // Inventory was manually corrected after last restock → use current qty
-            // as a fresh baseline from that point; only consider OUT transactions
-            // that happened AFTER the manual update.
-            $txnsSinceUpdate = $db->prepare("
-                SELECT SUM(quantity) as total
-                FROM transactions
-                WHERE product_id = ? AND location = ? AND type = 'out'
-                  AND created_at > ?
-            ");
-            $txnsSinceUpdate->execute([$pid, $loc, $item['updated_at']]);
-            $usedSinceUpdate = floatval($txnsSinceUpdate->fetchColumn() ?: 0);
-            $daysSinceBaseline = max(1, (time() - $lastManualUpdate) / 86400);
-            // The effective "restock" qty is what inventory had at manual edit time
-            // which is current qty + what was consumed since then
-            $restockQty = floatval($item['quantity']) + $usedSinceUpdate;
-            $restockDate = $lastManualUpdate;
-        }
-
+        $baselineQty = floatval($item['quantity']) + $usedSinceRestock;
         $daysSinceRestock = max(1, (time() - $restockDate) / 86400);
 
-        // Predicted remaining qty = restock qty - (daily rate * days since restock)
-        $expectedQty = max(0, $restockQty - ($dailyRate * $daysSinceRestock));
+        // Predicted remaining qty = baseline - (daily rate * days since restock)
+        $expectedQty = max(0, $baselineQty - ($dailyRate * $daysSinceRestock));
         $actualQty   = floatval($item['quantity']);
 
         // Flag if deviation > 30% and absolute diff > meaningful threshold
