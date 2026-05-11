@@ -1669,7 +1669,7 @@ function estimateOpenedExpiryDays(product, location) {
     if (/latte\s+(uht|a\s+lunga)/.test(name)) return 7;
     // Long-life mountain/brand milks stored in pantry before use (UHT)
     if (/latte.*(montagna|alta\s+qual|parmalat|granarolo|esselunga|conservaz|microfiltrat)/i.test(name)) return 7;
-    if (/\blatte\b/.test(name)) return 4;
+    if (/\blatte\b/.test(name)) return 7; // generic: default to UHT (most common in IT households)
     if (/\b(yogurt|yaourt|yoghurt)\b/.test(name)) return 5;
     if (/mozzarella|burrata|stracciatella/.test(name)) return 3;
     if (/philadelphia|spalmabile/.test(name)) return 7;
