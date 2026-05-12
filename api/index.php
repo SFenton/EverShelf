@@ -2117,7 +2117,7 @@ function getConsumptionPredictions(PDO $db): void {
         $txns->execute([$pid, $loc]);
         $rows = $txns->fetchAll(PDO::FETCH_ASSOC);
 
-        if (count($rows) < 3) continue; // Need at least 3 data points
+        if (count($rows) < 5) continue; // Need at least 5 data points for a reliable rate
 
         // Calculate average daily consumption
         $totalUsed = 0;
@@ -2125,7 +2125,9 @@ function getConsumptionPredictions(PDO $db): void {
 
         $firstDate = strtotime($rows[0]['created_at']);
         $lastDate  = strtotime($rows[count($rows) - 1]['created_at']);
-        $daySpan   = max(1, ($lastDate - $firstDate) / 86400);
+        $daySpan   = ($lastDate - $firstDate) / 86400;
+        // If all transactions are clustered within a week, the rate is unreliable
+        if ($daySpan < 7) continue;
         $dailyRate = $totalUsed / $daySpan;
 
         if ($dailyRate < 0.01) continue; // negligible consumption
@@ -2159,6 +2161,12 @@ function getConsumptionPredictions(PDO $db): void {
 
         $baselineQty = floatval($item['quantity']) + $usedSinceRestock;
         $daysSinceRestock = max(1, (time() - $restockDate) / 86400);
+
+        // If the model predicts you should have consumed less than 15% of baseline
+        // in this period, the daily rate is too low to make reliable predictions:
+        // any single normal use will look like an anomaly. Skip it.
+        $predictedConsumption = $dailyRate * $daysSinceRestock;
+        if ($baselineQty > 0 && $predictedConsumption < $baselineQty * 0.15) continue;
 
         // Predicted remaining qty = baseline - (daily rate * days since restock)
         $expectedQty = max(0, $baselineQty - ($dailyRate * $daysSinceRestock));
