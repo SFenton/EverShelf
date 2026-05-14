@@ -1,8 +1,11 @@
 package it.dadaloop.evershelf.kiosk
 
+import android.app.ActivityManager
+import android.app.ApplicationExitInfo
 import android.content.Context
 import android.os.Build
 import android.util.Log
+import androidx.annotation.RequiresApi
 import org.json.JSONObject
 import java.io.OutputStreamWriter
 import java.net.HttpURLConnection
@@ -40,7 +43,9 @@ object ErrorReporter {
 
     // SharedPreferences for crash persistence
     private const val PREFS_NAME  = "evershelf_kiosk_errors"
-    private const val KEY_PENDING = "pending_crash_json"
+    private const val KEY_PENDING     = "pending_crash_json"
+    private const val KEY_WAS_RUNNING = "was_running_dirty"
+    private const val KEY_LAST_EXIT_TS = "last_reported_exit_ts"
 
     private val executor = Executors.newSingleThreadExecutor()
 
@@ -76,6 +81,9 @@ object ErrorReporter {
         // Send any crash that was saved to prefs during a previous session
         sendPendingCrash()
 
+        // Detect ANR / OOM / native crashes from the previous run
+        detectPreviousCrash()
+
         // Install a global UncaughtExceptionHandler so ANY unhandled crash is reported
         val previousHandler = Thread.getDefaultUncaughtExceptionHandler()
         Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
@@ -93,6 +101,17 @@ object ErrorReporter {
             } catch (_: Exception) {}
             // Re-throw to the previous handler so the system crash dialog/restart still works
             previousHandler?.uncaughtException(thread, throwable)
+        }
+    }
+
+    /**
+     * Call from Activity.onDestroy() on a *clean* exit (back-pressed, settings, shutdown).
+     * Clears the dirty-launch sentinel so the next start does not report a false positive.
+     */
+    fun markCleanStop() {
+        if (::appContext.isInitialized) {
+            appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .edit().putBoolean(KEY_WAS_RUNNING, false).apply()
         }
     }
 
@@ -131,6 +150,96 @@ object ErrorReporter {
     }
 
     // ── Internal ─────────────────────────────────────────────────────────────
+
+    /**
+     * Detects whether the *previous* run of the app ended with a crash, ANR or OOM kill.
+     *
+     * On Android 11+ (API 30) we use [ActivityManager.getHistoricalProcessExitReasons] which
+     * gives the exact reason and (for Java crashes) a stack trace.
+     *
+     * On Android 7–10 we use a "dirty-launch sentinel": a boolean in SharedPreferences that is
+     * set to `true` on every start and `false` only when the activity is destroyed cleanly via
+     * [markCleanStop]. If it is still `true` on the next start, the previous run was not clean.
+     */
+    private fun detectPreviousCrash() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            detectExitReasonApi30()
+        } else {
+            // API 24–29: dirty-launch sentinel
+            val prefs = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            if (prefs.getBoolean(KEY_WAS_RUNNING, false)) {
+                reportAsync(
+                    type    = "crash-sentinel",
+                    message = "App was not cleanly shut down on previous run (ANR / OOM / native crash suspected).",
+                    stack   = "",
+                    context = mapOf(
+                        "device" to deviceInfo,
+                        "note"   to "Detected via dirty-launch sentinel (API ${Build.VERSION.SDK_INT})"
+                    )
+                )
+            }
+        }
+        // Mark this launch as running — will be cleared by markCleanStop() on clean exit
+        appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit().putBoolean(KEY_WAS_RUNNING, true).apply()
+    }
+
+    @RequiresApi(Build.VERSION_CODES.R)
+    private fun detectExitReasonApi30() {
+        try {
+            val am = appContext.getSystemService(ActivityManager::class.java) ?: return
+            // Check the last 5 exits; stop at the first we already reported
+            val exits = am.getHistoricalProcessExitReasons(null, 0, 5)
+            if (exits.isEmpty()) return
+
+            val prefs         = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            val lastReportedTs = prefs.getLong(KEY_LAST_EXIT_TS, 0L)
+
+            val crashReasons = setOf(
+                ApplicationExitInfo.REASON_CRASH,
+                ApplicationExitInfo.REASON_CRASH_NATIVE,
+                ApplicationExitInfo.REASON_ANR,
+                ApplicationExitInfo.REASON_LOW_MEMORY
+            )
+
+            var newestTs = lastReportedTs
+            for (exit in exits) {
+                if (exit.timestamp <= lastReportedTs) continue     // already reported
+                if (exit.reason !in crashReasons) continue
+
+                val reasonName = when (exit.reason) {
+                    ApplicationExitInfo.REASON_CRASH        -> "crash-java"
+                    ApplicationExitInfo.REASON_CRASH_NATIVE -> "crash-native"
+                    ApplicationExitInfo.REASON_ANR          -> "anr"
+                    ApplicationExitInfo.REASON_LOW_MEMORY   -> "oom-kill"
+                    else                                    -> "exit-${exit.reason}"
+                }
+                val msg = exit.description?.takeIf { it.isNotEmpty() }
+                    ?: "${exit.processName ?: "app"} terminated (reason ${exit.reason})"
+
+                // Java crashes include a tombstone trace — read up to 4KB
+                var stack = ""
+                try {
+                    exit.traceInputStream?.bufferedReader()?.use { stack = it.readText().take(4000) }
+                } catch (_: Exception) {}
+
+                val ctx = mutableMapOf<String, Any?>(
+                    "device"  to deviceInfo,
+                    "reason"  to exit.reason,
+                    "process" to (exit.processName ?: ""),
+                    "crash_ts" to SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(Date(exit.timestamp)),
+                    "note"    to "Detected via ApplicationExitInfo on restart (API ${Build.VERSION.SDK_INT})"
+                )
+                reportAsync(type = reasonName, message = msg, stack = stack, context = ctx)
+
+                if (exit.timestamp > newestTs) newestTs = exit.timestamp
+            }
+
+            if (newestTs > lastReportedTs) {
+                prefs.edit().putLong(KEY_LAST_EXIT_TS, newestTs).apply()
+            }
+        } catch (_: Exception) {}
+    }
 
     private fun fingerprint(type: String, message: String): String {
         val key = "$type:${message.take(120)}"

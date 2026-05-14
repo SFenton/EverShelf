@@ -1040,6 +1040,7 @@ class KioskActivity : AppCompatActivity() {
     }
 
     override fun onDestroy() {
+        ErrorReporter.markCleanStop()
         tts?.stop()
         tts?.shutdown()
         tts = null
