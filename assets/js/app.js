@@ -4820,6 +4820,9 @@ function showItemDetail(inventoryId, productId) {
 
 function closeModal() {
     document.getElementById('modal-overlay').style.display = 'none';
+    clearMoveModalTimer();
+    // Restore native kiosk settings button visibility
+    try { if (typeof _kioskBridge !== 'undefined') _kioskBridge.setNativeSettingsVisible(true); } catch (_) {}
     _cancelScaleAutoConfirm(false);
     _scaleRecipeAutoFillPaused = false;
     _scaleUserDismissed = false;
@@ -8048,14 +8051,22 @@ function closeLowStockPrompt() {
 
 let _moveModalTimer = null;
 let _moveModalRAF = null;
+let _moveModalTouchHandler = null;
 
 function clearMoveModalTimer() {
     if (_moveModalTimer) { clearTimeout(_moveModalTimer); _moveModalTimer = null; }
     if (_moveModalRAF) { cancelAnimationFrame(_moveModalRAF); _moveModalRAF = null; }
+    if (_moveModalTouchHandler) {
+        document.getElementById('modal-content')?.removeEventListener('pointerdown', _moveModalTouchHandler, true);
+        _moveModalTouchHandler = null;
+    }
 }
 
 function startMoveModalCountdown(btnId, onExpire) {
     clearMoveModalTimer();
+    // Any touch inside the modal cancels the auto-close countdown
+    _moveModalTouchHandler = () => clearMoveModalTimer();
+    document.getElementById('modal-content')?.addEventListener('pointerdown', _moveModalTouchHandler, { capture: true, once: true });
     const duration = 15000;
     const start = performance.now();
     const btn = document.getElementById(btnId);
@@ -8102,6 +8113,8 @@ function showMoveAfterUseModal(product, fromLoc, remaining, openedId, openedVacu
         </div>
     `;
     document.getElementById('modal-overlay').style.display = 'flex';
+    // Hide the native kiosk settings button while the modal is open (prevents touch bleed-through)
+    try { if (typeof _kioskBridge !== 'undefined') _kioskBridge.setNativeSettingsVisible(false); } catch (_) {}
     startMoveModalCountdown('btn-move-stay', () => { _saveVacuumAndStay(openedId || 0); });
 }
 
@@ -11729,6 +11742,8 @@ function showRecipeMoveModal(productId, fromLoc, remaining, openedId, wasVacuum)
         </div>
     `;
     document.getElementById('modal-overlay').style.display = 'flex';
+    // Hide the native kiosk settings button while the modal is open (prevents touch bleed-through)
+    try { if (typeof _kioskBridge !== 'undefined') _kioskBridge.setNativeSettingsVisible(false); } catch (_) {}
     startMoveModalCountdown('btn-move-stay', () => { closeModal(); });
 }
 

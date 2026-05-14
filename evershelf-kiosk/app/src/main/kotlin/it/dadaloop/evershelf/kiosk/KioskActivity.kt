@@ -492,6 +492,16 @@ class KioskActivity : AppCompatActivity() {
                 if (apkUrl.isBlank()) return
                 runOnUiThread { triggerApkDownload(apkUrl) }
             }
+            /**
+             * Called by the webapp when a modal is shown / hidden so the native settings
+             * button does not intercept touches that belong to the HTML modal content.
+             */
+            @JavascriptInterface
+            fun setNativeSettingsVisible(visible: Boolean) {
+                runOnUiThread {
+                    btnSettings.visibility = if (visible) View.VISIBLE else View.GONE
+                }
+            }
         }, "_kioskBridge")
 
         val url = prefs.getString(KEY_URL, "http://evershelf.local") ?: "http://evershelf.local"
