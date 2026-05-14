@@ -476,14 +476,14 @@ function _scaleAutoFillUse(msg) {
     else if (srcUnit === 'ml')  { grams = rawVal; scaleAlreadyMl = true; }
     else                                            grams = rawVal;
 
-    // Reject if raw grams < 2 (tara / rumore)
-    if (grams < 2) {
+    // Reject if raw grams < 10 (piatto vuoto / tara / rumore)
+    if (grams < 10) {
         _cancelScaleStabilityWait(); // stop bar only; keep sentinel & userDismissed
         return;
     }
 
     // Reject if weight hasn't changed enough from last confirmed reading (same product still on scale)
-    if (_scaleLastConfirmedGrams !== null && Math.abs(grams - _scaleLastConfirmedGrams) < 2) {
+    if (_scaleLastConfirmedGrams !== null && Math.abs(grams - _scaleLastConfirmedGrams) < 10) {
         return;
     }
 
@@ -508,8 +508,8 @@ function _scaleAutoFillUse(msg) {
         }
     }
 
-    // Reject if converted value < 2 (density edge case)
-    if (val < 2) {
+    // Reject if converted value < 10 (density edge case)
+    if (val < 10) {
         _scaleUserDismissed = false;
         _cancelScaleTimersOnly();
         _startScaleStabilityWait(() => {
@@ -612,15 +612,15 @@ function _scaleAutoFillRecipeUse(msg) {
         hint.style.display = '';
     }
 
-    if (val < 2) {
+    if (val < 10) {
         _cancelScaleStabilityWait(); // stop bar only; keep sentinel
         if (livLabel) livLabel.textContent = t('scale.weight_too_low');
         return;
     }
 
     // Reject if weight hasn't changed enough from last confirmed reading.
-    // Threshold: 2g — noise filter.
-    if (_scaleLastConfirmedGrams !== null && Math.abs(grams - _scaleLastConfirmedGrams) < 2) {
+    // Threshold: 5g — gives enough time to tare after opening the modal.
+    if (_scaleLastConfirmedGrams !== null && Math.abs(grams - _scaleLastConfirmedGrams) < 5) {
         return;
     }
 
