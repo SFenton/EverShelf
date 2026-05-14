@@ -83,6 +83,16 @@ class KioskActivity : AppCompatActivity() {
     private val pollHandler = Handler(Looper.getMainLooper())
     private var activeDownloadId: Long = -1
 
+    // Periodic update-check handler (fires every 30 min; internal throttle in checkForUpdates limits real API calls to every 6h)
+    private val updateCheckHandler = Handler(Looper.getMainLooper())
+    private val updateCheckRunnable = Runnable { schedulePeriodicUpdateCheck() }
+    private val UPDATE_CHECK_INTERVAL_MS = 30L * 60 * 1000  // 30 minutes
+
+    private fun schedulePeriodicUpdateCheck() {
+        checkForUpdates(forceCheck = false)
+        updateCheckHandler.postDelayed(updateCheckRunnable, UPDATE_CHECK_INTERVAL_MS)
+    }
+
     // File chooser
     private var fileChooserCallback: ValueCallback<Array<Uri>>? = null
 
@@ -104,6 +114,9 @@ class KioskActivity : AppCompatActivity() {
         private const val KIOSK_DOWNLOAD_URL = "https://github.com/dadaloop82/EverShelf/releases/download/kiosk-latest/evershelf-kiosk.apk"
         private const val SPLASH_DURATION = 1500L
         private const val GITHUB_RELEASES_API = "https://api.github.com/repos/dadaloop82/EverShelf/releases/latest"
+        // Keys for persisting a pending update across restarts
+        private const val KEY_PENDING_UPDATE_VERSION = "pending_update_version"
+        private const val KEY_PENDING_UPDATE_URL     = "pending_update_url"
     }
 
     override fun attachBaseContext(newBase: Context) {
@@ -648,7 +661,17 @@ class KioskActivity : AppCompatActivity() {
 
                 notifyJs(result)
 
-                if (!kioskNeedsUpdate) return@Thread
+                if (!kioskNeedsUpdate) {
+                    // Clear any stale pending update if the current version is now up to date
+                    prefs.edit().remove(KEY_PENDING_UPDATE_VERSION).remove(KEY_PENDING_UPDATE_URL).apply()
+                    return@Thread
+                }
+
+                // Persist the pending update so the banner reappears after a crash/restart
+                prefs.edit()
+                    .putString(KEY_PENDING_UPDATE_VERSION, latestTag)
+                    .putString(KEY_PENDING_UPDATE_URL, kioskApkUrl)
+                    .apply()
 
                 val label = if (isSemver) "$currentKiosk → $latestTag" else latestTag
                 runOnUiThread { showNativeUpdateBanner("🔄 Kiosk $label", kioskApkUrl) }
@@ -656,6 +679,33 @@ class KioskActivity : AppCompatActivity() {
                 notifyJs(JSONObject().put("has_update", false).put("error", e.message ?: "network error"))
             }
         }.start()
+    }
+
+    /**
+     * On resume: if a previous session detected an available update and saved it to prefs,
+     * restore the update banner immediately without a network round-trip.
+     */
+    private fun restorePendingUpdateBanner() {
+        val savedVersion = prefs.getString(KEY_PENDING_UPDATE_VERSION, null) ?: return
+        val savedUrl     = prefs.getString(KEY_PENDING_UPDATE_URL,     null) ?: return
+        val currentKiosk = try { packageManager.getPackageInfo(packageName, 0).versionName ?: "" } catch (_: Exception) { "" }
+        // Normalise: strip non-numeric prefix for comparison
+        val norm = { v: String -> v.replace(Regex("^[^0-9]*"), "") }
+        fun semverNewer(remote: String, local: String): Boolean {
+            val r = remote.split(".").map { it.filter(Char::isDigit).toIntOrNull() ?: 0 }
+            val l = local.split(".").map  { it.filter(Char::isDigit).toIntOrNull() ?: 0 }
+            for (i in 0 until maxOf(r.size, l.size)) {
+                val rv = r.getOrElse(i) { 0 }; val lv = l.getOrElse(i) { 0 }
+                if (rv != lv) return rv > lv
+            }
+            return false
+        }
+        if (currentKiosk.isNotEmpty() && semverNewer(norm(savedVersion), norm(currentKiosk))) {
+            showNativeUpdateBanner("🔄 Kiosk $currentKiosk → $savedVersion", savedUrl)
+        } else {
+            // Update was installed or is no longer applicable — clear the saved entry
+            prefs.edit().remove(KEY_PENDING_UPDATE_VERSION).remove(KEY_PENDING_UPDATE_URL).apply()
+        }
     }
 
     private fun showNativeUpdateBanner(message: String, apkDownloadUrl: String) {
@@ -962,6 +1012,16 @@ class KioskActivity : AppCompatActivity() {
             // Re-apply screensaver flag in case the user changed it in Settings
             applyScreensaverFlag()
         }
+        // Show banner immediately if there is a pending update detected in a previous session
+        restorePendingUpdateBanner()
+        // Start (or restart) the periodic update check
+        updateCheckHandler.removeCallbacks(updateCheckRunnable)
+        updateCheckHandler.postDelayed(updateCheckRunnable, UPDATE_CHECK_INTERVAL_MS)
+    }
+
+    override fun onPause() {
+        super.onPause()
+        updateCheckHandler.removeCallbacks(updateCheckRunnable)
     }
 
     @Suppress("DEPRECATION")
@@ -1051,6 +1111,7 @@ class KioskActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         ErrorReporter.markCleanStop()
+        updateCheckHandler.removeCallbacks(updateCheckRunnable)
         tts?.stop()
         tts?.shutdown()
         tts = null
