@@ -12095,6 +12095,18 @@ function startCookingMode() {
     _cookingTTS = true;
     document.getElementById('cooking-title').textContent = _cookingRecipe.title || '';
     document.getElementById('cooking-tts-btn').textContent = '🔊';
+    // Tools bar
+    const toolsBar = document.getElementById('cooking-tools-bar');
+    if (toolsBar) {
+        const tools = (_cookingRecipe.tools_needed || []).filter(t => t && t.trim());
+        if (tools.length > 0) {
+            toolsBar.innerHTML = '🔧 ' + tools.map(t => `<span class="cooking-tool-chip">${t}</span>`).join('');
+            toolsBar.style.display = '';
+        } else {
+            toolsBar.style.display = 'none';
+            toolsBar.innerHTML = '';
+        }
+    }
     document.getElementById('cooking-overlay').style.display = 'flex';
     document.body.classList.add('cooking-mode-active');
     // Hide kiosk overlay — it lives outside <body> with z-index:2147483647 and would overlap cooking UI
