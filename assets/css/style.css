@@ -3103,6 +3103,36 @@ body.server-offline .bottom-nav {
     justify-content: center;
 }
 
+/* ── Bug report form ── */
+.bug-type-pills {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+.bug-type-pill {
+    flex: 1;
+    min-width: 80px;
+    padding: 7px 10px;
+    border: 1.5px solid #cbd5e1;
+    border-radius: 20px;
+    background: #fff;
+    color: #475569;
+    font-size: 0.88rem;
+    cursor: pointer;
+    transition: border-color 0.15s, background 0.15s, color 0.15s;
+    -webkit-tap-highlight-color: transparent;
+}
+.bug-type-pill.active {
+    border-color: var(--primary, #2d5016);
+    background: var(--primary, #2d5016);
+    color: #fff;
+    font-weight: 600;
+}
+.bug-type-pill:not(.active):hover {
+    border-color: var(--primary, #2d5016);
+    color: var(--primary, #2d5016);
+}
+
 .modal-detail {
     display: flex;
     flex-direction: column;

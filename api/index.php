@@ -438,6 +438,10 @@ try {
             reportError();
             break;
 
+        case 'report_bug':
+            reportBugManual();
+            break;
+
         case 'check_update':
             checkUpdate();
             break;
@@ -6895,6 +6899,86 @@ function reportError(): void {
     _createOrCommentGithubIssue(_ghToken(), GH_REPO, $source, $type, $message, $stack, $pageUrl, $ua, $version, $context);
 
     echo json_encode(['ok' => true]);
+}
+
+/**
+ * POST /api/?action=report_bug
+ *
+ * Manual bug/feature/question report submitted by the user via the in-app form.
+ * Creates a GitHub issue directly with the provided title and description.
+ *
+ * Expected JSON body:
+ *   type        string  'bug'|'feature'|'question'
+ *   title       string  Issue title (required, max 150 chars)
+ *   description string  Main description (required, max 3000 chars)
+ *   steps       string? Steps to reproduce (optional, max 2000 chars)
+ *   lang        string? UI language the user is running
+ *   url         string? Page URL
+ *   user_agent  string? Navigator UA
+ *   version     string? App version
+ */
+function reportBugManual(): void {
+    $input = json_decode(file_get_contents('php://input'), true) ?: [];
+
+    $allowedTypes = ['bug', 'feature', 'question'];
+    $type  = in_array($input['type'] ?? '', $allowedTypes, true) ? $input['type'] : 'bug';
+    $title = substr(trim($input['title']       ?? ''), 0, 150);
+    $desc  = substr(trim($input['description'] ?? ''), 0, 3000);
+    $steps = substr(trim($input['steps']       ?? ''), 0, 2000);
+    $ua    = substr(trim($input['user_agent']  ?? ($_SERVER['HTTP_USER_AGENT'] ?? '')), 0, 300);
+    $url   = substr(trim($input['url']         ?? ''), 0, 300);
+    $ver   = substr(trim($input['version']     ?? ''), 0, 50);
+    $lang  = preg_replace('/[^a-z\-]/', '', strtolower($input['lang'] ?? 'it'));
+
+    if (empty($title) || empty($desc)) {
+        echo json_encode(['ok' => false, 'error' => 'title and description required']);
+        return;
+    }
+
+    $token = _ghToken();
+    if (!$token) {
+        // No GitHub token configured — log locally and return ok so the UX is not broken
+        _appendErrorLog('pwa', 'manual_report', $title, $desc, $url, $ua, ['type' => $type, 'version' => $ver, 'lang' => $lang]);
+        echo json_encode(['ok' => true, 'issue' => null]);
+        return;
+    }
+
+    // Labels: always 'user-report' + type-specific label
+    $labelMap = [
+        'bug'      => ['bug',         'user-report'],
+        'feature'  => ['enhancement', 'user-report'],
+        'question' => ['question',    'user-report'],
+    ];
+    $labels = $labelMap[$type];
+
+    $typeEmoji = ['bug' => '🐛', 'feature' => '💡', 'question' => '❓'][$type];
+    $ts = date('Y-m-d H:i:s T');
+
+    $body  = "## {$typeEmoji} User Report\n\n";
+    $body .= "**Description:**\n{$desc}\n\n";
+    if ($steps) {
+        $body .= "**Steps to reproduce:**\n{$steps}\n\n";
+    }
+    $body .= "---\n";
+    $body .= "**Version:** `{$ver}`  \n";
+    $body .= "**Language:** `{$lang}`  \n";
+    if ($url) $body .= "**URL:** `{$url}`  \n";
+    if ($ua)  $body .= "**User-Agent:** `{$ua}`  \n";
+    $body .= "**Reported at:** {$ts}\n\n";
+    $body .= "_This issue was submitted via the in-app bug report form._";
+
+    $res = _githubRequest($token, 'POST',
+        'https://api.github.com/repos/' . GH_REPO . '/issues',
+        ['title' => $title, 'body' => $body, 'labels' => $labels]
+    );
+
+    $issueNum = $res['body']['number'] ?? null;
+    $issueUrl = $res['body']['html_url'] ?? null;
+    if ($issueNum) {
+        echo json_encode(['ok' => true, 'issue' => $issueNum, 'url' => $issueUrl]);
+    } else {
+        echo json_encode(['ok' => false, 'error' => 'github_api_error']);
+    }
 }
 
 /**

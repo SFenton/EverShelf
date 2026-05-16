@@ -2100,51 +2100,124 @@ async function _loadAboutSection() {
  * Manually triggered bug report from the About section in Settings.
  * Collects basic info and submits via the existing report_error endpoint.
  */
-async function reportBugManual() {
-    const btn = document.getElementById('btn-report-bug');
-    const statusEl = document.getElementById('report-bug-status');
-    if (!btn || !statusEl) return;
+function reportBugManual() {
+    const mc = document.getElementById('modal-content');
+    if (!mc) return;
 
-    btn.disabled = true;
+    mc.innerHTML = `
+        <div class="modal-header">
+            <h3>${t('about.report_bug_modal_title')}</h3>
+            <button class="modal-close" onclick="closeModal()">✕</button>
+        </div>
+        <div style="padding:16px 20px 20px">
+            <div style="margin-bottom:14px">
+                <div class="bug-type-pills">
+                    <button type="button" class="bug-type-pill active" data-btype="bug">🐛 ${t('about.report_type_bug')}</button>
+                    <button type="button" class="bug-type-pill" data-btype="feature">💡 ${t('about.report_type_feature')}</button>
+                    <button type="button" class="bug-type-pill" data-btype="question">❓ ${t('about.report_type_question')}</button>
+                </div>
+            </div>
+            <div style="margin-bottom:12px">
+                <label class="settings-label" style="display:block;margin-bottom:4px">${t('about.report_field_title')} *</label>
+                <input type="text" id="bug-form-title" maxlength="150" autocomplete="off"
+                    placeholder="${t('about.report_field_title_ph')}"
+                    style="width:100%;box-sizing:border-box;padding:9px 11px;border:1.5px solid #cbd5e1;border-radius:8px;font-size:0.95rem;background:#fff;color:#1e293b;outline:none">
+            </div>
+            <div style="margin-bottom:12px">
+                <label class="settings-label" style="display:block;margin-bottom:4px">${t('about.report_field_desc')} *</label>
+                <textarea id="bug-form-desc" rows="4" maxlength="3000"
+                    placeholder="${t('about.report_field_desc_ph')}"
+                    style="width:100%;box-sizing:border-box;padding:9px 11px;border:1.5px solid #cbd5e1;border-radius:8px;font-size:0.95rem;resize:vertical;background:#fff;color:#1e293b;outline:none;font-family:inherit"></textarea>
+            </div>
+            <div id="bug-form-steps-group" style="margin-bottom:12px">
+                <label class="settings-label" style="display:block;margin-bottom:4px">${t('about.report_field_steps')}</label>
+                <textarea id="bug-form-steps" rows="3" maxlength="2000"
+                    placeholder="${t('about.report_field_steps_ph')}"
+                    style="width:100%;box-sizing:border-box;padding:9px 11px;border:1.5px solid #cbd5e1;border-radius:8px;font-size:0.95rem;resize:vertical;background:#fff;color:#1e293b;outline:none;font-family:inherit"></textarea>
+            </div>
+            <p class="settings-hint" style="margin:0 0 14px;font-size:0.78rem">
+                ${t('about.report_auto_info').replace('{version}', _loadedVersion || '—').replace('{lang}', _currentLang || '—')}
+            </p>
+            <div style="display:flex;gap:8px;justify-content:flex-end">
+                <button type="button" class="btn btn-secondary" onclick="closeModal()">${t('common.cancel') || 'Annulla'}</button>
+                <button type="button" class="btn btn-primary" id="bug-form-submit" onclick="_submitBugReport()">
+                    ${t('about.report_send_btn')}
+                </button>
+            </div>
+            <div id="bug-form-status" style="display:none;margin-top:10px;text-align:center;font-size:0.88rem;padding:8px;border-radius:6px"></div>
+        </div>
+    `;
+    document.getElementById('modal-overlay').style.display = 'flex';
+
+    // Pill click: switch type, show/hide steps field
+    mc.querySelectorAll('.bug-type-pill').forEach(pill => {
+        pill.addEventListener('click', () => {
+            mc.querySelectorAll('.bug-type-pill').forEach(p => p.classList.remove('active'));
+            pill.classList.add('active');
+            const stepsGroup = document.getElementById('bug-form-steps-group');
+            if (stepsGroup) stepsGroup.style.display = (pill.dataset.btype === 'bug') ? '' : 'none';
+        });
+    });
+}
+
+async function _submitBugReport() {
+    const submitBtn = document.getElementById('bug-form-submit');
+    const statusEl  = document.getElementById('bug-form-status');
+    const titleEl   = document.getElementById('bug-form-title');
+    const descEl    = document.getElementById('bug-form-desc');
+    const stepsEl   = document.getElementById('bug-form-steps');
+    const activePill = document.querySelector('#modal-content .bug-type-pill.active');
+
+    const title = titleEl?.value.trim() || '';
+    const desc  = descEl?.value.trim()  || '';
+    const steps = stepsEl?.value.trim() || '';
+    const type  = activePill?.dataset.btype || 'bug';
+
+    // Inline validation
+    if (!title) {
+        titleEl.style.borderColor = '#dc2626';
+        titleEl.focus();
+        return;
+    }
+    if (!desc) {
+        descEl.style.borderColor = '#dc2626';
+        descEl.focus();
+        return;
+    }
+
+    submitBtn.disabled = true;
     statusEl.style.display = '';
+    statusEl.style.background = '#f1f5f9';
     statusEl.style.color = '#64748b';
     statusEl.textContent = t('about.report_bug_sending');
 
-    const manifest = await fetch('manifest.json?_=' + Date.now()).then(r => r.json()).catch(() => ({}));
-
     try {
-        const res = await fetch(API_BASE + '?action=report_error', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                source: 'pwa',
-                type: 'manual_report',
-                message: 'Manual bug report submitted from Settings → About',
-                stack: '',
-                url: location.href,
-                user_agent: navigator.userAgent,
-                version: manifest.version || '',
-                context: {
-                    lang: _currentLang,
-                    online: navigator.onLine,
-                    version_guard_bypass: true,
-                }
-            })
+        const res = await api('report_bug', null, 'POST', {
+            type,
+            title,
+            description: desc,
+            steps,
+            user_agent: navigator.userAgent,
+            url: location.href,
+            version: _loadedVersion || '',
+            lang: _currentLang || 'it',
         });
-        const json = await res.json();
-        if (json.ok) {
+
+        if (res.ok) {
+            statusEl.style.background = '#dcfce7';
             statusEl.style.color = '#15803d';
-            statusEl.textContent = t('about.report_bug_sent');
-            // Open GitHub issues so user can add details
-            setTimeout(() => window.open('https://github.com/dadaloop82/EverShelf/issues', '_blank', 'noopener'), 800);
+            const issueRef = res.issue ? ` (#${res.issue})` : '';
+            statusEl.textContent = t('about.report_bug_sent') + issueRef;
+            submitBtn.style.display = 'none';
+            setTimeout(() => closeModal(), 3500);
         } else {
-            throw new Error(json.error || 'error');
+            throw new Error(res.error || 'error');
         }
     } catch(e) {
+        statusEl.style.background = '#fee2e2';
         statusEl.style.color = '#dc2626';
         statusEl.textContent = t('about.report_bug_error');
-    } finally {
-        btn.disabled = false;
+        submitBtn.disabled = false;
     }
 }
 
