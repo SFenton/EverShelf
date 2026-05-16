@@ -3926,11 +3926,12 @@ async function loadBannerAlerts() {
     if (!banner) { _bannerLoading = false; console.warn('[Banner] #alert-banner not found'); return; }
 
     try {
-        const [invData, predData, anomalyData, finishedData] = await Promise.all([
+        const [invData, predData, anomalyData, finishedData, statsData] = await Promise.all([
             api('inventory_list'),
             api('consumption_predictions').catch(err => { console.warn('[Banner] predictions fetch failed:', err); return { predictions: [] }; }),
             api('inventory_anomalies').catch(err => { console.warn('[Banner] anomalies fetch failed:', err); return { anomalies: [] }; }),
             api('inventory_finished_items').catch(err => { console.warn('[Banner] finished_items fetch failed:', err); return { finished: [] }; }),
+            api('stats').catch(() => ({ opened: [] })),
         ]);
         const items = invData.inventory || [];
         const confirmed = getReviewConfirmed();
@@ -3969,6 +3970,18 @@ async function loadBannerAlerts() {
             if (getExpiredSafety(item, daysExpired).level === 'ok') return;
             _bannerQueue.push({ type: 'expired', data: { ...item, days_expired: daysExpired } });
             _queuedItemIds.add(item.id);
+        });
+
+        // 1b. Opened items the SERVER considers not edible (is_edible=false from stats).
+        // The client-side getExpiredSafety check above uses conservative thresholds (e.g.
+        // conserve are 'ok' for 30 days past), but the server uses product-specific AI shelf
+        // life. Trust the server: any opened item with is_edible=false that isn't already
+        // queued goes into the banner as expired.
+        const openedNotEdible = (statsData.opened || []).filter(oi => !oi.is_edible && !_queuedItemIds.has(oi.id) && !confirmed['exp_' + oi.id]);
+        openedNotEdible.forEach(oi => {
+            const daysOI = Math.abs(oi.days_to_expiry ?? 0);
+            _bannerQueue.push({ type: 'expired', data: { ...oi, days_expired: daysOI } });
+            _queuedItemIds.add(oi.id);
         });
 
         // 2. Suspicious quantities ("expiring soon" shown only in dashboard sections, not in banner)
