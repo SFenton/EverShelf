@@ -14276,6 +14276,8 @@ function initSpesaMode() {
     if (!btn) return;
 
     btn.addEventListener('pointerdown', (e) => {
+        e.preventDefault(); // prevent browser-generated synthetic click + 300ms delay
+        btn.setPointerCapture(e.pointerId); // ensure pointerup always fires on this element even if finger drifts
         _longPressTimer = setTimeout(() => {
             _longPressTimer = null;
             startSpesaMode();
@@ -14289,12 +14291,14 @@ function initSpesaMode() {
             showPage('scan');
         }
     });
-    btn.addEventListener('pointerleave', () => {
+    btn.addEventListener('pointercancel', () => {
+        // OS cancelled gesture (e.g. home swipe) — discard timer, do nothing
         if (_longPressTimer) {
             clearTimeout(_longPressTimer);
             _longPressTimer = null;
         }
     });
+    // Note: no pointerleave handler needed — setPointerCapture prevents it from firing during touch
 }
 
 function startSpesaMode() {

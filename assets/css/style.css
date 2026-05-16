@@ -279,6 +279,7 @@ body {
     height: 48px;
     box-shadow: 0 2px 8px rgba(0,0,0,0.18);
     animation: pulse-scan 2s ease-in-out infinite;
+    touch-action: manipulation; /* prevent 300ms delay and double-tap zoom on mobile */
 }
 .header-scan-btn:active {
     background: rgba(255,255,255,0.45);
