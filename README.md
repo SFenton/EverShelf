@@ -104,7 +104,7 @@
 - **Stability + auto-confirm** — 10s stable wait + 5s countdown before confirming
 - **Real-time status** — Scale connection indicator always visible in the header
 - **Multi-protocol** — Supports Bluetooth SIG Weight Scale, Body Composition, Xiaomi Mi Scale 2 and 100+ models
-- **Built into kiosk (v1.6.0+)** — BLE gateway runs as an integrated foreground service inside the [EverShelf Kiosk](evershelf-kiosk/) app; no separate APK needed. The standalone gateway app in [`evershelf-scale-gateway/`](evershelf-scale-gateway/) is deprecated but kept for non-kiosk use cases.
+- **Built into kiosk (v1.6.0+)** — BLE gateway runs as an integrated foreground service inside the [EverShelf Kiosk](evershelf-kiosk/) app; no separate APK needed.
 
 ### 📺 Android Kiosk Mode (Add-on)
 - **Dedicated tablet app** — Full-screen WebView wrapper for wall-mounted kitchen tablets
