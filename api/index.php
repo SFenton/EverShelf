@@ -3020,6 +3020,7 @@ PROMPT;
                 'error_empty_reply' => 'Risposta vuota da Gemini',
                 'prompt_lang_rule' => 'IMPORTANTE: scrivi tutti i campi testuali della ricetta in Italiano.',
                 'prompt_step_example' => 'Passo 1…',
+                'tools_title' => 'Strumenti necessari',
             ],
             'en' => [
                 'status_analyze_pantry' => '📦 Analyzing pantry...',
@@ -3042,6 +3043,7 @@ PROMPT;
                 'error_empty_reply' => 'Empty response from Gemini',
                 'prompt_lang_rule' => 'IMPORTANT: write all textual recipe fields in English only. Do not use Italian or German.',
                 'prompt_step_example' => 'Step 1…',
+                'tools_title' => 'Equipment needed',
             ],
             'de' => [
                 'status_analyze_pantry' => '📦 Vorrat wird analysiert...',
@@ -3064,6 +3066,7 @@ PROMPT;
                 'error_empty_reply' => 'Leere Antwort von Gemini',
                 'prompt_lang_rule' => 'WICHTIG: schreibe alle textuellen Rezeptfelder nur auf Deutsch. Verwende kein Italienisch oder Englisch.',
                 'prompt_step_example' => 'Schritt 1…',
+                'tools_title' => 'Benötigte Geräte',
             ],
         ];
         $text = $dict[$lang][$key] ?? $dict['it'][$key] ?? $key;
@@ -3441,14 +3444,15 @@ REGOLE:
 4. "qty_number": valore NUMERICO nella STESSA unità della dispensa (g/ml/pz/conf, MAI kg o litri). Per non-dispensa: 0. IMPORTANTE: per ingredienti con unità "pz" scrivi qty_number come numero di PEZZI (es. 2, non 200g).
 5. "name": usa ESATTAMENTE il nome dalla lista (il sistema lo usa per scalare l'inventario).
 6. Includi nella lista ingredienti TUTTI quelli citati nei passi (tranne acqua/sale/pepe/olio).
-7. Language rule: {$recipeLangName} only for all textual fields (`title`, `tags`, `expiry_note`, `ingredients.qty`, `steps`, `nutrition_note`). Keep `meal` unchanged.
+7. Language rule: {$recipeLangName} only for all textual fields (`title`, `tags`, `expiry_note`, `ingredients.qty`, `steps`, `nutrition_note`, `tools_needed`). Keep `meal` unchanged.
+8. `tools_needed`: array of kitchen tools/appliances actually required by this recipe (e.g. ["Forno","Frullatore"]). Use the same language as all other text fields. Empty array [] if only stovetop/knife/pan needed.
 
 DISPENSA:
 $ingredientsText
 
 Rispondi SOLO JSON valido (no markdown):
 {$promptLanguageRule}
-{"title":"…","meal":"$mealType","persons":$persons,"prep_time":"…","cook_time":"…","tags":["…"],"expiry_note":"…","ingredients":[{"name":"…","qty":"200 g","qty_number":200,"from_pantry":true}],"steps":["{$promptStepExample}"],"nutrition_note":"…"}
+{"title":"…","meal":"$mealType","persons":$persons,"prep_time":"…","cook_time":"…","tags":["…"],"expiry_note":"…","tools_needed":["…"],"ingredients":[{"name":"…","qty":"200 g","qty_number":200,"from_pantry":true}],"steps":["{$promptStepExample}"],"nutrition_note":"…"}
 PROMPT;
 
     $payload = [
@@ -4317,14 +4321,15 @@ REGOLE:
 4. "qty_number": valore NUMERICO nella STESSA unità della dispensa (g/ml/pz/conf, MAI kg o litri). Per non-dispensa: 0. IMPORTANTE: per ingredienti con unità "pz" scrivi qty_number come numero di PEZZI (es. 2, non 200g).
 5. "name": usa ESATTAMENTE il nome dalla lista (il sistema lo usa per scalare l'inventario).
 6. Includi nella lista ingredienti TUTTI quelli citati nei passi (tranne acqua/sale/pepe/olio).
-7. Language rule: {$recipeLangName} only for all textual fields (`title`, `tags`, `expiry_note`, `ingredients.qty`, `steps`, `nutrition_note`). Keep `meal` unchanged.
+7. Language rule: {$recipeLangName} only for all textual fields (`title`, `tags`, `expiry_note`, `ingredients.qty`, `steps`, `nutrition_note`, `tools_needed`). Keep `meal` unchanged.
+8. `tools_needed`: array of kitchen tools/appliances actually required by this recipe (e.g. ["Forno","Frullatore"]). Use the same language as all other text fields. Empty array [] if only stovetop/knife/pan needed.
 
 DISPENSA:
 $ingredientsText
 
 Rispondi SOLO JSON valido (no markdown):
 {$promptLanguageRule}
-{"title":"…","meal":"$mealType","persons":$persons,"prep_time":"…","cook_time":"…","tags":["…"],"expiry_note":"…","ingredients":[{"name":"…","qty":"200 g","qty_number":200,"from_pantry":true}],"steps":["{$promptStepExample}"],"nutrition_note":"…"}
+{"title":"…","meal":"$mealType","persons":$persons,"prep_time":"…","cook_time":"…","tags":["…"],"expiry_note":"…","tools_needed":["…"],"ingredients":[{"name":"…","qty":"200 g","qty_number":200,"from_pantry":true}],"steps":["{$promptStepExample}"],"nutrition_note":"…"}
 PROMPT;
 
     $genConfig = [

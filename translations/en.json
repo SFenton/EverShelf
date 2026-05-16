@@ -341,6 +341,7 @@
     "regenerate": "🔄 Generate another one",
     "close_btn": "✅ Close",
     "ingredients_title": "🧾 Ingredients",
+    "tools_title": "Equipment needed",
     "steps_title": "👨‍🍳 Steps",
     "no_steps": "No steps available",
     "generate_error": "Generation error",

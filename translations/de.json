@@ -341,6 +341,7 @@
     "regenerate": "🔄 Noch eins generieren",
     "close_btn": "✅ Schließen",
     "ingredients_title": "🧾 Zutaten",
+    "tools_title": "Benötigte Geräte",
     "steps_title": "👨‍🍳 Zubereitung",
     "no_steps": "Keine Zubereitungsschritte verfügbar",
     "generate_error": "Fehler bei der Generierung",

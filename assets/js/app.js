@@ -11954,6 +11954,12 @@ function renderRecipe(r) {
         html += `<div class="recipe-expiry-note">⚠️ ${r.expiry_note}</div>`;
     }
 
+    // Tools/appliances banner (shown only when specific equipment is needed)
+    const tools = (r.tools_needed || []).filter(t => t && t.trim());
+    if (tools.length > 0) {
+        html += `<div class="recipe-tools-banner">🔧 <strong>${t('recipes.tools_title')}:</strong> ${tools.map(t => `<span class="recipe-tool-chip">${t}</span>`).join('')}</div>`;
+    }
+
     // Ingredients
     html += `<h3>${t('recipes.ingredients_title')}</h3><ul class="recipe-ingredients">`;
     (r.ingredients || []).forEach((ing, idx) => {

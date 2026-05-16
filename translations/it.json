@@ -341,6 +341,7 @@
     "regenerate": "🔄 Generane un'altra",
     "close_btn": "✅ Chiudi",
     "ingredients_title": "🧾 Ingredienti",
+    "tools_title": "Strumenti necessari",
     "steps_title": "👨‍🍳 Procedimento",
     "no_steps": "Nessun procedimento disponibile",
     "generate_error": "Errore nella generazione",
