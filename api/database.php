@@ -474,7 +474,7 @@ function estimateSealedExpiryDaysPHP(string $name, string $category, string $loc
     elseif (preg_match('/carota|carote|zucchina|zucchine|peperoni|melanzane/', $n)) $days = 7;
     elseif (preg_match('/broccoli|cavolfiore|cavolo|spinaci|bietola/', $n)) $days = 5;
     elseif (preg_match('/cipolla|cipolle/', $n)) $days = 10;
-    elseif (preg_match('/patata|patate/', $n)) $days = 14;
+    elseif (preg_match('/patata|patate/', $n)) $days = 30; // whole tubers in a bag, pantry: 3-5 weeks
     elseif (preg_match('/biscott|cracker|grissini|fette\s+biscott/', $n)) $days = 180;
     elseif (preg_match('/nutella|marmellata|miele/', $n)) $days = 365;
     elseif (preg_match('/passata|pelati|pomodor/', $n)) $days = 730;
