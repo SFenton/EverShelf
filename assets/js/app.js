@@ -7626,6 +7626,9 @@ async function loadUseInventoryInfo() {
         // Build location buttons only for locations where the product exists
         const productLocations = [...new Set(items.map(i => i.location))];
         const locSelector = document.getElementById('use-location-selector');
+        // Hide the location row when the product is in only one location (nothing to choose)
+        const locGroup = document.getElementById('use-location-group');
+        if (locGroup) locGroup.style.display = productLocations.length > 1 ? '' : 'none';
 
         // Prefer the remembered location (if confirmed), else use the opened-package heuristic
         const prefLoc = _getPreferredUseLocation(currentProduct.id);
@@ -7823,6 +7826,42 @@ function selectUseLocation(btn, loc) {
 // auto-selects it and hides the location picker (user can still tap "cambia").
 const _PREF_LOC_KEY = '_prefUseLoc';
 const _PREF_LOC_NEEDED = 2; // choices needed to confirm a preference
+
+// ── PREFERRED MOVE-AFTER-USE LOCATION ────────────────────────────────────
+// Tracks where the user puts the remainder after using a product.
+// After _PREF_MOVE_NEEDED consistent choices, the modal is skipped entirely.
+const _PREF_MOVE_KEY = '_prefMoveLoc';
+const _PREF_MOVE_NEEDED = 2;
+let _pendingMoveCtx = null; // { productId, fromLoc, openedId } — set before showing modal
+
+function _getMoveLocHistory(productId, fromLoc) {
+    try {
+        const all = JSON.parse(localStorage.getItem(_PREF_MOVE_KEY) || '{}');
+        return all[`${productId}|${fromLoc}`] || [];
+    } catch { return []; }
+}
+
+function _recordMoveLocChoice(productId, fromLoc, toLoc) {
+    try {
+        const all = JSON.parse(localStorage.getItem(_PREF_MOVE_KEY) || '{}');
+        const key = `${productId}|${fromLoc}`;
+        const hist = all[key] || [];
+        hist.push(toLoc);
+        if (hist.length > 8) hist.splice(0, hist.length - 8);
+        all[key] = hist;
+        localStorage.setItem(_PREF_MOVE_KEY, JSON.stringify(all));
+    } catch { }
+}
+
+function _getPreferredMoveLoc(productId, fromLoc) {
+    const hist = _getMoveLocHistory(productId, fromLoc);
+    if (hist.length < _PREF_MOVE_NEEDED) return null;
+    const recent = hist.slice(-5);
+    const counts = {};
+    for (const loc of recent) counts[loc] = (counts[loc] || 0) + 1;
+    const [topLoc, topCount] = Object.entries(counts).sort((a, b) => b[1] - a[1])[0];
+    return topCount >= _PREF_MOVE_NEEDED ? topLoc : null;
+}
 
 function _getPrefLocHistory(productId) {
     try {
@@ -8176,6 +8215,22 @@ function startMoveModalCountdown(btnId, onExpire) {
 }
 
 function showMoveAfterUseModal(product, fromLoc, remaining, openedId, openedVacuumSealed, unit) {
+    // Store context so _saveVacuumAndStay can record the choice
+    _pendingMoveCtx = { productId: product.id, fromLoc, openedId };
+
+    // If a preference is established, skip the modal entirely and auto-apply
+    const prefMoveLoc = _getPreferredMoveLoc(product.id, fromLoc);
+    if (prefMoveLoc) {
+        if (prefMoveLoc === fromLoc) {
+            // Preference: stay in place — silent, no modal
+            _saveVacuumAndStay(openedId || 0);
+        } else {
+            // Preference: move to another location — apply silently
+            confirmMoveAfterUse(product.id, fromLoc, prefMoveLoc, openedId || 0, !!(openedVacuumSealed ?? product.vacuum_sealed));
+        }
+        return;
+    }
+
     const otherLocs = Object.entries(LOCATIONS).filter(([k]) => k !== fromLoc);
     const locButtons = otherLocs.map(([k, v]) =>
         `<button type="button" class="loc-btn" onclick="clearMoveModalTimer();confirmMoveAfterUse(${product.id}, '${fromLoc}', '${k}', ${openedId || 0})">${v.icon} ${v.label}</button>`
@@ -8209,6 +8264,11 @@ function showMoveAfterUseModal(product, fromLoc, remaining, openedId, openedVacu
 
 /** Save vacuum state when user chooses to keep the item at the current location. */
 async function _saveVacuumAndStay(openedId) {
+    // Record the "stay" preference before closing
+    if (_pendingMoveCtx) {
+        _recordMoveLocChoice(_pendingMoveCtx.productId, _pendingMoveCtx.fromLoc, _pendingMoveCtx.fromLoc);
+        _pendingMoveCtx = null;
+    }
     closeModal();
     if (openedId) {
         const isVacuum = document.getElementById('move-vacuum-check')?.checked ? 1 : 0;
@@ -8220,9 +8280,14 @@ async function _saveVacuumAndStay(openedId) {
     showPage('dashboard');
 }
 
-async function confirmMoveAfterUse(productId, fromLoc, toLoc, openedId) {
+async function confirmMoveAfterUse(productId, fromLoc, toLoc, openedId, forcedVacuum) {
     clearMoveModalTimer();
-    const newVacuum = document.getElementById('move-vacuum-check')?.checked ? 1 : 0;
+    const newVacuum = forcedVacuum !== undefined ? (forcedVacuum ? 1 : 0) : (document.getElementById('move-vacuum-check')?.checked ? 1 : 0);
+    // Record preference
+    if (_pendingMoveCtx && _pendingMoveCtx.productId === productId) {
+        _recordMoveLocChoice(productId, fromLoc, toLoc);
+        _pendingMoveCtx = null;
+    }
     closeModal();
     showLoading(true);
     try {
