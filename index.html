@@ -325,11 +325,11 @@
         <div class="action-buttons" id="action-buttons-container">
             <button class="btn btn-huge btn-success" onclick="showAddForm()">
                 <span class="btn-icon">📥</span>
-                <span class="btn-text">AGGIUNGI<br><small>in dispensa/frigo</small></span>
+                <span class="btn-text"><span data-i18n="action.add_btn">AGGIUNGI</span><br><small data-i18n="action.add_sub">in dispensa/frigo</small></span>
             </button>
             <button class="btn btn-huge btn-danger" onclick="showUseForm()">
                 <span class="btn-icon">📤</span>
-                <span class="btn-text">USA / CONSUMA<br><small>dalla dispensa/frigo</small></span>
+                <span class="btn-text"><span data-i18n="action.use_btn">USA / CONSUMA</span><br><small data-i18n="action.use_sub">dalla dispensa/frigo</small></span>
             </button>
         </div>
     </section>
@@ -337,23 +337,23 @@
     <!-- ===== ADD TO INVENTORY FORM ===== -->
     <section class="page" id="page-add">
         <div class="page-header">
-            <button class="back-btn" onclick="showPage('action')">← Indietro</button>
-            <h2>Aggiungi alla Dispensa</h2>
+            <button class="back-btn" onclick="showPage('action')" data-i18n="btn.back">← Indietro</button>
+            <h2 data-i18n="add.title">Aggiungi alla Dispensa</h2>
         </div>
         <div class="product-preview-small" id="add-product-preview"></div>
         <form class="form" onsubmit="submitAdd(event)">
             <div class="form-group">
-                <label>📍 Dove lo metti?</label>
+                <label data-i18n="add.location_label">📍 Dove lo metti?</label>
                 <div class="location-selector">
-                    <button type="button" class="loc-btn active" onclick="selectLocation(this, 'dispensa')">🗄️ Dispensa</button>
-                    <button type="button" class="loc-btn" onclick="selectLocation(this, 'frigo')">🧊 Frigo</button>
-                    <button type="button" class="loc-btn" onclick="selectLocation(this, 'freezer')">❄️ Freezer</button>
-                    <button type="button" class="loc-btn" onclick="selectLocation(this, 'altro')">📦 Altro</button>
+                    <button type="button" class="loc-btn active" onclick="selectLocation(this, 'dispensa')">🗄️ <span data-i18n="locations.dispensa">Dispensa</span></button>
+                    <button type="button" class="loc-btn" onclick="selectLocation(this, 'frigo')">🧊 <span data-i18n="locations.frigo">Frigo</span></button>
+                    <button type="button" class="loc-btn" onclick="selectLocation(this, 'freezer')">❄️ <span data-i18n="locations.freezer">Freezer</span></button>
+                    <button type="button" class="loc-btn" onclick="selectLocation(this, 'altro')">📦 <span data-i18n="locations.altro">Altro</span></button>
                 </div>
                 <input type="hidden" id="add-location" value="dispensa">
             </div>
             <div class="form-group">
-                <label>📦 Quantità</label>
+                <label data-i18n="add.quantity_label">📦 Quantità</label>
                 <div class="qty-unit-row">
                     <div class="qty-control flex-1">
                         <button type="button" class="qty-btn" onclick="adjustAddQty(-1)">−</button>
@@ -369,7 +369,7 @@
                 </div>
                 <button type="button" id="btn-scale-add" class="btn btn-secondary scale-read-btn" style="display:none" onclick="readScaleWeight('add-quantity', function(){ return document.getElementById('add-unit').value; })" data-i18n="scale.read_btn">⚖️ Leggi dalla bilancia</button>
                 <div id="add-conf-size-row" class="conf-size-row" style="display:none">
-                    <label class="conf-size-label">📦 Ogni confezione contiene:</label>
+                    <label class="conf-size-label" data-i18n="add.conf_size_label">📦 Ogni confezione contiene:</label>
                     <div class="conf-size-inputs">
                         <input type="number" id="add-conf-size" class="form-input conf-size-input" min="1" step="any" placeholder="es. 300">
                         <select id="add-conf-unit" class="form-input conf-size-unit">
@@ -382,43 +382,43 @@
             </div>
             <div class="form-group" id="add-vacuum-group">
                 <label class="toggle-row" onclick="toggleVacuumSealed()">
-                    <span>🫙 Sotto vuoto</span>
+                    <span data-i18n="add.vacuum_label">🫙 Sotto vuoto</span>
                     <span class="toggle-switch" id="add-vacuum-toggle">
                         <input type="checkbox" id="add-vacuum-sealed" onchange="onVacuumSealedChange()">
                         <span class="toggle-slider"></span>
                     </span>
                 </label>
-                <p class="form-hint" id="add-vacuum-hint" style="display:none">La scadenza verrà estesa automaticamente</p>
+                <p class="form-hint" id="add-vacuum-hint" style="display:none" data-i18n="add.vacuum_hint">La scadenza verrà estesa automaticamente</p>
             </div>
             <div class="form-group" id="add-expiry-section">
                 <!-- Populated dynamically by showAddForm() -->
             </div>
-            <button type="submit" class="btn btn-large btn-success full-width">✅ Aggiungi</button>
+            <button type="submit" class="btn btn-large btn-success full-width" data-i18n="add.submit">✅ Aggiungi</button>
         </form>
     </section>
 
     <!-- ===== USE FROM INVENTORY FORM ===== -->
     <section class="page" id="page-use">
         <div class="page-header">
-            <button class="back-btn" onclick="showPage('action')">← Indietro</button>
-            <h2>Usa / Consuma</h2>
+            <button class="back-btn" onclick="showPage('action')" data-i18n="btn.back">← Indietro</button>
+            <h2 data-i18n="use.title">Usa / Consuma</h2>
         </div>
         <div class="product-preview-small" id="use-product-preview"></div>
         <div class="use-inventory-info" id="use-inventory-info"></div>
         <div id="use-expiry-hint" style="display:none"></div>
         <form class="form" onsubmit="submitUse(event)">
             <div class="form-group" id="use-location-group">
-                <label>📍 Da dove?</label>
+                <label data-i18n="use.location_label">📍 Da dove?</label>
                 <div class="location-selector" id="use-location-selector">
-                    <button type="button" class="loc-btn active" onclick="selectUseLocation(this, 'dispensa')">🗄️ Dispensa</button>
-                    <button type="button" class="loc-btn" onclick="selectUseLocation(this, 'frigo')">🧊 Frigo</button>
-                    <button type="button" class="loc-btn" onclick="selectUseLocation(this, 'freezer')">❄️ Freezer</button>
-                    <button type="button" class="loc-btn" onclick="selectUseLocation(this, 'altro')">📦 Altro</button>
+                    <button type="button" class="loc-btn active" onclick="selectUseLocation(this, 'dispensa')">🗄️ <span data-i18n="locations.dispensa">Dispensa</span></button>
+                    <button type="button" class="loc-btn" onclick="selectUseLocation(this, 'frigo')">🧊 <span data-i18n="locations.frigo">Frigo</span></button>
+                    <button type="button" class="loc-btn" onclick="selectUseLocation(this, 'freezer')">❄️ <span data-i18n="locations.freezer">Freezer</span></button>
+                    <button type="button" class="loc-btn" onclick="selectUseLocation(this, 'altro')">📦 <span data-i18n="locations.altro">Altro</span></button>
                 </div>
                 <input type="hidden" id="use-location" value="dispensa">
             </div>
             <div class="form-group">
-                <label>Quanto hai usato?</label>
+                <label data-i18n="use.quantity_label">Quanto hai usato?</label>
                 <button type="button" id="btn-scale-use" class="btn btn-secondary scale-read-btn" style="display:none" onclick="readScaleWeight('use-quantity', function(){ return _useNormalUnit || 'g'; })" data-i18n="scale.read_btn">⚖️ Leggi dalla bilancia</button>
                 <!-- Live scale weight box (visible when scale connected and unit is g/ml) -->
                 <div id="scale-live-box" class="scale-live-box" style="display:none">
@@ -431,21 +431,21 @@
                 </div>
                 <div class="use-unit-switch" id="use-unit-switch" style="display:none">
                     <button type="button" class="use-unit-btn active" id="use-unit-sub" onclick="switchUseUnit('sub')"></button>
-                    <button type="button" class="use-unit-btn" id="use-unit-conf" onclick="switchUseUnit('conf')">Confezioni</button>
+                    <button type="button" class="use-unit-btn" id="use-unit-conf" onclick="switchUseUnit('conf')" data-i18n="units.boxes">Confezioni</button>
                 </div>
                 <div class="use-options">
-                    <button type="button" class="btn btn-large btn-danger full-width use-all-btn" onclick="submitUseAll()">
+                    <button type="button" class="btn btn-large btn-danger full-width use-all-btn" onclick="submitUseAll()" data-i18n="use.use_all">
                         🗑️ Usato TUTTO / Finito
                     </button>
                     <div class="use-partial">
-                        <p id="use-partial-hint">Oppure specifica la quantità usata:</p>
+                        <p id="use-partial-hint" data-i18n="use.partial_hint">Oppure specifica la quantità usata:</p>
                         <div class="qty-control">
                             <button type="button" class="qty-btn" id="use-qty-minus" onclick="adjustUseQty(-1)">−</button>
                             <input type="number" id="use-quantity" value="1" min="0.1" step="any" class="qty-input"
                                    oninput="_scaleUserDismissed=true; _cancelScaleTimersOnly();">
                             <button type="button" class="qty-btn" id="use-qty-plus" onclick="adjustUseQty(1)">+</button>
                         </div>
-                        <button type="submit" id="btn-use-submit" class="btn btn-large btn-warning full-width mt-2 move-countdown-btn">📤 Usa questa quantità</button>
+                        <button type="submit" id="btn-use-submit" class="btn btn-large btn-warning full-width mt-2 move-countdown-btn" data-i18n="use.submit">📤 Usa questa quantità</button>
                     </div>
                 </div>
             </div>
@@ -456,7 +456,7 @@
     <!-- ===== MANUAL / EDIT PRODUCT FORM ===== -->
     <section class="page" id="page-product-form">
         <div class="page-header">
-            <button class="back-btn" onclick="showPage('scan')">← Indietro</button>
+            <button class="back-btn" onclick="showPage('scan')" data-i18n="btn.back">← Indietro</button>
             <h2 id="product-form-title">Nuovo Prodotto</h2>
         </div>
         <form class="form" onsubmit="submitProduct(event)">
@@ -644,7 +644,7 @@
     <!-- ===== ALL PRODUCTS PAGE ===== -->
     <section class="page" id="page-products">
         <div class="page-header">
-            <button class="back-btn" onclick="showPage('dashboard')">← Indietro</button>
+            <button class="back-btn" onclick="showPage('dashboard')" data-i18n="btn.back">← Indietro</button>
             <h2>📦 Tutti i Prodotti</h2>
         </div>
         <div class="search-bar">
@@ -778,7 +778,7 @@
     <!-- ===== AI IDENTIFICATION PAGE ===== -->
     <section class="page" id="page-ai">
         <div class="page-header">
-            <button class="back-btn" onclick="stopScanner(); showPage('scan')">← Indietro</button>
+            <button class="back-btn" onclick="stopScanner(); showPage('scan')" data-i18n="btn.back">← Indietro</button>
             <h2>🤖 Identificazione AI</h2>
         </div>
         <div class="ai-container">

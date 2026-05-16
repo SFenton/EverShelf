@@ -2139,7 +2139,7 @@ function reportBugManual() {
                 ${t('about.report_auto_info').replace('{version}', _loadedVersion || '—').replace('{lang}', _currentLang || '—')}
             </p>
             <div style="display:flex;gap:8px;justify-content:flex-end">
-                <button type="button" class="btn btn-secondary" onclick="closeModal()">${t('common.cancel') || 'Annulla'}</button>
+                <button type="button" class="btn btn-secondary" onclick="closeModal()">${t('btn.cancel')}</button>
                 <button type="button" class="btn btn-primary" id="bug-form-submit" onclick="_submitBugReport()">
                     ${t('about.report_send_btn')}
                 </button>
