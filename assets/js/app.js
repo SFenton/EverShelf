@@ -2466,7 +2466,24 @@ function _injectKioskOverlay() {
     const appHeader = document.querySelector('.app-header');
     if (appHeader) appHeader.classList.add('kiosk-mode');
 
-    if (document.getElementById('_kiosk_overlay')) return;
+    const btnStyle = 'background:rgba(255,255,255,0.2);border:none;color:#fff;width:34px;height:34px;border-radius:50%;font-size:15px;cursor:pointer;display:flex;align-items:center;justify-content:center;-webkit-tap-highlight-color:transparent;touch-action:manipulation;';
+
+    // If the Kotlin onPageFinished already injected #_kiosk_overlay (with only ✕ and ↻),
+    // just append the missing ⚙️ settings button to it and hide the native Android gear.
+    const existing = document.getElementById('_kiosk_overlay');
+    if (existing) {
+        if (!document.getElementById('_kiosk_settings_btn')) {
+            const settBtn = document.createElement('button');
+            settBtn.id = '_kiosk_settings_btn';
+            settBtn.textContent = '\u2699\uFE0F';
+            settBtn.title = t('settings.title') || 'Settings';
+            settBtn.style.cssText = btnStyle.replace('font-size:15px', 'font-size:16px');
+            settBtn.addEventListener('click', (e) => { e.stopPropagation(); showPage('settings'); });
+            existing.appendChild(settBtn);
+        }
+        try { _kioskBridge.setNativeSettingsVisible(false); } catch(_) {}
+        return;
+    }
 
     const headerLeft = document.getElementById('header-left');
     if (!headerLeft) return;
@@ -2474,8 +2491,6 @@ function _injectKioskOverlay() {
     const wrap = document.createElement('div');
     wrap.id = '_kiosk_overlay';
     wrap.style.cssText = 'display:flex;gap:6px;align-items:center;';
-
-    const btnStyle = 'background:rgba(255,255,255,0.2);border:none;color:#fff;width:34px;height:34px;border-radius:50%;font-size:15px;cursor:pointer;display:flex;align-items:center;justify-content:center;-webkit-tap-highlight-color:transparent;touch-action:manipulation;';
 
     // Exit button
     const exitBtn = document.createElement('button');
