@@ -4503,6 +4503,28 @@ body.cooking-mode-active .app-header {
 }
 .cooking-timers-bar::-webkit-scrollbar { display: none; }
 
+.cooking-tools-bar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+    padding: 7px 14px;
+    background: rgba(99,102,241,0.15);
+    border-bottom: 1px solid rgba(99,102,241,0.25);
+    flex-shrink: 0;
+    font-size: 0.78rem;
+    color: #c7d2fe;
+}
+.cooking-tool-chip {
+    background: rgba(99,102,241,0.25);
+    border: 1px solid rgba(99,102,241,0.4);
+    border-radius: 20px;
+    padding: 2px 9px;
+    font-size: 0.76rem;
+    color: #e0e7ff;
+    white-space: nowrap;
+}
+
 .cooking-timer-card {
     display: flex;
     align-items: center;
