@@ -2337,6 +2337,9 @@ async function loadSettingsUI() {
         // Show kiosk self-update panel
         const updatePanel = document.getElementById('kiosk-update-panel');
         if (updatePanel) updatePanel.style.display = '';
+        // Show kiosk native settings shortcut panel
+        const nativePanel = document.getElementById('kiosk-native-settings-panel');
+        if (nativePanel) nativePanel.style.display = '';
     }
 
     // Populate About section version
@@ -2353,6 +2356,19 @@ function _kioskReconfigureScale() {
         const notice = document.getElementById('kiosk-needs-update-notice');
         if (notice) notice.style.display = '';
         showToast('⚠️ Aggiorna il kiosk per usare questa funzione', 'warning');
+    }
+}
+
+// ── Kiosk: open native SettingsActivity (server URL, BLE, screensaver) ──
+function _openKioskNativeSettings() {
+    if (typeof _kioskBridge === 'undefined') return;
+    if (typeof _kioskBridge.openNativeSettings === 'function') {
+        try { _kioskBridge.openNativeSettings(); } catch(e) {}
+    } else {
+        // Older APK without openNativeSettings — make the native gear button
+        // temporarily visible with a hint to tap it.
+        try { _kioskBridge.setNativeSettingsVisible(true); } catch(_) {}
+        showToast(t('settings.kiosk.native_tap_hint') || 'Tocca la rotella ⚙️ in alto a destra', 'info', 4000);
     }
 }
 

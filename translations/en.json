@@ -677,7 +677,11 @@
     "kiosk": {
       "hint": "Turn an Android tablet into an always-on EverShelf panel with built-in BLE scale gateway.",
       "download_btn": "📥 Download EverShelf Kiosk (APK)",
-      "download_sub": "Full-screen kiosk mode + integrated scale gateway. Source: evershelf-kiosk/"
+      "download_sub": "Full-screen kiosk mode + integrated scale gateway. Source: evershelf-kiosk/",
+      "native_title": "Kiosk Configuration",
+      "native_hint": "Server URL, BLE scale, screensaver and setup wizard.",
+      "native_btn": "Open kiosk configuration",
+      "native_tap_hint": "Tap the gear button at the top right"
     },
     "saved": "✅ Configuration saved!",
     "saved_local": "✅ Configuration saved locally",

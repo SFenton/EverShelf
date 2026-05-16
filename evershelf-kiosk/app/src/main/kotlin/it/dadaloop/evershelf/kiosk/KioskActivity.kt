@@ -515,6 +515,17 @@ class KioskActivity : AppCompatActivity() {
                     btnSettings.visibility = if (visible) View.VISIBLE else View.GONE
                 }
             }
+            /**
+             * Open the native SettingsActivity from the webapp settings page.
+             * Allows configuring server URL, BLE scale and screensaver without
+             * the user having to find the native gear button.
+             */
+            @JavascriptInterface
+            fun openNativeSettings() {
+                runOnUiThread {
+                    startActivity(Intent(this@KioskActivity, SettingsActivity::class.java))
+                }
+            }
         }, "_kioskBridge")
 
         val url = prefs.getString(KEY_URL, "http://evershelf.local") ?: "http://evershelf.local"

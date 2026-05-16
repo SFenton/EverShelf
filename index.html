@@ -1302,6 +1302,18 @@
             <p class="settings-hint" style="margin-top:8px" data-i18n="settings.kiosk.download_sub">Modalità kiosk full-screen + gateway bilancia integrato. Sorgente: <code>evershelf-kiosk/</code></p>
         </div>
 
+        <!-- Kiosk native settings panel (visible only inside kiosk WebView) -->
+        <div id="kiosk-native-settings-panel" style="display:none;background:rgba(99,102,241,0.06);border:1.5px solid rgba(99,102,241,0.2);border-radius:12px;padding:16px;margin-top:16px">
+            <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">
+                <span style="font-size:1.4rem">🖥️</span>
+                <div>
+                    <p style="margin:0;font-weight:700;font-size:0.9rem" data-i18n="settings.kiosk.native_title">Configurazione Kiosk</p>
+                    <p class="settings-hint" style="margin:2px 0 0" data-i18n="settings.kiosk.native_hint">URL server, bilancia BLE, salvaschermo e setup wizard.</p>
+                </div>
+            </div>
+            <button class="btn btn-secondary full-width" onclick="_openKioskNativeSettings()">⚙️ <span data-i18n="settings.kiosk.native_btn">Apri configurazione kiosk</span></button>
+        </div>
+
         <!-- Kiosk self-update panel (visible only inside kiosk WebView) -->
         <div id="kiosk-update-panel" style="display:none;background:rgba(16,185,129,0.06);border:1.5px solid rgba(16,185,129,0.2);border-radius:12px;padding:16px;margin-top:16px">
             <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:10px">
