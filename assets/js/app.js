@@ -12663,7 +12663,10 @@ function _initBrowserTtsVoices(selectedVoice) {
     const populate = () => {
         let voices = [];
         try {
-            voices = (window.speechSynthesis.getVoices() || []).filter(v => v != null && v.lang);
+            voices = (window.speechSynthesis.getVoices() || []).filter(v => {
+                try { return v != null && typeof v.lang === 'string' && v.lang.length > 0; }
+                catch (_) { return false; }
+            });
         } catch (_) { return false; }
         if (!voices.length) return false;
         // Italian voices first, then others
