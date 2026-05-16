@@ -12026,6 +12026,9 @@ function startCookingMode() {
     document.getElementById('cooking-tts-btn').textContent = '🔊';
     document.getElementById('cooking-overlay').style.display = 'flex';
     document.body.classList.add('cooking-mode-active');
+    // Hide kiosk overlay — it lives outside <body> with z-index:2147483647 and would overlap cooking UI
+    const _kioskOvl = document.getElementById('_kiosk_overlay');
+    if (_kioskOvl) _kioskOvl.style.display = 'none';
     _bindCookingWheelControls();
     const wheelEl = document.getElementById('cooking-wheel');
     if (wheelEl) setTimeout(() => wheelEl.focus(), 20);
@@ -12039,6 +12042,9 @@ function startCookingMode() {
 function closeCookingMode() {
     document.getElementById('cooking-overlay').style.display = 'none';
     document.body.classList.remove('cooking-mode-active');
+    // Restore kiosk overlay
+    const _kioskOvl = document.getElementById('_kiosk_overlay');
+    if (_kioskOvl) _kioskOvl.style.display = 'flex';
     // NOTE: intentionally keep _cookingRecipe, _cookingStep, _cookingVisited
     // so the user can resume from the same step when they reopen
     try { screen.orientation?.unlock().catch(() => {}); } catch (_) { /* ignore */ }
