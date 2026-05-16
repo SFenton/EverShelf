@@ -7,6 +7,7 @@ on:
       - 'Dockerfile'
       - 'docker-compose.yml'
       - 'api/**'
+      - '.github/workflows/security.yml'
   schedule:
     # Run weekly on Monday at 07:00 UTC
     - cron: '0 7 * * 1'
