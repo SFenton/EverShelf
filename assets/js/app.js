@@ -2469,21 +2469,8 @@ function _injectKioskOverlay() {
     const btnStyle = 'background:rgba(255,255,255,0.2);border:none;color:#fff;width:34px;height:34px;border-radius:50%;font-size:15px;cursor:pointer;display:flex;align-items:center;justify-content:center;-webkit-tap-highlight-color:transparent;touch-action:manipulation;';
 
     // If the Kotlin onPageFinished already injected #_kiosk_overlay (with only ✕ and ↻),
-    // just append the missing ⚙️ settings button to it and hide the native Android gear.
-    const existing = document.getElementById('_kiosk_overlay');
-    if (existing) {
-        if (!document.getElementById('_kiosk_settings_btn')) {
-            const settBtn = document.createElement('button');
-            settBtn.id = '_kiosk_settings_btn';
-            settBtn.textContent = '\u2699\uFE0F';
-            settBtn.title = t('settings.title') || 'Settings';
-            settBtn.style.cssText = btnStyle.replace('font-size:15px', 'font-size:16px');
-            settBtn.addEventListener('click', (e) => { e.stopPropagation(); showPage('settings'); });
-            existing.appendChild(settBtn);
-        }
-        try { _kioskBridge.setNativeSettingsVisible(false); } catch(_) {}
-        return;
-    }
+    // nothing more to do — the native Android btnSettings (top-right) opens SettingsActivity.
+    if (document.getElementById('_kiosk_overlay')) return;
 
     const headerLeft = document.getElementById('header-left');
     if (!headerLeft) return;
@@ -2514,24 +2501,13 @@ function _injectKioskOverlay() {
         _kioskBridge.hardReload();
     });
 
-    // Settings button — replaces the native Android settings button
-    const settBtn = document.createElement('button');
-    settBtn.id = '_kiosk_settings_btn';
-    settBtn.textContent = '\u2699\uFE0F';
-    settBtn.title = t('settings.title') || 'Settings';
-    settBtn.style.cssText = btnStyle.replace('font-size:15px', 'font-size:16px');
-    settBtn.addEventListener('click', (e) => {
-        e.stopPropagation();
-        showPage('settings');
-    });
+    // NOTE: No ⚙️ button here — the native Android settings button (top-right, injected by
+    // Kotlin) opens SettingsActivity (server URL, BLE scale, screensaver). Do NOT call
+    // setNativeSettingsVisible(false) — that would hide the only way to reconfigure the kiosk.
 
     wrap.appendChild(exitBtn);
     wrap.appendChild(refBtn);
-    wrap.appendChild(settBtn);
     headerLeft.appendChild(wrap);
-
-    // Permanently hide the native Android settings button — replaced by the web overlay button above.
-    try { _kioskBridge.setNativeSettingsVisible(false); } catch(_) {}
 }
 
 function renderAppliances(appliances) {
@@ -4925,8 +4901,8 @@ function showItemDetail(inventoryId, productId) {
 function closeModal() {
     document.getElementById('modal-overlay').style.display = 'none';
     clearMoveModalTimer();
-    // Native kiosk settings button is permanently replaced by the web overlay button — keep hidden.
-    try { if (typeof _kioskBridge !== 'undefined') _kioskBridge.setNativeSettingsVisible(false); } catch (_) {}
+    // Restore the native kiosk settings button when the modal closes.
+    try { if (typeof _kioskBridge !== 'undefined') _kioskBridge.setNativeSettingsVisible(true); } catch (_) {}
     _cancelScaleAutoConfirm(false);
     _scaleRecipeAutoFillPaused = false;
     _scaleUserDismissed = false;
