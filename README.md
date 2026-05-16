@@ -25,7 +25,7 @@
 [![SQLite](https://img.shields.io/badge/SQLite-3-blue.svg)](https://www.sqlite.org/)
 [![Docker](https://img.shields.io/badge/Docker-Ready-2496ED.svg)](Dockerfile)
 [![i18n](https://img.shields.io/badge/i18n-IT%20%7C%20EN%20%7C%20DE-orange.svg)](translations/)
-[![Version](https://img.shields.io/badge/version-1.7.13-brightgreen.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-1.7.15-brightgreen.svg)](CHANGELOG.md)
 [![GitHub stars](https://img.shields.io/github/stars/dadaloop82/EverShelf?style=social)](https://github.com/dadaloop82/EverShelf/stargazers)
 [![Last commit](https://img.shields.io/github/last-commit/dadaloop82/EverShelf/main)](https://github.com/dadaloop82/EverShelf/commits/main)
 [![Contributors](https://img.shields.io/github/contributors/dadaloop82/EverShelf)](https://github.com/dadaloop82/EverShelf/graphs/contributors)
@@ -45,7 +45,7 @@
 - **Expiry tracking** — Automatic shelf-life estimation based on product type and storage
 - **Opened product tracking** — Reduced shelf-life calculation when packages are opened; opened-product expiry is now also checked when building banner alerts (not just the dashboard section)
 - **Vacuum-sealed support** — Extended expiry dates for vacuum-sealed items
-- **Anomaly detection** — Banner alerts for suspicious quantities and consumption predictions with inline correction; dismiss button now shows the current inventory quantity so the action is unambiguous ("La quantità è giusta (2 pz)")
+- **Anomaly detection** — Banner alerts for suspicious quantities and consumption predictions with inline correction; dismiss button now shows the current inventory quantity so the action is unambiguous ("Quantity is correct (2 pcs)")
 
 ### 🤖 AI-Powered (Google Gemini)
 - **Expiry date reading** — Photograph a label and extract the expiry date automatically
@@ -55,13 +55,13 @@
 - **Recipe generation** — Get personalized recipes based on what's in your pantry; streams live via Server-Sent Events so results appear as they are generated
 - **Smart chat assistant** — Ask questions about your inventory, get cooking tips
 - **Shopping suggestions with tips** — AI-powered purchase recommendations, each enriched with a short practical buying/storing tip
-- **Anomaly explanation** — "🤖 Spiega" button on anomaly banners explains in plain language why a discrepancy likely occurred and what to do
+- **Anomaly explanation** — "Explain" button on anomaly banners explains in plain language why a discrepancy likely occurred and what to do
 - **Model fallback** — All AI endpoints try `gemini-2.5-flash` first and fall back to `gemini-2.0-flash` automatically
 - **Graceful no-key state** — When no Gemini key is configured, AI entry points show a friendly message; the header button is visually greyed with an amber dot
 
 ### 🛒 Shopping List
 - **Bring! integration** — Sync with the [Bring!](https://www.getbring.com/) shopping list app
-- **Generic shopping names** — Products are grouped by type ("Latte", "Affettato", "Panna da cucina") rather than brand, keeping the Bring! list clean and consolidated
+- **Generic shopping names** — Products are grouped by type (e.g. "Milk", "Cold cuts", "Cooking cream") rather than brand, keeping the Bring! list clean and consolidated
 - **Smart predictions** — Know what you'll need before you run out
 - **Auto-add on depletion** — When a product reaches zero the app adds it to Bring! automatically, no confirmation needed
 - **Auto-remove on scan** — Products are removed from the shopping list when scanned in  - **Auto-migration** — Items already on the Bring! list are silently renamed to their generic name in the background (throttled, runs on list load)
@@ -72,7 +72,7 @@
 - **Text-to-Speech** — Voice readout of recipe steps; supports browser Web Speech API, native Android TTS (kiosk), or a custom REST endpoint (Home Assistant, etc.); retries voice loading for up to 10 seconds with a fallback refresh button; TTS activates automatically without requiring the global TTS setting to be enabled
 - **Auto-read on navigate** — Each step is read aloud automatically when you tap Next or Previous; the first step is read when entering cooking mode
 - **Timer voice alerts** — 10-second countdown warning spoken aloud before each timer expires; expiry announced vocally when time is up
-- **Recipe completion** — "Buon appetito!" spoken when the last step is confirmed
+- **Recipe completion** — "Bon appétit!" announced via TTS when the last step is confirmed
 - **Built-in timer** — Automatic timer suggestions based on recipe instructions
 - **Ingredient tracking** — Mark ingredients as used during cooking; leftover quantities prompt a "move to another location" flow
 
@@ -82,7 +82,7 @@
 - **Expiry alerts** — Visual warnings for expired and soon-to-expire items
 - **Opened products panel** — Tracks partially-used items; expiry is recalculated from the opening date using AI (Gemini) + per-category rule fallback; whole sealed packages always keep their original manufacturer expiry; conf items with mixed whole + fractional units are shown as two separate entries
 - **Freezer shelf-life** — Granular per-product estimates (USDA/EFSA): fish 120 d, poultry 270 d, whole red-meat cuts 365 d, mince 120 d, vegetables/fruit 270 d, generic 180 d; AI + cache still take priority over rules
-- **Safety ratings** — Smart assessment of expired product safety (by category and location); expired unsafe items shown with a red danger banner and "L'ho buttato" as the primary action
+- **Safety ratings** — Smart assessment of expired product safety (by category and location); expired unsafe items shown with a red danger banner and a discard action as the primary action
 - **Expired product banner** — Products that have passed their effective shelf-life (including opened-product reduced expiry) appear in the top notification banner; icon, colour and title adapt to the actual safety level (✅ green for safe, 👀 amber to check, 🚫 red for danger); high-risk items get a prominent discard action
 - **Quick recipe bar** — One-tap recipe suggestion using expiring products
 - **Anomaly banner** — Scrollable banner with suspicious quantities and consumption prediction mismatches, with one-tap correction or inline edit
@@ -427,6 +427,12 @@ This project is licensed under the **MIT License** — see the [LICENSE](LICENSE
 
 ## 📸 Screenshots
 
+<div align="center">
+
+![EverShelf demo — barcode scan, inventory management and AI recipe generation](assets/img/demo.gif)
+
+</div>
+
 For a live walkthrough with real data and full AI enabled, visit the **[live demo](https://evershelfproject.dadaloop.it/demo)** — no installation required.
 
-> Want to contribute a GIF or screenshots? See [CONTRIBUTING.md](CONTRIBUTING.md) — PRs welcome!
+> Want to contribute additional screenshots? See [CONTRIBUTING.md](CONTRIBUTING.md) — PRs welcome!

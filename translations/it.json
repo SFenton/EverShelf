@@ -20,6 +20,8 @@
     "add": "✅ Aggiungi",
     "delete": "Elimina",
     "edit": "✏️ Modifica",
+    "use": "Usa",
+    "edit_item": "Modifica",
     "search": "🔍 Cerca",
     "go": "✅ Vai",
     "toggle_password": "👁️ Mostra/Nascondi",
@@ -29,7 +31,12 @@
     "restart": "↺ Ricomincia",
     "reset_default": "↺ Ripristina default",
     "save_info": "💾 Salva informazioni",
-    "retry": "🔄 Riprova"
+    "retry": "🔄 Riprova",
+    "yes_short": "Sì",
+    "no_short": "No"
+  },
+  "form": {
+    "select_placeholder": "-- Seleziona --"
   },
   "locations": {
     "dispensa": "Dispensa",
@@ -64,7 +71,9 @@
     "pieces": "Pezzi",
     "grams": "Grammi",
     "box": "Confezione",
-    "boxes": "Confezioni"
+    "boxes": "Confezioni",
+    "millilitres": "Millilitri",
+    "from": "da"
   },
   "shopping_sections": {
     "frutta_verdura": "Frutta & Verdura",
@@ -216,7 +225,7 @@
     "throw_btn": "🗑️ BUTTA",
     "throw_sub": "butta il prodotto",
     "edit_sub": "scadenza, luogo…",
-    "create_recipe_btn": "Crea una ricetta con questo"
+    "create_recipe_btn": "Ricetta"
   },
   "add": {
     "title": "Aggiungi alla Dispensa",
@@ -241,7 +250,9 @@
     "scan_expiry_title": "📷 Scansiona Data Scadenza",
     "product_added": "✅ {name} aggiunto!{qty}",
     "suffix_freezer_vacuum": "(freezer + sotto vuoto)",
-    "history_badge_tip": "Media da {n} inserimenti precedenti"
+    "history_badge_tip": "Media da {n} inserimenti precedenti",
+    "vacuum_question": "Messo sotto vuoto?",
+    "vacuum_saved": "🔒 Sotto vuoto registrato"
   },
   "use": {
     "title": "Usa / Consuma",
@@ -313,7 +324,13 @@
     "edit_info": "✏️ Modifica informazioni",
     "modify_details": "MODIFICA\nscadenza, luogo…",
     "already_in_pantry": "📋 Già in dispensa",
-    "no_barcode": "Senza barcode"
+    "no_barcode": "Senza barcode",
+    "unknown_product": "Prodotto non riconosciuto",
+    "edit_name_brand": "Modifica nome/marca",
+    "weight_label": "Peso",
+    "origin_label": "Origine",
+    "labels_label": "Etichette",
+    "select_variant": "Seleziona la variante esatta o usa i dati AI:"
   },
   "products": {
     "title": "📦 Tutti i Prodotti",
@@ -483,7 +500,8 @@
     "undo_success": "↩ Operazione annullata per {name}",
     "already_undone": "Operazione già annullata",
     "too_old": "Non è possibile annullare operazioni più vecchie di 24 ore",
-    "undo_error": "Errore durante l'annullamento"
+    "undo_error": "Errore durante l'annullamento",
+    "recipe_prefix": "Ricetta"
   },
   "chat": {
     "title": "Gemini Chef",
@@ -503,7 +521,8 @@
     "transfer_to_recipes": "Trasferisci a Ricette",
     "transferring": "Trasferimento in corso...",
     "transferred": "Aggiunta alle Ricette!",
-    "open_recipe": "Apri la ricetta"
+    "open_recipe": "Apri la ricetta",
+    "quick_recipe_prompt": "Suggeriscimi una ricetta veloce PER UNA PERSONA usando i prodotti che scadono prima! Ignora i prodotti in freezer, concentrati su frigo e dispensa."
   },
   "cooking": {
     "close": "Chiudi",
@@ -520,7 +539,8 @@
     "timer_warning_tts": "Attenzione! {label}: mancano 10 secondi!",
     "recipe_done_tts": "Ricetta completata! Buon appetito!",
     "expires_chip": "scade {date}",
-    "finish": "✅ Fine"
+    "finish": "✅ Fine",
+    "step_fallback": "Passo {n}"
   },
   "settings": {
     "title": "⚙️ Configurazione",
@@ -631,7 +651,11 @@
       "hint": "Se il browser mostra l'errore \"La connessione non è privata\" (ERR_CERT_AUTHORITY_INVALID), devi installare il certificato CA nel dispositivo.",
       "download_btn": "📥 Scarica Certificato CA",
       "token_title": "🔑 Token Impostazioni",
-      "token_label": "Token di accesso"
+      "token_label": "Token di accesso",
+      "token_hint": "Se `SETTINGS_TOKEN` è configurato nel `.env` server, inserisci qui il token prima di salvare le impostazioni. Lascia vuoto se non configurato.",
+      "token_placeholder": "(vuoto = nessuna protezione)",
+      "token_required_hint": "🔒 Questo server richiede un token per salvare le impostazioni.",
+      "cert_instructions": "<strong>Istruzioni per Chrome (Android):</strong><br>1. Scarica il certificato qui sopra<br>2. Vai in <em>Impostazioni &rarr; Sicurezza e privacy &rarr; Altre impostazioni di sicurezza &rarr; Installa da archivio dispositivo</em><br>3. Seleziona il file <em>EverShelf_CA.crt</em> scaricato<br>4. Scegli \"CA\" e conferma<br>5. Riavvia Chrome<br><br><strong>Istruzioni per Chrome (PC):</strong><br>1. Scarica il certificato qui sopra<br>2. Vai in <em>chrome://settings/certificates</em> (o Impostazioni &rarr; Privacy e sicurezza &rarr; Sicurezza &rarr; Gestisci certificati)<br>3. Tab \"Autorità\" &rarr; Importa &rarr; seleziona il file<br>4. Spunta \"Considera attendibile per identificare siti web\"<br>5. Riavvia Chrome"
     },
     "tts": {
       "title": "🔊 Voce & TTS",
@@ -658,7 +682,14 @@
       "extra_fields_label": "➕ Campi extra (JSON)",
       "extra_fields_placeholder": "{\"entity_id\": \"media_player.living_room\"}",
       "extra_fields_hint": "Campi aggiuntivi da includere nel payload, in formato JSON. Lascia vuoto se non necessario.",
-      "test_btn": "🔊 Invia Test Vocale"
+      "test_btn": "🔊 Invia Test Vocale",
+      "voices_loading": "Caricamento voci…",
+      "voice_not_supported": "Voce non supportata dal browser",
+      "voices_none": "Nessuna voce disponibile su questo dispositivo",
+      "voices_hint": "Le voci disponibili dipendono dal sistema operativo e dal browser. Su macOS/iOS è disponibile la voce Paola (italiano). Premi ↺ se la lista non si carica.",
+      "url_missing": "⚠️ URL endpoint mancante.",
+      "test_sending": "⏳ Invio in corso…",
+      "test_ok": "✅ Risposta {code} — controlla che l'altoparlante abbia parlato."
     },
     "language": {
       "title": "🌐 Lingua / Language",
@@ -676,7 +707,8 @@
       "timeout_10": "10 minuti",
       "timeout_15": "15 minuti",
       "timeout_30": "30 minuti",
-      "timeout_60": "1 ora"
+      "timeout_60": "1 ora",
+      "start_after": "⏱️ Avvia dopo"
     },
     "scale": {
       "title": "⚖️ Bilancia Smart",
@@ -691,7 +723,11 @@
       "download_hint": "App Android che fa da ponte tra la bilancia BLE e questo sito.",
       "download_sub": "Sorgente: evershelf-scale-gateway/ nella root del progetto",
       "live_weight": "peso in tempo reale",
-      "auto_reconnect": "🔁 Riconnessione: automatica"
+      "auto_reconnect": "🔁 Riconnessione: automatica",
+      "kiosk_title": "📡 Bilancia BLE integrata nel Kiosk",
+      "kiosk_hint": "La bilancia è gestita direttamente dal Gateway BLE interno al kiosk. Per abbinare un nuovo dispositivo usa il wizard di configurazione.",
+      "kiosk_reconfigure": "🔄 Riconfigura bilancia BLE",
+      "ble_protocols": "<p style=\"margin:0 0 6px;font-weight:600\">🔌 Protocolli BLE supportati:</p><ul style=\"margin:0 0 0 16px;padding:0;font-size:0.8rem\"><li>Bluetooth SIG Weight Scale (0x181D)</li><li>Bluetooth SIG Body Composition (0x181B) &mdash; peso, grasso, BMI</li><li>Xiaomi Mi Body Composition Scale 2</li><li>Generico &mdash; heuristica automatica su 100+ modelli</li></ul>"
     },
     "kiosk": {
       "hint": "Trasforma un tablet Android in un pannello EverShelf sempre acceso, con bilancia BLE integrata.",
@@ -838,7 +874,10 @@
     "select_items": "Seleziona almeno un prodotto",
     "server_offline": "Connessione al server persa",
     "server_restored": "Connessione al server ripristinata",
-    "server_retry": "Riprova"
+    "server_retry": "Riprova",
+    "unknown": "Errore sconosciuto",
+    "prefix": "Errore",
+    "no_inventory_entry": "Nessuna voce di inventario trovata"
   },
   "confirm": {
     "remove_item": "Vuoi davvero rimuovere questo prodotto dall'inventario?",
@@ -854,7 +893,9 @@
   "edit": {
     "title": "Modifica {name}",
     "unknown_hint": "Inserisci il nome e le informazioni del prodotto",
-    "label_name": "🏷️ Nome prodotto"
+    "label_name": "🏷️ Nome prodotto",
+    "choose_location_title": "Quale modifica?",
+    "choose_location_hint": "Scegli la posizione da modificare:"
   },
   "screensaver": {
     "recipe_btn": "Ricette",
@@ -951,7 +992,8 @@
     "thing_rest": "il resto",
     "stay_btn": "No, resta in {location}",
     "moved_toast": "📦 Confezione aperta spostata in {location}",
-    "vacuum_restore": "🫙 Torna sotto vuoto"
+    "vacuum_restore": "🫙 Torna sotto vuoto",
+    "vacuum_seal_rest": "🔒 Metti sotto vuoto il resto"
   },
   "nova": {
     "1": "Non trasformato",

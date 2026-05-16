@@ -2869,6 +2869,8 @@ function geminiChat(PDO $db): void {
     $history = $input['history'] ?? [];
     $appliances = $input['appliances'] ?? [];
     $dietaryRestrictions = $input['dietary_restrictions'] ?? '';
+    $lang = recipeNormalizeLang($input['lang'] ?? 'it');
+    $langName = recipeLangName($lang);
 
     if (empty($message)) {
         echo json_encode(['success' => false, 'error' => 'Messaggio vuoto']);
@@ -2916,27 +2918,29 @@ function geminiChat(PDO $db): void {
 
     $dietaryText = '';
     if (!empty($dietaryRestrictions)) {
-        $dietaryText = "\nRestrizioni alimentari dell'utente: {$dietaryRestrictions}. Rispetta SEMPRE queste restrizioni.";
+        $dietaryText = "\nUser dietary restrictions: {$dietaryRestrictions}. Always respect these restrictions.";
     }
 
+    $langName = recipeLangName($lang);
     $systemPrompt = <<<PROMPT
-Sei un assistente cucina italiano esperto, amichevole e conciso. L'utente ha una dispensa e ti chiede consigli su cosa preparare.
+You are an expert kitchen assistant, friendly and concise. The user has a pantry and asks you for advice on what to prepare.
+IMPORTANT: Always respond in {$langName}, using a colloquial and friendly tone.
 
-CONTESTO - INGREDIENTI DISPONIBILI IN DISPENSA:
+CONTEXT - AVAILABLE PANTRY INGREDIENTS:
 {$ingredientsText}
 {$appliancesText}{$dietaryText}
 
-REGOLE:
-1. Rispondi SEMPRE in italiano, in modo colloquiale e amichevole
-2. Usa SOLO gli ingredienti dalla dispensa dell'utente (più acqua, sale, pepe, olio che si presumono sempre disponibili)
-3. Dai priorità agli ingredienti in scadenza
-4. Sii conciso: non fare liste chilometriche, vai al sodo
-5. Se l'utente chiede una ricetta o preparazione, dai istruzioni chiare con quantità
-6. Se non ci sono ingredienti adatti per la richiesta, dillo onestamente e suggerisci alternative
-7. Puoi suggerire combinazioni creative
-8. Quando menzioni quantità, usa le stesse unità di misura della dispensa
-9. Ricorda il contesto della conversazione precedente
-10. Se l'utente chiede esplicitamente una ricetta per un apparecchio specifico (es. macchina del pane, Cookeo, friggitrice ad aria), fornisci la ricetta SOLO per quell'apparecchio, con istruzioni specifiche per quel dispositivo (programmi, ordine degli ingredienti, tempi, temperature)
+RULES:
+1. Always respond in {$langName}
+2. Use ONLY ingredients from the user's pantry (plus water, salt, pepper, oil which are assumed always available)
+3. Prioritize ingredients that expire soon
+4. Be concise: no lengthy lists, get to the point
+5. If the user asks for a recipe or preparation, give clear instructions with quantities
+6. If there are no suitable ingredients for the request, say so honestly and suggest alternatives
+7. You can suggest creative combinations
+8. When mentioning quantities, use the same units as in the pantry
+9. Remember the context of the previous conversation
+10. If the user explicitly asks for a recipe for a specific appliance (e.g. bread machine, Cookeo, air fryer), provide the recipe ONLY for that appliance, with device-specific instructions (programs, ingredient order, times, temperatures)
 PROMPT;
 
     // Build conversation for Gemini
@@ -3810,6 +3814,8 @@ function recipeFromIngredient(PDO $db): void {
         echo json_encode(['success' => false, 'error' => 'empty_ingredient']);
         return;
     }
+    $lang = recipeNormalizeLang($input['lang'] ?? 'it');
+    $langName = recipeLangName($lang);
 
     // Fetch inventory (same as generateRecipe)
     $stmt = $db->query("
@@ -3825,18 +3831,18 @@ function recipeFromIngredient(PDO $db): void {
     $safeName = htmlspecialchars($ingredientName, ENT_QUOTES, 'UTF-8');
 
     $prompt = <<<PROMPT
-Generate a recipe in Italian that uses "{$safeName}" as a main ingredient.
+Generate a recipe in {$langName} that uses "{$safeName}" as a main ingredient.
 Return ONLY a JSON object, no markdown.
 
 Fields:
-- title: string (Italian recipe name)
+- title: string (recipe name in {$langName})
 - meal: null  (do NOT categorize)
 - persons: 2
 - prep_time: string or null
 - cook_time: string or null
 - ingredients: array of {"name":"...","qty":"...","qty_number":0.0,"unit":"g|ml|pz|conf|kg|l","from_pantry":true}
   — "{$safeName}" MUST be the first ingredient; set from_pantry=true for ALL
-- steps: array of strings (step text only, no numbers)
+- steps: array of strings (step text only, no numbers, in {$langName})
 - nutrition_note: string or null
 PROMPT;
 

@@ -20,6 +20,8 @@
     "add": "✅ Hinzufügen",
     "delete": "Löschen",
     "edit": "✏️ Bearbeiten",
+    "use": "Verwenden",
+    "edit_item": "Bearbeiten",
     "search": "🔍 Suchen",
     "go": "✅ Los",
     "toggle_password": "👁️ Anzeigen/Ausblenden",
@@ -29,7 +31,12 @@
     "restart": "↺ Neustart",
     "reset_default": "↺ Standard wiederherstellen",
     "save_info": "💾 Info speichern",
-    "retry": "🔄 Erneut versuchen"
+    "retry": "🔄 Erneut versuchen",
+    "yes_short": "Ja",
+    "no_short": "Nein"
+  },
+  "form": {
+    "select_placeholder": "-- Auswählen --"
   },
   "locations": {
     "dispensa": "Vorratskammer",
@@ -64,7 +71,9 @@
     "pieces": "Stück",
     "grams": "Gramm",
     "box": "Packung",
-    "boxes": "Packungen"
+    "boxes": "Packungen",
+    "millilitres": "Milliliter",
+    "from": "von"
   },
   "shopping_sections": {
     "frutta_verdura": "Obst & Gemüse",
@@ -216,7 +225,7 @@
     "throw_btn": "🗑️ ENTSORGEN",
     "throw_sub": "wegwerfen",
     "edit_sub": "Ablauf, Ort…",
-    "create_recipe_btn": "Rezept damit erstellen"
+    "create_recipe_btn": "Rezept"
   },
   "add": {
     "title": "Zum Vorrat hinzufügen",
@@ -241,7 +250,9 @@
     "scan_expiry_title": "📷 Ablaufdatum scannen",
     "product_added": "✅ {name} hinzugefügt!{qty}",
     "suffix_freezer_vacuum": "(Tiefkühler + vakuumversiegelt)",
-    "history_badge_tip": "Durchschnitt aus {n} früheren Einträgen"
+    "history_badge_tip": "Durchschnitt aus {n} früheren Einträgen",
+    "vacuum_question": "Vakuumiert?",
+    "vacuum_saved": "🔒 Als vakuumiert gespeichert"
   },
   "use": {
     "title": "Verwenden / Verbrauchen",
@@ -313,7 +324,13 @@
     "edit_info": "✏️ Informationen bearbeiten",
     "modify_details": "BEARBEITEN\nAblauf, Ort…",
     "already_in_pantry": "📋 Bereits im Vorratsschrank",
-    "no_barcode": "Kein Barcode"
+    "no_barcode": "Kein Barcode",
+    "unknown_product": "Unbekanntes Produkt",
+    "edit_name_brand": "Name/Marke bearbeiten",
+    "weight_label": "Gewicht",
+    "origin_label": "Herkunft",
+    "labels_label": "Etiketten",
+    "select_variant": "Genaue Variante auswählen oder KI-Daten nutzen:"
   },
   "products": {
     "title": "📦 Alle Produkte",
@@ -503,7 +520,8 @@
     "transfer_to_recipes": "Zu Rezepten hinzufügen",
     "transferring": "Übertrage...",
     "transferred": "Zu Rezepten hinzugefügt!",
-    "open_recipe": "Rezept öffnen"
+    "open_recipe": "Rezept öffnen",
+    "quick_recipe_prompt": "Schlage mir ein schnelles Rezept FÜR EINE PERSON vor, das die Produkte mit dem nächsten Ablaufdatum verwendet! Ignoriere Tiefkühlprodukte, konzentriere dich auf Kühlschrank und Vorratsschrank."
   },
   "cooking": {
     "close": "Schließen",
@@ -520,7 +538,8 @@
     "timer_warning_tts": "Achtung! {label}: noch 10 Sekunden!",
     "recipe_done_tts": "Rezept abgeschlossen! Guten Appetit!",
     "expires_chip": "läuft ab {date}",
-    "finish": "✅ Fertig"
+    "finish": "✅ Fertig",
+    "step_fallback": "Schritt {n}"
   },
   "settings": {
     "title": "⚙️ Einstellungen",
@@ -631,7 +650,11 @@
       "hint": "Wenn der Browser den Fehler \"Verbindung nicht sicher\" (ERR_CERT_AUTHORITY_INVALID) zeigt, installiere das CA-Zertifikat auf dem Gerät.",
       "download_btn": "📥 CA-Zertifikat herunterladen",
       "token_title": "🔑 Einstellungs-Token",
-      "token_label": "Zugriffstoken"
+      "token_label": "Zugriffstoken",
+      "token_hint": "Falls `SETTINGS_TOKEN` in der Server-`.env` konfiguriert ist, gib hier den Token ein, bevor du die Einstellungen speicherst. Leer lassen, wenn nicht konfiguriert.",
+      "token_placeholder": "(leer = kein Schutz)",
+      "token_required_hint": "🔒 Dieser Server benötigt einen Token zum Speichern der Einstellungen.",
+      "cert_instructions": "<strong>Anleitung für Chrome (Android):</strong><br>1. Zertifikat oben herunterladen<br>2. Gehe zu <em>Einstellungen &rarr; Sicherheit &amp; Datenschutz &rarr; Weitere Sicherheitseinstellungen &rarr; Vom Gerätespeicher installieren</em><br>3. Wähle die heruntergeladene <em>EverShelf_CA.crt</em> Datei<br>4. Wähle \"CA\" und bestätige<br>5. Chrome neu starten<br><br><strong>Anleitung für Chrome (PC):</strong><br>1. Zertifikat oben herunterladen<br>2. Gehe zu <em>chrome://settings/certificates</em> (oder Einstellungen &rarr; Datenschutz und Sicherheit &rarr; Sicherheit &rarr; Zertifikate verwalten)<br>3. Tab \"Zertifizierungsstellen\" &rarr; Importieren &rarr; Datei auswählen<br>4. Häkchen bei \"Dieser Zertifizierungsstelle für die Identifikation von Webseiten vertrauen\"<br>5. Chrome neu starten"
     },
     "tts": {
       "title": "🔊 Sprache & TTS",
@@ -658,7 +681,14 @@
       "extra_fields_label": "➕ Zusätzliche Felder (JSON)",
       "extra_fields_placeholder": "{\"entity_id\": \"media_player.living_room\"}",
       "extra_fields_hint": "Zusätzliche Felder im Payload, im JSON-Format. Leer lassen wenn nicht benötigt.",
-      "test_btn": "🔊 Testansage senden"
+      "test_btn": "🔊 Testansage senden",
+      "voices_loading": "Stimmen werden geladen…",
+      "voice_not_supported": "Stimme vom Browser nicht unterstützt",
+      "voices_none": "Keine Stimmen auf diesem Gerät verfügbar",
+      "voices_hint": "Verfügbare Stimmen hängen vom Betriebssystem und Browser ab. Auf macOS/iOS ist die Stimme Paola (Italienisch) verfügbar. Drücken Sie ↺ wenn die Liste nicht lädt.",
+      "url_missing": "⚠️ Endpunkt-URL fehlt.",
+      "test_sending": "⏳ Wird gesendet…",
+      "test_ok": "✅ Antwort {code} — prüfe ob der Lautsprecher gesprochen hat."
     },
     "language": {
       "title": "🌐 Sprache",
@@ -676,7 +706,8 @@
       "timeout_10": "10 Minuten",
       "timeout_15": "15 Minuten",
       "timeout_30": "30 Minuten",
-      "timeout_60": "1 Stunde"
+      "timeout_60": "1 Stunde",
+      "start_after": "⏱️ Starten nach"
     },
     "scale": {
       "title": "⚖️ Smart-Waage",
@@ -691,7 +722,11 @@
       "download_hint": "Android-App als Brücke zwischen BLE-Waage und EverShelf.",
       "download_sub": "Quellcode: evershelf-scale-gateway/ im Projektstamm",
       "live_weight": "Echtzeit-Gewicht",
-      "auto_reconnect": "🔁 Verbindung: automatisch"
+      "auto_reconnect": "🔁 Verbindung: automatisch",
+      "kiosk_title": "📡 BLE-Waage im Kiosk integriert",
+      "kiosk_hint": "Die Waage wird direkt vom internen BLE-Gateway des Kiosks verwaltet. Um ein neues Gerät zu koppeln, verwende den Konfigurationsassistenten.",
+      "kiosk_reconfigure": "🔄 BLE-Waage neu konfigurieren",
+      "ble_protocols": "<p style=\"margin:0 0 6px;font-weight:600\">🔌 Unterstützte BLE-Protokolle:</p><ul style=\"margin:0 0 0 16px;padding:0;font-size:0.8rem\"><li>Bluetooth SIG Weight Scale (0x181D)</li><li>Bluetooth SIG Body Composition (0x181B) &mdash; Gewicht, Fett, BMI</li><li>Xiaomi Mi Body Composition Scale 2</li><li>Generisch &mdash; automatische Heuristik für 100+ Modelle</li></ul>"
     },
     "kiosk": {
       "hint": "Verwandeln Sie ein Android-Tablet in ein EverShelf-Panel mit integriertem BLE-Waagen-Gateway.",
@@ -838,7 +873,10 @@
     "select_items": "Wähle mindestens ein Produkt aus",
     "server_offline": "Serververbindung unterbrochen",
     "server_restored": "Serververbindung wiederhergestellt",
-    "server_retry": "Erneut versuchen"
+    "server_retry": "Erneut versuchen",
+    "unknown": "Unbekannter Fehler",
+    "prefix": "Fehler",
+    "no_inventory_entry": "Kein Inventareintrag gefunden"
   },
   "confirm": {
     "remove_item": "Möchtest du dieses Produkt wirklich aus dem Bestand entfernen?",
@@ -854,7 +892,9 @@
   "edit": {
     "title": "{name} bearbeiten",
     "unknown_hint": "Produktname und Informationen eingeben",
-    "label_name": "🏷️ Produktname"
+    "label_name": "🏷️ Produktname",
+    "choose_location_title": "Welchen Ort?",
+    "choose_location_hint": "Wähle den zu bearbeitenden Ort:"
   },
   "screensaver": {
     "recipe_btn": "Rezepte",
@@ -951,7 +991,8 @@
     "thing_rest": "den Rest",
     "stay_btn": "Nein, bleibt in {location}",
     "moved_toast": "📦 Offene Packung bewegt nach {location}",
-    "vacuum_restore": "🫙 Vakuum wiederherstellen"
+    "vacuum_restore": "🫙 Vakuum wiederherstellen",
+    "vacuum_seal_rest": "🔒 Rest vakuumieren"
   },
   "nova": {
     "1": "Unverarbeitet",

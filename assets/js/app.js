@@ -2463,7 +2463,7 @@ window._kioskUpdateResult = function(result) {
         status.style.background = 'rgba(239,68,68,0.1)';
         status.style.border = '1px solid rgba(239,68,68,0.3)';
         status.style.color = '';
-        status.innerHTML = `❌ Errore: ${result.error}`;
+        status.innerHTML = `❌ ${t('error.prefix')}: ${result.error}`;
         return;
     }
 
@@ -3434,7 +3434,7 @@ function _renderNutritionSection(inventory) {
                 <div class="nutr-leg-row">
                     <span class="nutr-leg-dot" style="background:${s.color}"></span>
                     <span class="nutr-leg-icon">${s.icon}</span>
-                    <span class="nutr-leg-name">${s.cat}</span>
+                    <span class="nutr-leg-name">${t('categories.' + s.cat) || s.cat}</span>
                     <span class="nutr-leg-pct">${s.pct}%</span>
                 </div>`).join('')}
             </div>
@@ -3654,7 +3654,7 @@ async function loadDashboard() {
                 const locInfo = LOCATIONS[item.location] || { icon: '📦', label: item.location };
                 const qty = parseFloat(item.quantity);
                 const pkgSize = parseFloat(item.default_quantity);
-                const unitLabels = { 'ml': 'ml', 'g': 'g', 'pz': 'pz' };
+                const unitLabels = { 'ml': 'ml', 'g': 'g', 'pz': t('units.pz') };
                 let qtyText = '';
 
                 if (item.unit === 'conf') {
@@ -3666,13 +3666,13 @@ async function loadDashboard() {
                     // Only show remainder if it rounds to at least 1 unit
                     const remainderText = remainderAmt >= 0.5 ? formatSubRemainder(remainderAmt, pkgUnit) : '';
                     if (wholeConf > 0 && remainderText) {
-                        qtyText = `${wholeConf} conf${pkgLabel ? ` (da ${pkgSize}${pkgLabel})` : ''} + ${remainderText}`;
+                        qtyText = `${wholeConf} ${t('units.conf') || 'conf'}${pkgLabel ? ` (${t('units.from') || 'da'} ${pkgSize}${pkgLabel})` : ''} + ${remainderText}`;
                     } else if (wholeConf > 0) {
-                        qtyText = `${wholeConf} conf${pkgLabel ? ` (da ${pkgSize}${pkgLabel})` : ''}`;
+                        qtyText = `${wholeConf} ${t('units.conf') || 'conf'}${pkgLabel ? ` (${t('units.from') || 'da'} ${pkgSize}${pkgLabel})` : ''}`;
                     } else if (remainderText) {
                         qtyText = remainderAmt >= 1 ? remainderText : t('inventory.qty_trace') || '< 1' + (pkgLabel || '');
                     } else {
-                        qtyText = `${qty} conf`;
+                        qtyText = `${Math.round(qty * 10) / 10} ${t('units.conf') || 'conf'}`;
                     }
                 } else {
                     const unitLabel = unitLabels[item.unit] || item.unit || '';
@@ -3770,7 +3770,7 @@ function quickRecipeSuggestion() {
     // Navigate to chat and auto-send a prompt about expiring products
     showPage('chat');
     setTimeout(() => {
-        document.getElementById('chat-input').value = 'Suggeriscimi una ricetta veloce PER UNA PERSONA usando i prodotti che scadono prima! Ignora i prodotti in freezer (hanno scadenze molto lunghe), concentrati su frigo e dispensa.';
+        document.getElementById('chat-input').value = t('chat.quick_recipe_prompt') || 'Suggeriscimi una ricetta veloce PER UNA PERSONA usando i prodotti che scadono prima! Ignora i prodotti in freezer (hanno scadenze molto lunghe), concentrati su frigo e dispensa.';
         sendChatMessage();
     }, 500);
 }
@@ -4348,7 +4348,7 @@ async function explainBannerAnomaly() {
         }
     } catch (e) {
         detailEl.innerHTML = originalHtml;
-        showToast('Errore AI', 'error');
+        showToast(t('error.generic'), 'error');
     }
 }
 
@@ -4432,7 +4432,7 @@ function bannerFinishAll() {
             showToast(t('toast.finished_all').replace('{name}', item.name), 'success');
             showLowStockBringPrompt(res, () => loadDashboard());
         } else {
-            showToast(res.error || 'Errore', 'error');
+            showToast(res.error || t('error.generic'), 'error');
         }
     }).catch(() => showToast(t('error.connection'), 'error'));
 }
@@ -4637,8 +4637,8 @@ function _pzFractionLabel(n) {
 function formatQuantity(qty, unit, defaultQty, packageUnit) {
     if (!qty && qty !== 0) return '';
     const n = parseFloat(qty);
-    const unitLabels = { 'pz': 'pz', 'g': 'g', 'ml': 'ml', 'conf': 'conf' };
-    const label = unitLabels[unit] || unit || 'pz';
+    const unitLabels = { 'pz': t('units.pz'), 'g': 'g', 'ml': 'ml', 'conf': t('units.conf') };
+    const label = unitLabels[unit] || unit || t('units.pz');
 
     // Special handling for conf with partial packages
     if (unit === 'conf' && packageUnit && defaultQty > 0) {
@@ -4647,11 +4647,11 @@ function formatQuantity(qty, unit, defaultQty, packageUnit) {
         const fractionalConf = Math.round((n - wholeConf) * 1000) / 1000;
 
         if (fractionalConf < 0.01) {
-            return `${wholeConf} conf <span class="conf-size-info">(da ${defaultQty}${pkgLabel})</span>`;
+            return `${wholeConf} ${t('units.conf') || 'conf'} <span class="conf-size-info">(${t('units.from') || 'da'} ${defaultQty}${pkgLabel})</span>`;
         }
         const remainderText = formatSubRemainder(fractionalConf * defaultQty, packageUnit);
         if (wholeConf > 0) {
-            return `${wholeConf} conf <span class="conf-size-info">(da ${defaultQty}${pkgLabel})</span> + ${remainderText}`;
+            return `${wholeConf} ${t('units.conf') || 'conf'} <span class="conf-size-info">(${t('units.from') || 'da'} ${defaultQty}${pkgLabel})</span> + ${remainderText}`;
         }
         return remainderText;
     }
@@ -4667,8 +4667,8 @@ function formatQuantity(qty, unit, defaultQty, packageUnit) {
 // Returns { mainQty: '10', unitLabel: 'conf', packageDetail: 'da 36g', fraction: '¼' }
 function formatQuantityParts(qty, unit, defaultQty, packageUnit) {
     const n = parseFloat(qty) || 0;
-    const unitLabels = { 'pz': 'pz', 'g': 'g', 'ml': 'ml', 'conf': 'conf' };
-    const label = unitLabels[unit] || unit || 'pz';
+    const unitLabels = { 'pz': t('units.pz'), 'g': 'g', 'ml': 'ml', 'conf': t('units.conf') };
+    const label = unitLabels[unit] || unit || t('units.pz');
 
     // Special handling for conf with partial packages
     if (unit === 'conf' && packageUnit && defaultQty > 0) {
@@ -4677,11 +4677,11 @@ function formatQuantityParts(qty, unit, defaultQty, packageUnit) {
         const fractionalConf = Math.round((n - wholeConf) * 1000) / 1000;
 
         if (fractionalConf < 0.01) {
-            return { mainQty: `${wholeConf}`, unitLabel: 'conf', packageDetail: `da ${defaultQty}${pkgLabel}`, fraction: '' };
+            return { mainQty: `${wholeConf}`, unitLabel: t('units.conf') || 'conf', packageDetail: `${t('units.from') || 'da'} ${defaultQty}${pkgLabel}`, fraction: '' };
         }
         const remainderText = formatSubRemainder(fractionalConf * defaultQty, packageUnit);
         if (wholeConf > 0) {
-            return { mainQty: `${wholeConf}`, unitLabel: 'conf', packageDetail: `da ${defaultQty}${pkgLabel}`, fraction: `+ ${remainderText}` };
+            return { mainQty: `${wholeConf}`, unitLabel: t('units.conf') || 'conf', packageDetail: `${t('units.from') || 'da'} ${defaultQty}${pkgLabel}`, fraction: `+ ${remainderText}` };
         }
         return { mainQty: remainderText, unitLabel: '', packageDetail: '', fraction: '' };
     }
@@ -4978,9 +4978,9 @@ function showItemDetail(inventoryId, productId) {
             </div>
         </div>
         <div class="modal-actions">
-            <button class="btn btn-danger flex-1" onclick="quickUse(${item.product_id}, '${item.location}')">📤 Usa</button>
-            <button class="btn btn-primary flex-1" onclick="editInventoryItem(${inventoryId})">✏️ Modifica</button>
-            <button class="btn btn-accent flex-1" onclick="closeModal();generateRecipeForIngredient(${JSON.stringify(item.name)})">🍳 Ricetta</button>
+            <button class="btn btn-danger flex-1" onclick="quickUse(${item.product_id}, '${item.location}')">📤 ${t('btn.use')}</button>
+            <button class="btn btn-primary flex-1" onclick="editInventoryItem(${inventoryId})">✏️ ${t('btn.edit_item')}</button>
+            <button class="btn btn-accent flex-1" data-name="${escapeHtml(item.name)}" onclick="closeModal();generateRecipeForIngredient(this.dataset.name)">🍳 ${t('action.create_recipe_btn')}</button>
             <button class="btn btn-secondary" onclick="deleteInventoryItem(${inventoryId})" style="padding:12px">🗑️</button>
         </div>
     `;
@@ -5091,7 +5091,7 @@ function editInventoryItem(id) {
     // Rebuild modal content for editing (don't close and reopen - just replace content)
     document.getElementById('modal-content').innerHTML = `
         <div class="modal-header">
-            <h3>Modifica ${escapeHtml(item.name)}</h3>
+            <h3>${t('edit.title').replace('{name}', escapeHtml(item.name))}</h3>
             <button class="modal-close" onclick="closeModal()">✕</button>
         </div>
         <form class="form" onsubmit="submitEditInventory(event, ${id}, ${item.product_id})">
@@ -5112,15 +5112,15 @@ function editInventoryItem(id) {
                 ` : ''}
             </div>
             <div class="form-group">
-                <label>📏 Unità di misura</label>
+                <label>${t('product.unit_label')}</label>
                 <select id="edit-unit" class="form-input" onchange="onEditUnitChange()">
-                    ${['pz','g','ml','conf'].map(u => `<option value="${u}" ${(item.unit||'pz') === u ? 'selected' : ''}>${u === 'pz' ? 'pz (pezzi)' : u === 'g' ? 'g (grammi)' : u === 'ml' ? 'ml (millilitri)' : u === 'conf' ? 'conf (confezioni)' : u}</option>`).join('')}
+                    ${['pz','g','ml','conf'].map(u => `<option value="${u}" ${(item.unit||'pz') === u ? 'selected' : ''}>${u === 'pz' ? 'pz (' + t('units.pieces') + ')' : u === 'g' ? 'g (' + t('units.grams') + ')' : u === 'ml' ? 'ml (' + t('units.millilitres') + ')' : u === 'conf' ? 'conf (' + t('units.boxes') + ')' : u}</option>`).join('')}
                 </select>
             </div>
             <div class="form-group" id="edit-conf-size-group" style="display:${isConf ? 'block' : 'none'}">
-                <label>📦 Ogni confezione contiene:</label>
+                <label>${t('product.conf_size_label')}</label>
                 <div class="conf-size-inputs">
-                    <input type="number" id="edit-conf-size" class="form-input conf-size-input" min="1" step="any" value="${confSizeVal}" placeholder="es. 300">
+                    <input type="number" id="edit-conf-size" class="form-input conf-size-input" min="1" step="any" value="${confSizeVal}" placeholder="${t('product.conf_size_placeholder')}">
                     <select id="edit-conf-unit" class="form-input conf-size-unit">
                         ${['g','ml'].map(u => `<option value="${u}" ${confUnitVal === u ? 'selected' : ''}>${u}</option>`).join('')}
                     </select>
@@ -5183,7 +5183,7 @@ async function submitEditInventory(e, id, productId) {
     
     await api('inventory_update', {}, 'POST', payload);
     closeModal();
-    showToast('Aggiornato!', 'success');
+    showToast(t('toast.updated'), 'success');
     if (_bannerEditPending) {
         _bannerEditPending = false;
         // Mark the item as confirmed so it does NOT reappear in the banner
@@ -5661,12 +5661,12 @@ async function onBarcodeDetected(barcode) {
             
             // Build rich notes with all available info
             const notesParts = [];
-            if (p.quantity_info) notesParts.push(`Peso: ${p.quantity_info}`);
+            if (p.quantity_info) notesParts.push(`${t('product.weight_label')}: ${p.quantity_info}`);
             if (p.nutriscore) notesParts.push(`Nutriscore: ${p.nutriscore.toUpperCase()}`);
             if (p.nova_group) notesParts.push(`NOVA: ${p.nova_group}`);
             if (p.ecoscore) notesParts.push(`Ecoscore: ${p.ecoscore.toUpperCase()}`);
-            if (p.origin) notesParts.push(`Origine: ${p.origin}`);
-            if (p.labels) notesParts.push(`Etichette: ${p.labels}`);
+            if (p.origin) notesParts.push(`${t('product.origin_label')}: ${p.origin}`);
+            if (p.labels) notesParts.push(`${t('product.labels_label')}: ${p.labels}`);
             
             // Save to local DB
             const saveResult = await api('product_save', {}, 'POST', {
@@ -6307,7 +6307,7 @@ function showProductAction() {
             ${currentProduct.weight_info ? `<p style="font-size:0.85rem;color:var(--text-light)">⚖️ ${escapeHtml(currentProduct.weight_info)}</p>` : ''}
             ${currentProduct.barcode ? `<p style="font-size:0.75rem;color:var(--text-muted)">📊 ${currentProduct.barcode}</p>` : ''}
         </div>
-        <button type="button" class="btn-edit-inline" onclick="toggleActionEdit()" title="Modifica nome/marca">✏️</button>
+        <button type="button" class="btn-edit-inline" onclick="toggleActionEdit()" title="${t('product.edit_name_brand')}">✏️</button>
     `;
     
     // Check if product needs editing (unknown name, missing info)
@@ -6331,7 +6331,7 @@ function showProductAction() {
     
     editInfoEl.innerHTML = `
         <div class="edit-unknown-card ${isUnknown ? 'highlight' : ''}">
-            <h4>${isUnknown ? '⚠️ Prodotto non riconosciuto' : '✏️ Modifica informazioni'}</h4>
+            <h4>${isUnknown ? '⚠️ ' + t('product.unknown_product') : '✏️ ' + t('product.edit_info')}</h4>
             ${isUnknown ? '<p class="edit-unknown-hint">Inserisci il nome e le informazioni del prodotto</p>' : ''}
             <div class="edit-unknown-form">
                 <div class="form-group">
@@ -6339,13 +6339,13 @@ function showProductAction() {
                     <input type="text" id="edit-action-name" class="form-input" value="${escapeHtml(isUnknown ? '' : currentProduct.name)}" placeholder="Es: Latte intero, Pasta penne..." required>
                 </div>
                 <div class="form-group">
-                    <label>🏪 Marca</label>
+                    <label>${t('product.brand_label')}</label>
                     <input type="text" id="edit-action-brand" class="form-input" value="${escapeHtml(currentProduct.brand || '')}" placeholder="Es: Barilla, Mulino Bianco...">
                 </div>
                 <div class="form-group">
-                    <label>📂 Categoria</label>
+                    <label>${t('product.category_label')}</label>
                     <select id="edit-action-category" class="form-input">
-                        <option value="">-- Seleziona --</option>
+                        <option value="">${t('form.select_placeholder')}</option>
                         ${categoryOptions}
                     </select>
                 </div>
@@ -6445,7 +6445,7 @@ function showProductAction() {
                     <span class="btn-icon">✏️</span>
                     <span class="btn-text">${t('product.modify_details')}<br><small>${t('action.edit_sub')}</small></span>
                 </button>
-                <button class="btn btn-recipe-from-ingredient" onclick="generateRecipeForIngredient(${JSON.stringify(currentProduct.name)})">
+                <button class="btn btn-recipe-from-ingredient" data-name="${escapeHtml(currentProduct.name)}" onclick="generateRecipeForIngredient(this.dataset.name)">
                     👨‍🍳 ${t('action.create_recipe_btn') || 'Crea una ricetta'}
                 </button>
             `;
@@ -6457,7 +6457,7 @@ function showProductAction() {
                 catalogLink.style.cssText = 'text-align:center;margin-top:6px';
                 btnsContainer.after(catalogLink);
             }
-            catalogLink.innerHTML = `<button type="button" class="btn-link-small" onclick="editProductFromAction()">⚙️ Modifica scheda prodotto (nome, marca, categoria…)</button>`;
+            catalogLink.innerHTML = `<button type="button" class="btn-link-small" onclick="editProductFromAction()">${t('product.edit_catalog')}</button>`;
         } else {
             // Product NOT in inventory - show only AGGIUNGI
             statusBar.style.display = 'none';
@@ -6561,7 +6561,7 @@ function editProductFromAction() {
 function openInventoryEdit() {
     const items = _actionInventoryItems;
     if (!items || items.length === 0) {
-        showToast('Nessuna voce di inventario trovata', 'error');
+        showToast(t('error.no_inventory_entry') || 'Nessuna voce di inventario trovata', 'error');
         return;
     }
     if (items.length === 1) {
@@ -6572,10 +6572,10 @@ function openInventoryEdit() {
     const contentEl = document.getElementById('modal-content');
     contentEl.innerHTML = `
         <div class="modal-header">
-            <h3>✏️ Quale modifica?</h3>
+            <h3>✏️ ${t('edit.choose_location_title')}</h3>
             <button class="modal-close" onclick="closeModal()">✕</button>
         </div>
-        <p style="font-size:0.9rem;color:var(--text-muted);margin:0 0 12px">Scegli la posizione da modificare:</p>
+        <p style="font-size:0.9rem;color:var(--text-muted);margin:0 0 12px">${t('edit.choose_location_hint')}</p>
         <div style="display:flex;flex-direction:column;gap:8px">
             ${items.map(inv => {
                 const locInfo = LOCATIONS[inv.location] || { icon: '📦', label: inv.location };
@@ -6610,7 +6610,7 @@ function editActionInventoryItem(inventoryId) {
     
     document.getElementById('modal-content').innerHTML = `
         <div class="modal-header">
-            <h3>Modifica ${escapeHtml(item.name || currentProduct.name)}</h3>
+            <h3>${t('edit.title').replace('{name}', escapeHtml(item.name || currentProduct.name))}</h3>
             <button class="modal-close" onclick="closeModal()">✕</button>
         </div>
         <form class="form" onsubmit="submitActionEditInventory(event, ${inventoryId}, ${item.product_id})">
@@ -6625,13 +6625,13 @@ function editActionInventoryItem(inventoryId) {
             <div class="form-group">
                 <label>${t('product.unit_label')}</label>
                 <select id="action-edit-unit" class="form-input" onchange="onActionEditUnitChange()">
-                    ${['pz','g','ml','conf'].map(u => `<option value="${u}" ${(item.unit||'pz') === u ? 'selected' : ''}>${u === 'pz' ? 'pz (pezzi)' : u === 'g' ? 'g (grammi)' : u === 'ml' ? 'ml (millilitri)' : u === 'conf' ? 'conf (confezioni)' : u}</option>`).join('')}
+                    ${['pz','g','ml','conf'].map(u => `<option value="${u}" ${(item.unit||'pz') === u ? 'selected' : ''}>${u === 'pz' ? 'pz (' + t('units.pieces') + ')' : u === 'g' ? 'g (' + t('units.grams') + ')' : u === 'ml' ? 'ml (' + t('units.millilitres') + ')' : u === 'conf' ? 'conf (' + t('units.boxes') + ')' : u}</option>`).join('')}
                 </select>
             </div>
             <div class="form-group" id="action-edit-conf-group" style="display:${isConf ? 'block' : 'none'}">
-                <label>📦 Ogni confezione contiene:</label>
+                <label>${t('product.conf_size_label')}</label>
                 <div class="conf-size-inputs">
-                    <input type="number" id="action-edit-conf-size" class="form-input conf-size-input" min="1" step="any" value="${confSizeVal}" placeholder="es. 300">
+                    <input type="number" id="action-edit-conf-size" class="form-input conf-size-input" min="1" step="any" value="${confSizeVal}" placeholder="${t('product.conf_size_placeholder')}">
                     <select id="action-edit-conf-unit" class="form-input conf-size-unit">
                         ${['g','ml'].map(u => `<option value="${u}" ${confUnitVal === u ? 'selected' : ''}>${u}</option>`).join('')}
                     </select>
@@ -6695,7 +6695,7 @@ async function submitActionEditInventory(e, id, productId) {
     
     await api('inventory_update', {}, 'POST', payload);
     closeModal();
-    showToast('Aggiornato!', 'success');
+    showToast(t('toast.updated'), 'success');
     showProductAction(); // Refresh the action page
 }
 
@@ -6874,7 +6874,7 @@ async function throwAll() {
                     showToast(t('toast.thrown_away', { name: currentProduct.name }), 'success');
                     showPage('dashboard');
                 } else {
-                    showToast(result.error || 'Errore', 'error');
+                    showToast(result.error || t('error.generic'), 'error');
                 }
             } catch(e) {
                 showLoading(false);
@@ -6902,7 +6902,7 @@ async function throwPartial() {
             showToast(t('toast.thrown_away_partial', { qty, unit: currentProduct.unit || 'pz', name: currentProduct.name }), 'success');
             showPage('dashboard');
         } else {
-            showToast(result.error || 'Errore', 'error');
+            showToast(result.error || t('error.generic'), 'error');
         }
     } catch(e) {
         showLoading(false);
@@ -7120,7 +7120,7 @@ function recalculateAddExpiry() {
     if (window._historyExpiryDays) suffix = ' (da storico)';
     else if (loc === 'freezer' && isVacuum) suffix = ' ' + t('add.suffix_freezer_vacuum');
     else if (loc === 'freezer') suffix = ' (freezer)';
-    else if (isVacuum) suffix = ' (sotto vuoto)';
+    else if (isVacuum) suffix = ' ' + t('add.suffix_vacuum');
     
     const expiryInput = document.getElementById('add-expiry');
     const estimateEl = document.querySelector('.expiry-estimate-label');
@@ -7368,12 +7368,12 @@ function selectPurchaseType(btn, type) {
     } else {
         detailDiv.innerHTML = `
             <div class="form-group">
-                <label>📅 Quando scade?</label>
+                <label>${t('inventory.label_expiry')}</label>
                 <div class="expiry-input-row">
                     <input type="date" id="add-expiry" class="form-input" value="">
                     <button type="button" class="btn btn-accent btn-scan-expiry" onclick="scanExpiryWithAI()" title="${t('add.scan_expiry_title')}">📷</button>
                 </div>
-                <p class="form-hint">Inserisci la data di scadenza o scansionala</p>
+                <p class="form-hint">${t('add.expiry_hint')}</p>
             </div>
             <div class="form-group">
                 <label>${t('add.remaining_label')}</label>
@@ -7494,7 +7494,7 @@ async function submitAdd(e) {
             let qtyInfo = '';
             if (result.total_qty) {
                 const u = result.unit || 'pz';
-                const unitLabels = { 'pz': 'pz', 'g': 'g', 'ml': 'ml', 'conf': 'conf' };
+                const unitLabels = { 'pz': t('units.pz'), 'g': 'g', 'ml': 'ml', 'conf': t('units.conf') };
                 const uLabel = unitLabels[u] || u;
                 if (u === 'conf' && result.package_unit && result.default_quantity > 0) {
                     const pkgLabel = unitLabels[result.package_unit] || result.package_unit;
@@ -7547,7 +7547,7 @@ async function submitAdd(e) {
                 window._addExtraBatches = [];
             }
         } else {
-            showToast(result.error || 'Errore', 'error');
+            showToast(result.error || t('error.generic'), 'error');
         }
     } catch (err) {
         showLoading(false);
@@ -8082,9 +8082,9 @@ function _showVacuumPrompt(openedId, wasVacuumSealed) {
         'width:calc(100% - 32px)', 'box-sizing:border-box', 'overflow:hidden'
     ].join(';');
     bar.innerHTML = `
-        <span style="flex:1;font-size:0.9rem;line-height:1.3">🔒 Messo <b>sotto vuoto</b>?</span>
-        <button id="_vac-yes" style="background:#22c55e;color:#fff;border:none;border-radius:8px;padding:7px 14px;font-weight:700;cursor:pointer;white-space:nowrap">Sì</button>
-        <button id="_vac-no" style="background:#475569;color:#fff;border:none;border-radius:8px;padding:7px 14px;font-weight:700;cursor:pointer;white-space:nowrap">No</button>
+        <span style="flex:1;font-size:0.9rem;line-height:1.3">${t('add.vacuum_question')}</span>
+        <button id="_vac-yes" style="background:#22c55e;color:#fff;border:none;border-radius:8px;padding:7px 14px;font-weight:700;cursor:pointer;white-space:nowrap">${t('btn.yes_short')}</button>
+        <button id="_vac-no" style="background:#475569;color:#fff;border:none;border-radius:8px;padding:7px 14px;font-weight:700;cursor:pointer;white-space:nowrap">${t('btn.no_short')}</button>
         <div id="_vac-bar" style="position:absolute;bottom:0;left:0;height:3px;background:#60a5fa;border-radius:0;width:100%"></div>
     `;
     document.body.appendChild(bar);
@@ -8100,7 +8100,7 @@ function _showVacuumPrompt(openedId, wasVacuumSealed) {
         if (rafH) cancelAnimationFrame(rafH);
         bar.remove();
         api('inventory_update', {}, 'POST', { id: openedId, vacuum_sealed: vacuum ? 1 : 0 })
-            .then(() => { if (vacuum) showToast('🔒 Sotto vuoto registrato', 'success'); })
+            .then(() => { if (vacuum) showToast(t('add.vacuum_saved'), 'success'); })
             .catch(() => {});
     }
 
@@ -8322,7 +8322,7 @@ function showMoveAfterUseModal(product, fromLoc, remaining, openedId, openedVacu
     const vacuumRow = `
         <label style="display:flex;align-items:center;gap:8px;margin-top:12px;cursor:pointer">
             <input type="checkbox" id="move-vacuum-check" ${wasVacuum ? 'checked' : ''}>
-            <span>🔒 Metti <b>sotto vuoto</b> il resto${wasVacuum ? ' (era già sigillato)' : ''}</span>
+            <span>${t('move.vacuum_seal_rest')}${wasVacuum ? ' ' + t('move.was_sealed') : ''}</span>
         </label>`;
     document.getElementById('modal-content').innerHTML = `
         <div class="modal-header">
@@ -8354,7 +8354,7 @@ async function _saveVacuumAndStay(openedId) {
         const isVacuum = document.getElementById('move-vacuum-check')?.checked ? 1 : 0;
         try {
             await api('inventory_update', {}, 'POST', { id: openedId, vacuum_sealed: isVacuum });
-            if (isVacuum) showToast('🔒 Sotto vuoto registrato', 'success');
+            if (isVacuum) showToast(t('add.vacuum_saved'), 'success');
         } catch (_) {}
     }
     showPage('dashboard');
@@ -8448,7 +8448,7 @@ async function _doSubmitUseAll() {
             }
             showLowStockBringPrompt(result, () => showPage('dashboard'));
         } else {
-            showToast(result.error || 'Errore', 'error');
+            showToast(result.error || t('error.generic'), 'error');
         }
     } catch (err) {
         showLoading(false);
@@ -8534,7 +8534,7 @@ async function _submitUseAllAt(location, isOpenedOnly) {
             }
             showLowStockBringPrompt(result, () => showPage('dashboard'));
         } else {
-            showToast(result.error || 'Errore', 'error');
+            showToast(result.error || t('error.generic'), 'error');
         }
     } catch (err) {
         showLoading(false);
@@ -8603,7 +8603,7 @@ async function submitUse(e) {
         } else if (result.duplicate) {
             // Silently ignore: this was a scale double-trigger, not a real error
         } else {
-            showToast(result.error || 'Errore', 'error');
+            showToast(result.error || t('error.generic'), 'error');
         }
     } catch (err) {
         showLoading(false);
@@ -8693,7 +8693,7 @@ async function analyzeWithAI() {
 
         if (!result.success) {
             if (result.error === 'no_api_key') {
-                resultDiv.innerHTML = `<p style="color:var(--warning)">⚠️ Chiave API Gemini non configurata.<br><small>Aggiungi GEMINI_API_KEY nel file .env sul server.</small></p>`;
+                resultDiv.innerHTML = `<p style="color:var(--warning)">${t('ai.no_api_key').replace(/\n/g, '<br>')}</p>`;
             } else if (/resource.?exhaust|quota|rate.?limit/i.test(result.error || '')) {
                 resultDiv.innerHTML = `<p style="color:var(--warning)">⏳ ${t('error.ai_quota')}</p>
                     <button class="btn btn-secondary full-width mt-2" onclick="retakePhotoAI()">${t('btn.retry')}</button>`;
@@ -8830,11 +8830,11 @@ async function selectAIMatch(idx) {
             const detected = detectUnitAndQuantity(p.quantity_info);
 
             const notesParts = [];
-            if (p.quantity_info) notesParts.push(`Peso: ${p.quantity_info}`);
+            if (p.quantity_info) notesParts.push(`${t('product.weight_label')}: ${p.quantity_info}`);
             if (p.nutriscore) notesParts.push(`Nutriscore: ${p.nutriscore.toUpperCase()}`);
             if (p.nova_group) notesParts.push(`NOVA: ${p.nova_group}`);
             if (p.ecoscore) notesParts.push(`Ecoscore: ${p.ecoscore.toUpperCase()}`);
-            if (p.origin) notesParts.push(`Origine: ${p.origin}`);
+            if (p.origin) notesParts.push(`${t('product.origin_label')}: ${p.origin}`);
 
             const saveResult = await api('product_save', {}, 'POST', {
                 barcode: match.barcode,
@@ -9040,7 +9040,7 @@ async function _pfAiAnalyze(base64) {
         html += `</div>`;
 
         if (matches.length > 0) {
-            html += `<p style="font-size:0.82rem;color:var(--text-muted);margin-bottom:6px">Seleziona la variante esatta o usa i dati AI:</p>`;
+            html += `<p style="font-size:0.82rem;color:var(--text-muted);margin-bottom:6px">${t('product.select_variant')}</p>`;
             html += `<div class="ai-matches-list" style="max-height:160px;overflow-y:auto;margin-bottom:10px">`;
             matches.forEach((m, idx) => {
                 html += `<div class="ai-match-item" onclick="_pfAiFillFromMatch(${idx})">`;
@@ -9184,7 +9184,7 @@ async function selectProductForAction(productId) {
         }
     } catch (err) {
         showLoading(false);
-        showToast('Errore', 'error');
+        showToast(t('error.generic'), 'error');
     }
 }
 
@@ -10164,10 +10164,10 @@ async function migrateBringNames(btn) {
                 showToast(t('shopping.names_already_updated'), 'info');
             }
         } else {
-            if (statusEl) statusEl.textContent = '❌ ' + (data.error || 'Errore');
+            if (statusEl) statusEl.textContent = '❌ ' + (data.error || t('error.unknown'));
         }
     } catch(e) {
-        if (statusEl) statusEl.textContent = '❌ Errore di connessione';
+        if (statusEl) statusEl.textContent = '❌ ' + t('scale.error_connect');
     }
     if (btn) btn.disabled = false;
 }
@@ -10224,7 +10224,7 @@ async function addSmartToBring() {
             // Reload to refresh badges
             loadShoppingList();
         } else {
-            showToast(result.error || 'Errore', 'error');
+            showToast(result.error || t('error.generic'), 'error');
         }
     } catch (e) {
         showLoading(false);
@@ -10997,7 +10997,7 @@ async function analyzeExpiryImage(dataUrl) {
             // Close modal after delay
             setTimeout(() => closeExpiryScanner(), 1500);
         } else if (result.error === 'no_api_key') {
-            statusDiv.innerHTML = `<p style="color:var(--warning)">⚠️ Chiave API Gemini non configurata.<br><small>Aggiungi GEMINI_API_KEY nel file .env sul server.</small></p>`;
+            statusDiv.innerHTML = `<p style="color:var(--warning)">${t('ai.no_api_key').replace(/\n/g, '<br>')}</p>`;
         } else {
             statusDiv.innerHTML = `<p style="color:var(--danger)">❌ Non riesco a leggere la data. ${result.raw_text ? '<br><small>Letto: ' + escapeHtml(result.raw_text) + '</small>' : ''}</p>
                 <button class="btn btn-secondary" onclick="retakeExpiry()" style="margin-top:8px">${t('btn.retry')}</button>`;
@@ -11071,7 +11071,7 @@ const LOG_PAGE_SIZE = 50;
 async function loadLog(more = false) {
     if (!more) {
         _logOffset = 0;
-        document.getElementById('log-list').innerHTML = '<p style="text-align:center;color:var(--text-muted)">Caricamento...</p>';
+        document.getElementById('log-list').innerHTML = '<p style="text-align:center;color:var(--text-muted)">' + t('loading') + '</p>';
     }
 
     try {
@@ -11722,7 +11722,7 @@ async function useRecipeIngredient(idx, productId, location, qtyNumber, btn, rec
         
         // Build quantity controls
         let qtySection = '';
-        let defaultQtyValue = qtyNumber;
+        let defaultQtyValue = Math.round(qtyNumber * 10) / 10;
         
         if (isConf) {
             const totalConf = items.reduce((s, i) => s + parseFloat(i.quantity), 0);
@@ -11733,7 +11733,7 @@ async function useRecipeIngredient(idx, productId, location, qtyNumber, btn, rec
             
             // qtyNumber from recipe is in sub-units (g, ml)
             const step = getSubUnitStep(pkgUnit);
-            defaultQtyValue = qtyNumber;
+            defaultQtyValue = (pkgUnit === 'g' || pkgUnit === 'ml') ? Math.round(qtyNumber) : Math.round(qtyNumber * 10) / 10;
             
             qtySection = `
                 <div class="use-unit-switch" style="display:flex;margin-bottom:8px">
@@ -11749,7 +11749,7 @@ async function useRecipeIngredient(idx, productId, location, qtyNumber, btn, rec
                 </div>`;
         } else {
             _recipeUseNormalUnit = unit;
-            const unitLabels = { 'pz': 'pz', 'g': 'g', 'ml': 'ml' };
+            const unitLabels = { 'pz': t('units.pz'), 'g': 'g', 'ml': 'ml' };
             const unitLabel = unitLabels[unit] || unit;
             const inputMin = '0.1';
             qtySection = `
@@ -11961,7 +11961,7 @@ function showRecipeMoveModal(productId, fromLoc, remaining, openedId, wasVacuum)
     const vacuumRow = `
         <label style="display:flex;align-items:center;gap:8px;margin-top:12px;cursor:pointer">
             <input type="checkbox" id="move-vacuum-check" ${wasVacuum ? 'checked' : ''}>
-            <span>${wasVacuum ? t('move.vacuum_restore') : '🔒 Metti <b>sotto vuoto</b> il resto'}</span>
+            <span>${wasVacuum ? t('move.vacuum_restore') : t('move.vacuum_seal_rest')}</span>
         </label>`;
     document.getElementById('modal-content').innerHTML = `
         <div class="modal-header">
@@ -12076,7 +12076,7 @@ function renderRecipe(r) {
     html += `<h3>${t('recipes.ingredients_title')}</h3><ul class="recipe-ingredients">`;
     (r.ingredients || []).forEach((ing, idx) => {
         if (ing.from_pantry && ing.product_id) {
-            const qtyNum = ing.qty_number || 0;
+            const qtyNum = Math.round((ing.qty_number || 0) * 10) / 10;
             const loc = (ing.location || 'dispensa').replace(/'/g, "\\'");
             const alreadyUsed = ing.used === true;
             html += `<li class="recipe-ingredient${alreadyUsed ? ' recipe-ing-used' : ''}" id="recipe-ing-${idx}">`;
@@ -12438,7 +12438,7 @@ function renderCookingStep() {
         const cookingLocLabels = Object.fromEntries(Object.entries(LOCATIONS).map(([k,v]) => [k, `${v.icon} ${v.label}`]));
         ingsEl.innerHTML = ings.map(ing => {
             const loc = (ing.location || 'dispensa').replace(/'/g, "\\'");
-            const qtyNum = ing.qty_number || 0;
+            const qtyNum = Math.round((ing.qty_number || 0) * 10) / 10;
             // Build info chips: brand, location, expiry
             const chips = [];
             if (ing.brand) chips.push(`<span class="cooking-ing-chip">${escapeHtml(ing.brand)}</span>`);
@@ -12566,12 +12566,12 @@ function _initBrowserTtsVoices(selectedVoice) {
     }
 
     if (!window.speechSynthesis) {
-        sel.innerHTML = '<option value="">— Voce non supportata dal browser —</option>';
+        sel.innerHTML = `<option value="">— ${t('settings.tts.voice_not_supported')} —</option>`;
         return;
     }
 
     // Reset to loading state each time (settings page may be re-opened)
-    sel.innerHTML = '<option value="">— Caricamento voci… —</option>';
+    sel.innerHTML = `<option value="">— ${t('settings.tts.voices_loading')} —</option>`;
 
     const populate = () => {
         let voices = [];
@@ -12611,7 +12611,7 @@ function _initBrowserTtsVoices(selectedVoice) {
         } else if (tries >= 50) { // 50 × 200ms = 10s
             clearInterval(interval);
             if (!window.speechSynthesis.getVoices().length) {
-                sel.innerHTML = '<option value="">— Nessuna voce disponibile su questo dispositivo —</option>';
+                sel.innerHTML = `<option value="">— ${t('settings.tts.voices_none')} —</option>`;
             }
         }
     }, 200);
@@ -12697,23 +12697,23 @@ async function testTTS() {
         tts_extra_fields: document.getElementById('setting-tts-extra-fields')?.value || ''
     };
     if (!formSettings.tts_url) {
-        if (statusEl) { statusEl.style.display = 'block'; statusEl.className = 'settings-status error'; statusEl.textContent = '⚠️ URL endpoint mancante.'; }
+        if (statusEl) { statusEl.style.display = 'block'; statusEl.className = 'settings-status error'; statusEl.textContent = t('settings.tts.url_missing'); }
         return;
     }
-    if (statusEl) { statusEl.style.display = 'block'; statusEl.className = 'settings-status'; statusEl.textContent = '⏳ Invio in corso…'; }
+    if (statusEl) { statusEl.style.display = 'block'; statusEl.className = 'settings-status'; statusEl.textContent = t('settings.tts.test_sending'); }
     try {
         const req = _buildTtsRequest('Test vocale EverShelf', formSettings);
         const res = await _ttsViaProxy(req);
         const data = await res.json().catch(() => ({}));
         const httpCode = data.status || res.status;
         if (res.ok && httpCode >= 200 && httpCode < 300) {
-            if (statusEl) { statusEl.className = 'settings-status success'; statusEl.textContent = `✅ Risposta ${httpCode} — controlla che l'altoparlante abbia parlato.`; }
+            if (statusEl) { statusEl.className = 'settings-status success'; statusEl.textContent = t('settings.tts.test_ok').replace('{code}', httpCode); }
         } else {
             const errDetail = data.error || data.body || res.statusText;
             if (statusEl) { statusEl.className = 'settings-status error'; statusEl.textContent = `⚠️ HTTP ${httpCode}: ${errDetail}`; }
         }
     } catch(e) {
-        if (statusEl) { statusEl.className = 'settings-status error'; statusEl.textContent = `❌ Errore: ${e.message}`; }
+        if (statusEl) { statusEl.className = 'settings-status error'; statusEl.textContent = `❌ ${t('error.prefix')}: ${e.message}`; }
     }
 }
 
@@ -12825,7 +12825,7 @@ function _extractTimerLabel(text, stepNum) {
         .replace(/\s+/g, ' ')
         .trim();
 
-    if (!beforeTime) return `Passo ${stepNum + 1}`;
+    if (!beforeTime) return t('cooking.step_fallback').replace('{n}', stepNum + 1);
 
     const actionRules = [
         { re: /\b(rosolatur\w*|rosola\w*|soffrigg\w*)\b/i, label: 'Rosolatura' },
@@ -12875,11 +12875,11 @@ function _extractTimerLabel(text, stepNum) {
             .filter(w => w.length > 2 && !/^\d+$/.test(w) && !fillers.has(w) && !applianceWords.has(w))
             .slice(0, 3)
             .join(' ');
-        label = fallback || `Passo ${stepNum + 1}`;
+        label = fallback || t('cooking.step_fallback').replace('{n}', stepNum + 1);
     }
 
     label = label.replace(/\s+/g, ' ').trim();
-    if (!label) return `Passo ${stepNum + 1}`;
+    if (!label) return t('cooking.step_fallback').replace('{n}', stepNum + 1);
 
     // Keep timer chips compact and readable.
     const maxLen = 30;
@@ -13394,7 +13394,7 @@ async function chatTransferToRecipes(btn, replyText) {
         });
         if (!result || !result.success || !result.recipe) {
             resetBtn();
-            showToast('⚠️ ' + (result?.error || t('error.generic') || 'Errore'), 'error');
+            showToast('⚠️ ' + (result?.error || t('error.generic') || t('error.generic')), 'error');
             return;
         }
         const recipe = result.recipe;
@@ -13417,7 +13417,7 @@ async function chatTransferToRecipes(btn, replyText) {
     } catch (err) {
         console.error('[chatTransferToRecipes]', err);
         resetBtn();
-        showToast('⚠️ ' + (err.message || t('error.connection') || 'Errore di connessione'), 'error');
+        showToast('⚠️ ' + (err.message || t('error.connection')), 'error');
     }
 }
 
@@ -13430,10 +13430,10 @@ async function generateRecipeForIngredient(ingredientName) {
     const loadingMsg = document.getElementById('recipe-loading-msg');
     if (loadingMsg) loadingMsg.textContent = '👨‍🍳 ' + (t('recipes.loading_msg') || 'Sto preparando la ricetta...');
     try {
-        const result = await api('recipe_from_ingredient', {}, 'POST', { ingredient: ingredientName });
+        const result = await api('recipe_from_ingredient', {}, 'POST', { ingredient: ingredientName, lang: _currentLang });
         if (!result || !result.success || !result.recipe) {
             document.getElementById('recipe-overlay').style.display = 'none';
-            showToast('⚠️ ' + (result?.error || t('error.generic') || 'Errore'), 'error');
+            showToast('⚠️ ' + (result?.error || t('error.generic') || t('error.generic')), 'error');
             return;
         }
         const recipe = result.recipe;
@@ -13447,7 +13447,7 @@ async function generateRecipeForIngredient(ingredientName) {
     } catch (err) {
         console.error('[generateRecipeForIngredient]', err);
         document.getElementById('recipe-overlay').style.display = 'none';
-        showToast('⚠️ ' + (t('error.connection') || 'Errore di connessione'), 'error');
+        showToast('⚠️ ' + t('error.connection'), 'error');
     }
 }
 
@@ -13481,7 +13481,8 @@ async function sendChatMessage() {
             message: text,
             history: chatHistory.slice(0, -1).slice(-20), // last 20 messages for context
             appliances: settings.appliances || [],
-            dietary_restrictions: settings.dietary_restrictions || ''
+            dietary_restrictions: settings.dietary_restrictions || '',
+            lang: _currentLang
         });
         
         // Remove typing indicator
@@ -13502,7 +13503,7 @@ async function sendChatMessage() {
                 scrollChatBottom();
             }
         } else {
-            const errMsg = result.error === 'no_api_key' ? 'Configura la chiave API Gemini nelle impostazioni.' : (result.error || 'Errore nella risposta');
+            const errMsg = result.error === 'no_api_key' ? t('error.no_api_key') : (result.error || t('error.generic'));
             appendChatBubble('gemini', `⚠️ ${escapeHtml(errMsg)}`);
         }
     } catch(err) {
@@ -13807,7 +13808,7 @@ function _renderScreensaverNutrition() {
                 <div class="ss-pie3d" id="ss-pie-main" style="--pie-bg:${gradient}"></div>
                 <div class="ss-nutr-chart-label">${t('nutrition.products_n').replace('{n}', total)}</div>
                 <div class="ss-nutr-legend">
-                    ${top4.map(s => `<div class="ss-leg-row"><span style="background:${s.color}" class="ss-leg-dot"></span><span>${s.icon} ${s.cat}</span><span class="ss-leg-pct">${s.pct}%</span></div>`).join('')}
+                    ${top4.map(s => `<div class="ss-leg-row"><span style="background:${s.color}" class="ss-leg-dot"></span><span>${s.icon} ${t('categories.' + s.cat) || s.cat}</span><span class="ss-leg-pct">${s.pct}%</span></div>`).join('')}
                 </div>
             </div>
             <!-- Score donuts -->
@@ -14324,6 +14325,7 @@ function initInactivityWatcher() {
 }
 
 // ===== INITIALIZATION =====
+const _splashStart = Date.now();
 document.addEventListener('DOMContentLoaded', () => {
     // Load translations first, then initialize the app
     loadTranslations(_currentLang).then(() => {
@@ -14652,11 +14654,22 @@ async function _initApp() {
     startHeartbeat();
     _injectKioskOverlay(); // kiosk X / refresh buttons (only when running inside Android WebView)
 
-    // Hide preloader once the dashboard is rendered
+    // Sync version label in preloader (in case HTML is stale)
+    const preloaderVer = document.getElementById('preloader-version');
+    if (preloaderVer) {
+        const ver = document.querySelector('.header-version')?.textContent?.trim() || '';
+        if (ver) preloaderVer.textContent = ver;
+    }
+
+    // Hide preloader — enforce minimum 3 s splash regardless of load speed
     const preloader = document.getElementById('app-preloader');
     if (preloader) {
-        preloader.classList.add('fade-out');
-        setTimeout(() => preloader.remove(), 380);
+        const elapsed = Date.now() - _splashStart;
+        const minDelay = Math.max(0, 3000 - elapsed);
+        setTimeout(() => {
+            preloader.classList.add('fade-out');
+            setTimeout(() => preloader.remove(), 380);
+        }, minDelay);
     }
 
     // Defer update check: fire 6 s after app is ready so it doesn't compete

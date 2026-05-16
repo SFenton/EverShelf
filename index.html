@@ -11,7 +11,7 @@
     <title>EverShelf</title>
     <link rel="manifest" href="manifest.json">
     <link rel="icon" type="image/png" href="assets/img/logo/logo_icon.png">
-    <link rel="stylesheet" href="assets/css/style.css?v=20260516a">
+    <link rel="stylesheet" href="assets/css/style.css?v=20260516b">
     <!-- QuaggaJS for barcode scanning -->
     <script src="https://cdn.jsdelivr.net/npm/@ericblade/quagga2@1.8.4/dist/quagga.min.js"></script>
     <!-- @xenova/transformers: ES-module bootstrap that exposes a lazy category-classifier as window._categoryPipelinePromise -->
@@ -53,8 +53,9 @@
 <!-- ===== APP PRELOADER (hidden by JS once _initApp completes) ===== -->
 <div id="app-preloader" aria-hidden="true">
     <div class="app-preloader-inner">
-        <div class="app-preloader-spinner"></div>
         <img src="assets/img/logo/logo.png" alt="EverShelf" class="app-preloader-logo" />
+        <div class="app-preloader-spinner"></div>
+        <span class="app-preloader-version" id="preloader-version">v1.7.15</span>
     </div>
 </div>
 
@@ -67,7 +68,7 @@
         <!-- Title — left-aligned; grows to fill space -->
         <div class="header-title-wrap">
             <h1 class="header-title" onclick="showPage('dashboard')">
-                <img src="assets/img/logo/logo_icon.png" alt="" class="header-logo-icon" aria-hidden="true" /><span data-i18n="nav.title">EverShelf</span><span class="header-version">v1.7.14</span>
+                <img src="assets/img/logo/logo_icon.png" alt="" class="header-logo-icon" aria-hidden="true" /><span data-i18n="nav.title">EverShelf</span><span class="header-version">v1.7.15</span>
             </h1>
             <!-- Update badge — shown alongside title, never replaces it -->
             <span class="header-update-badge" id="header-update-badge" style="display:none"></span>
@@ -577,7 +578,7 @@
             <div class="form-group">
                 <label data-i18n="product.category_label">📂 Categoria</label>
                 <select id="pf-category" class="form-input" onchange="onCategoryChange(false)">
-                    <option value="">-- Seleziona --</option>
+                    <option value="" data-i18n="form.select_placeholder">-- Seleziona --</option>
                     <option value="latticini">🥛 Latticini</option>
                     <option value="carne">🥩 Carne</option>
                     <option value="pesce">🐟 Pesce</option>
@@ -628,10 +629,10 @@
             <div class="form-group">
                 <label data-i18n="product.barcode_label">🔖 Barcode</label>
                 <div class="expiry-input-row">
-                    <input type="text" id="pf-barcode" class="form-input" placeholder="Codice a barre (se disponibile)" inputmode="numeric">
+                    <input type="text" id="pf-barcode" class="form-input" placeholder="Codice a barre (se disponibile)" inputmode="numeric" data-i18n-placeholder="product.barcode_placeholder">
                     <button type="button" class="btn btn-accent btn-scan-expiry" id="pf-barcode-scan-btn" onclick="scanBarcodeForForm()" title="Scansiona barcode">📷</button>
                 </div>
-                <p class="form-hint" id="pf-barcode-hint" style="display:none">⚠️ Aggiungi il barcode così al prossimo acquisto basta scansionarlo!</p>
+                <p class="form-hint" id="pf-barcode-hint" style="display:none" data-i18n="product.barcode_hint">⚠️ Aggiungi il barcode così al prossimo acquisto basta scansionarlo!</p>
             </div>
             <input type="hidden" id="pf-image">
             <div class="product-image-preview" id="pf-image-preview" style="display:none">
@@ -994,18 +995,18 @@
                         </div>
                     </div>
                     <div class="common-appliances mt-2">
-                        <p class="settings-hint">Aggiungi velocemente:</p>
+                        <p class="settings-hint" data-i18n="settings.appliances.quick_title">Aggiungi velocemente:</p>
                         <div class="appliance-quick-tags">
-                            <button class="btn btn-small btn-secondary" onclick="addApplianceQuick('Forno')">🔥 Forno</button>
-                            <button class="btn btn-small btn-secondary" onclick="addApplianceQuick('Microonde')">📡 Microonde</button>
-                            <button class="btn btn-small btn-secondary" onclick="addApplianceQuick('Friggitrice ad aria')">🍟 Friggitrice ad aria</button>
-                            <button class="btn btn-small btn-secondary" onclick="addApplianceQuick('Macchina del pane')">🍞 Macchina pane</button>
-                            <button class="btn btn-small btn-secondary" onclick="addApplianceQuick('Bimby/Moulinex Cookeo')">🤖 Bimby/Cookeo</button>
-                            <button class="btn btn-small btn-secondary" onclick="addApplianceQuick('Planetaria')">🌀 Planetaria</button>
-                            <button class="btn btn-small btn-secondary" onclick="addApplianceQuick('Vaporiera')">♨️ Vaporiera</button>
-                            <button class="btn btn-small btn-secondary" onclick="addApplianceQuick('Pentola a pressione')">🫕 Pentola pressione</button>
-                            <button class="btn btn-small btn-secondary" onclick="addApplianceQuick('Tostapane')">🍞 Tostapane</button>
-                            <button class="btn btn-small btn-secondary" onclick="addApplianceQuick('Frullatore/Mixer')">🍹 Frullatore</button>
+                            <button class="btn btn-small btn-secondary" onclick="addApplianceQuick('Forno')" data-i18n="settings.appliances.oven">🔥 Forno</button>
+                            <button class="btn btn-small btn-secondary" onclick="addApplianceQuick('Microonde')" data-i18n="settings.appliances.microwave">📡 Microonde</button>
+                            <button class="btn btn-small btn-secondary" onclick="addApplianceQuick('Friggitrice ad aria')" data-i18n="settings.appliances.air_fryer">🍟 Friggitrice ad aria</button>
+                            <button class="btn btn-small btn-secondary" onclick="addApplianceQuick('Macchina del pane')" data-i18n="settings.appliances.bread_maker">🍞 Macchina pane</button>
+                            <button class="btn btn-small btn-secondary" onclick="addApplianceQuick('Bimby/Moulinex Cookeo')" data-i18n="settings.appliances.bimby">🤖 Bimby/Cookeo</button>
+                            <button class="btn btn-small btn-secondary" onclick="addApplianceQuick('Planetaria')" data-i18n="settings.appliances.mixer">🌀 Planetaria</button>
+                            <button class="btn btn-small btn-secondary" onclick="addApplianceQuick('Vaporiera')" data-i18n="settings.appliances.steamer">♨️ Vaporiera</button>
+                            <button class="btn btn-small btn-secondary" onclick="addApplianceQuick('Pentola a pressione')" data-i18n="settings.appliances.pressure_cooker">🫕 Pentola pressione</button>
+                            <button class="btn btn-small btn-secondary" onclick="addApplianceQuick('Tostapane')" data-i18n="settings.appliances.toaster">🍞 Tostapane</button>
+                            <button class="btn btn-small btn-secondary" onclick="addApplianceQuick('Frullatore/Mixer')" data-i18n="settings.appliances.blender">🍹 Frullatore</button>
                         </div>
                     </div>
                 </div>
@@ -1030,21 +1031,21 @@
             <div class="settings-panel" id="tab-security">
                 <div class="settings-card">
                     <h4 data-i18n="settings.security.token_title">🔑 Token Impostazioni</h4>
-                    <p class="settings-hint">Se <code>SETTINGS_TOKEN</code> è configurato nel <code>.env</code> server, inserisci qui il token prima di salvare le impostazioni. Lascia vuoto se non configurato.</p>
+                    <p class="settings-hint" data-i18n="settings.security.token_hint">Se <code>SETTINGS_TOKEN</code> è configurato nel <code>.env</code> server, inserisci qui il token prima di salvare le impostazioni. Lascia vuoto se non configurato.</p>
                     <div class="form-group">
                         <label data-i18n="settings.security.token_label">Token di accesso</label>
-                        <input type="password" id="setting-settings-token" class="form-input" placeholder="(vuoto = nessuna protezione)">
+                        <input type="password" id="setting-settings-token" class="form-input" placeholder="(vuoto = nessuna protezione)" data-i18n-placeholder="settings.security.token_placeholder">
                         <button class="btn btn-small btn-secondary mt-2" onclick="togglePasswordVisibility('setting-settings-token')" data-i18n="btn.toggle_password">👁️ Mostra/Nascondi</button>
                     </div>
-                    <p class="settings-hint" id="settings-token-status-hint" style="display:none;color:var(--accent)">🔒 Questo server richiede un token per salvare le impostazioni.</p>
+                    <p class="settings-hint" id="settings-token-status-hint" style="display:none;color:var(--accent)" data-i18n="settings.security.token_required_hint">🔒 Questo server richiede un token per salvare le impostazioni.</p>
                 </div>
                 <div class="settings-card">
                     <h4 data-i18n="settings.security.title">🔒 Certificato HTTPS</h4>
-                    <p class="settings-hint">Se il browser mostra l'errore "La connessione non è privata" (ERR_CERT_AUTHORITY_INVALID), devi installare il certificato CA nel dispositivo.</p>
+                    <p class="settings-hint" data-i18n="settings.security.hint">Se il browser mostra l'errore "La connessione non è privata" (ERR_CERT_AUTHORITY_INVALID), devi installare il certificato CA nel dispositivo.</p>
                     <div class="form-group">
                         <a href="ca.crt" download="EverShelf_CA.crt" class="btn btn-large btn-accent full-width" style="text-align:center;text-decoration:none;display:block" data-i18n="settings.security.download_btn">📥 Scarica Certificato CA</a>
                     </div>
-                    <div class="settings-hint" style="margin-top:12px;line-height:1.6">
+                    <div class="settings-hint" style="margin-top:12px;line-height:1.6" data-i18n-html="settings.security.cert_instructions">
                         <strong>Istruzioni per Chrome (Android):</strong><br>
                         1. Scarica il certificato qui sopra<br>
                         2. Vai in <em>Impostazioni → Sicurezza e privacy → Altre impostazioni di sicurezza → Installa da archivio dispositivo</em><br>
@@ -1088,11 +1089,11 @@
                             <label data-i18n="settings.tts.voice_label">🗣️ Voce</label>
                             <div style="display:flex;gap:8px;align-items:center">
                                 <select id="setting-tts-voice" class="form-input" style="flex:1">
-                                    <option value="">— Caricamento voci… —</option>
+                                    <option value="" data-i18n="settings.tts.voices_loading">— Caricamento voci… —</option>
                                 </select>
                                 <button type="button" class="btn btn-secondary" style="padding:8px 12px;white-space:nowrap;flex-shrink:0" onclick="_initBrowserTtsVoices(document.getElementById('setting-tts-voice').value)">↺</button>
                             </div>
-                            <p class="settings-hint">Le voci disponibili dipendono dal sistema operativo e dal browser. Su macOS/iOS è disponibile la voce <strong>Paola</strong> (italiano). Premi ↺ se la lista non si carica.</p>
+                            <p class="settings-hint" data-i18n="settings.tts.voices_hint">Le voci disponibili dipendono dal sistema operativo e dal browser. Su macOS/iOS è disponibile la voce <strong>Paola</strong> (italiano). Premi ↺ se la lista non si carica.</p>
                         </div>
                         <div class="form-group">
                             <label><span data-i18n="settings.tts.rate_label">⚡ Velocità</span>: <span id="tts-rate-label">1.0</span>×</label>
@@ -1158,7 +1159,7 @@
                     <div class="form-group">
                         <label data-i18n="settings.tts.extra_fields_label">➕ Campi extra (JSON)</label>
                         <textarea id="setting-tts-extra-fields" class="form-input" rows="3" placeholder='{"entity_id": "media_player.living_room"}'></textarea>
-                        <p class="settings-hint">Campi aggiuntivi da includere nel payload, in formato JSON. Lascia vuoto se non necessario.</p>
+                        <p class="settings-hint" data-i18n="settings.tts.extra_fields_hint">Campi aggiuntivi da includere nel payload, in formato JSON. Lascia vuoto se non necessario.</p>
                     </div>
                     </div><!-- /tts-server-section -->
 
@@ -1174,9 +1175,9 @@
 
                     <!-- Kiosk-mode panel: replace WebSocket config with native reconfigure button -->
                     <div id="scale-kiosk-panel" style="display:none;background:rgba(16,185,129,0.07);border:1px solid rgba(16,185,129,0.25);border-radius:10px;padding:14px;margin-bottom:16px">
-                        <p style="margin:0 0 6px;font-weight:600">📡 Bilancia BLE integrata nel Kiosk</p>
-                        <p class="settings-hint" style="margin-bottom:12px">La bilancia è gestita direttamente dal Gateway BLE interno al kiosk. Per abbinare un nuovo dispositivo usa il wizard di configurazione.</p>
-                        <button class="btn btn-secondary full-width" onclick="_kioskReconfigureScale()">🔄 Riconfigura bilancia BLE</button>
+                        <p style="margin:0 0 6px;font-weight:600" data-i18n="settings.scale.kiosk_title">📡 Bilancia BLE integrata nel Kiosk</p>
+                        <p class="settings-hint" style="margin-bottom:12px" data-i18n="settings.scale.kiosk_hint">La bilancia è gestita direttamente dal Gateway BLE interno al kiosk. Per abbinare un nuovo dispositivo usa il wizard di configurazione.</p>
+                        <button class="btn btn-secondary full-width" onclick="_kioskReconfigureScale()" data-i18n="settings.scale.kiosk_reconfigure">🔄 Riconfigura bilancia BLE</button>
                         <!-- shown when kiosk APK is too old to have reconfigureScale() -->
                         <div id="kiosk-needs-update-notice" style="display:none;margin-top:10px;padding:8px 12px;background:rgba(245,158,11,0.1);border:1px solid rgba(245,158,11,0.35);border-radius:8px;font-size:0.83rem">
                             <span data-i18n="settings.kiosk.needs_update">⚠️ Il kiosk installato non supporta questa funzione.
@@ -1238,7 +1239,7 @@
                     </div>
 
                     <!-- Protocol info -->
-                    <div class="settings-hint" style="margin-top:16px;padding:10px;background:var(--bg-secondary,#f8fafc);border-radius:8px">
+                    <div class="settings-hint" style="margin-top:16px;padding:10px;background:var(--bg-secondary,#f8fafc);border-radius:8px" data-i18n-html="settings.scale.ble_protocols">
                         <p style="margin:0 0 6px;font-weight:600">🔌 Protocolli BLE supportati:</p>
                         <ul style="margin:0 0 0 16px;padding:0;font-size:0.8rem">
                             <li>Bluetooth SIG Weight Scale (0x181D)</li>
@@ -1274,7 +1275,7 @@
                         </label>
                     </div>
                     <div class="form-group" id="screensaver-timeout-row" style="margin-top:10px">
-                        <label for="setting-screensaver-timeout" style="font-size:0.85rem;font-weight:600;color:var(--text-secondary)">⏱️ Avvia dopo</label>
+                        <label for="setting-screensaver-timeout" style="font-size:0.85rem;font-weight:600;color:var(--text-secondary)" data-i18n="settings.screensaver.start_after">⏱️ Avvia dopo</label>
                         <select id="setting-screensaver-timeout" class="form-control" style="margin-top:6px;max-width:200px">
                             <option value="1" data-i18n="settings.screensaver.timeout_1">1 minuto</option>
                             <option value="2" data-i18n="settings.screensaver.timeout_2">2 minuti</option>
@@ -1559,6 +1560,6 @@
     </div>
 </div>
 
-<script src="assets/js/app.js?v=20260516a"></script>
+<script src="assets/js/app.js?v=20260516b"></script>
 </body>
 </html>

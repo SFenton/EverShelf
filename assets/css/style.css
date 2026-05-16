@@ -104,10 +104,17 @@ body {
     letter-spacing: 0.5px;
 }
 .app-preloader-logo {
-    height: 120px;
+    height: 160px;
     width: auto;
     object-fit: contain;
-    filter: drop-shadow(0 2px 8px rgba(0,0,0,0.4));
+    filter: drop-shadow(0 4px 16px rgba(74,222,128,0.2));
+}
+.app-preloader-version {
+    color: rgba(255,255,255,0.35);
+    font-size: 0.72rem;
+    font-family: monospace;
+    letter-spacing: 0.5px;
+    margin-top: -8px;
 }
 .header-logo-icon {
     height: 28px;
@@ -1265,6 +1272,16 @@ body.server-offline .bottom-nav {
 .btn-warning {
     background: var(--warning);
     color: white;
+}
+
+#btn-report-bug {
+    background: #f97316;
+    color: #fff;
+    border-color: #ea580c;
+}
+#btn-report-bug:hover {
+    background: #ea580c;
+    border-color: #c2410c;
 }
 
 .btn-secondary {

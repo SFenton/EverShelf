@@ -20,6 +20,8 @@
     "add": "✅ Add",
     "delete": "Delete",
     "edit": "✏️ Edit",
+    "use": "Use",
+    "edit_item": "Edit",
     "search": "🔍 Search",
     "go": "✅ Go",
     "toggle_password": "👁️ Show/Hide",
@@ -29,7 +31,12 @@
     "restart": "↺ Restart",
     "reset_default": "↺ Reset to default",
     "save_info": "💾 Save information",
-    "retry": "🔄 Retry"
+    "retry": "🔄 Retry",
+    "yes_short": "Yes",
+    "no_short": "No"
+  },
+  "form": {
+    "select_placeholder": "-- Select --"
   },
   "locations": {
     "dispensa": "Pantry",
@@ -64,7 +71,9 @@
     "pieces": "Pieces",
     "grams": "Grams",
     "box": "Package",
-    "boxes": "Packages"
+    "boxes": "Packages",
+    "millilitres": "Millilitres",
+    "from": "of"
   },
   "shopping_sections": {
     "frutta_verdura": "Fruits & Vegetables",
@@ -216,7 +225,7 @@
     "throw_btn": "🗑️ DISCARD",
     "throw_sub": "throw away",
     "edit_sub": "expiry, location…",
-    "create_recipe_btn": "Create a recipe with this"
+    "create_recipe_btn": "Recipe"
   },
   "add": {
     "title": "Add to Pantry",
@@ -241,7 +250,9 @@
     "scan_expiry_title": "📷 Scan Expiry Date",
     "product_added": "✅ {name} added!{qty}",
     "suffix_freezer_vacuum": "(freezer + vacuum sealed)",
-    "history_badge_tip": "Average from {n} previous entries"
+    "history_badge_tip": "Average from {n} previous entries",
+    "vacuum_question": "Vacuum sealed?",
+    "vacuum_saved": "🔒 Vacuum sealed!"
   },
   "use": {
     "title": "Use / Consume",
@@ -313,7 +324,13 @@
     "edit_info": "✏️ Edit information",
     "modify_details": "EDIT\nexpiry, location…",
     "already_in_pantry": "📋 Already in pantry",
-    "no_barcode": "No barcode"
+    "no_barcode": "No barcode",
+    "unknown_product": "Unrecognized product",
+    "edit_name_brand": "Edit name/brand",
+    "weight_label": "Weight",
+    "origin_label": "Origin",
+    "labels_label": "Labels",
+    "select_variant": "Select the exact variant or use AI data:"
   },
   "products": {
     "title": "📦 All Products",
@@ -483,7 +500,8 @@
     "undo_success": "↩ Operation undone for {name}",
     "already_undone": "Operation already undone",
     "too_old": "Cannot undo operations older than 24 hours",
-    "undo_error": "Error during undo"
+    "undo_error": "Error during undo",
+    "recipe_prefix": "Recipe"
   },
   "chat": {
     "title": "Gemini Chef",
@@ -503,7 +521,8 @@
     "transfer_to_recipes": "Transfer to Recipes",
     "transferring": "Transferring...",
     "transferred": "Added to Recipes!",
-    "open_recipe": "Open recipe"
+    "open_recipe": "Open recipe",
+    "quick_recipe_prompt": "Suggest a quick recipe FOR ONE PERSON using the products that expire first! Ignore freezer items, focus on fridge and pantry."
   },
   "cooking": {
     "close": "Close",
@@ -520,7 +539,8 @@
     "timer_warning_tts": "Heads up! {label}: 10 seconds left!",
     "recipe_done_tts": "Recipe complete! Enjoy your meal!",
     "expires_chip": "exp. {date}",
-    "finish": "✅ Finish"
+    "finish": "✅ Finish",
+    "step_fallback": "Step {n}"
   },
   "settings": {
     "title": "⚙️ Settings",
@@ -631,7 +651,11 @@
       "hint": "If the browser shows the error \"Your connection is not private\" (ERR_CERT_AUTHORITY_INVALID), you need to install the CA certificate on the device.",
       "download_btn": "📥 Download CA Certificate",
       "token_title": "🔑 Settings Token",
-      "token_label": "Access token"
+      "token_label": "Access token",
+      "token_hint": "If `SETTINGS_TOKEN` is configured in the server's `.env`, enter the token here before saving settings. Leave empty if not configured.",
+      "token_placeholder": "(empty = no protection)",
+      "token_required_hint": "🔒 This server requires a token to save settings.",
+      "cert_instructions": "<strong>Instructions for Chrome (Android):</strong><br>1. Download the certificate above<br>2. Go to <em>Settings &rarr; Security &amp; Privacy &rarr; More security settings &rarr; Install from device storage</em><br>3. Select the downloaded <em>EverShelf_CA.crt</em> file<br>4. Choose \"CA\" and confirm<br>5. Restart Chrome<br><br><strong>Instructions for Chrome (PC):</strong><br>1. Download the certificate above<br>2. Go to <em>chrome://settings/certificates</em> (or Settings &rarr; Privacy and security &rarr; Security &rarr; Manage certificates)<br>3. Tab \"Authorities\" &rarr; Import &rarr; select the file<br>4. Check \"Trust this certificate for identifying websites\"<br>5. Restart Chrome"
     },
     "tts": {
       "title": "🔊 Voice & TTS",
@@ -658,7 +682,14 @@
       "extra_fields_label": "➕ Extra fields (JSON)",
       "extra_fields_placeholder": "{\"entity_id\": \"media_player.living_room\"}",
       "extra_fields_hint": "Additional fields to include in the payload, in JSON format. Leave empty if not needed.",
-      "test_btn": "🔊 Send Test Voice"
+      "test_btn": "🔊 Send Test Voice",
+      "voices_loading": "Loading voices…",
+      "voice_not_supported": "Voice not supported by this browser",
+      "voices_none": "No voices available on this device",
+      "voices_hint": "Available voices depend on the OS and browser. On macOS/iOS the Paola (Italian) voice is available. Press ↺ if the list does not load.",
+      "url_missing": "⚠️ Endpoint URL missing.",
+      "test_sending": "⏳ Sending…",
+      "test_ok": "✅ Response {code} — check that the speaker has spoken."
     },
     "language": {
       "title": "🌐 Language",
@@ -676,7 +707,8 @@
       "timeout_10": "10 minutes",
       "timeout_15": "15 minutes",
       "timeout_30": "30 minutes",
-      "timeout_60": "1 hour"
+      "timeout_60": "1 hour",
+      "start_after": "⏱️ Start after"
     },
     "scale": {
       "title": "⚖️ Smart Scale",
@@ -691,7 +723,11 @@
       "download_hint": "Android app that bridges your BLE scale and EverShelf.",
       "download_sub": "Source: evershelf-scale-gateway/ in the project root",
       "live_weight": "real-time weight",
-      "auto_reconnect": "🔁 Reconnect: automatic"
+      "auto_reconnect": "🔁 Reconnect: automatic",
+      "kiosk_title": "📡 BLE Scale integrated in Kiosk",
+      "kiosk_hint": "The scale is directly managed by the internal BLE Gateway of the kiosk. To pair a new device, use the configuration wizard.",
+      "kiosk_reconfigure": "🔄 Reconfigure BLE Scale",
+      "ble_protocols": "<p style=\"margin:0 0 6px;font-weight:600\">🔌 Supported BLE protocols:</p><ul style=\"margin:0 0 0 16px;padding:0;font-size:0.8rem\"><li>Bluetooth SIG Weight Scale (0x181D)</li><li>Bluetooth SIG Body Composition (0x181B) &mdash; weight, fat, BMI</li><li>Xiaomi Mi Body Composition Scale 2</li><li>Generic &mdash; automatic heuristic for 100+ models</li></ul>"
     },
     "kiosk": {
       "hint": "Turn an Android tablet into an always-on EverShelf panel with built-in BLE scale gateway.",
@@ -838,7 +874,10 @@
     "select_items": "Select at least one product",
     "server_offline": "Server connection lost",
     "server_restored": "Server connection restored",
-    "server_retry": "Retry"
+    "server_retry": "Retry",
+    "unknown": "Unknown error",
+    "prefix": "Error",
+    "no_inventory_entry": "No inventory entry found"
   },
   "confirm": {
     "remove_item": "Do you really want to remove this product from inventory?",
@@ -854,7 +893,9 @@
   "edit": {
     "title": "Edit {name}",
     "unknown_hint": "Enter the product name and information",
-    "label_name": "🏷️ Product name"
+    "label_name": "🏷️ Product name",
+    "choose_location_title": "Which location?",
+    "choose_location_hint": "Choose the location to edit:"
   },
   "screensaver": {
     "recipe_btn": "Recipes",
@@ -951,7 +992,8 @@
     "thing_rest": "rest",
     "stay_btn": "No, stay in {location}",
     "moved_toast": "📦 Opened package moved to {location}",
-    "vacuum_restore": "🫙 Restore vacuum sealed"
+    "vacuum_restore": "🫙 Restore vacuum sealed",
+    "vacuum_seal_rest": "🔒 Vacuum seal the rest"
   },
   "nova": {
     "1": "Unprocessed",
