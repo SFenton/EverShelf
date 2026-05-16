@@ -47,8 +47,11 @@ All data stays on your server. No cloud, no subscriptions.
 ## 🆕 What's New
 
 ### v1.7.13 (2026-05-16)
-- **Critical fix:** Fresh-install crash resolved — `transactions` schema was missing the `undone` column, causing a database failure on every new installation
-- **Fix:** Race condition in DB migrations no longer causes `duplicate column name` errors on concurrent first requests
+- **Fix:** Kiosk Settings button (⚙️) added to the web overlay — tapping the camera button no longer accidentally opens kiosk settings
+- **Fix:** Opened-item expiry badge is now consistent with the top banner: low-risk items (jams, condiments) show amber ⚠️ "Check soon" instead of misleading red ⛔ "Expired"
+- **Cooking Mode:** 3D wheel UI with perspective card flip, ghost steps (prev/next), float animation, and full `prefers-reduced-motion` support
+- **CI:** `data/category_ai_cache.json` added to `.gitignore`
+- **Critical fix (DB):** Fresh-install crash resolved — `transactions` schema was missing the `undone` column
 
 ### v1.7.12 (2026-05-13)
 - "Use first" banner now shows opening date and location instead of a confusing calculated expiry
@@ -81,7 +84,7 @@ EverShelf/
 ├── translations/               # i18n JSON files (it, en, de)
 ├── docs/openapi.yaml           # OpenAPI 3.0 spec
 ├── evershelf-kiosk/            # Android kiosk app (Kotlin)
-└── evershelf-scale-gateway/    # Android BLE gateway app (Kotlin)
+└── evershelf-scale-gateway/    # Android BLE gateway app (Kotlin) — DEPRECATED, built into kiosk since v1.6.0
 ```
 
 ---

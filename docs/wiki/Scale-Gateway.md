@@ -75,7 +75,7 @@ In EverShelf **Settings → Scale**:
 
 ### 4. Connect your scale
 
-Tap **"Cerca Bilance Bluetooth"** (Find Bluetooth Scales). Make sure your scale is powered on. Tap it in the list to pair and connect.
+Tap **"Find Bluetooth Scales"**. Make sure your scale is powered on. Tap it in the list to pair and connect.
 
 ---
 
@@ -84,7 +84,7 @@ Tap **"Cerca Bilance Bluetooth"** (Find Bluetooth Scales). Make sure your scale 
 When scale integration is enabled:
 
 1. Open the **Add** or **Use** form for any product with unit `g` or `ml`
-2. A **"⚖️ Leggi bilancia"** button appears
+2. A **"⚖️ Read Scale"** button appears
 3. Tap it — a live weight display appears with a stability indicator
 4. Step on or place the product on the scale
 5. When the reading stabilizes, a **5-second countdown** starts
@@ -127,7 +127,7 @@ Every 6 hours the gateway app checks GitHub releases. If a newer version is avai
 ### Weight not appearing in EverShelf
 - Confirm the Gateway URL in EverShelf Settings matches the URL shown in the gateway app
 - Check that the Android device and the EverShelf server are on the same network
-- Tap "Disconnetti / Riconnetti" in the gateway app to refresh the WebSocket connection
+- Tap "Disconnect / Reconnect" in the gateway app to refresh the WebSocket connection
 
 ### "Mixed content" error in browser
 - Make sure you are accessing EverShelf over HTTPS (not plain HTTP)

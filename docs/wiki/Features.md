@@ -83,9 +83,9 @@ Recipes stream live via Server-Sent Events so results appear as they are generat
 ### AI Chat Assistant
 
 Open **💬 Chat** to ask questions like:
-- "Cosa posso fare con le uova e la pasta?"
-- "Quanti giorni dura il prosciutto cotto aperto in frigo?"
-- "Suggeriscimi uno spuntino veloce"
+- "What can I make with eggs and pasta?"
+- "How long does cooked ham last once opened in the fridge?"
+- "Suggest a quick snack"
 
 The assistant knows your current inventory.
 
@@ -121,7 +121,7 @@ Configure `BRING_EMAIL` and `BRING_PASSWORD` in `.env` to enable.
 
 ## 🍳 Cooking Mode
 
-Start cooking mode from any recipe by tapping **▶ Avvia cottura**.
+Start cooking mode from any recipe by tapping **▶ Start Cooking**.
 
 ### Features
 
@@ -132,7 +132,7 @@ Start cooking mode from any recipe by tapping **▶ Avvia cottura**.
   - Custom REST endpoint (e.g. Home Assistant)
 - **Built-in timers** — automatic timer suggestions based on recipe text; 10-second vocal countdown warning before expiry
 - **Ingredient tracking** — mark ingredients as used; leftover quantities prompt a "move to another location" flow
-- **Recipe completion** — "Buon appetito!" spoken on the last step
+- **Recipe completion** — "Buon appetito!" *(Enjoy your meal!)* spoken on the last step
 
 ---
 
@@ -155,8 +155,8 @@ Actions per item: Use, Throw away, Edit, Dismiss. Swipe or tap arrows to navigat
 Highlights suspicious quantities (e.g. "You have 0 eggs but used 12 this month"). Actions:
 - One-tap correction to the suggested quantity
 - Inline edit with free-form quantity
-- "🤖 Spiega" for AI explanation
-- Dismiss (with current quantity shown: "La quantità è giusta (2 pz)")
+- "🤖 Explain" for AI explanation
+- Dismiss (with current quantity shown: "The quantity is correct (2 pcs)")
 
 ### Anti-Waste Report
 

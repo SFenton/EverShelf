@@ -36,12 +36,12 @@ Overview of what the wizard will configure.
 ### Step 3 — Permissions
 Grant camera, microphone, and storage permissions needed by the web app.
 
-The button transforms from "Concedi permessi" to **"✅ Permessi concessi — Continua →"** (green) once all permissions are granted.
+The button transforms from **"Grant permissions"** to **"✅ Permissions granted — Continue →"** (green) once all permissions are granted.
 
 ### Step 4 — Server URL
 Enter your EverShelf server URL (e.g. `https://192.168.1.100/dispensa`).
 
-**Or tap "Rileva automaticamente"** to let the wizard scan your LAN:
+**Or tap "Auto-discover"** to let the wizard scan your LAN:
 - 60 parallel threads, TCP pre-check, ports 80/443/8080/8443
 - Only scans your actual Wi-Fi/Ethernet subnet (VPN and cellular interfaces ignored)
 - Real-time feedback as hosts are tested
@@ -62,9 +62,23 @@ All done — the web app loads in full-screen kiosk mode.
 
 ---
 
+## Header Overlay Buttons
+
+Three buttons are injected into the top-left of the web header by the kiosk app:
+
+| Button | Action |
+|--------|--------|
+| **✕** | Exit kiosk mode (confirmation dialog) |
+| **↻** | Hard-refresh — clears WebView cache and reloads the app |
+| **⚙️** | Open EverShelf Settings |
+
+The native Android settings button is permanently hidden once the overlay is injected — the **⚙️** web button replaces it entirely.
+
+---
+
 ## Exiting Kiosk Mode
 
-Tap the **✕** button in the header (top-left). A confirmation dialog appears.
+Tap the **✕** button in the header overlay (top-left). A confirmation dialog appears.
 
 ---
 
@@ -133,6 +147,6 @@ Requires Android Studio or JDK 17+ with the Android SDK.
 | `CAMERA` | Barcode scanning and AI photo identification |
 | `RECORD_AUDIO` | Voice input in AI chat |
 | `WAKE_LOCK` | Keep the screen on |
-| `REQUEST_INSTALL_PACKAGES` | Install the Scale Gateway APK |
+| `REQUEST_INSTALL_PACKAGES` | Over-the-air kiosk self-updates (installs new APK from GitHub releases) |
 | `ACCESS_WIFI_STATE` | LAN auto-discovery |
-| `REORDER_TASKS` | Bring app to foreground after gateway launch |
+| `REORDER_TASKS` | Bring the kiosk app to foreground when needed |

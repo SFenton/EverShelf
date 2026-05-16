@@ -43,14 +43,12 @@ docker compose up -d
 
 ## AI Features
 
-### AI features don't work / "AI non disponibile"
+### "AI not available" error
 
 1. Check that `GEMINI_API_KEY` is set in `.env`
 2. Verify the key is valid at [aistudio.google.com](https://aistudio.google.com)
 3. Check that you haven't exceeded the free tier quota (15 req/min, 1500 req/day)
 4. Look for errors in the PHP error log
-
-### Recipe generation stops midway
 
 This is usually a Gemini API timeout. The app streams results via SSE — if the server PHP timeout is too low, the stream is cut short. Increase `max_execution_time` in `php.ini`:
 
@@ -62,7 +60,7 @@ max_execution_time = 120
 
 ## Shopping List (Bring!)
 
-### "Bring! non configurato" message in the shopping tab
+### "Bring! not configured" message in the shopping tab
 
 Add your Bring! credentials to `.env`:
 
@@ -90,7 +88,7 @@ BRING_PASSWORD=yourpassword
 ### Scale shows weight but form doesn't auto-fill
 
 - The auto-fill only triggers for products with unit `g` or `ml`
-- Make sure you tapped "⚖️ Leggi bilancia" first to activate the scale modal
+- Make sure you tapped **"⚖️ Read Scale"** first to activate the scale modal
 - The weight must stabilize (stay within 10g) for the countdown to start
 
 ### Bluetooth scale not appearing in the gateway app
@@ -109,19 +107,19 @@ BRING_PASSWORD=yourpassword
 - Try entering the URL manually instead of using auto-discovery
 - Check that the server responds on the expected port (80/443/8080/8443)
 
-### Gateway install fails with an error dialog
+### Kiosk app update fails
 
-The dialog shows the exact failure code. Common causes:
+The kiosk checks for a new release every 6 hours and downloads it from GitHub. If the install fails:
 
-| Code | Cause | Fix |
-|------|-------|-----|
-| `STATUS_FAILURE` (1) | Generic install failure — often OEM restriction | Enable "Install from unknown sources" for the kiosk app in Android Settings |
-| `STATUS_FAILURE_CONFLICT` (3) | Signature mismatch with existing install | Uninstall the old gateway app, then retry |
-| `STATUS_FAILURE_STORAGE` (6) | Not enough storage | Free up space on the device |
+| Symptom | Fix |
+|---------|-----|
+| "Install from unknown sources" dialog | Enable the setting for the EverShelf Kiosk app in Android Settings |
+| Persistent failure after download | Force-stop the app, clear its data, and relaunch the update flow |
+| Not enough space | Free up storage on the device |
 
 ### Exit button (✕) is not visible
 
-The ✕ button is injected into the header by the kiosk app. If the web app's header is covered or the page failed to load, try the hard refresh (↻) button. If neither is visible, triple-tap the page title area to access the developer settings.
+Three buttons are always visible in the kiosk header overlay: **✕** (exit), **↻** (refresh), **⚙️** (settings). If the page failed to load entirely, tap **↻** first. If nothing is visible, restart the device.
 
 ### App is stuck in kiosk mode after a crash
 
@@ -139,7 +137,7 @@ The version is cached by the browser. Do a hard refresh:
 
 ### Transactions are missing from the log
 
-The log shows the last 50 entries by default. Tap "Carica altri" to load more. Entries older than the database creation date won't appear.
+The log shows the last 50 entries by default. Tap **"Load more"** to load more. Entries older than the database creation date won't appear.
 
 ### "Can only undo transactions within 24 hours"
 
