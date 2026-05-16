@@ -352,35 +352,7 @@ The application uses no build tools — edit files directly and refresh.
 
 ## 📋 Roadmap
 
-### High Priority
-- [ ] **Cooking mode — 3D wheel JS** — swipe navigation, gyroscope tilt, haptic feedback
-- [ ] **Cooking mode — step timers** — auto-detect "X minutes" in recipe steps, countdown + alert
-- [ ] **Push notifications** — daily expiry alerts via PWA Service Worker + VAPID
-- [ ] **Quick search / quick-add bar** — always-visible search above the nav, PWA shortcuts
-
-### Medium Priority
-- [ ] **Receipt OCR → bulk add** — photo of receipt → Gemini Vision → auto-fill inventory
-- [ ] **CSV/JSON export & import** — download/upload inventory from Settings
-- [ ] **Custom storage locations** — user-defined locations beyond Fridge/Freezer/Pantry
-- [ ] **Multi-user support** — PIN-based user distinction, action log with user label
-- [ ] **AI optimal purchase prediction** — suggest "buy X units of Y within Z days"
-- [ ] **Price history sparklines** — per-product price chart from the AI cache data
-
-### Low Priority / Nice to Have
-- [ ] **Dark mode** — CSS custom properties are already structured to support it
-- [ ] **Full offline mode** — Service Worker cache to show inventory read-only when server is down
-- [ ] **French & Spanish translations** (`fr.json`, `es.json`)
-- [ ] **Swipe actions on inventory rows** — swipe left to use/discard, right to edit
-- [ ] **PHP unit tests** — PHPUnit coverage for shelf-life, price calc, and key helpers
-
-### Completed ✅
-- ✅ AI price estimation in shopping list
-- ✅ Server heartbeat + offline banner
-- ✅ In-app bug reporter → automatic GitHub issue creation
-- ✅ Cooking mode (start, steps, 3D wheel CSS)
-- ✅ Kiosk ⚙️ Settings overlay button (replaces Android native button)
-- ✅ Adaptive consumption anomaly detection
-- ✅ CI/CD pipeline (PHP lint, JS lint, Docker build, Trivy security scan)
+Feature requests, bug reports and planned work are tracked in the [**EverShelf Roadmap**](https://github.com/users/dadaloop82/projects/2) GitHub Project.
 
 ---
 
