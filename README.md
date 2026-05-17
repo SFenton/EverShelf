@@ -39,6 +39,7 @@
 ## ✨ Features
 
 ### 📦 Inventory Management
+- **Export inventory** — Download the full inventory as a UTF-8 CSV (Excel-compatible) or open a print-ready page to save as PDF; export button always visible in the inventory page header
 - **Barcode scanning** — Scan products with your phone camera using QuaggaJS; last 20 scanned products saved as tappable chips so you can re-select them without rescanning
 - **AI identification** — Take a photo and let Google Gemini identify the product, with suggestions from your existing inventory; gracefully shows a friendly message when AI quota is exhausted instead of a raw API error
 - **Smart locations** — Track items across Pantry, Fridge, Freezer, and custom locations
@@ -89,6 +90,9 @@
 - **Expired/expiring alerts** — Priority-sorted banner notifications for expired and soon-to-expire products with use, throw, edit, and dismiss actions
 - **Swipe navigation** — Touch swipe or tap arrows/dots to browse banner notifications
 - **Quick-access buttons** — Recently used and most popular products shown on the inventory page for fast access
+
+### 🌙 Appearance
+- **Dark mode** — Three modes: Light, Dark, and Auto (follows the OS/browser setting); theme is applied before the first render to prevent a white flash on dark-mode systems; toggle in Settings → Appearance
 
 ### 📱 Progressive Web App
 - **Mobile-first design** — Optimized for phones, works on tablets and desktop
