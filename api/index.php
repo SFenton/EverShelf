@@ -110,63 +110,202 @@ if (($_GET['action'] ?? '') === 'ping') {
 if (($_GET['action'] ?? '') === 'health_check') {
     $checks = [];
 
-    // 1. PHP version
-    $phpOk = version_compare(PHP_VERSION, '8.0.0', '>=');
-    $checks['php'] = ['ok' => $phpOk, 'value' => PHP_VERSION];
+    // ── 1. PHP version ────────────────────────────────────────────────────────
+    $checks['php_version'] = [
+        'ok'    => version_compare(PHP_VERSION, '8.0.0', '>='),
+        'value' => PHP_VERSION,
+    ];
 
-    // 2. Required PHP extensions
-    $requiredExts = ['pdo_sqlite', 'curl', 'mbstring', 'json'];
-    $missingExts  = array_filter($requiredExts, fn($e) => !extension_loaded($e));
-    $checks['php_extensions'] = ['ok' => empty($missingExts), 'missing' => array_values($missingExts)];
+    // ── 2. Critical PHP extensions ────────────────────────────────────────────
+    foreach (['pdo_sqlite', 'curl', 'json', 'mbstring'] as $ext) {
+        $checks['ext_' . $ext] = ['ok' => extension_loaded($ext)];
+    }
 
-    // 3. data/ directory writable
+    // ── 3. Optional PHP extensions ────────────────────────────────────────────
+    foreach (['openssl', 'fileinfo', 'zip', 'intl'] as $ext) {
+        $checks['ext_' . $ext] = ['ok' => extension_loaded($ext), 'optional' => true];
+    }
+
+    // ── 4. PHP runtime configuration ─────────────────────────────────────────
+    // Memory limit
+    $memRaw = ini_get('memory_limit');
+    $memBytes = (function ($v) {
+        $v    = trim($v);
+        if ($v === '-1') return PHP_INT_MAX;
+        $unit = strtolower(substr($v, -1));
+        $num  = (int) $v;
+        return match ($unit) { 'g' => $num * 1073741824, 'm' => $num * 1048576, 'k' => $num * 1024, default => $num };
+    })($memRaw);
+    $checks['php_memory'] = ['ok' => $memBytes >= 64 * 1048576, 'value' => $memRaw, 'optional' => true];
+
+    // Max execution time
+    $maxExec = (int) ini_get('max_execution_time');
+    $checks['php_max_exec'] = [
+        'ok'       => $maxExec === 0 || $maxExec >= 30,
+        'value'    => $maxExec === 0 ? '∞' : $maxExec . 's',
+        'optional' => true,
+    ];
+
+    // Upload size
+    $uploadRaw = ini_get('upload_max_filesize');
+    $checks['php_upload'] = ['ok' => true, 'value' => $uploadRaw, 'optional' => true];
+
+    // ── 5. data/ directory ────────────────────────────────────────────────────
     $dataDir = __DIR__ . '/../data';
-    $dataWritable = is_dir($dataDir) && is_writable($dataDir);
-    if (!$dataWritable && !is_dir($dataDir)) {
-        @mkdir($dataDir, 0775, true);
-        $dataWritable = is_dir($dataDir) && is_writable($dataDir);
-    }
-    $checks['data_dir'] = ['ok' => $dataWritable, 'path' => realpath($dataDir) ?: $dataDir];
+    if (!is_dir($dataDir)) @mkdir($dataDir, 0775, true);
+    $dataDirOk = is_dir($dataDir) && is_writable($dataDir);
+    $checks['data_dir'] = ['ok' => $dataDirOk, 'path' => realpath($dataDir) ?: $dataDir];
 
-    // 4. SQLite DB accessible
-    $dbOk = false; $dbError = '';
-    try {
-        $dbPath = $dataDir . '/dispensa.db';
-        $pdo = new PDO('sqlite:' . $dbPath, null, null, [
-            PDO::ATTR_ERRMODE            => PDO::ERRMODE_EXCEPTION,
-            PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
+    // data/rate_limits/
+    $rlDir = $dataDir . '/rate_limits';
+    if (!is_dir($rlDir)) @mkdir($rlDir, 0775, true);
+    $checks['data_rate_limits'] = ['ok' => is_dir($rlDir) && is_writable($rlDir), 'optional' => true];
+
+    // data/backups/
+    $bkDir = $dataDir . '/backups';
+    if (!is_dir($bkDir)) @mkdir($bkDir, 0775, true);
+    $checks['data_backups'] = ['ok' => is_dir($bkDir) && is_writable($bkDir), 'optional' => true];
+
+    // ── 6. Actual file-write test ─────────────────────────────────────────────
+    $testFile = $dataDir . '/_hc_' . getmypid() . '.tmp';
+    $writeOk  = $dataDirOk && (@file_put_contents($testFile, 'hc') !== false);
+    if ($writeOk) @unlink($testFile);
+    $checks['data_write_test'] = ['ok' => $writeOk];
+
+    // ── 7. Free disk space ────────────────────────────────────────────────────
+    $freeBytes = $dataDirOk ? @disk_free_space($dataDir) : false;
+    $freeMB    = $freeBytes !== false ? round($freeBytes / 1048576) : null;
+    $checks['disk_space'] = [
+        'ok'       => $freeBytes === false || $freeBytes > 50 * 1048576,
+        'value'    => $freeMB !== null ? $freeMB . ' MB liberi' : null,
+        'optional' => true,
+    ];
+
+    // ── 8. SQLite database ────────────────────────────────────────────────────
+    $dbPath  = $dataDir . '/dispensa.db';
+    $isFresh = !file_exists($dbPath) && $dataDirOk;
+
+    if ($isFresh) {
+        // Fresh install: DB will be created automatically on first real API call
+        $checks['db_connect']   = ['ok' => true, 'fresh' => true, 'value' => 'nuovo impianto'];
+        $checks['db_tables']    = ['ok' => true, 'fresh' => true];
+        $checks['db_integrity'] = ['ok' => true, 'fresh' => true];
+        $checks['db_wal']       = ['ok' => true, 'fresh' => true, 'optional' => true];
+        $checks['db_size']      = ['ok' => true, 'value' => '0 KB', 'optional' => true];
+        $checks['db_row_count'] = ['ok' => true, 'value' => '0 prodotti', 'optional' => true];
+    } else {
+        $pdo = null; $dbConnOk = false;
+        try {
+            $pdo = new PDO('sqlite:' . $dbPath, null, null, [
+                PDO::ATTR_ERRMODE            => PDO::ERRMODE_EXCEPTION,
+                PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
+            ]);
+            $pdo->query('SELECT 1');
+            $dbConnOk = true;
+            $checks['db_connect'] = ['ok' => true];
+        } catch (\Throwable $e) {
+            $checks['db_connect'] = ['ok' => false, 'error' => $e->getMessage()];
+        }
+
+        if ($dbConnOk && $pdo) {
+            // Required tables
+            try {
+                $tables   = $pdo->query("SELECT name FROM sqlite_master WHERE type='table'")->fetchAll(PDO::FETCH_COLUMN);
+                $required = ['inventory', 'products', 'transactions'];
+                $missing  = array_values(array_diff($required, $tables));
+                $checks['db_tables'] = ['ok' => empty($missing), 'missing' => $missing];
+            } catch (\Throwable $e) {
+                $checks['db_tables'] = ['ok' => false, 'error' => $e->getMessage()];
+            }
+
+            // Integrity (fast)
+            try {
+                $integ = $pdo->query("PRAGMA quick_check")->fetchColumn();
+                $checks['db_integrity'] = ['ok' => $integ === 'ok', 'value' => $integ !== 'ok' ? $integ : null];
+            } catch (\Throwable $e) {
+                $checks['db_integrity'] = ['ok' => false, 'error' => $e->getMessage()];
+            }
+
+            // WAL mode
+            try {
+                $wal = $pdo->query("PRAGMA journal_mode")->fetchColumn();
+                $checks['db_wal'] = ['ok' => $wal === 'wal', 'value' => $wal, 'optional' => true];
+            } catch (\Throwable $e) {
+                $checks['db_wal'] = ['ok' => false, 'optional' => true];
+            }
+
+            // DB file size
+            $dbSizeKB = round(filesize($dbPath) / 1024);
+            $checks['db_size'] = ['ok' => true, 'value' => $dbSizeKB . ' KB', 'optional' => true];
+
+            // Row count
+            try {
+                $cnt = $pdo->query("SELECT COUNT(*) FROM inventory WHERE quantity > 0")->fetchColumn();
+                $checks['db_row_count'] = ['ok' => true, 'value' => $cnt . ' prodotti in inventario', 'optional' => true];
+            } catch (\Throwable $e) {
+                $checks['db_row_count'] = ['ok' => true, 'value' => '?', 'optional' => true];
+            }
+        } else {
+            foreach (['db_tables', 'db_integrity'] as $k) $checks[$k] = ['ok' => false];
+            foreach (['db_wal', 'db_size', 'db_row_count'] as $k) $checks[$k] = ['ok' => false, 'optional' => true];
+        }
+    }
+
+    // ── 9. .env file ──────────────────────────────────────────────────────────
+    $checks['env_file'] = ['ok' => file_exists(__DIR__ . '/../.env'), 'optional' => true];
+
+    // ── 10. Gemini AI key ─────────────────────────────────────────────────────
+    $checks['gemini_key'] = ['ok' => !empty(env('GEMINI_API_KEY')), 'optional' => true];
+
+    // ── 11. Bring! credentials & token ────────────────────────────────────────
+    $checks['bring_credentials'] = [
+        'ok'       => !empty(env('BRING_EMAIL')) && !empty(env('BRING_PASSWORD')),
+        'optional' => true,
+    ];
+    $checks['bring_token'] = ['ok' => !empty(env('BRING_ACCESS_TOKEN')), 'optional' => true];
+
+    // ── 12. cURL SSL support ──────────────────────────────────────────────────
+    if (function_exists('curl_version')) {
+        $cv = curl_version();
+        $checks['curl_ssl'] = [
+            'ok'       => !empty($cv['ssl_version']),
+            'value'    => $cv['ssl_version'] ?? null,
+            'optional' => true,
+        ];
+    } else {
+        $checks['curl_ssl'] = ['ok' => false, 'optional' => true];
+    }
+
+    // ── 13. Internet / Gemini API reachability ────────────────────────────────
+    $internetOk = false;
+    if (extension_loaded('curl')) {
+        $ch = curl_init();
+        curl_setopt_array($ch, [
+            CURLOPT_URL            => 'https://generativelanguage.googleapis.com/',
+            CURLOPT_NOBODY         => true,
+            CURLOPT_FOLLOWLOCATION => false,
+            CURLOPT_TIMEOUT        => 3,
+            CURLOPT_CONNECTTIMEOUT => 2,
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_SSL_VERIFYPEER => false,
         ]);
-        $pdo->query('SELECT 1');
-        // Check at least inventory table exists
-        $tables = $pdo->query("SELECT name FROM sqlite_master WHERE type='table'")->fetchAll(PDO::FETCH_COLUMN);
-        $dbOk = in_array('inventory', $tables);
-        if (!$dbOk) $dbError = 'Missing tables (fresh install?)';
-    } catch (\Throwable $e) {
-        $dbError = $e->getMessage();
+        curl_exec($ch);
+        $httpCode   = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $curlErr    = curl_errno($ch);
+        curl_close($ch);
+        $internetOk = ($httpCode > 0) || ($curlErr === 0);
     }
-    $checks['database'] = ['ok' => $dbOk, 'error' => $dbError ?: null];
+    $checks['internet'] = ['ok' => $internetOk, 'optional' => true];
 
-    // 5. .env loaded + Gemini key present
-    $envPath = __DIR__ . '/../.env';
-    $envLoaded = file_exists($envPath);
-    $geminiKey = env('GEMINI_API_KEY');
-    $checks['env_file']   = ['ok' => $envLoaded];
-    $checks['gemini_key'] = ['ok' => !empty($geminiKey)];
-
-    // 6. Bring! token (optional — warning only)
-    $bringToken = env('BRING_ACCESS_TOKEN');
-    $checks['bring_token'] = ['ok' => !empty($bringToken), 'optional' => true];
-
-    // 7. cURL available + internet reachable (light check, no actual call)
-    $curlOk = function_exists('curl_init');
-    $checks['curl'] = ['ok' => $curlOk];
-
-    // Overall: critical = php, php_extensions, data_dir, database
-    $critical = ['php', 'php_extensions', 'data_dir', 'database'];
-    $allOk    = array_reduce($critical, fn($c, $k) => $c && ($checks[$k]['ok'] ?? false), true);
+    // ── Compute overall result ────────────────────────────────────────────────
+    $criticalKeys = [
+        'php_version', 'ext_pdo_sqlite', 'ext_curl', 'ext_json', 'ext_mbstring',
+        'data_dir', 'data_write_test', 'db_connect', 'db_tables', 'db_integrity',
+    ];
+    $allOk = array_reduce($criticalKeys, fn($c, $k) => $c && ($checks[$k]['ok'] ?? false), true);
 
     header('Content-Type: application/json');
-    echo json_encode(['ok' => $allOk, 'checks' => $checks], JSON_UNESCAPED_UNICODE);
+    echo json_encode(['ok' => $allOk, 'checks' => $checks, 'fresh' => $isFresh ?? false], JSON_UNESCAPED_UNICODE);
     exit;
 }
 
