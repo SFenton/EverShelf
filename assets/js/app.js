@@ -4352,15 +4352,17 @@ function renderBannerItem() {
         detailEl.innerHTML = `${baseDetail} <span class="banner-safety-tip banner-safety-${safety.level}">${safety.icon} ${safety.tip}</span>`;
         let btns = '';
         btns += `<button class="btn-banner btn-banner-finish" onclick="bannerFinishAll()">${t('dashboard.banner_expired_action_finished')}</button>`;
-        if (safety.level !== 'danger') {
+        if (!isOpenedExpiry && safety.level !== 'danger') {
             btns += `<button class="btn-banner btn-banner-use" onclick="bannerQuickUse()">${t('dashboard.banner_expired_action_use')}</button>`;
         }
         btns += `<button class="btn-banner btn-banner-throw" onclick="bannerThrowAway()">${t('dashboard.banner_expired_action_throw')}</button>`;
         btns += `<button class="btn-banner btn-banner-edit" onclick="editBannerExpiry()">${t('dashboard.banner_expired_action_edit')}</button>`;
-        if (safety.level === 'danger') {
+        if (!isOpenedExpiry && safety.level === 'danger') {
             btns += `<button class="btn-banner btn-banner-use btn-banner-use-danger" onclick="bannerQuickUse()">${t('dashboard.banner_expired_action_use')}</button>`;
         }
-        btns += `<button class="btn-banner btn-banner-ok" onclick="dismissBannerExpired()">${t('dashboard.banner_review_dismiss')}</button>`;
+        if (!isOpenedExpiry) {
+            btns += `<button class="btn-banner btn-banner-ok" onclick="dismissBannerExpired()">${t('dashboard.banner_review_dismiss')}</button>`;
+        }
         actionsEl.innerHTML = btns;
 
     } else if (entry.type === 'review') {
@@ -14897,7 +14899,7 @@ async function _runStartupCheck() {
     if (spinnerEl) spinnerEl.style.display = 'none';
     wrapEl.style.display = '';
 
-    // Helper: set progress bar + label
+    // Helper: set progress bar + 3D check wheel
     let _curPct = 0;
     const setProgress = (pct, label, state) => {
         _curPct = pct;
@@ -14905,14 +14907,26 @@ async function _runStartupCheck() {
             barEl.style.width = pct + '%';
             barEl.className = 'preloader-bar' + (state === 'error' ? ' bar-error' : state === 'warn' ? ' bar-warn' : '');
         }
-        if (labelEl) labelEl.textContent = label || '';
+        const wheelPrev = document.getElementById('check-wheel-prev');
+        const wheelCurr = document.getElementById('check-wheel-current');
+        if (wheelCurr) {
+            const prevText = wheelCurr.textContent.trim();
+            if (wheelPrev && prevText && prevText !== '\u00a0') wheelPrev.textContent = prevText;
+            wheelCurr.textContent = label || '';
+            const sc = state === 'error' ? 'state-error' : state === 'warn' ? 'state-warn' : 'state-ok';
+            wheelCurr.className = 'check-wheel-current ' + sc;
+            void wheelCurr.offsetWidth; // re-trigger CSS animation
+        }
     };
 
     // Phase 1: animate 0→15% while fetching (so it never looks stuck)
     setProgress(0, tl('connecting', 'Connessione al server...'));
     let _fetchDone = false;
     const slowAnim = setInterval(() => {
-        if (!_fetchDone && _curPct < 13) setProgress(_curPct + 1, labelEl?.textContent);
+        if (!_fetchDone && _curPct < 13) {
+            _curPct++;
+            if (barEl) barEl.style.width = _curPct + '%';
+        }
     }, 100);
 
     // Make the request

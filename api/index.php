@@ -279,8 +279,8 @@ if (($_GET['action'] ?? '') === 'health_check') {
         $checks['gemini_key'] = ['ok' => strlen($geminiKey) > 20, 'optional' => true,
             'hint' => strlen($geminiKey) <= 20 ? 'Chiave Gemini AI sembra troppo corta — verifica il valore in .env' : null];
     } else {
-        $checks['gemini_key'] = ['ok' => false, 'optional' => true,
-            'hint' => 'GEMINI_API_KEY non configurata — le funzioni AI non saranno disponibili'];
+        $checks['gemini_key'] = ['ok' => true, 'optional' => true,
+            'value' => 'non configurata', 'hint' => 'Configura GEMINI_API_KEY in .env per abilitare le funzioni AI'];
     }
 
     // ── 11. Bring! — solo se EMAIL+PASSWORD sono impostate ───────────────────
@@ -298,7 +298,8 @@ if (($_GET['action'] ?? '') === 'health_check') {
             $bringTokenOk = !empty($bringData['access_token'] ?? ($bringData['accessToken'] ?? ''));
             if (!$bringTokenOk) $bringTokenHint = 'Token Bring! presente ma non valido — verrà rinnovato automaticamente al prossimo accesso';
         } else {
-            $bringTokenHint = 'Token Bring! non ancora generato — verrà creato al primo accesso alla lista spesa';
+            $bringTokenOk   = true; // non ancora generato, si crea al primo accesso — non è un errore
+            $bringTokenHint = 'Verrà generato automaticamente al primo accesso alla lista spesa';
         }
         $checks['bring_token'] = ['ok' => $bringTokenOk, 'optional' => true, 'hint' => $bringTokenHint];
     }

@@ -122,8 +122,8 @@ body {
     flex-direction: column;
     align-items: center;
     gap: 10px;
-    width: 250px;
-    max-width: 88vw;
+    width: 310px;
+    max-width: 92vw;
     animation: zwFadeIn 0.2s ease;
 }
 .preloader-bar-track {
@@ -142,17 +142,59 @@ body {
 }
 .preloader-bar.bar-error { background: linear-gradient(90deg, #f87171, #ef4444); }
 .preloader-bar.bar-warn  { background: linear-gradient(90deg, #fbbf24, #f59e0b); }
-.preloader-check-label {
-    color: rgba(255,255,255,0.60);
-    font-size: 0.74rem;
-    font-family: monospace;
+.preloader-check-label { display: none; } /* replaced by check-wheel */
+
+/* ── Startup check wheel (3-D scroll) ──────────────────────────────── */
+.check-wheel {
+    position: relative;
+    width: 100%;
+    height: 108px;
+    perspective: 640px;
+    overflow: hidden;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+.check-wheel-current {
+    position: relative;
+    z-index: 3;
+    width: 100%;
     text-align: center;
+    font-size: clamp(0.88rem, 2.6vw, 1.08rem);
+    font-weight: 700;
+    padding: 10px 14px;
+    border-radius: 14px;
+    border: 1px solid rgba(52,211,153,0.35);
+    background: rgba(52,211,153,0.08);
+    color: #34d399;
+    transform-style: preserve-3d;
+    animation: checkWheelIn 0.30s ease;
+    letter-spacing: 0.01em;
+    line-height: 1.4;
+}
+.check-wheel-current.state-ok    { color: #34d399; background: rgba(52,211,153,0.08);  border-color: rgba(52,211,153,0.35);  }
+.check-wheel-current.state-warn  { color: #fbbf24; background: rgba(251,191,36,0.08);  border-color: rgba(251,191,36,0.35);  }
+.check-wheel-current.state-error { color: #f87171; background: rgba(248,113,113,0.08); border-color: rgba(248,113,113,0.35); }
+.check-wheel-prev {
+    position: absolute;
+    top: 3px;
+    left: 6%; right: 6%;
+    text-align: center;
+    font-size: clamp(0.67rem, 1.8vw, 0.82rem);
+    font-weight: 600;
+    color: rgba(203,213,225,0.45);
+    opacity: 0.52;
+    transform: rotateX(54deg) scale(0.85);
+    transform-origin: center bottom;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
-    max-width: 100%;
-    min-height: 1.1em;
-    letter-spacing: 0.01em;
+    pointer-events: none;
+    font-family: monospace;
+}
+@keyframes checkWheelIn {
+    from { transform: translateY(24px) rotateX(-18deg); opacity: 0.35; }
+    to   { transform: translateY(0)    rotateX(0deg);   opacity: 1;    }
 }
 .preloader-warnings {
     max-width: 310px;
