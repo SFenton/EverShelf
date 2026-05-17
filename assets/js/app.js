@@ -1833,24 +1833,20 @@ function switchScanTab(tab) {
     }
 }
 
-// ===== SCAN RECENTS (localStorage) =====
-const _SCAN_RECENTS_KEY = 'evershelf_scan_recents';
-const _SCAN_RECENTS_MAX = 6;
-
-function _getScanRecents() {
-    try { return JSON.parse(localStorage.getItem(_SCAN_RECENTS_KEY) || '[]'); } catch(_) { return []; }
-}
+// ===== SCAN HISTORY (server-synced via app_settings key "scan_history") =====
+const _SCAN_HISTORY_MAX = 20;
 
 function addToScanRecents(product) {
     if (!product || !product.id) return;
-    let list = _getScanRecents().filter(r => r.id !== product.id);
-    list.unshift({ id: product.id, name: product.name, brand: product.brand || '', category: product.category || '' });
-    if (list.length > _SCAN_RECENTS_MAX) list = list.slice(0, _SCAN_RECENTS_MAX);
-    try { localStorage.setItem(_SCAN_RECENTS_KEY, JSON.stringify(list)); } catch(_) {}
+    let list = (_scanHistoryCache || []).filter(r => r.id !== product.id);
+    list.unshift({ id: product.id, barcode: product.barcode || '', name: product.name, brand: product.brand || '', category: product.category || '', ts: Date.now() });
+    if (list.length > _SCAN_HISTORY_MAX) list = list.slice(0, _SCAN_HISTORY_MAX);
+    _scanHistoryCache = list;
+    _saveToServer('scan_history', list);
 }
 
 function updateScanRecents() {
-    const list = _getScanRecents();
+    const list = (_scanHistoryCache || []).slice(0, 6);
     const wrap = document.getElementById('scan-recents');
     const chips = document.getElementById('scan-recents-chips');
     if (!wrap || !chips) return;
@@ -2038,27 +2034,64 @@ async function syncSettingsFromDB() {
         // Primary: load from server .env (only when not already done via _applySyncedSettings)
         const serverSettings = await api('get_settings');
         _applySyncedSettings(serverSettings);
-        // Also load review_confirmed, meal_plan, tts_voice from DB (cross-device shared)
+        // Load all server-persisted user data from SQLite app_settings
         const res = await api('app_settings_get');
         if (res.success && res.settings) {
-            if (res.settings.review_confirmed) {
-                _reviewConfirmedCache = res.settings.review_confirmed;
-            }
+            const srv = res.settings;
+
+            if (srv.review_confirmed) _reviewConfirmedCache = srv.review_confirmed;
+
             // meal_plan is stored in SQLite app_settings so all devices stay in sync
-            if (res.settings.meal_plan) {
+            if (srv.meal_plan) {
                 const s = getSettings();
-                s.meal_plan = res.settings.meal_plan;
+                s.meal_plan = srv.meal_plan;
                 _settingsCache = s;
                 localStorage.setItem('evershelf_settings', JSON.stringify(s));
                 if (document.getElementById('meal-plan-grid')) renderMealPlanEditor();
             }
             // tts_voice preference (best-effort cross-device — falls back if voice unavailable)
-            if (res.settings.tts_voice) {
+            if (srv.tts_voice) {
                 const s = getSettings();
-                if (!s.tts_voice) { s.tts_voice = res.settings.tts_voice; _settingsCache = s; localStorage.setItem('evershelf_settings', JSON.stringify(s)); }
+                if (!s.tts_voice) { s.tts_voice = srv.tts_voice; _settingsCache = s; localStorage.setItem('evershelf_settings', JSON.stringify(s)); }
+            }
+
+            // ── User data previously stored in localStorage, now server-synced ──
+            if (srv.scan_history)        _scanHistoryCache       = srv.scan_history;
+            if (srv.shopping_tags)       _shoppingTagsCache      = srv.shopping_tags;
+            if (srv.pinned_bring)        _pinnedBringCache       = srv.pinned_bring;
+            if (srv.pref_use_loc)        _prefUseLocCache        = srv.pref_use_loc;
+            if (srv.pref_move_loc)       _prefMoveLocCache       = srv.pref_move_loc;
+            if (srv.auto_added_bring)    _autoAddedBringCache    = srv.auto_added_bring;
+            if (srv.bring_blocklist)     _bringBlocklistCache    = srv.bring_blocklist;
+            if (srv.no_expiry_dismissed) _noExpiryDismissedCache = srv.no_expiry_dismissed;
+
+            // ── One-time migration: if server has nothing yet, seed from old localStorage ──
+            if (!srv.shopping_tags) {
+                try { const v = localStorage.getItem('shopping_tags'); if (v) { _shoppingTagsCache = JSON.parse(v); _saveToServer('shopping_tags', _shoppingTagsCache); localStorage.removeItem('shopping_tags'); } } catch(_) {}
+            }
+            if (!srv.pinned_bring) {
+                try { const v = localStorage.getItem('_userPinnedBring'); if (v) { _pinnedBringCache = JSON.parse(v); _saveToServer('pinned_bring', _pinnedBringCache); localStorage.removeItem('_userPinnedBring'); } } catch(_) {}
+            }
+            if (!srv.pref_use_loc) {
+                try { const v = localStorage.getItem('_prefUseLoc'); if (v) { _prefUseLocCache = JSON.parse(v); _saveToServer('pref_use_loc', _prefUseLocCache); localStorage.removeItem('_prefUseLoc'); } } catch(_) {}
+            }
+            if (!srv.pref_move_loc) {
+                try { const v = localStorage.getItem('_prefMoveLoc'); if (v) { _prefMoveLocCache = JSON.parse(v); _saveToServer('pref_move_loc', _prefMoveLocCache); localStorage.removeItem('_prefMoveLoc'); } } catch(_) {}
+            }
+            if (!srv.auto_added_bring) {
+                try { const v = localStorage.getItem('_autoAddedBring'); if (v) { _autoAddedBringCache = JSON.parse(v); _saveToServer('auto_added_bring', _autoAddedBringCache); localStorage.removeItem('_autoAddedBring'); } } catch(_) {}
+            }
+            if (!srv.bring_blocklist) {
+                try { const v = localStorage.getItem('_bringPurchasedBlocklist'); if (v) { _bringBlocklistCache = JSON.parse(v); _saveToServer('bring_blocklist', _bringBlocklistCache); localStorage.removeItem('_bringPurchasedBlocklist'); } } catch(_) {}
+            }
+            if (!srv.no_expiry_dismissed) {
+                try { const v = localStorage.getItem('_noExpiryDismissed'); if (v) { _noExpiryDismissedCache = JSON.parse(v); _saveToServer('no_expiry_dismissed', _noExpiryDismissedCache); localStorage.removeItem('_noExpiryDismissed'); } } catch(_) {}
+            }
+            if (!srv.scan_history) {
+                try { const v = localStorage.getItem('evershelf_scan_recents'); if (v) { _scanHistoryCache = JSON.parse(v); _saveToServer('scan_history', _scanHistoryCache); localStorage.removeItem('evershelf_scan_recents'); } } catch(_) {}
             }
         }
-    } catch(e) { /* offline, use local */ }
+    } catch(e) { /* offline — in-memory caches stay at their defaults */ }
 }
 
 /**
@@ -3886,6 +3919,20 @@ function getReviewConfirmed() {
     return _reviewConfirmedCache || {};
 }
 let _reviewConfirmedCache = {};
+// ===== SERVER-SYNCED APP DATA CACHES =====
+// Loaded at startup from app_settings (SQLite). Reads are synchronous (from cache).
+// Writes update cache + fire-and-forget to server via app_settings_save.
+let _shoppingTagsCache     = {};
+let _pinnedBringCache      = {};
+let _prefUseLocCache       = {};
+let _prefMoveLocCache      = {};
+let _autoAddedBringCache   = {};
+let _bringBlocklistCache   = {};
+let _noExpiryDismissedCache = {};
+let _scanHistoryCache      = [];
+function _saveToServer(key, value) {
+    api('app_settings_save', {}, 'POST', { settings: { [key]: value } }).catch(() => {});
+}
 
 function setReviewConfirmed(inventoryId) {
     const c = getReviewConfirmed();
@@ -3896,13 +3943,14 @@ function setReviewConfirmed(inventoryId) {
 
 /** Return map of product IDs the user has marked as "no expiry needed". */
 function _getNoExpiryDismissed() {
-    try { return JSON.parse(localStorage.getItem('_noExpiryDismissed') || '{}'); } catch { return {}; }
+    return _noExpiryDismissedCache || {};
 }
 /** Permanently mark a product as "no expiry needed" for this browser. */
 function _dismissNoExpiry(productId) {
-    const m = _getNoExpiryDismissed();
+    const m = Object.assign({}, _noExpiryDismissedCache || {});
     m[String(productId)] = Date.now();
-    localStorage.setItem('_noExpiryDismissed', JSON.stringify(m));
+    _noExpiryDismissedCache = m;
+    _saveToServer('no_expiry_dismissed', m);
 }
 
 // === ALERT BANNER SYSTEM (replaces old review table) ===
@@ -8001,33 +8049,28 @@ function selectUseLocation(btn, loc) {
 // ── PREFERRED USE LOCATION ───────────────────────────────────────────────
 // After 3+ consistent choices from the same location for a product,
 // auto-selects it and hides the location picker (user can still tap "cambia").
-const _PREF_LOC_KEY = '_prefUseLoc';
 const _PREF_LOC_NEEDED = 2; // choices needed to confirm a preference
 
 // ── PREFERRED MOVE-AFTER-USE LOCATION ────────────────────────────────────
 // Tracks where the user puts the remainder after using a product.
 // After _PREF_MOVE_NEEDED consistent choices, the modal is skipped entirely.
-const _PREF_MOVE_KEY = '_prefMoveLoc';
 const _PREF_MOVE_NEEDED = 2;
 let _pendingMoveCtx = null; // { productId, fromLoc, openedId } — set before showing modal
 
 function _getMoveLocHistory(productId, fromLoc) {
-    try {
-        const all = JSON.parse(localStorage.getItem(_PREF_MOVE_KEY) || '{}');
-        return all[`${productId}|${fromLoc}`] || [];
-    } catch { return []; }
+    const all = _prefMoveLocCache || {};
+    return all[`${productId}|${fromLoc}`] || [];
 }
 
 function _recordMoveLocChoice(productId, fromLoc, toLoc) {
-    try {
-        const all = JSON.parse(localStorage.getItem(_PREF_MOVE_KEY) || '{}');
-        const key = `${productId}|${fromLoc}`;
-        const hist = all[key] || [];
-        hist.push(toLoc);
-        if (hist.length > 8) hist.splice(0, hist.length - 8);
-        all[key] = hist;
-        localStorage.setItem(_PREF_MOVE_KEY, JSON.stringify(all));
-    } catch { }
+    const all = Object.assign({}, _prefMoveLocCache || {});
+    const key = `${productId}|${fromLoc}`;
+    const hist = (all[key] || []).slice();
+    hist.push(toLoc);
+    if (hist.length > 8) hist.splice(0, hist.length - 8);
+    all[key] = hist;
+    _prefMoveLocCache = all;
+    _saveToServer('pref_move_loc', all);
 }
 
 function _getPreferredMoveLoc(productId, fromLoc) {
@@ -8041,22 +8084,19 @@ function _getPreferredMoveLoc(productId, fromLoc) {
 }
 
 function _getPrefLocHistory(productId) {
-    try {
-        const all = JSON.parse(localStorage.getItem(_PREF_LOC_KEY) || '{}');
-        return all[String(productId)] || [];
-    } catch { return []; }
+    const all = _prefUseLocCache || {};
+    return all[String(productId)] || [];
 }
 
 function _recordUseLocationChoice(productId, loc) {
-    try {
-        const all = JSON.parse(localStorage.getItem(_PREF_LOC_KEY) || '{}');
-        const key = String(productId);
-        const hist = all[key] || [];
-        hist.push(loc);
-        if (hist.length > 8) hist.splice(0, hist.length - 8); // keep last 8
-        all[key] = hist;
-        localStorage.setItem(_PREF_LOC_KEY, JSON.stringify(all));
-    } catch { }
+    const all = Object.assign({}, _prefUseLocCache || {});
+    const key = String(productId);
+    const hist = (all[key] || []).slice();
+    hist.push(loc);
+    if (hist.length > 8) hist.splice(0, hist.length - 8);
+    all[key] = hist;
+    _prefUseLocCache = all;
+    _saveToServer('pref_use_loc', all);
 }
 
 function _getPreferredUseLocation(productId) {
@@ -8332,9 +8372,10 @@ async function addLowStockToBring() {
         const data = await api('bring_add', {}, 'POST', payload);
         if (data.success && data.added > 0) {
             // Pin as user-added so cleanup never auto-removes it
-            const pinned = JSON.parse(localStorage.getItem('_userPinnedBring') || '{}');
+            const pinned = Object.assign({}, _pinnedBringCache || {});
             pinned[bringName.toLowerCase()] = Date.now();
-            localStorage.setItem('_userPinnedBring', JSON.stringify(pinned));
+            _pinnedBringCache = pinned;
+            _saveToServer('pinned_bring', pinned);
             showToast(t('shopping.added_to_bring').replace('{n}', data.added), 'success');
         } else if (data.success && data.skipped > 0) {
             showToast(t('shopping.already_in_list_short'), 'info');
@@ -9309,27 +9350,26 @@ function updateShoppingTabCounts() {
     document.getElementById('shopping-tabs')?.style.setProperty('display', 'flex');
 }
 
-// ===== LOCAL SHOPPING TAGS =====
+// ===== LOCAL SHOPPING TAGS (server-synced) =====
 function getShoppingTags(itemName) {
-    try {
-        const tags = JSON.parse(localStorage.getItem('shopping_tags') || '{}');
-        return tags[itemName.toLowerCase()] || [];
-    } catch { return []; }
+    const tags = _shoppingTagsCache || {};
+    return tags[itemName.toLowerCase()] || [];
 }
 
 function toggleShoppingTag(itemIdx, tag) {
     const item = shoppingItems[itemIdx];
     if (!item) return;
-    const key = item.name.toLowerCase();
     try {
-        const tags = JSON.parse(localStorage.getItem('shopping_tags') || '{}');
-        const existing = tags[key] || [];
+        const key = item.name.toLowerCase();
+        const tags = Object.assign({}, _shoppingTagsCache || {});
+        const existing = (tags[key] || []).slice();
         const pos = existing.indexOf(tag);
         if (pos >= 0) existing.splice(pos, 1);
         else existing.push(tag);
         if (existing.length) tags[key] = existing;
         else delete tags[key];
-        localStorage.setItem('shopping_tags', JSON.stringify(tags));
+        _shoppingTagsCache = tags;
+        _saveToServer('shopping_tags', tags);
 
         // Sync urgente/presto tag to Bring specification so it's visible in the Bring app
         if (tag === 'urgente' && shoppingListUUID) {
@@ -9391,54 +9431,57 @@ function _urgencyToSpec(urgency, brand) {
  * function only ever removes those, never manually-added ones.
  */
 function _getAutoAddedBring() {
-    try {
-        const raw = localStorage.getItem('_autoAddedBring');
-        const map = raw ? JSON.parse(raw) : {};
-        const now = Date.now();
-        let changed = false;
-        for (const k of Object.keys(map)) {
-            if (now - map[k] > 30 * 24 * 60 * 60 * 1000) { delete map[k]; changed = true; }
-        }
-        if (changed) localStorage.setItem('_autoAddedBring', JSON.stringify(map));
-        return map;
-    } catch(e) { return {}; }
+    const map = Object.assign({}, _autoAddedBringCache || {});
+    const now = Date.now();
+    let changed = false;
+    for (const k of Object.keys(map)) {
+        if (now - map[k] > 30 * 24 * 60 * 60 * 1000) { delete map[k]; changed = true; }
+    }
+    if (changed) {
+        _autoAddedBringCache = map;
+        _saveToServer('auto_added_bring', map);
+    }
+    return map;
 }
 function _markAutoAddedBring(names) {
     const map = _getAutoAddedBring();
     const now = Date.now();
     for (const n of names) map[n.toLowerCase()] = now;
-    localStorage.setItem('_autoAddedBring', JSON.stringify(map));
+    _autoAddedBringCache = map;
+    _saveToServer('auto_added_bring', map);
 }
 function _unmarkAutoAddedBring(names) {
     const map = _getAutoAddedBring();
     for (const n of names) delete map[n.toLowerCase()];
-    localStorage.setItem('_autoAddedBring', JSON.stringify(map));
+    _autoAddedBringCache = map;
+    _saveToServer('auto_added_bring', map);
 }
 
-// ===== BRING! PURCHASED BLOCKLIST =====
+// ===== BRING! PURCHASED BLOCKLIST (server-synced) =====
 // When an item disappears from Bring (user bought it), we block auto-re-add for 4h.
 const _BRING_PURCHASED_TTL = 4 * 60 * 60 * 1000; // 4 hours
 
 function _getBringPurchasedBlocklist() {
-    try {
-        const raw = localStorage.getItem('_bringPurchasedBlocklist');
-        const map = raw ? JSON.parse(raw) : {};
-        const now = Date.now();
-        // Prune expired entries
-        let changed = false;
-        for (const key of Object.keys(map)) {
-            if (now - map[key] > _BRING_PURCHASED_TTL) { delete map[key]; changed = true; }
-        }
-        if (changed) localStorage.setItem('_bringPurchasedBlocklist', JSON.stringify(map));
-        return map;
-    } catch(e) { return {}; }
+    const map = Object.assign({}, _bringBlocklistCache || {});
+    const now = Date.now();
+    // Prune expired entries
+    let changed = false;
+    for (const key of Object.keys(map)) {
+        if (now - map[key] > _BRING_PURCHASED_TTL) { delete map[key]; changed = true; }
+    }
+    if (changed) {
+        _bringBlocklistCache = map;
+        _saveToServer('bring_blocklist', map);
+    }
+    return map;
 }
 
 function _markBringPurchased(names) {
     const map = _getBringPurchasedBlocklist();
     const now = Date.now();
     for (const n of names) map[n.toLowerCase()] = now;
-    localStorage.setItem('_bringPurchasedBlocklist', JSON.stringify(map));
+    _bringBlocklistCache = map;
+    _saveToServer('bring_blocklist', map);
 }
 
 function _isBringPurchased(name, urgency) {
@@ -9501,10 +9544,10 @@ async function forceSyncBring() {
     if (btn) { btn.disabled = true; btn.textContent = `⏳ ${t('shopping.syncing')}`; }
     // Clear auto-add/cleanup guards so the next run is unconditional.
     // Do NOT clear _userPinnedBring — items the user manually added must stay protected.
-    localStorage.removeItem('_bringPurchasedBlocklist');
+    _bringBlocklistCache = {}; _saveToServer('bring_blocklist', {});
     localStorage.removeItem('_autoAddedCriticalTs');
     localStorage.removeItem('_bringCleanupTs');
-    localStorage.removeItem('_autoAddedBring');
+    _autoAddedBringCache = {}; _saveToServer('auto_added_bring', {});
     logOperation('force_sync_bring', {});
     // Reload everything from scratch
     await loadShoppingList();
@@ -9754,10 +9797,10 @@ async function fetchAllPrices(forceRefresh = false) {
     if (btn) { btn.disabled = true; btn.textContent = `⏳ ${t('shopping.syncing')}`; }
     // Clear auto-add/cleanup guards so the next run is unconditional.
     // Do NOT clear _userPinnedBring — items the user manually added must stay protected.
-    localStorage.removeItem('_bringPurchasedBlocklist');
+    _bringBlocklistCache = {}; _saveToServer('bring_blocklist', {});
     localStorage.removeItem('_autoAddedCriticalTs');
     localStorage.removeItem('_bringCleanupTs');
-    localStorage.removeItem('_autoAddedBring');
+    _autoAddedBringCache = {}; _saveToServer('auto_added_bring', {});
     logOperation('force_sync_bring', {});
     // Reload everything from scratch
     await loadShoppingList();
@@ -10313,10 +10356,11 @@ async function addSmartToBring() {
             showToast(msg, result.added > 0 ? 'success' : 'info');
             // Mark all manually-added items as user-pinned so cleanupObsoleteBringItems never removes them
             if (result.added > 0) {
-                const pinned = JSON.parse(localStorage.getItem('_userPinnedBring') || '{}');
+                const pinned = Object.assign({}, _pinnedBringCache || {});
                 const now = Date.now();
                 for (const it of itemsToAdd) pinned[it.name.toLowerCase()] = now;
-                localStorage.setItem('_userPinnedBring', JSON.stringify(pinned));
+                _pinnedBringCache = pinned;
+                _saveToServer('pinned_bring', pinned);
             }
             // Reload to refresh badges
             loadShoppingList();
@@ -10369,12 +10413,12 @@ async function loadShoppingCount() {
  */
 function _syncTagsFromBringSpec() {
     try {
-        const tags = JSON.parse(localStorage.getItem('shopping_tags') || '{}');
+        const tags = Object.assign({}, _shoppingTagsCache || {});
         let changed = false;
         for (const item of shoppingItems) {
             const key = item.name.toLowerCase();
             const spec = (item.specification || '').toLowerCase();
-            const existing = tags[key] || [];
+            const existing = (tags[key] || []).slice();
             const hasUrgente = existing.includes('urgente');
             const smartMatch = _matchBringToSmart(item.name, smartShoppingItems);
             const smartIsCritical = smartMatch && (smartMatch.urgency === 'critical' || smartMatch.urgency === 'high');
@@ -10389,7 +10433,10 @@ function _syncTagsFromBringSpec() {
                 changed = true;
             }
         }
-        if (changed) localStorage.setItem('shopping_tags', JSON.stringify(tags));
+        if (changed) {
+            _shoppingTagsCache = tags;
+            _saveToServer('shopping_tags', tags);
+        }
     } catch (e) { /* ignore */ }
 }
 
