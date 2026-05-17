@@ -8434,6 +8434,32 @@ function _calcEstimatedTotal(float $pricePerUnit, string $priceUnitLabel, float 
         }
     }
 
+    // ── conf/pz with known package weight vs weight-labeled AI price ──────────
+    // E.g. unit='conf', defQty=170g, AI priced 'pacco 500g' @ €3.20
+    // → need ceil(7×170 / 500) = 3 packs × €3.20 = €9.60, not 7×€3.20 = €22.40
+    if (in_array(strtolower($unit), ['conf', 'pz']) && $defQty > 0 && !empty($pkgUnit)) {
+        $pkgL  = strtolower($pkgUnit);
+        $isWt  = in_array($pkgL, ['g', 'kg']);
+        $isVol = in_array($pkgL, ['ml', 'l', 'lt']);
+        if (($isWt || $isVol) &&
+            preg_match('/\b(\d+(?:[.,]\d+)?)\s*(g|kg|ml|l|lt)\b/i', $priceUnitLabel, $m)) {
+            $rawVal  = (float) str_replace(',', '.', $m[1]);
+            $rawUnit = strtolower($m[2]);
+            $labelIsWt  = in_array($rawUnit, ['g', 'kg']);
+            $labelIsVol = in_array($rawUnit, ['ml', 'l', 'lt']);
+            if (($isWt && $labelIsWt) || ($isVol && $labelIsVol)) {
+                // Convert to base units (g or ml)
+                $defBase   = $pkgL  === 'kg' ? $defQty * 1000.0 : $defQty;
+                $labelBase = match($rawUnit) { 'kg','l','lt' => $rawVal * 1000.0, default => $rawVal };
+                if ($labelBase > 0) {
+                    $totalBase = $qty * $defBase;
+                    $packs     = (int) max(1, ceil($totalBase / $labelBase));
+                    return round($pricePerUnit * $packs, 2);
+                }
+            }
+        }
+    }
+
     $buyQty = max(1.0, $qty);
     return round($pricePerUnit * $buyQty, 2);
 }
