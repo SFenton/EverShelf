@@ -761,6 +761,24 @@
       "card_title": "♻️ Suggerimenti zero-waste",
       "card_hint": "Durante la cottura, mostra consigli su come riutilizzare gli scarti prodotti in ogni passo (bucce, acqua di cottura, ecc.). Disattivo per impostazione predefinita.",
       "label": "Mostra suggerimenti durante la cottura"
+    },
+    "info": {
+      "tab": "Info",
+      "ai_title": "Gemini AI — Utilizzo Token",
+      "ai_hint": "Consumo mensile e costo stimato per la chiave API corrente.",
+      "loading": "Caricamento…",
+      "total_tokens": "Token totali",
+      "est_cost": "Costo stimato",
+      "input_tok": "Token input",
+      "output_tok": "Token output",
+      "ai_calls": "Chiamate AI",
+      "by_action": "Dettaglio per funzione",
+      "by_model": "Dettaglio per modello",
+      "pricing_note": "Prezzi di riferimento: gemini-2.5-flash $0.15/1M input, $0.60/1M output.",
+      "system_title": "Sistema",
+      "db_size": "Dimensione database",
+      "log_size": "Dimensione log",
+      "log_level": "Livello di log"
     }
   },
   "expiry": {

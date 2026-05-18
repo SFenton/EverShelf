@@ -2203,6 +2203,104 @@ function _applySyncedSettings(serverSettings) {
     }
 }
 
+let _infoTabTimer = null;
+
+/**
+ * Load the Info tab: Gemini token usage + cost, log size, DB size, log level.
+ * Called on tab click; auto-refreshes every 30s while the tab is open.
+ */
+async function _loadInfoTab() {
+    // Cancel any previous auto-refresh
+    if (_infoTabTimer) { clearInterval(_infoTabTimer); _infoTabTimer = null; }
+    await _renderInfoTab();
+    // Auto-refresh every 30s while Info tab is visible
+    _infoTabTimer = setInterval(_renderInfoTab, 30_000);
+}
+
+async function _renderInfoTab() {
+    const aiEl  = document.getElementById('info-ai-content');
+    const sysEl = document.getElementById('info-system-content');
+    if (!aiEl && !sysEl) return;
+
+    try {
+        const d = await api('gemini_usage');
+        const s = getSettings();
+        const sym = s.price_currency === 'USD' ? '$' : (s.price_currency === 'GBP' ? '£' : '€');
+
+        // ── AI Usage card ────────────────────────────────────────────────────
+        if (aiEl) {
+            const totalTok  = (d.input_tokens || 0) + (d.output_tokens || 0);
+            const costUsd   = d.cost_usd || 0;
+
+            // Convert cost to display currency (rough fixed rates)
+            let costDisplay = '$' + costUsd.toFixed(4);
+            if (s.price_currency === 'EUR') costDisplay = '€' + (costUsd * 0.92).toFixed(4);
+            if (s.price_currency === 'GBP') costDisplay = '£' + (costUsd * 0.79).toFixed(4);
+
+            // By-action breakdown
+            const actions = d.by_action || {};
+            const actionRows = Object.entries(actions)
+                .sort((a, b) => b[1] - a[1])
+                .map(([k, v]) => `<tr><td style="padding:2px 8px 2px 0;color:var(--text-secondary);font-size:0.82rem">${k}</td><td style="font-variant-numeric:tabular-nums;font-size:0.82rem">${v} calls</td></tr>`)
+                .join('');
+
+            // By-model breakdown
+            const models = d.by_model || {};
+            const modelRows = Object.entries(models)
+                .map(([m, mv]) => `<tr><td style="padding:2px 8px 2px 0;color:var(--text-secondary);font-size:0.82rem">${m}</td><td style="font-variant-numeric:tabular-nums;font-size:0.82rem">${((mv.in||0)+(mv.out||0)).toLocaleString()} tok</td></tr>`)
+                .join('');
+
+            aiEl.innerHTML = `
+                <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:12px">
+                    <div style="background:var(--bg-secondary);border-radius:10px;padding:12px;text-align:center">
+                        <div style="font-size:1.4rem;font-weight:700;color:var(--accent)">${totalTok.toLocaleString()}</div>
+                        <div style="font-size:0.75rem;color:var(--text-secondary);margin-top:2px">${t('settings.info.total_tokens')}</div>
+                    </div>
+                    <div style="background:var(--bg-secondary);border-radius:10px;padding:12px;text-align:center">
+                        <div style="font-size:1.4rem;font-weight:700;color:#15803d">${costDisplay}</div>
+                        <div style="font-size:0.75rem;color:var(--text-secondary);margin-top:2px">${t('settings.info.est_cost')} (${d.month})</div>
+                    </div>
+                </div>
+                <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:10px;font-size:0.82rem;color:var(--text-secondary)">
+                    <span>↑ ${t('settings.info.input_tok')}: <strong>${(d.input_tokens||0).toLocaleString()}</strong></span>
+                    <span>↓ ${t('settings.info.output_tok')}: <strong>${(d.output_tokens||0).toLocaleString()}</strong></span>
+                    <span>${t('settings.info.ai_calls')}: <strong>${d.calls||0}</strong></span>
+                </div>
+                ${actionRows ? `<details style="margin-top:6px"><summary style="font-size:0.82rem;cursor:pointer;color:var(--text-secondary)">${t('settings.info.by_action')}</summary><table style="margin-top:6px;border-collapse:collapse">${actionRows}</table></details>` : ''}
+                ${modelRows  ? `<details style="margin-top:4px"><summary style="font-size:0.82rem;cursor:pointer;color:var(--text-secondary)">${t('settings.info.by_model')}</summary><table style="margin-top:6px;border-collapse:collapse">${modelRows}</table></details>` : ''}
+                <p class="settings-hint" style="margin-top:8px">${t('settings.info.pricing_note')}</p>
+            `;
+        }
+
+        // ── System card ──────────────────────────────────────────────────────
+        if (sysEl) {
+            const logMb  = ((d.log_bytes || 0) / 1048576).toFixed(2);
+            const dbMb   = ((d.db_bytes  || 0) / 1048576).toFixed(2);
+            sysEl.innerHTML = `
+                <table style="border-collapse:collapse;width:100%;font-size:0.88rem">
+                    <tr style="border-bottom:1px solid var(--border)">
+                        <td style="padding:7px 0;color:var(--text-secondary)">${t('settings.info.db_size')}</td>
+                        <td style="padding:7px 0;font-weight:600;text-align:right">${dbMb} MB</td>
+                    </tr>
+                    <tr style="border-bottom:1px solid var(--border)">
+                        <td style="padding:7px 0;color:var(--text-secondary)">${t('settings.info.log_size')}</td>
+                        <td style="padding:7px 0;font-weight:600;text-align:right">${logMb} MB (${d.log_files||0} files)</td>
+                    </tr>
+                    <tr>
+                        <td style="padding:7px 0;color:var(--text-secondary)">${t('settings.info.log_level')}</td>
+                        <td style="padding:7px 0;font-weight:600;text-align:right">
+                            <span style="background:${d.log_level==='DEBUG'?'#dbeafe':d.log_level==='INFO'?'#dcfce7':d.log_level==='WARN'?'#fef9c3':'#fee2e2'};color:${d.log_level==='DEBUG'?'#1e40af':d.log_level==='INFO'?'#15803d':d.log_level==='WARN'?'#854d0e':'#991b1b'};padding:2px 8px;border-radius:6px;font-size:0.8rem">${d.log_level||'INFO'}</span>
+                        </td>
+                    </tr>
+                </table>
+            `;
+        }
+    } catch(e) {
+        if (aiEl)  aiEl.innerHTML  = `<p class="settings-hint">${t('error.generic')}</p>`;
+        if (sysEl) sysEl.innerHTML = `<p class="settings-hint">${t('error.generic')}</p>`;
+    }
+}
+
 /**
  * Populate the About section with the current app version from the server.
  */
@@ -3002,6 +3100,11 @@ async function saveSettings() {
 }
 
 function switchSettingsTab(btn, tabId) {
+    // Stop info-tab auto-refresh when leaving that tab
+    if (tabId !== 'tab-info' && _infoTabTimer) {
+        clearInterval(_infoTabTimer);
+        _infoTabTimer = null;
+    }
     document.querySelectorAll('.settings-tab').forEach(t => t.classList.remove('active'));
     document.querySelectorAll('.settings-panel').forEach(p => p.classList.remove('active'));
     btn.classList.add('active');

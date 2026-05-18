@@ -18,6 +18,14 @@ define('_GH_TK_KEY', 'D1sp3ns4!Ev3r#26');
 define('GH_REPO',    'dadaloop82/EverShelf');
 define('PRICE_CACHE_PATH', __DIR__ . '/../data/shopping_price_cache.json');
 define('CATEGORY_CACHE_PATH', __DIR__ . '/../data/category_ai_cache.json');
+define('AI_USAGE_PATH', __DIR__ . '/../data/ai_usage.json');
+// Gemini pricing (USD per 1M tokens) — overridable via .env
+// gemini-2.5-flash: $0.15 input / $0.60 output
+// gemini-2.0-flash: $0.10 input / $0.40 output
+define('GEMINI_COST_25F_IN',  0.15);
+define('GEMINI_COST_25F_OUT', 0.60);
+define('GEMINI_COST_20F_IN',  0.10);
+define('GEMINI_COST_20F_OUT', 0.40);
 
 /** Decode the XOR-obfuscated GitHub token at runtime. */
 function _ghToken(): string {
@@ -131,6 +139,56 @@ if (($_GET['action'] ?? '') === 'get_logs') {
         'current_file' => basename(EverLog::currentFile()),
         'level'        => EverLog::levelName(),
         'files'        => EverLog::listFiles(),
+    ], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
+// ── Gemini token usage + cost estimate ────────────────────────────────────────
+if (($_GET['action'] ?? '') === 'gemini_usage') {
+    header('Content-Type: application/json; charset=utf-8');
+    $data  = file_exists(AI_USAGE_PATH) ? (json_decode(file_get_contents(AI_USAGE_PATH), true) ?: []) : [];
+    $month = date('Y-m');
+    $cur   = $data[$month] ?? ['input_tokens' => 0, 'output_tokens' => 0, 'calls' => 0, 'by_action' => [], 'by_model' => []];
+
+    // Per-model cost calculation
+    $totalCost = 0.0;
+    foreach (($cur['by_model'] ?? []) as $mdl => $mu) {
+        $inRate  = str_contains($mdl, '2.5') ? (float)(env('GEMINI_COST_INPUT_PER_1M')  ?: GEMINI_COST_25F_IN)  : (float)(env('GEMINI_COST_INPUT_PER_1M')  ?: GEMINI_COST_20F_IN);
+        $outRate = str_contains($mdl, '2.5') ? (float)(env('GEMINI_COST_OUTPUT_PER_1M') ?: GEMINI_COST_25F_OUT) : (float)(env('GEMINI_COST_OUTPUT_PER_1M') ?: GEMINI_COST_20F_OUT);
+        $totalCost += ($mu['in'] / 1_000_000) * $inRate + ($mu['out'] / 1_000_000) * $outRate;
+    }
+    // Fallback if by_model not populated (old data)
+    if ($totalCost === 0.0 && ($cur['input_tokens'] > 0 || $cur['output_tokens'] > 0)) {
+        $inRate  = (float)(env('GEMINI_COST_INPUT_PER_1M')  ?: GEMINI_COST_25F_IN);
+        $outRate = (float)(env('GEMINI_COST_OUTPUT_PER_1M') ?: GEMINI_COST_25F_OUT);
+        $totalCost = ($cur['input_tokens'] / 1_000_000) * $inRate + ($cur['output_tokens'] / 1_000_000) * $outRate;
+    }
+
+    // Log sizes — EverLog::listFiles() returns [{file, size_kb, mtime}, ...]
+    $logFilesInfo = EverLog::listFiles();
+    $logBytes = 0;
+    foreach ($logFilesInfo as $lf) {
+        $logBytes += (int)(($lf['size_kb'] ?? 0) * 1024);
+    }
+
+    echo json_encode([
+        'month'         => $month,
+        'input_tokens'  => (int)$cur['input_tokens'],
+        'output_tokens' => (int)$cur['output_tokens'],
+        'calls'         => (int)$cur['calls'],
+        'by_action'     => $cur['by_action'] ?? [],
+        'by_model'      => $cur['by_model']  ?? [],
+        'cost_usd'      => round($totalCost, 6),
+        'log_bytes'     => $logBytes,
+        'log_level'     => EverLog::levelName(),
+        'log_files'     => count($logFilesInfo),
+        'db_bytes'      => file_exists(DB_PATH) ? filesize(DB_PATH) : 0,
+        'history'       => array_map(fn($k, $v) => [
+            'month'         => $k,
+            'input_tokens'  => (int)($v['input_tokens'] ?? 0),
+            'output_tokens' => (int)($v['output_tokens'] ?? 0),
+            'calls'         => (int)($v['calls'] ?? 0),
+        ], array_keys($data), array_values($data)),
     ], JSON_UNESCAPED_UNICODE);
     exit;
 }
@@ -2904,27 +2962,72 @@ function callGemini(string $url, array $payload, int $timeout = 60): array {
         EverLog::aiResponse('gemini', strlen($lastBody), $elapsed, false, "HTTP {$lastCode}: " . substr($lastBody, 0, 300));
     }
 
+    $data = $lastBody ? json_decode($lastBody, true) : null;
+    // Extract token counts from Gemini usageMetadata
+    $usage = $data['usageMetadata'] ?? [];
+    $tokIn  = (int)($usage['promptTokenCount']     ?? 0);
+    $tokOut = (int)($usage['candidatesTokenCount'] ?? 0);
+
     return [
-        'http_code' => $lastCode,
-        'body'      => $lastBody,
-        'data'      => $lastBody ? json_decode($lastBody, true) : null,
+        'http_code'  => $lastCode,
+        'body'       => $lastBody,
+        'data'       => $data,
+        'tokens_in'  => $tokIn,
+        'tokens_out' => $tokOut,
     ];
+}
+
+/**
+ * Record Gemini token usage to the monthly ai_usage.json file.
+ * Called by callGeminiWithFallback after each successful call.
+ */
+function _recordAiUsage(string $model, int $tokIn, int $tokOut, string $action = ''): void {
+    if ($tokIn === 0 && $tokOut === 0) return;
+    $month = date('Y-m');
+    $data  = [];
+    if (file_exists(AI_USAGE_PATH)) {
+        $data = json_decode(file_get_contents(AI_USAGE_PATH), true) ?: [];
+    }
+    if (!isset($data[$month])) {
+        $data[$month] = ['input_tokens' => 0, 'output_tokens' => 0, 'calls' => 0, 'by_action' => [], 'by_model' => []];
+    }
+    $m = &$data[$month];
+    $m['input_tokens']  += $tokIn;
+    $m['output_tokens'] += $tokOut;
+    $m['calls']++;
+    if ($action) {
+        $m['by_action'][$action] = ($m['by_action'][$action] ?? 0) + 1;
+    }
+    if ($model) {
+        if (!isset($m['by_model'][$model])) $m['by_model'][$model] = ['in' => 0, 'out' => 0, 'calls' => 0];
+        $m['by_model'][$model]['in']    += $tokIn;
+        $m['by_model'][$model]['out']   += $tokOut;
+        $m['by_model'][$model]['calls'] += 1;
+    }
+    // Keep only last 13 months
+    krsort($data);
+    $data = array_slice($data, 0, 13, true);
+    @file_put_contents(AI_USAGE_PATH, json_encode($data, JSON_PRETTY_PRINT));
+    EverLog::debug('ai_usage recorded', ['model' => $model, 'in' => $tokIn, 'out' => $tokOut, 'action' => $action]);
 }
 
 /**
  * Like callGemini() but tries gemini-2.5-flash first, falls back to gemini-2.0-flash
  * on quota/rate-limit errors (429/503). Builds the URL from model name + API key.
  */
-function callGeminiWithFallback(string $apiKey, array $payload, int $timeout = 30): array {
+function callGeminiWithFallback(string $apiKey, array $payload, int $timeout = 30, string $usageAction = ''): array {
     $models   = ['gemini-2.5-flash', 'gemini-2.0-flash'];
-    $last     = ['http_code' => 0, 'body' => '', 'data' => null];
+    $last     = ['http_code' => 0, 'body' => '', 'data' => null, 'tokens_in' => 0, 'tokens_out' => 0];
     $promptLen = strlen(json_encode($payload));
     foreach ($models as $idx => $model) {
         $isFallback = $idx > 0;
         EverLog::aiCall($model, $promptLen, $isFallback);
         $url  = "https://generativelanguage.googleapis.com/v1beta/models/{$model}:generateContent?key={$apiKey}";
         $last = callGemini($url, $payload, $timeout);
-        if ($last['http_code'] === 200) return $last;
+        if ($last['http_code'] === 200) {
+            _recordAiUsage($model, $last['tokens_in'], $last['tokens_out'], $usageAction);
+            return $last;
+        }
         if ($last['http_code'] !== 429 && $last['http_code'] !== 503) return $last; // non-retryable
         EverLog::warn('AI model exhausted, trying fallback', ['model' => $model, 'code' => $last['http_code']]);
     }
@@ -3014,7 +3117,7 @@ function getOpenedShelfLifeDays(string $name, string $category, string $location
             'contents'         => [['parts' => [['text' => $prompt]]]],
             'generationConfig' => ['maxOutputTokens' => 8, 'temperature' => 0],
         ];
-        $result = callGeminiWithFallback($apiKey, $payload, 12);
+        $result = callGeminiWithFallback($apiKey, $payload, 12, 'shelf_life');
         if ($result['http_code'] === 200) {
             $text = trim($result['data']['candidates'][0]['content']['parts'][0]['text'] ?? '');
             $parsed = (int)preg_replace('/\D/', '', $text);
@@ -3280,7 +3383,7 @@ function geminiReadExpiry(): void {
         ]
     ];
     
-    $result   = callGeminiWithFallback($apiKey, $payload, 30);
+    $result   = callGeminiWithFallback($apiKey, $payload, 30, 'expiry_ocr');
     $httpCode = $result['http_code'];
 
     if ($httpCode !== 200) {
@@ -3434,7 +3537,7 @@ PROMPT;
         ]
     ];
 
-    $result   = callGeminiWithFallback($apiKey, $payload, 90);
+    $result   = callGeminiWithFallback($apiKey, $payload, 90, 'chat');
     $httpCode = $result['http_code'];
 
     if ($httpCode !== 200) {
@@ -3939,7 +4042,7 @@ PROMPT;
         ]
     ];
 
-    $result   = callGeminiWithFallback($apiKey, $payload, 60);
+    $result   = callGeminiWithFallback($apiKey, $payload, 60, 'recipe');
     $httpCode = $result['http_code'];
 
     if ($httpCode !== 200) {
@@ -4223,7 +4326,7 @@ PROMPT;
         'generationConfig' => ['temperature' => 0.1, 'maxOutputTokens' => 8192]
     ];
 
-    $result = callGeminiWithFallback($apiKey, $payload, 45);
+    $result = callGeminiWithFallback($apiKey, $payload, 45, 'chat_recipe');
 
     if ($result['http_code'] !== 200) {
         echo json_encode(['success' => false, 'error' => $result['data']['error']['message'] ?? 'gemini_error']);
@@ -4339,7 +4442,7 @@ PROMPT;
         'generationConfig' => ['temperature' => 0.7, 'maxOutputTokens' => 8192],
     ];
 
-    $result = callGeminiWithFallback($apiKey, $payload, 45);
+    $result = callGeminiWithFallback($apiKey, $payload, 45, 'recipe_ingredient');
 
     if ($result['http_code'] !== 200) {
         echo json_encode(['success' => false, 'error' => $result['data']['error']['message'] ?? 'gemini_error']);
@@ -5102,7 +5205,7 @@ PROMPT;
         ]
     ];
 
-    $result   = callGeminiWithFallback($apiKey, $payload, 30);
+    $result   = callGeminiWithFallback($apiKey, $payload, 30, 'identify_product');
     $httpCode = $result['http_code'];
 
     if ($httpCode !== 200) {
@@ -5515,7 +5618,7 @@ PROMPT;
         'generationConfig' => ['temperature' => 0.1, 'maxOutputTokens' => 16],
     ];
 
-    $result = callGeminiWithFallback($apiKey, $payload, 15);
+    $result = callGeminiWithFallback($apiKey, $payload, 15, 'classify_category');
     if ($result['http_code'] !== 200 || !isset($result['data']['candidates'][0])) return null;
 
     $text = trim($result['data']['candidates'][0]['content']['parts'][0]['text'] ?? '');
@@ -6495,6 +6598,7 @@ function smartShopping(PDO $db): void {
     }
 
     // 3. Get transaction stats per product (exclude undone=1 corrections)
+    // Also compute rolling 90-day consumption for smarter quantity suggestions (#70)
     $txStmt = $db->query("
         SELECT product_id,
                COUNT(CASE WHEN type IN ('out','waste') AND undone=0 THEN 1 END) as use_count,
@@ -6503,7 +6607,9 @@ function smartShopping(PDO $db): void {
                SUM(CASE WHEN type = 'in' AND undone=0 THEN quantity ELSE 0 END) as total_bought,
                MIN(CASE WHEN type = 'in' AND undone=0 THEN created_at END) as first_in,
                MAX(CASE WHEN type = 'in' AND undone=0 THEN created_at END) as last_in,
-               MAX(CASE WHEN type IN ('out','waste') AND undone=0 THEN created_at END) as last_out
+               MAX(CASE WHEN type IN ('out','waste') AND undone=0 THEN created_at END) as last_out,
+               SUM(CASE WHEN type IN ('out','waste') AND undone=0 AND created_at >= datetime('now','-90 days') THEN quantity ELSE 0 END) as used_90d,
+               SUM(CASE WHEN type IN ('out','waste') AND undone=0 AND created_at >= datetime('now','-30 days') THEN quantity ELSE 0 END) as used_30d
         FROM transactions
         GROUP BY product_id
     ");
@@ -6581,19 +6687,40 @@ function smartShopping(PDO $db): void {
         $lastOut = $tx && $tx['last_out'] ? strtotime($tx['last_out']) : null;
         $daysSinceFirst = $firstIn ? max(1, ($now - $firstIn) / 86400) : 999;
 
-        // Average daily consumption rate.
-        // Use the "effective tracking period" (first purchase → last activity) rather than
-        // first purchase → now, so idle periods after last use don't deflate the rate.
-        // Example: Aglio bought 60 days ago but last used 34 days ago → use 34-day window.
-        $lastActivity = max($lastIn ?? 0, $lastOut ?? 0);
-        $activitySpan = ($firstIn && $lastActivity > $firstIn) ? ($lastActivity - $firstIn) : 0;
-        // Guard: if all activity fits within 24h (e.g. bought & consumed same day / seconds apart),
-        // effectiveDays would collapse to 1 → wildly inflated daily rate (e.g. Pizza: in+out 9s apart).
-        // Fall back to daysSinceFirst (first purchase → now) for a conservative estimate.
-        $effectiveDays = ($activitySpan >= 86400)
-            ? max(1, $activitySpan / 86400)
-            : $daysSinceFirst;
-        $dailyRate = $effectiveDays < 999 && $totalUsed > 0 ? $totalUsed / $effectiveDays : 0;
+        // Average daily consumption rate — rolling 90-day window with EWMA weighting (#70).
+        // Priority: if we have ≥3 use events in last 90 days, use weighted blend
+        //   70% weight on last 30 days, 30% on days 31-90 → reacts to habit changes.
+        // Fallback: all-time effective-period rate (original logic).
+        $used90d = (float)($tx['used_90d'] ?? 0);
+        $used30d = (float)($tx['used_30d'] ?? 0);
+        $used60_90d = max(0, $used90d - $used30d); // consumption in days 31-90
+
+        $dailyRate30 = $used30d > 0 ? $used30d / 30.0 : 0;
+        $dailyRate60 = $used60_90d > 0 ? $used60_90d / 60.0 : 0;
+
+        // Use EWMA only when we have enough recent data
+        $useEwma = ($used90d > 0 && $daysSinceFirst >= 14);
+        if ($useEwma) {
+            if ($dailyRate30 > 0 && $dailyRate60 > 0) {
+                // Both windows have data → blend 70/30
+                $dailyRate = 0.70 * $dailyRate30 + 0.30 * $dailyRate60;
+            } elseif ($dailyRate30 > 0) {
+                $dailyRate = $dailyRate30; // only recent data
+            } else {
+                $dailyRate = $dailyRate60; // only older data
+            }
+        } else {
+            // Fallback: all-time effective-period rate (original logic)
+            $lastActivity = max($lastIn ?? 0, $lastOut ?? 0);
+            $activitySpan = ($firstIn && $lastActivity > $firstIn) ? ($lastActivity - $firstIn) : 0;
+            // Guard: if all activity fits within 24h (e.g. bought & consumed same day / seconds apart),
+            // effectiveDays would collapse to 1 → wildly inflated daily rate (e.g. Pizza: in+out 9s apart).
+            // Fall back to daysSinceFirst (first purchase → now) for a conservative estimate.
+            $effectiveDays = ($activitySpan >= 86400)
+                ? max(1, $activitySpan / 86400)
+                : $daysSinceFirst;
+            $dailyRate = $effectiveDays < 999 && $totalUsed > 0 ? $totalUsed / $effectiveDays : 0;
+        }
 
         // Days of stock remaining
         $daysLeft = ($dailyRate > 0 && $qty > 0) ? $qty / $dailyRate : ($qty > 0 ? 999 : 0);
@@ -7151,7 +7278,7 @@ function bringSuggestItems(PDO $db): void {
                 . "Name and reason must be in Italian. Reason max 8 words.";
 
             $payload   = ['contents' => [['parts' => [['text' => $prompt]]]]];
-            $gemResult = callGeminiWithFallback($apiKey, $payload, 20);
+            $gemResult = callGeminiWithFallback($apiKey, $payload, 20, 'bring_suggest');
 
             $aiResult = null;
             if ($gemResult['http_code'] === 200) {
@@ -7822,7 +7949,7 @@ function geminiProductHint(): void {
         . "Output ONLY the JSON, no markdown, no extra text.";
 
     $payload = ['contents' => [['parts' => [['text' => $prompt]]]]];
-    $result  = callGeminiWithFallback($apiKey, $payload, 15);
+    $result  = callGeminiWithFallback($apiKey, $payload, 15, 'product_hint');
 
     if ($result['http_code'] !== 200) {
         echo json_encode(['success' => false, 'error' => 'gemini_error', 'http_code' => $result['http_code']]);
@@ -7919,7 +8046,7 @@ function geminiShoppingEnrich(PDO $db): void {
         . "Keep the same order and count as the input. Output ONLY the JSON array, no markdown.";
 
     $payload = ['contents' => [['parts' => [['text' => $prompt]]]]];
-    $result  = callGeminiWithFallback($apiKey, $payload, 20);
+    $result  = callGeminiWithFallback($apiKey, $payload, 20, 'shopping_enrich');
 
     if ($result['http_code'] !== 200) {
         echo json_encode(['success' => false, 'error' => 'gemini_error']);
@@ -7983,7 +8110,7 @@ function geminiNumberOCR(): void {
         'generationConfig' => ['temperature' => 0, 'maxOutputTokens' => 20, 'thinkingConfig' => ['thinkingBudget' => 0]]
     ];
 
-    $result = callGeminiWithFallback($apiKey, $payload, 10);
+    $result = callGeminiWithFallback($apiKey, $payload, 10, 'number_ocr');
     $text   = trim($result['text'] ?? '');
     $digits = preg_replace('/\D/', '', $text);
 
@@ -8045,7 +8172,7 @@ function geminiAnomalyExplain(): void {
         . "Be conversational and practical.";
 
     $payload = ['contents' => [['parts' => [['text' => $prompt]]]]];
-    $result  = callGeminiWithFallback($apiKey, $payload, 15);
+    $result  = callGeminiWithFallback($apiKey, $payload, 15, 'anomaly_explain');
 
     if ($result['http_code'] !== 200) {
         echo json_encode(['success' => false, 'error' => 'gemini_error']);
@@ -8131,7 +8258,7 @@ PROMPT;
 
     $payload = ['contents' => [['parts' => [['text' => $prompt]]]]];
     // 55s timeout — generous for large batches (set_time_limit(120) in getAllShoppingPrices)
-    $result  = callGeminiWithFallback($apiKey, $payload, 55);
+    $result  = callGeminiWithFallback($apiKey, $payload, 55, 'price_batch');
 
     if ($result['http_code'] !== 200) return [];
 
@@ -8189,7 +8316,7 @@ function guessCategoryFromAI(): void {
         ],
     ];
 
-    $result = callGeminiWithFallback($apiKey, $payload, 10);
+    $result = callGeminiWithFallback($apiKey, $payload, 10, 'guess_category');
     $raw    = strtolower(trim($result['data']['candidates'][0]['content']['parts'][0]['text'] ?? ''));
     $raw    = preg_replace('/[^a-z_ ]/', '', $raw);
     $raw    = trim($raw);

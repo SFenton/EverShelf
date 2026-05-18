@@ -841,6 +841,7 @@
             <button class="settings-tab" onclick="switchSettingsTab(this, 'tab-tts')" data-tab="tab-tts" title="Voce (TTS)" data-i18n-title="settings.tab_tts">🔊</button>
             <button class="settings-tab" onclick="switchSettingsTab(this, 'tab-language')" data-tab="tab-language" title="Lingua" data-i18n-title="settings.tab_language">🌐</button>
             <button class="settings-tab" onclick="switchSettingsTab(this, 'tab-scale')" data-tab="tab-scale" title="Bilancia Smart" data-i18n-title="settings.scale.tab">⚖️</button>
+            <button class="settings-tab" onclick="switchSettingsTab(this, 'tab-info'); _loadInfoTab();" data-tab="tab-info" data-i18n-title="settings.info.tab" title="Info">ℹ️</button>
         </div>
         <div class="settings-panels">
             <!-- API Keys Tab -->
@@ -1332,6 +1333,25 @@
                         <button class="btn btn-outline" onclick="exportInventory('html')" style="flex:1;min-width:120px">
                             🖨️ <span data-i18n="export.btn_pdf">PDF / Stampa</span>
                         </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Info Tab -->
+            <div class="settings-panel" id="tab-info">
+                <!-- Gemini AI Usage card -->
+                <div class="settings-card">
+                    <h4 data-i18n="settings.info.ai_title">Gemini AI — Token Usage</h4>
+                    <p class="settings-hint" data-i18n="settings.info.ai_hint">Monthly consumption and estimated cost for the current API key.</p>
+                    <div id="info-ai-content" style="margin-top:10px">
+                        <p class="settings-hint" data-i18n="settings.info.loading">Loading…</p>
+                    </div>
+                </div>
+                <!-- System Info card -->
+                <div class="settings-card">
+                    <h4 data-i18n="settings.info.system_title">System</h4>
+                    <div id="info-system-content" style="margin-top:10px">
+                        <p class="settings-hint" data-i18n="settings.info.loading">Loading…</p>
                     </div>
                 </div>
             </div>

@@ -761,6 +761,24 @@
       "card_title": "♻️ Zero-waste tips",
       "card_hint": "During cooking, show tips on how to reuse scraps generated in each step (peels, cooking water, etc.). Disabled by default.",
       "label": "Show tips during cooking"
+    },
+    "info": {
+      "tab": "Info",
+      "ai_title": "Gemini AI — Token Usage",
+      "ai_hint": "Monthly consumption and estimated cost for the current API key.",
+      "loading": "Loading…",
+      "total_tokens": "Total tokens",
+      "est_cost": "Est. cost",
+      "input_tok": "Input tokens",
+      "output_tok": "Output tokens",
+      "ai_calls": "AI calls",
+      "by_action": "Breakdown by function",
+      "by_model": "Breakdown by model",
+      "pricing_note": "Reference pricing: gemini-2.5-flash $0.15/1M input, $0.60/1M output.",
+      "system_title": "System",
+      "db_size": "Database size",
+      "log_size": "Log size",
+      "log_level": "Log level"
     }
   },
   "expiry": {
