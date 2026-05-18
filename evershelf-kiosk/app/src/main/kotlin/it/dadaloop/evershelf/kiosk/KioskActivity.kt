@@ -774,7 +774,13 @@ class KioskActivity : AppCompatActivity() {
                 val q  = DownloadManager.Query().setFilterById(downloadId)
                 val c  = (getSystemService(DOWNLOAD_SERVICE) as DownloadManager).query(q)
                 var ok = false
-                if (c.moveToFirst()) ok = c.getInt(c.getColumnIndexOrThrow(DownloadManager.COLUMN_STATUS)) == DownloadManager.STATUS_SUCCESSFUL
+                var dmStatus = -1
+                var dmReason = -1
+                if (c.moveToFirst()) {
+                    dmStatus = c.getInt(c.getColumnIndexOrThrow(DownloadManager.COLUMN_STATUS))
+                    dmReason = c.getInt(c.getColumnIndexOrThrow(DownloadManager.COLUMN_REASON))
+                    ok = dmStatus == DownloadManager.STATUS_SUCCESSFUL
+                }
                 c.close()
                 if (ok) {
                     pollHandler.removeCallbacksAndMessages(null); activeDownloadId = -1
@@ -784,7 +790,12 @@ class KioskActivity : AppCompatActivity() {
                     pollHandler.removeCallbacksAndMessages(null); activeDownloadId = -1
                     setInstallUI("\u274C", getString(R.string.install_error_download), getString(R.string.install_error_download_detail), 0xFFf87171.toInt(), btnEnabled = true, progress = -2)
                     runOnUiThread { activeInstallBtn?.text = getString(R.string.install_btn_retry) }
-                    ErrorReporter.reportMessage("install_download_failed", "DownloadManager returned failure for URL: $apkUrl")
+                    ErrorReporter.reportMessage(
+                        "install_download_failed",
+                        "DownloadManager returned failure for URL: $apkUrl",
+                        mapOf("dm_status" to dmStatus, "dm_reason" to dmReason,
+                              "device" to buildDeviceLabel())
+                    )
                 }
             }
         }
@@ -868,6 +879,11 @@ class KioskActivity : AppCompatActivity() {
             val params = PackageInstaller.SessionParams(PackageInstaller.SessionParams.MODE_FULL_INSTALL)
             // Note: setAppPackageName() is intentionally omitted — it causes STATUS_FAILURE (1)
             // on some OEM/Android versions even when the package name is correct.
+            // setInstallReason is required on Android 14+ (API 34+) for PackageInstaller
+            // to accept self-updates; without it Android 16 returns STATUS_FAILURE=1.
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                params.setInstallReason(android.content.pm.PackageManager.INSTALL_REASON_USER)
+            }
             val sessionId = pi.createSession(params)
             val session   = pi.openSession(sessionId)
             try {

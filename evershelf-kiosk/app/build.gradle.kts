@@ -5,14 +5,14 @@ plugins {
 
 android {
     namespace = "it.dadaloop.evershelf.kiosk"
-    compileSdk = 34
+    compileSdk = 35
 
     defaultConfig {
         applicationId = "it.dadaloop.evershelf.kiosk"
         minSdk = 24
-        targetSdk = 34
-        versionCode = 17
-        versionName = "1.7.16"
+        targetSdk = 35
+        versionCode = 18
+        versionName = "1.7.17"
     }
 
     signingConfigs {
