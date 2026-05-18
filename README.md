@@ -39,7 +39,7 @@
 ## ✨ Features
 
 > ⚙️ **New in v1.7.23 — Global settings tab, DB auto-cleanup, vacuum-sealed expiry**
-> A new **Generali** tab groups all global settings (language, currency, theme, screensaver, zero-waste, export) in one place.
+> A new **General** tab groups all global settings (language, currency, theme, screensaver, zero-waste, export) in one place.
 > Recipes older than `RECIPE_RETENTION_DAYS` and transactions older than `TRANSACTION_RETENTION_DAYS` are deleted automatically every cron cycle, followed by a SQLite `VACUUM` to keep the database small.
 > Vacuum-sealed products get an extended grace period (`VACUUM_EXPIRY_EXTENSION_DAYS`, default 30 days) before being flagged as expired.
 > Auto theme now follows **time of day** (dark 20:00–07:00) instead of the OS setting, making it server-friendly.
@@ -100,7 +100,7 @@
 
 ### 🌙 Appearance
 - **Dark mode** — Three modes: Light, Dark, and Auto (time-based: dark from 20:00 to 07:00, light otherwise); applies immediately without page reload; auto mode re-evaluates every 5 minutes, so night/day transitions happen automatically even on always-on kiosk displays; theme is applied before the first render to prevent a white flash
-- **Global settings tab** — A dedicated **⚙️ Generali** tab groups all system-wide settings (language, currency, theme, screensaver, zero-waste tips, export) at the top of the Settings panel
+- **Global settings tab** — A dedicated **⚙️ General** tab groups all system-wide settings (language, currency, theme, screensaver, zero-waste tips, export) at the top of the Settings panel
 
 ### �️ Database Maintenance
 - **Automatic cleanup** — Recipes older than `RECIPE_RETENTION_DAYS` (default 7) and transactions older than `TRANSACTION_RETENTION_DAYS` (default 7) are deleted automatically on every cron cycle; SQLite `VACUUM` runs after each cleanup to keep the file compact

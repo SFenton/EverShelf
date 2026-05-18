@@ -1034,7 +1034,10 @@
     "retake_btn": "🔄 Retake",
     "camera_error_hint": "Ensure you use HTTPS and have granted camera permissions.<br>You can enter the barcode manually or use AI identification.",
     "no_barcode": "No barcode",
-    "save_new_btn": "🆕 None of these — save as new"
+    "save_new_btn": "🆕 None of these — save as new",
+    "expiry_found": "Date found",
+    "expiry_read_fail": "Cannot read the date.",
+    "expiry_raw_label": "Read"
   },
   "lowstock": {
     "title": "⚠️ Running low!",

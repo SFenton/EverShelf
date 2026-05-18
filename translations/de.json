@@ -1034,7 +1034,10 @@
     "retake_btn": "🔄 Erneut aufnehmen",
     "camera_error_hint": "Stelle sicher, dass du HTTPS verwendest und Kameraberechtigungen erteilt hast.<br>Du kannst den Barcode manuell eingeben oder die KI-Identifikation verwenden.",
     "no_barcode": "Kein Barcode",
-    "save_new_btn": "🆕 Keines davon — als neu speichern"
+    "save_new_btn": "🆕 Keines davon — als neu speichern",
+    "expiry_found": "Datum gefunden",
+    "expiry_read_fail": "Datum konnte nicht gelesen werden.",
+    "expiry_raw_label": "Erkannt"
   },
   "lowstock": {
     "title": "⚠️ Wird knapp!",

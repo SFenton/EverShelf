@@ -2744,7 +2744,7 @@ function _openKioskNativeSettings() {
         _kioskBridge.openNativeSettings();
     } catch(e) {
         // Older APK without openNativeSettings bridge — inform user to update
-        showToast(t('settings.kiosk.native_update_hint') || 'Aggiorna l\'app kiosk per usare questa funzione', 'warning', 4000);
+        showToast(t('settings.kiosk.native_update_hint'), 'warning', 4000);
     }
 }
 
@@ -11452,14 +11452,14 @@ async function analyzeExpiryImage(dataUrl) {
             if (expiryInput) {
                 expiryInput.value = result.expiry_date;
             }
-            statusDiv.innerHTML = `<p style="color:var(--success);font-weight:600">✅ Data trovata: ${formatDate(result.expiry_date)}</p>`;
+            statusDiv.innerHTML = `<p style="color:var(--success);font-weight:600">✅ ${t('scanner.expiry_found')}: ${formatDate(result.expiry_date)}</p>`;
             
             // Close modal after delay
             setTimeout(() => closeExpiryScanner(), 1500);
         } else if (result.error === 'no_api_key') {
             statusDiv.innerHTML = `<p style="color:var(--warning)">${t('ai.no_api_key').replace(/\n/g, '<br>')}</p>`;
         } else {
-            statusDiv.innerHTML = `<p style="color:var(--danger)">❌ Non riesco a leggere la data. ${result.raw_text ? '<br><small>Letto: ' + escapeHtml(result.raw_text) + '</small>' : ''}</p>
+            statusDiv.innerHTML = `<p style="color:var(--danger)">❌ ${t('scanner.expiry_read_fail')} ${result.raw_text ? '<br><small>' + t('scanner.expiry_raw_label') + ': ' + escapeHtml(result.raw_text) + '</small>' : ''}</p>
                 <button class="btn btn-secondary" onclick="retakeExpiry()" style="margin-top:8px">${t('btn.retry')}</button>`;
         }
     } catch (err) {

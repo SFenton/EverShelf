@@ -391,7 +391,7 @@ if (($_GET['action'] ?? '') === 'health_check') {
         'ok'       => $freeBytes === false || $freeBytes > 50*1048576,
         'value'    => $freeMB !== null ? $freeMB.' MB liberi' : null,
         'optional' => true,
-        'hint'     => $freeBytes !== false && $freeBytes <= 50*1048576 ? 'Meno di 50 MB liberi — libera spazio sul disco' : null,
+        'hint'     => $freeBytes !== false && $freeBytes <= 50*1048576 ? 'Less than 50 MB free — free up disk space' : null,
     ];
 
     // ── 8. SQLite database ────────────────────────────────────────────────────
@@ -419,11 +419,11 @@ if (($_GET['action'] ?? '') === 'health_check') {
     $checks['db_legacy'] = [
         'ok'       => !$hasLegacy,
         'optional' => true,
-        'hint'     => $hasLegacy ? 'Trovato vecchio dispensa.db — il file è ormai obsoleto, puoi eliminarlo manualmente' : null,
+        'hint'     => $hasLegacy ? 'Legacy dispensa.db found — the file is obsolete, you can delete it manually' : null,
     ];
 
     if ($isFresh) {
-        $checks['db_connect']   = ['ok' => true, 'fresh' => true, 'value' => 'nuovo impianto'];
+        $checks['db_connect']   = ['ok' => true, 'fresh' => true, 'value' => 'fresh install'];
         $checks['db_tables']    = ['ok' => true, 'fresh' => true];
         $checks['db_integrity'] = ['ok' => true, 'fresh' => true];
         $checks['db_wal']       = ['ok' => true, 'fresh' => true, 'optional' => true];
@@ -441,7 +441,7 @@ if (($_GET['action'] ?? '') === 'health_check') {
             $checks['db_connect'] = ['ok' => true, 'value' => basename($dbPath)];
         } catch (\Throwable $e) {
             $checks['db_connect'] = ['ok' => false, 'error' => $e->getMessage(),
-                'hint' => 'Impossibile aprire il database — verifica permessi su data/evershelf.db'];
+                'hint' => 'Cannot open the database — check permissions on data/evershelf.db'];
         }
 
         if ($dbConnOk && $pdo) {
@@ -452,7 +452,7 @@ if (($_GET['action'] ?? '') === 'health_check') {
             $checks['db_tables'] = [
                 'ok'   => empty($missing),
                 'missing' => $missing,
-                'hint' => !empty($missing) ? 'Tabelle mancanti: ' . implode(', ', $missing) . ' — esegui una chiamata API per auto-inizializzare il DB' : null,
+                'hint' => !empty($missing) ? 'Missing tables: ' . implode(', ', $missing) . ' — call any API endpoint to auto-initialize the DB' : null,
             ];
 
             // Integrity
@@ -466,7 +466,7 @@ if (($_GET['action'] ?? '') === 'health_check') {
             // WAL
             $wal = $pdo->query("PRAGMA journal_mode")->fetchColumn();
             $checks['db_wal'] = ['ok' => $wal === 'wal', 'value' => $wal, 'optional' => true,
-                'hint' => $wal !== 'wal' ? 'Modalità journal non ottimale — sarà corretta automaticamente al primo avvio' : null];
+                'hint' => $wal !== 'wal' ? 'Journal mode not optimal — will be corrected automatically on next startup' : null];
 
             // Size & rows
             $checks['db_size']      = ['ok' => true, 'value' => round(filesize($dbPath)/1024).' KB', 'optional' => true];
@@ -474,7 +474,7 @@ if (($_GET['action'] ?? '') === 'health_check') {
             $checks['db_row_count'] = ['ok' => true, 'value' => $cnt.' prodotti in inventario', 'optional' => true];
         } else {
             foreach (['db_tables', 'db_integrity'] as $k)
-                $checks[$k] = ['ok' => false, 'hint' => 'Impossibile verificare — connessione DB fallita'];
+                $checks[$k] = ['ok' => false, 'hint' => 'Cannot verify — DB connection failed'];
             foreach (['db_wal', 'db_size', 'db_row_count'] as $k)
                 $checks[$k] = ['ok' => false, 'optional' => true];
         }
@@ -492,10 +492,10 @@ if (($_GET['action'] ?? '') === 'health_check') {
     $geminiKey = $envGet('GEMINI_API_KEY');
     if (!empty($geminiKey)) {
         $checks['gemini_key'] = ['ok' => strlen($geminiKey) > 20, 'optional' => true,
-            'hint' => strlen($geminiKey) <= 20 ? 'Chiave Gemini AI sembra troppo corta — verifica il valore in .env' : null];
+            'hint' => strlen($geminiKey) <= 20 ? 'Gemini AI key looks too short — check the value in .env' : null];
     } else {
         $checks['gemini_key'] = ['ok' => true, 'optional' => true,
-            'value' => 'non configurata', 'hint' => 'Configura GEMINI_API_KEY in .env per abilitare le funzioni AI'];
+            'value' => 'not configured', 'hint' => 'Set GEMINI_API_KEY in .env to enable AI features'];
     }
 
     // ── 11. Bring! — solo se EMAIL+PASSWORD sono impostate ───────────────────
@@ -511,7 +511,7 @@ if (($_GET['action'] ?? '') === 'health_check') {
         $checks['tts_url'] = [
             'ok'       => !empty($ttsUrl),
             'optional' => true,
-            'hint'     => empty($ttsUrl) ? 'TTS_ENABLED=true ma TTS_URL non configurata' : null,
+            'hint'     => empty($ttsUrl) ? 'TTS_ENABLED=true but TTS_URL not configured' : null,
         ];
     }
 
@@ -521,7 +521,7 @@ if (($_GET['action'] ?? '') === 'health_check') {
         $checks['scale_gateway'] = [
             'ok'       => !empty($scaleUrl),
             'optional' => true,
-            'hint'     => empty($scaleUrl) ? 'SCALE_ENABLED=true ma SCALE_GATEWAY_URL non configurata' : null,
+            'hint'     => empty($scaleUrl) ? 'SCALE_ENABLED=true but SCALE_GATEWAY_URL not configured' : null,
         ];
     }
 
@@ -546,7 +546,7 @@ if (($_GET['action'] ?? '') === 'health_check') {
         curl_close($ch);
         $internetOk = $httpCode > 0 || $curlErrNo === 0;
         $checks['internet'] = ['ok' => $internetOk, 'optional' => true,
-            'hint' => !$internetOk ? 'Impossibile raggiungere i server Gemini — le funzioni AI non funzioneranno senza connessione internet' : null];
+            'hint' => !$internetOk ? 'Cannot reach Gemini servers — AI features will not work without an internet connection' : null];
     }
 
     // ── Compute overall result ────────────────────────────────────────────────
@@ -2129,7 +2129,7 @@ function updateInventory(PDO $db): void {
         if (abs($diff) > 0.001) {
             $txType = $diff > 0 ? 'in' : 'out';
             $txQty  = abs($diff);
-            $db->prepare("INSERT INTO transactions (product_id, type, quantity, location, notes) VALUES (?, ?, ?, ?, '[Correzione manuale]')")
+            $db->prepare("INSERT INTO transactions (product_id, type, quantity, location, notes) VALUES (?, ?, ?, ?, '[Manual correction]')")
                ->execute([$pid, $txType, $txQty, $loc]);
         }
     }
@@ -2331,7 +2331,7 @@ function undoTransaction(PDO $db): void {
                 }
             }
             // Log counter-transaction
-            $db->prepare("INSERT INTO transactions (product_id, type, quantity, location, notes) VALUES (?, 'out', ?, ?, '[Annullato]')")->execute([$productId, $quantity, $location]);
+            $db->prepare("INSERT INTO transactions (product_id, type, quantity, location, notes) VALUES (?, 'out', ?, ?, '[Undone]')")->execute([$productId, $quantity, $location]);
 
         } elseif ($type === 'out' || $type === 'waste') {
             // Reverse a USE: add quantity back to inventory
@@ -2345,7 +2345,7 @@ function undoTransaction(PDO $db): void {
                 $db->prepare("INSERT INTO inventory (product_id, location, quantity) VALUES (?, ?, ?)")->execute([$productId, $location, $quantity]);
             }
             // Log counter-transaction
-            $db->prepare("INSERT INTO transactions (product_id, type, quantity, location, notes) VALUES (?, 'in', ?, ?, '[Annullato]')")->execute([$productId, $quantity, $location]);
+            $db->prepare("INSERT INTO transactions (product_id, type, quantity, location, notes) VALUES (?, 'in', ?, ?, '[Undone]')")->execute([$productId, $quantity, $location]);
         }
 
         // Mark original as undone
@@ -3599,7 +3599,7 @@ function geminiChat(PDO $db): void {
     $langName = recipeLangName($lang);
 
     if (empty($message)) {
-        echo json_encode(['success' => false, 'error' => 'Messaggio vuoto']);
+        echo json_encode(['success' => false, 'error' => 'Empty message']);
         return;
     }
 
@@ -3703,7 +3703,7 @@ PROMPT;
     $httpCode = $result['http_code'];
 
     if ($httpCode !== 200) {
-        $errMsg = $result['data']['error']['message'] ?? 'Errore API Gemini';
+        $errMsg = $result['data']['error']['message'] ?? 'Gemini API error';
         echo json_encode(['success' => false, 'error' => $errMsg, 'http_code' => $httpCode]);
         return;
     }
@@ -3711,7 +3711,7 @@ PROMPT;
     $reply = $result['data']['candidates'][0]['content']['parts'][0]['text'] ?? '';
 
     if (empty($reply)) {
-        echo json_encode(['success' => false, 'error' => 'Risposta vuota da Gemini']);
+        echo json_encode(['success' => false, 'error' => 'Empty response from Gemini']);
         return;
     }
 
@@ -5371,7 +5371,7 @@ PROMPT;
     $httpCode = $result['http_code'];
 
     if ($httpCode !== 200) {
-        $errMsg = $result['data']['error']['message'] ?? 'Errore API Gemini';
+        $errMsg = $result['data']['error']['message'] ?? 'Gemini API error';
         echo json_encode(['success' => false, 'error' => $errMsg, 'http_code' => $httpCode]);
         return;
     }
@@ -5386,7 +5386,7 @@ PROMPT;
     $identified = json_decode($text, true);
 
     if (!$identified || empty($identified['name'])) {
-        echo json_encode(['success' => false, 'error' => 'Impossibile identificare il prodotto', 'raw' => $text]);
+        echo json_encode(['success' => false, 'error' => 'Cannot identify the product', 'raw' => $text]);
         return;
     }
 
@@ -6290,7 +6290,7 @@ function bringGetList(): void {
     $auth = bringAuth();
     if (!$auth) {
         EverLog::info('bringGetList');
-        echo json_encode(['success' => false, 'error' => 'Credenziali Bring! non configurate. Aggiungi BRING_EMAIL e BRING_PASSWORD al file .env']);
+        echo json_encode(['success' => false, 'error' => 'Bring! credentials not configured. Add BRING_EMAIL and BRING_PASSWORD to .env']);
         return;
     }
     
@@ -6301,14 +6301,14 @@ function bringGetList(): void {
         if ($lists && isset($lists['lists'][0]['listUuid'])) {
             $listUUID = $lists['lists'][0]['listUuid'];
         } else {
-            echo json_encode(['success' => false, 'error' => 'Nessuna lista Bring! trovata']);
+            echo json_encode(['success' => false, 'error' => 'No Bring! list found']);
             return;
         }
     }
     
     $data = bringRequest('GET', "https://api.getbring.com/rest/v2/bringlists/{$listUUID}");
     if (!$data) {
-        echo json_encode(['success' => false, 'error' => 'Errore nel recupero della lista']);
+        echo json_encode(['success' => false, 'error' => 'Error fetching the list']);
         return;
     }
     
@@ -6368,7 +6368,7 @@ function bringAddItems(): void {
     $auth = bringAuth();
     if (!$auth) {
         EverLog::info('bringAddItems');
-        echo json_encode(['success' => false, 'error' => 'Credenziali Bring! non configurate']);
+        echo json_encode(['success' => false, 'error' => 'Bring! credentials not configured']);
         return;
     }
 
@@ -6377,7 +6377,7 @@ function bringAddItems(): void {
     $listUUID = $input['listUUID'] ?? $auth['bringListUUID'];
     
     if (empty($listUUID)) {
-        echo json_encode(['success' => false, 'error' => 'Lista non trovata']);
+        echo json_encode(['success' => false, 'error' => 'List not found']);
         return;
     }
     
@@ -6446,7 +6446,7 @@ function bringRemoveItem(): void {
     $auth = bringAuth();
     if (!$auth) {
         EverLog::info('bringRemoveItem');
-        echo json_encode(['success' => false, 'error' => 'Credenziali Bring! non configurate']);
+        echo json_encode(['success' => false, 'error' => 'Bring! credentials not configured']);
         return;
     }
     
@@ -6455,7 +6455,7 @@ function bringRemoveItem(): void {
     $listUUID = $input['listUUID'] ?? $auth['bringListUUID'];
     
     if (empty($name) || empty($listUUID)) {
-        echo json_encode(['success' => false, 'error' => 'Parametri mancanti']);
+        echo json_encode(['success' => false, 'error' => 'Missing parameters']);
         return;
     }
     
@@ -6494,19 +6494,19 @@ function bringCleanSpecs(): void {
     $auth = bringAuth();
     if (!$auth) {
         EverLog::info('bringCleanSpecs');
-        echo json_encode(['success' => false, 'error' => 'Credenziali Bring! non configurate']);
+        echo json_encode(['success' => false, 'error' => 'Bring! credentials not configured']);
         return;
     }
 
     $listUUID = $auth['bringListUUID'];
     if (empty($listUUID)) {
-        echo json_encode(['success' => false, 'error' => 'Lista non trovata']);
+        echo json_encode(['success' => false, 'error' => 'List not found']);
         return;
     }
 
     $data = bringRequest('GET', "https://api.getbring.com/rest/v2/bringlists/{$listUUID}");
     if (!$data || !isset($data['purchase'])) {
-        echo json_encode(['success' => false, 'error' => 'Errore nel recupero della lista']);
+        echo json_encode(['success' => false, 'error' => 'Error fetching the list']);
         return;
     }
 
@@ -6605,17 +6605,17 @@ function bringMigrateNames(PDO $db): void {
     $auth = bringAuth();
     if (!$auth) {
         EverLog::info('bringMigrateNames');
-        echo json_encode(['success' => false, 'error' => 'Credenziali Bring! non configurate']);
+        echo json_encode(['success' => false, 'error' => 'Bring! credentials not configured']);
         return;
     }
     $listUUID = $auth['bringListUUID'];
     if (empty($listUUID)) {
-        echo json_encode(['success' => false, 'error' => 'Lista non trovata']);
+        echo json_encode(['success' => false, 'error' => 'List not found']);
         return;
     }
     $data = bringRequest('GET', "https://api.getbring.com/rest/v2/bringlists/{$listUUID}");
     if (!$data || !isset($data['purchase'])) {
-        echo json_encode(['success' => false, 'error' => 'Errore nel recupero della lista']);
+        echo json_encode(['success' => false, 'error' => 'Error fetching the list']);
         return;
     }
 

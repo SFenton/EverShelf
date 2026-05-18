@@ -1034,7 +1034,10 @@
     "retake_btn": "🔄 Riscatta",
     "camera_error_hint": "Assicurati di usare HTTPS e di aver concesso i permessi della fotocamera.<br>Puoi inserire il barcode manualmente o usare l'identificazione AI.",
     "no_barcode": "Senza barcode",
-    "save_new_btn": "🆕 Non è nessuno di questi — salva come nuovo"
+    "save_new_btn": "🆕 Non è nessuno di questi — salva come nuovo",
+    "expiry_found": "Data trovata",
+    "expiry_read_fail": "Non riesco a leggere la data.",
+    "expiry_raw_label": "Letto"
   },
   "lowstock": {
     "title": "⚠️ Sta per finire!",
