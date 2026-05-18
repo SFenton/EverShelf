@@ -2206,15 +2206,257 @@ function _applySyncedSettings(serverSettings) {
     }
 }
 
-let _infoTabTimer = null;
+let _infoTabTimer  = null;
+let _backupTabTimer = null;
 
 /**
  * Load the Info tab: Gemini token usage + cost, log size, DB size, log level.
  * Called on tab click; auto-refreshes every 30s while the tab is open.
  */
+// ── Backup Tab ────────────────────────────────────────────────────────────────
+
+async function _loadBackupTab() {
+    if (_backupTabTimer) { clearInterval(_backupTabTimer); _backupTabTimer = null; }
+    await _renderBackupTab();
+    // Pull server settings to populate inputs if not yet loaded
+    try {
+        const ss = await api('get_settings');
+        if (ss) {
+            const bkRetEl = document.getElementById('setting-backup-retention-days');
+            if (bkRetEl) { bkRetEl.value = ss.backup_retention_days || 3; bkRetEl.dataset.loaded = '1'; }
+            const gdriveEnEl = document.getElementById('setting-gdrive-enabled');
+            if (gdriveEnEl) gdriveEnEl.checked = !!ss.gdrive_enabled;
+            const gdriveFolderEl = document.getElementById('setting-gdrive-folder-id');
+            if (gdriveFolderEl) { gdriveFolderEl.value = ss.gdrive_folder_id || ''; gdriveFolderEl.dataset.loaded = '1'; }
+            const gdriveRetEl = document.getElementById('setting-gdrive-retention-days');
+            if (gdriveRetEl) { gdriveRetEl.value = ss.gdrive_retention_days || 30; gdriveRetEl.dataset.loaded = '1'; }
+            // Pre-fill client_id (never show secret back)
+            if (ss.gdrive_client_id_set) {
+                const ciEl = document.getElementById('setting-gdrive-client-id');
+                if (ciEl && !ciEl.value) ciEl.placeholder = '● ● ● already configured ● ● ●';
+            }
+            // OAuth token status
+            const oauthStatusEl = document.getElementById('gdrive-oauth-token-status');
+            if (oauthStatusEl) {
+                oauthStatusEl.textContent = ss.gdrive_refresh_token_set
+                    ? ('✅ ' + (t('settings.backup.gdrive_oauth_authorized') || 'Authorized'))
+                    : ('⚠️ ' + (t('settings.backup.gdrive_oauth_not_authorized') || 'Not authorized yet'));
+                oauthStatusEl.style.color = ss.gdrive_refresh_token_set ? '#15803d' : '#b45309';
+            }
+            // Redirect URI for OAuth setup — always http://localhost for self-hosted compat
+            // (can be overridden server-side via GDRIVE_REDIRECT_URI env var)
+            const rdEl = document.getElementById('gdrive-redirect-uri-display');
+            if (rdEl) rdEl.textContent = 'http://localhost';
+        }
+    } catch(e) { /* non-critical */ }
+}
+
+async function _renderBackupTab() {
+    const lastInfoEl = document.getElementById('backup-last-info');
+    const listEl     = document.getElementById('backup-list-container');
+    try {
+        const data = await api('backup_list');
+        if (!data || !data.success) {
+            if (lastInfoEl) lastInfoEl.innerHTML = '<span style="color:#ef4444">Error loading backup info</span>';
+            return;
+        }
+        // Last backup info
+        if (lastInfoEl) {
+            if (data.last_backup_ts) {
+                const secsAgo = Math.floor(Date.now() / 1000) - data.last_backup_ts;
+                let ago;
+                if (secsAgo < 120)           ago = secsAgo < 5 ? t('time.just_now') || 'adesso' : `${secsAgo}s fa`;
+                else if (secsAgo < 3600)     ago = `${Math.floor(secsAgo / 60)} min fa`;
+                else if (secsAgo < 86400)    ago = `${Math.floor(secsAgo / 3600)}h fa`;
+                else                         ago = `${Math.floor(secsAgo / 86400)}gg fa`;
+                const name = data.last_backup_file || '';
+                lastInfoEl.innerHTML = `<strong>${t('settings.backup.last_backup') || 'Ultimo backup'}</strong>: ${ago} <span style="color:#94a3b8;font-size:0.78rem">(${name})</span>`;
+            } else {
+                lastInfoEl.innerHTML = `<em style="color:#f59e0b">${t('settings.backup.no_backup_yet') || 'Nessun backup ancora'}</em>`;
+            }
+        }
+        // Backup list
+        if (listEl) {
+            if (!data.backups || data.backups.length === 0) {
+                listEl.innerHTML = `<p class="settings-hint" style="text-align:center;padding:12px">${t('settings.backup.list_empty') || 'Nessun backup disponibile'}</p>`;
+            } else {
+                const rows = data.backups.map(b => {
+                    const d = new Date(b.created_at);
+                    const dateStr = d.toLocaleString();
+                    return `<div style="display:flex;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid var(--border-color,#e2e8f0);font-size:0.83rem">
+                        <span style="flex:1;color:var(--text-primary)">${b.filename}</span>
+                        <span style="color:#94a3b8;white-space:nowrap">${b.size_kb} KB · ${dateStr}</span>
+                        <button class="btn btn-small btn-secondary" onclick="_backupRestore('${b.filename}')" style="flex-shrink:0" title="${t('settings.backup.restore_btn') || 'Ripristina'}">${t('settings.backup.restore_btn') || '↩ Ripristina'}</button>
+                        <button class="btn btn-small btn-danger" onclick="_backupDelete('${b.filename}')" style="flex-shrink:0" title="${t('settings.backup.delete_btn') || 'Elimina'}">🗑</button>
+                    </div>`;
+                }).join('');
+                listEl.innerHTML = `<p style="font-size:0.78rem;color:#94a3b8;margin-bottom:6px">${t('settings.backup.retention_info') || ''} ${data.retention_days} ${t('settings.backup.retention_days') || 'gg'}</p>${rows}`;
+            }
+        }
+    } catch(e) {
+        if (lastInfoEl) lastInfoEl.innerHTML = '<span style="color:#ef4444">Error: ' + e.message + '</span>';
+    }
+}
+
+async function _backupNow() {
+    const btn = document.getElementById('btn-backup-now');
+    const statusEl = document.getElementById('backup-status');
+    if (btn) btn.disabled = true;
+    if (statusEl) { statusEl.className = 'settings-status'; statusEl.textContent = t('settings.backup.backing_up') || '⏳ Backup in corso…'; statusEl.style.display = 'block'; }
+    try {
+        const r = await api('backup_now');
+        if (r && r.success) {
+            if (statusEl) { statusEl.className = 'settings-status success'; statusEl.textContent = `✅ ${r.filename} (${r.size_kb} KB)`; }
+            await _renderBackupTab();
+        } else {
+            if (statusEl) { statusEl.className = 'settings-status error'; statusEl.textContent = `❌ ${r?.error || 'Error'}`; }
+        }
+    } catch(e) {
+        if (statusEl) { statusEl.className = 'settings-status error'; statusEl.textContent = `❌ ${e.message}`; }
+    } finally {
+        if (btn) btn.disabled = false;
+        if (statusEl) setTimeout(() => { statusEl.style.display = 'none'; }, 5000);
+    }
+}
+
+async function _backupDelete(filename) {
+    if (!confirm(`${t('settings.backup.delete_confirm') || 'Eliminare il backup'} ${filename}?`)) return;
+    const r = await api('backup_delete', {}, 'POST', { filename });
+    if (r && r.success) await _renderBackupTab();
+    else alert(`❌ ${r?.error || 'Error deleting backup'}`);
+}
+
+async function _backupRestore(filename) {
+    if (!confirm(`${t('settings.backup.restore_confirm') || 'Ripristinare il backup'} "${filename}"?\n\n⚠️ ATTENZIONE: tutti i dati attuali verranno SOSTITUITI. Questa azione è irreversibile.`)) return;
+    const statusEl = document.getElementById('backup-status');
+    if (statusEl) { statusEl.className = 'settings-status'; statusEl.textContent = '⏳ Ripristino in corso…'; statusEl.style.display = 'block'; }
+    try {
+        const r = await api('backup_restore', {}, 'POST', { filename });
+        if (r && r.success) {
+            alert(`✅ ${r.message || 'Ripristino completato!'}\n\nLa pagina verrà ricaricata.`);
+            location.reload();
+        } else {
+            if (statusEl) { statusEl.className = 'settings-status error'; statusEl.textContent = `❌ ${r?.error || 'Error'}`; }
+        }
+    } catch(e) {
+        if (statusEl) { statusEl.className = 'settings-status error'; statusEl.textContent = `❌ ${e.message}`; }
+    }
+}
+
+async function _gdriveTest() {
+    const btn = document.getElementById('btn-gdrive-test');
+    const statusEl = document.getElementById('gdrive-test-status');
+    if (btn) btn.disabled = true;
+    if (statusEl) { statusEl.className = 'settings-status'; statusEl.textContent = '⏳ Test connessione…'; statusEl.style.display = 'block'; }
+    try {
+        // Save current settings first so the server has the latest JSON/folder
+        await saveSettings();
+        const r = await api('gdrive_test');
+        if (r && r.success) {
+            if (statusEl) { statusEl.className = 'settings-status success'; statusEl.textContent = `✅ ${t('settings.backup.gdrive_ok') || 'Connessione riuscita!'}`; }
+        } else {
+            if (statusEl) { statusEl.className = 'settings-status error'; statusEl.textContent = `❌ ${r?.error || 'Error'}`; }
+        }
+    } catch(e) {
+        if (statusEl) { statusEl.className = 'settings-status error'; statusEl.textContent = `❌ ${e.message}`; }
+    } finally {
+        if (btn) btn.disabled = false;
+        if (statusEl) setTimeout(() => { statusEl.style.display = 'none'; }, 6000);
+    }
+}
+
+async function _gdrivePushNow() {
+    const btn = document.getElementById('btn-gdrive-push');
+    const statusEl = document.getElementById('gdrive-test-status');
+    if (btn) btn.disabled = true;
+    if (statusEl) { statusEl.className = 'settings-status'; statusEl.textContent = t('settings.backup.gdrive_pushing') || '⏳ Upload in corso…'; statusEl.style.display = 'block'; }
+    try {
+        await saveSettings();
+        const r = await api('gdrive_push');
+        if (r && r.success) {
+            if (statusEl) { statusEl.className = 'settings-status success'; statusEl.textContent = `✅ ${r.filename} → Drive (purged: ${r.purged_remote || 0})`; }
+        } else {
+            if (statusEl) { statusEl.className = 'settings-status error'; statusEl.textContent = `❌ ${r?.error || 'Error'}`; }
+        }
+    } catch(e) {
+        if (statusEl) { statusEl.className = 'settings-status error'; statusEl.textContent = `❌ ${e.message}`; }
+    } finally {
+        if (btn) btn.disabled = false;
+        if (statusEl) setTimeout(() => { statusEl.style.display = 'none'; }, 6000);
+    }
+}
+
+async function _gdriveAuthorize() {
+    const btn = document.getElementById('btn-gdrive-authorize');
+    if (btn) btn.disabled = true;
+    try {
+        await saveSettings();
+        const r = await api('gdrive_oauth_url');
+        if (r && r.success) {
+            window.open(r.url, '_blank', 'width=600,height=700,noopener');
+            // Store redirect_uri used so gdrive_oauth_exchange can match it
+            window._gdriveLastRedirectUri = r.redirect_uri || 'http://localhost';
+            // Show manual code input section
+            const codeSection = document.getElementById('gdrive-code-section');
+            if (codeSection) codeSection.style.display = '';
+            const statusEl = document.getElementById('gdrive-oauth-token-status');
+            if (statusEl) {
+                statusEl.textContent = t('settings.backup.gdrive_oauth_window_opened') || '🔑 Authorization page opened — authorize and paste the URL below';
+                statusEl.style.color = '#2563eb';
+            }
+        } else {
+            alert('❌ ' + (r?.error || 'Failed to get OAuth URL'));
+        }
+    } catch(e) {
+        alert('❌ ' + e.message);
+    } finally {
+        if (btn) btn.disabled = false;
+    }
+}
+
+async function _gdriveSubmitCode() {
+    const inputEl = document.getElementById('gdrive-code-input');
+    const btn     = document.getElementById('btn-gdrive-submit-code');
+    const raw     = (inputEl?.value || '').trim();
+    if (!raw) { alert(t('settings.backup.gdrive_code_empty') || 'Paste the URL or code first'); return; }
+
+    // Accept either a full URL (extract code param) or just the bare code
+    let code = raw;
+    try {
+        const u = new URL(raw);
+        const c = u.searchParams.get('code');
+        if (c) code = c;
+    } catch(e) { /* not a URL, use as-is */ }
+
+    if (btn) btn.disabled = true;
+    try {
+        const r = await api('gdrive_oauth_exchange', null, 'POST', {
+            code,
+            redirect_uri: window._gdriveLastRedirectUri || 'http://localhost'
+        });
+        if (r && r.success) {
+            const statusEl = document.getElementById('gdrive-oauth-token-status');
+            if (statusEl) {
+                statusEl.textContent = '✅ ' + (t('settings.backup.gdrive_oauth_authorized') || 'Authorized');
+                statusEl.style.color = '#15803d';
+            }
+            const codeSection = document.getElementById('gdrive-code-section');
+            if (codeSection) codeSection.style.display = 'none';
+            if (inputEl) inputEl.value = '';
+        } else {
+            alert('❌ ' + (r?.error || 'Code exchange failed'));
+        }
+    } catch(e) {
+        alert('❌ ' + e.message);
+    } finally {
+        if (btn) btn.disabled = false;
+    }
+}
+
 async function _loadInfoTab() {
     // Cancel any previous auto-refresh
-    if (_infoTabTimer) { clearInterval(_infoTabTimer); _infoTabTimer = null; }
+    if (_infoTabTimer)   { clearInterval(_infoTabTimer);   _infoTabTimer  = null; }
+    if (_backupTabTimer) { clearInterval(_backupTabTimer); _backupTabTimer = null; }
     await _renderInfoTab();
     // Auto-refresh every 30s while Info tab is visible
     _infoTabTimer = setInterval(_renderInfoTab, 30_000);
@@ -2685,6 +2927,15 @@ async function loadSettingsUI() {
     if (scaleEnabledUiEl) scaleEnabledUiEl.checked = !!s.scale_enabled;
     const scaleUrlUiEl = document.getElementById('setting-scale-url');
     if (scaleUrlUiEl) scaleUrlUiEl.value = s.scale_gateway_url || '';
+    // Backup settings pre-fill (populated fully when _loadBackupTab() is called)
+    const bkRetEl = document.getElementById('setting-backup-retention-days');
+    if (bkRetEl && !bkRetEl.dataset.loaded) bkRetEl.value = s.backup_retention_days || 3;
+    const gdriveEnUiEl = document.getElementById('setting-gdrive-enabled');
+    if (gdriveEnUiEl) gdriveEnUiEl.checked = !!s.gdrive_enabled;
+    const gdriveFolderUiEl = document.getElementById('setting-gdrive-folder-id');
+    if (gdriveFolderUiEl && !gdriveFolderUiEl.dataset.loaded) gdriveFolderUiEl.value = s.gdrive_folder_id || '';
+    const gdriveRetUiEl = document.getElementById('setting-gdrive-retention-days');
+    if (gdriveRetUiEl && !gdriveRetUiEl.dataset.loaded) gdriveRetUiEl.value = s.gdrive_retention_days || 30;
     // Hide kiosk download banner if running inside Android WebView (kiosk mode)
     const kioskBanner = document.getElementById('kiosk-download-banner');
     if (kioskBanner && /; wv\)/.test(navigator.userAgent)) {
@@ -3092,6 +3343,22 @@ async function saveSettings() {
     if (priceCurrencySaveEl) s.price_currency = priceCurrencySaveEl.value;
     const priceMonthsSaveEl = document.getElementById('setting-price-update-months');
     if (priceMonthsSaveEl) s.price_update_months = parseInt(priceMonthsSaveEl.value, 10) || 3;
+    // Backup settings
+    const backupEnabledEl = document.getElementById('setting-backup-enabled');
+    if (backupEnabledEl) s.backup_enabled = backupEnabledEl.checked;
+    const backupRetentionEl = document.getElementById('setting-backup-retention-days');
+    if (backupRetentionEl) s.backup_retention_days = parseInt(backupRetentionEl.value, 10) || 3;
+    const gdriveEnabledEl = document.getElementById('setting-gdrive-enabled');
+    if (gdriveEnabledEl) s.gdrive_enabled = gdriveEnabledEl.checked;
+    const gdriveFolderEl = document.getElementById('setting-gdrive-folder-id');
+    if (gdriveFolderEl) s.gdrive_folder_id = gdriveFolderEl.value.trim();
+    const gdriveRetentionEl = document.getElementById('setting-gdrive-retention-days');
+    if (gdriveRetentionEl) s.gdrive_retention_days = parseInt(gdriveRetentionEl.value, 10) || 30;
+    // OAuth fields
+    const gdriveClientIdEl = document.getElementById('setting-gdrive-client-id');
+    if (gdriveClientIdEl && gdriveClientIdEl.value.trim()) s.gdrive_client_id = gdriveClientIdEl.value.trim();
+    const gdriveClientSecretEl = document.getElementById('setting-gdrive-client-secret');
+    if (gdriveClientSecretEl && gdriveClientSecretEl.value.trim()) s.gdrive_client_secret = gdriveClientSecretEl.value.trim();
     saveSettingsToStorage(s);
     
     // Save ALL settings to server .env
@@ -3136,8 +3403,15 @@ async function saveSettings() {
             price_currency: s.price_currency,
             price_update_months: s.price_update_months,
             recipe_retention_days: s.recipe_retention_days || 7,
-            transaction_retention_days: s.transaction_retention_days || 7,
+            transaction_retention_days: s.transaction_retention_days || 90,
             vacuum_expiry_extension_days: s.vacuum_expiry_extension_days || 30,
+            backup_enabled: s.backup_enabled !== false,
+            backup_retention_days: s.backup_retention_days || 3,
+            gdrive_enabled: !!s.gdrive_enabled,
+            gdrive_folder_id: s.gdrive_folder_id || '',
+            gdrive_retention_days: s.gdrive_retention_days || 30,
+            ...(s.gdrive_client_id     ? { gdrive_client_id:     s.gdrive_client_id }     : {}),
+            ...(s.gdrive_client_secret ? { gdrive_client_secret: s.gdrive_client_secret } : {}),
         }, tokenHeader);
         const statusEl = document.getElementById('settings-status');
         if (result.success) {
@@ -14857,7 +15131,7 @@ document.addEventListener('DOMContentLoaded', () => {
 // ===== SETUP WIZARD =====
 let _setupStep = 0;
 let _setupPendingSteps = [];
-const _setupData = { lang: _currentLang, gemini_key: '', bring_email: '', bring_password: '' };
+const _setupData = { lang: _currentLang, gemini_key: '', bring_email: '', bring_password: '', gdrive_folder_id: '', gdrive_client_id: '', gdrive_client_secret: '' };
 
 /**
  * Returns indices of setup steps that still need configuration.
@@ -14880,8 +15154,10 @@ function _getMissingSetupSteps(serverSettings) {
         if (!s.gemini_key && !srv.gemini_key_set) missing.push(1);
         // Step 2 — Bring! credentials (check both localStorage and server .env)
         if ((!s.bring_email && !srv.bring_email) || (!s.bring_password && !srv.bring_password_set)) missing.push(2);
+        // Step 3 — Google Drive backup (always optional on first run, skippable)
+        if (!srv.gdrive_refresh_token_set && !srv.gdrive_folder_id) missing.push(3);
     }
-    // Note: step 3 (done screen) gets appended automatically when there are missing steps
+    // Note: step 4 (done screen) gets appended automatically when there are missing steps
 
     return missing;
 }
@@ -14931,6 +15207,30 @@ function _setupSteps() {
             `
         },
         {
+            title: '☁️ Google Drive Backup',
+            desc: t('settings.backup.gdrive_wizard_hint') || 'Optional: automatically back up to Google Drive daily.',
+            render: () => `
+                <details style="margin-bottom:14px;background:var(--bg-secondary,#f8fafc);border-radius:8px;padding:10px 14px">
+                    <summary style="cursor:pointer;font-weight:600;font-size:0.85rem;color:var(--text-primary)">${t('settings.backup.gdrive_oauth_how_to') || '📋 Setup guide'}</summary>
+                    <ol style="margin:10px 0 0 16px;font-size:0.8rem;color:var(--text-secondary);line-height:1.8">${t('settings.backup.gdrive_oauth_steps') || ''}</ol>
+                </details>
+                <div class="form-group">
+                    <label>${t('settings.backup.gdrive_folder_id') || 'Folder ID Drive'}</label>
+                    <input type="text" id="setup-gdrive-folder" class="form-input" placeholder="1ABCdef_xyz…" value="${_setupData.gdrive_folder_id}">
+                </div>
+                <div class="form-group">
+                    <label>${t('settings.backup.gdrive_client_id') || 'Client ID'}</label>
+                    <input type="text" id="setup-gdrive-client-id" class="form-input" placeholder="1234567890-abc….apps.googleusercontent.com" value="${_setupData.gdrive_client_id}">
+                </div>
+                <div class="form-group">
+                    <label>${t('settings.backup.gdrive_client_secret') || 'Client Secret'}</label>
+                    <input type="password" id="setup-gdrive-client-secret" class="form-input" placeholder="GOCSPX-…" value="${_setupData.gdrive_client_secret}">
+                </div>
+                <p class="settings-hint" style="font-size:0.78rem">${t('settings.backup.gdrive_redirect_uri_label') || 'Redirect URI:'} <code>http://localhost</code></p>
+                <span class="setup-skip-link" onclick="_setupSkipStep()">${t('settings.backup.gdrive_skip') || 'Skip — configure later in Settings'}</span>
+            `
+        },
+        {
             title: '✅ ' + (_currentLang === 'it' ? 'Tutto pronto!' : _currentLang === 'de' ? 'Alles bereit!' : _currentLang === 'fr' ? 'Tout est prêt !' : _currentLang === 'es' ? '¡Todo listo!' : 'All set!'),
             desc: _currentLang === 'it' ? 'La configurazione è completata. Puoi sempre modificare queste impostazioni dalla pagina Configurazione.'
                  : _currentLang === 'de' ? 'Die Konfiguration ist abgeschlossen. Du kannst diese Einstellungen jederzeit ändern.'
@@ -14948,8 +15248,8 @@ function _setupSteps() {
 function showSetupWizard(pendingSteps) {
     _setupPendingSteps = pendingSteps || _getMissingSetupSteps();
     if (_setupPendingSteps.length === 0) return;
-    // Append the "done" step (3) at the end
-    _setupPendingSteps.push(3);
+    // Append the "done" step (4) at the end
+    _setupPendingSteps.push(4);
     _setupStep = 0;
     // Pre-fill _setupData from existing settings so we don't lose them
     const s = getSettings();
@@ -15012,6 +15312,13 @@ function _setupCollectCurrent() {
         const pass = document.getElementById('setup-bring-password');
         if (email) _setupData.bring_email = email.value.trim();
         if (pass) _setupData.bring_password = pass.value.trim();
+    } else if (realIndex === 3) {
+        const folderEl = document.getElementById('setup-gdrive-folder');
+        const clientIdEl = document.getElementById('setup-gdrive-client-id');
+        const clientSecretEl = document.getElementById('setup-gdrive-client-secret');
+        if (folderEl) _setupData.gdrive_folder_id = folderEl.value.trim();
+        if (clientIdEl) _setupData.gdrive_client_id = clientIdEl.value.trim();
+        if (clientSecretEl) _setupData.gdrive_client_secret = clientSecretEl.value.trim();
     }
 }
 
@@ -15052,6 +15359,9 @@ async function _finishSetup() {
     if (_setupData.gemini_key) envPayload.gemini_key = _setupData.gemini_key;
     if (_setupData.bring_email) envPayload.bring_email = _setupData.bring_email;
     if (_setupData.bring_password) envPayload.bring_password = _setupData.bring_password;
+    if (_setupData.gdrive_folder_id) envPayload.gdrive_folder_id = _setupData.gdrive_folder_id;
+    if (_setupData.gdrive_client_id) { envPayload.gdrive_client_id = _setupData.gdrive_client_id; envPayload.gdrive_enabled = true; }
+    if (_setupData.gdrive_client_secret) envPayload.gdrive_client_secret = _setupData.gdrive_client_secret;
     try {
         if (Object.keys(envPayload).length > 0) {
             await api('save_settings', {}, 'POST', envPayload);

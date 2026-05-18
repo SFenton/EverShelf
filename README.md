@@ -296,6 +296,24 @@ The included `backup.sh` creates local daily backups of your database:
 0 3 * * * /path/to/evershelf/backup.sh
 ```
 
+### Google Drive Backup (Optional)
+
+EverShelf supports automatic daily backups to Google Drive via OAuth 2.0. This works on any server, including private IP / local network setups (no public domain required).
+
+**Setup:**
+
+1. Go to [console.cloud.google.com](https://console.cloud.google.com) and select or create a project.
+2. Enable the **Google Drive API** (`APIs & Services → Enable APIs → Google Drive API`).
+3. Go to `APIs & Services → Credentials → Create Credentials → OAuth client ID`.
+4. Application type: **Web application**.
+5. Add **`http://localhost`** as an Authorized Redirect URI (this is the key — it works even without a real domain).
+6. Copy **Client ID** and **Client Secret** into EverShelf Settings → Backup.
+7. Enter your **Google Drive Folder ID** (the last part of the folder URL).
+8. Click **Authorize with Google** and sign in.
+9. The browser will redirect to `http://localhost` and may show a connection error — **this is expected**. Copy the full URL from the address bar (e.g. `http://localhost/?code=4%2F0A...`) and paste it into the field that appears in EverShelf, then click **Submit**.
+
+> **Note:** While the OAuth app is in *Testing* status in Google Cloud Console, you must add your Google account as a test user under `APIs & Services → OAuth consent screen → Test users`.
+
 ---
 
 ## 🏗️ Architecture

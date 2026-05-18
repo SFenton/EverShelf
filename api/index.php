@@ -23,6 +23,8 @@ define('FOODFACTS_CACHE_PATH',     __DIR__ . '/../data/food_facts_cache.json');
 define('SHOPPING_NAME_CACHE_PATH', __DIR__ . '/../data/shopping_name_cache.json');
 define('BRING_TOKEN_PATH',         __DIR__ . '/../data/bring_token.json');
 define('AI_USAGE_PATH',            __DIR__ . '/../data/ai_usage.json');
+define('BACKUP_DIR',               __DIR__ . '/../data/backups');
+define('BACKUP_LAST_TS_PATH',      __DIR__ . '/../data/backup_last_ts.json');
 // Gemini pricing (USD per 1M tokens) — configurable in .env (GEMINI_COST_25F_IN etc.)
 // Defaults: gemini-2.5-flash $0.15/M in · $0.60/M out — gemini-2.0-flash $0.10/M in · $0.40/M out
 define('GEMINI_COST_25F_IN',  (float)(getenv('GEMINI_COST_25F_IN')  ?: 0.15));
@@ -116,6 +118,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
 // ── Ping / heartbeat — early response, no DB or rate-limit required ───────────
 if (($_GET['action'] ?? '') === 'ping') {
     echo json_encode(['ok' => true, 'ts' => time()]);
+    exit;
+}
+
+// ── Google Drive OAuth callback — returns HTML, not JSON ──────────────────────
+if (($_GET['action'] ?? '') === 'gdrive_oauth_callback') {
+    _gdriveHandleOAuthCallback();
     exit;
 }
 
@@ -690,6 +698,7 @@ try {
             'save_settings', 'product_save', 'product_delete', 'product_merge',
             'inventory_add', 'inventory_use', 'inventory_update', 'inventory_remove',
             'dismiss_anomaly', 'bring_add', 'bring_remove', 'bring_sync',
+            'backup_delete', 'backup_restore',
         ];
         if (in_array($action, $demoBlocked, true)) {
             EverLog::warn('demo_mode blocked (403)');
@@ -906,6 +915,98 @@ try {
 
         case 'db_cleanup':
             dbCleanup(getDB());
+            break;
+
+        case 'backup_now':
+            echo json_encode(createLocalBackup($db));
+            break;
+        case 'backup_list':
+            echo json_encode(listLocalBackups());
+            break;
+        case 'backup_delete':
+            $fn = json_decode(file_get_contents('php://input'), true)['filename'] ?? '';
+            echo json_encode(deleteLocalBackup($fn));
+            break;
+        case 'backup_restore':
+            $fn = json_decode(file_get_contents('php://input'), true)['filename'] ?? '';
+            echo json_encode(restoreLocalBackup($fn, $db));
+            break;
+        case 'gdrive_push':
+            echo json_encode(backupToGDrive($db));
+            break;
+        case 'gdrive_test':
+            $tokResult = _gdriveGetTokenEx();
+            if (!empty($tokResult['token'])) {
+                echo json_encode(['success' => true]);
+            } else {
+                echo json_encode(['success' => false, 'error' => $tokResult['error'] ?? 'Auth failed']);
+            }
+            break;
+        case 'gdrive_oauth_url':
+            $clientId = env('GDRIVE_CLIENT_ID', '');
+            if (empty($clientId)) {
+                echo json_encode(['success' => false, 'error' => 'GDRIVE_CLIENT_ID not configured — save settings first']);
+            } else {
+                // Use http://localhost so the flow works on any self-hosted server (IP, local domain, etc.).
+                // Google will redirect to http://localhost?code=... after auth; user copies and pastes the URL.
+                // Override via GDRIVE_REDIRECT_URI env var for installations with a real public domain.
+                $redirectUri = env('GDRIVE_REDIRECT_URI', '') ?: 'http://localhost';
+                $url = 'https://accounts.google.com/o/oauth2/v2/auth?' . http_build_query([
+                    'client_id'     => $clientId,
+                    'redirect_uri'  => $redirectUri,
+                    'scope'         => 'https://www.googleapis.com/auth/drive.file',
+                    'response_type' => 'code',
+                    'access_type'   => 'offline',
+                    'prompt'        => 'consent',
+                ]);
+                echo json_encode(['success' => true, 'url' => $url, 'redirect_uri' => $redirectUri]);
+            }
+            break;
+
+        case 'gdrive_oauth_exchange':
+            // Manual code exchange: accepts {code, redirect_uri} from the JS after user copies URL.
+            $_exchangeBody = json_decode(file_get_contents('php://input'), true) ?? [];
+            $code        = trim($_exchangeBody['code'] ?? '');
+            $redirectUri = trim($_exchangeBody['redirect_uri'] ?? '') ?: (env('GDRIVE_REDIRECT_URI', '') ?: 'http://localhost');
+            if (empty($code)) {
+                echo json_encode(['success' => false, 'error' => 'No authorization code provided']);
+                break;
+            }
+            $clientId     = env('GDRIVE_CLIENT_ID', '');
+            $clientSecret = env('GDRIVE_CLIENT_SECRET', '');
+            if (!$clientId || !$clientSecret) {
+                echo json_encode(['success' => false, 'error' => 'Client ID/Secret not configured — save settings first']);
+                break;
+            }
+            $ch = curl_init('https://oauth2.googleapis.com/token');
+            curl_setopt_array($ch, [
+                CURLOPT_RETURNTRANSFER => true,
+                CURLOPT_POST           => true,
+                CURLOPT_POSTFIELDS     => http_build_query([
+                    'client_id'     => $clientId,
+                    'client_secret' => $clientSecret,
+                    'code'          => $code,
+                    'redirect_uri'  => $redirectUri,
+                    'grant_type'    => 'authorization_code',
+                ]),
+                CURLOPT_TIMEOUT        => 15,
+                CURLOPT_SSL_VERIFYPEER => true,
+            ]);
+            $gdriveExResp = curl_exec($ch);
+            $gdriveExErr  = curl_error($ch);
+            curl_close($ch);
+            if (!$gdriveExResp) {
+                echo json_encode(['success' => false, 'error' => 'cURL error: ' . $gdriveExErr]);
+                break;
+            }
+            $gdriveExData = json_decode($gdriveExResp, true);
+            if (!empty($gdriveExData['refresh_token'])) {
+                _gdriveSetEnvVar('GDRIVE_REFRESH_TOKEN', $gdriveExData['refresh_token']);
+                echo json_encode(['success' => true]);
+            } else {
+                $errDesc = $gdriveExData['error_description'] ?? $gdriveExData['error'] ?? $gdriveExResp;
+                echo json_encode(['success' => false, 'error' => 'Token exchange failed: ' . $errDesc]);
+            }
             break;
 
         case 'gemini_product_hint':
@@ -2145,7 +2246,12 @@ function updateInventory(PDO $db): void {
         $stmt = $db->prepare("UPDATE products SET package_unit = ?, default_quantity = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?");
         $stmt->execute([$input['package_unit'], $input['package_size'] ?? 0, $input['product_id']]);
     }
-    
+
+    // Real-time Bring! sync: if quantity changed, keep Bring! in sync immediately
+    if (isset($input['quantity']) && $prevRow && abs((float)$input['quantity'] - (float)$prevRow['quantity']) > 0.001) {
+        try { bringQuickSyncProduct($db, (int)$prevRow['product_id']); } catch (Throwable $e) {}
+    }
+
     echo json_encode(['success' => true]);
 }
 
@@ -2915,14 +3021,24 @@ function getServerSettings(): void {
         'price_currency' => env('PRICE_CURRENCY', 'EUR'),
         'price_update_months' => (int)env('PRICE_UPDATE_MONTHS', '3'),
         'recipe_retention_days' => (int)env('RECIPE_RETENTION_DAYS', '7'),
-        'transaction_retention_days' => (int)env('TRANSACTION_RETENTION_DAYS', '7'),
+        'transaction_retention_days' => (int)env('TRANSACTION_RETENTION_DAYS', '90'),
         'vacuum_expiry_extension_days' => (int)env('VACUUM_EXPIRY_EXTENSION_DAYS', '30'),
+        // Backup
+        'backup_enabled' => env('BACKUP_ENABLED', 'true') === 'true',
+        'backup_retention_days' => (int)env('BACKUP_RETENTION_DAYS', '3'),
+        'gdrive_enabled' => env('GDRIVE_ENABLED', 'false') === 'true',
+        'gdrive_folder_id' => env('GDRIVE_FOLDER_ID', ''),
+        'gdrive_retention_days' => (int)env('GDRIVE_RETENTION_DAYS', '30'),
+        'gdrive_client_id_set'    => !empty(env('GDRIVE_CLIENT_ID')),
+        'gdrive_refresh_token_set'=> !empty(env('GDRIVE_REFRESH_TOKEN')),
     ]);
 }
 
 function dbCleanup(?PDO $db = null): void {
     $recipeDays = max(1, (int)env('RECIPE_RETENTION_DAYS', '7'));
-    $txDays     = max(1, (int)env('TRANSACTION_RETENTION_DAYS', '7'));
+    // Minimum 90 days: smart shopping needs months of history to compute frequencies.
+    // A value below 30 will cause the shopping list to appear nearly empty.
+    $txDays     = max(30, (int)env('TRANSACTION_RETENTION_DAYS', '90'));
     $pdo = $db ?? getDB();
     try {
         // Delete old recipes (generated recipe plans)
@@ -2976,6 +3092,9 @@ function saveSettings(): void {
         'tts_auth_header_name'  => 'TTS_AUTH_HEADER_NAME',
         'tts_auth_header_value' => 'TTS_AUTH_HEADER_VALUE',
         'tts_extra_fields'      => 'TTS_EXTRA_FIELDS',
+        'gdrive_folder_id'   => 'GDRIVE_FOLDER_ID',
+        'gdrive_client_id'   => 'GDRIVE_CLIENT_ID',
+        'gdrive_client_secret'          => 'GDRIVE_CLIENT_SECRET',
     ];
     // Boolean keys
     $boolMap = [
@@ -2991,6 +3110,8 @@ function saveSettings(): void {
         'screensaver_enabled' => 'SCREENSAVER_ENABLED',
         'price_enabled' => 'PRICE_ENABLED',
         'zerowaste_tips_enabled' => 'ZEROWASTE_TIPS_ENABLED',
+        'backup_enabled' => 'BACKUP_ENABLED',
+        'gdrive_enabled' => 'GDRIVE_ENABLED',
     ];
     // Integer keys
     $intMap = [
@@ -3000,6 +3121,8 @@ function saveSettings(): void {
         'recipe_retention_days'       => 'RECIPE_RETENTION_DAYS',
         'transaction_retention_days'  => 'TRANSACTION_RETENTION_DAYS',
         'vacuum_expiry_extension_days'=> 'VACUUM_EXPIRY_EXTENSION_DAYS',
+        'backup_retention_days'       => 'BACKUP_RETENTION_DAYS',
+        'gdrive_retention_days'       => 'GDRIVE_RETENTION_DAYS',
     ];
     // Float keys
     $floatMap = [
@@ -3031,7 +3154,7 @@ function saveSettings(): void {
     if (array_key_exists('appliances', $input)) {
         $envVars['APPLIANCES'] = is_array($input['appliances']) ? implode(',', $input['appliances']) : (string)$input['appliances'];
     }
-    
+
     // Write .env file
     $lines = [];
     foreach ($envVars as $key => $val) {
@@ -6106,6 +6229,428 @@ function computeShoppingName(string $name, string $category = '', string $brand 
         return mb_strtoupper(mb_substr($firstToken, 0, 1)) . mb_substr($firstToken, 1);
     }
     return ucfirst($name);
+}
+
+/**
+ * Real-time Bring! sync for a single product.
+ * Called after inventory changes (use/update/add) to keep Bring! in sync immediately
+ * instead of waiting for the next cron cycle.
+ */
+function bringQuickSyncProduct(PDO $db, int $productId): void {
+    $stmt = $db->prepare("SELECT SUM(quantity) FROM inventory WHERE product_id = ? AND quantity > 0");
+    $stmt->execute([$productId]);
+    $totalQty = (float)($stmt->fetchColumn() ?: 0);
+
+    $auth = bringAuth();
+    if (!$auth) return;
+    $listUUID = $auth['bringListUUID'];
+
+    $stmt = $db->prepare("SELECT name, brand, shopping_name FROM products WHERE id = ?");
+    $stmt->execute([$productId]);
+    $prod = $stmt->fetch();
+    if (!$prod) return;
+
+    $genericName = $prod['shopping_name'] ?: computeShoppingName($prod['name'], '', $prod['brand']);
+    $bringName   = italianToBring($genericName);
+
+    $listData = bringRequest('GET', "https://api.getbring.com/rest/v2/bringlists/{$listUUID}");
+    if (!$listData || !isset($listData['purchase'])) return;
+
+    $onBring = false;
+    foreach ($listData['purchase'] as $item) {
+        if (strcasecmp($item['name'] ?? '', $bringName) === 0) { $onBring = true; break; }
+    }
+
+    if ($totalQty <= 0 && !$onBring) {
+        // Out of stock — add to Bring!
+        $spec = $genericName !== $prod['name']
+            ? $prod['name'] . ($prod['brand'] ? ' · ' . $prod['brand'] : '') . ' · 🛒 Esaurito'
+            : ($prod['brand'] ? $prod['brand'] . ' · ' : '') . '🛒 Esaurito';
+        bringRequest('PUT', "https://api.getbring.com/rest/v2/bringlists/{$listUUID}",
+            http_build_query(['uuid' => $listUUID, 'purchase' => $bringName, 'specification' => $spec]));
+        EverLog::info('bringQuickSync: added to Bring!', ['product_id' => $productId, 'name' => $bringName]);
+    } elseif ($totalQty > 0 && $onBring) {
+        // Back in stock — remove from Bring!
+        bringRequest('PUT', "https://api.getbring.com/rest/v2/bringlists/{$listUUID}",
+            http_build_query(['uuid' => $listUUID, 'remove' => $bringName]));
+        EverLog::info('bringQuickSync: removed from Bring!', ['product_id' => $productId, 'name' => $bringName]);
+    }
+}
+
+// ===== LOCAL BACKUP =====
+
+/**
+ * Create a timestamped local backup of evershelf.db.
+ * WAL-checkpointed before copy. Purges backups older than BACKUP_RETENTION_DAYS.
+ */
+function createLocalBackup(?PDO $db = null): array {
+    EverLog::info('createLocalBackup');
+    $backupDir = BACKUP_DIR;
+    if (!is_dir($backupDir) && !mkdir($backupDir, 0755, true)) {
+        return ['success' => false, 'error' => 'Cannot create backup directory'];
+    }
+
+    $dbFile = __DIR__ . '/../data/evershelf.db';
+    if (!file_exists($dbFile)) {
+        return ['success' => false, 'error' => 'Database file not found'];
+    }
+
+    // WAL checkpoint: flush WAL into main DB file before copying
+    try {
+        $pdo = $db ?? getDB();
+        $pdo->exec('PRAGMA wal_checkpoint(FULL)');
+    } catch (Throwable $e) { /* non-fatal */ }
+
+    $date     = date('Y-m-d_Hi');
+    $filename = "evershelf_{$date}.db";
+    $destPath = "$backupDir/$filename";
+
+    if (!copy($dbFile, $destPath)) {
+        return ['success' => false, 'error' => 'Failed to copy database file'];
+    }
+
+    // Purge local backups older than retention
+    $retentionDays = max(1, (int)env('BACKUP_RETENTION_DAYS', '3'));
+    $cutoff = strtotime("-{$retentionDays} days");
+    $purged = 0;
+    foreach (glob("$backupDir/evershelf_*.db") ?: [] as $f) {
+        if ($f !== $destPath && filemtime($f) < $cutoff) {
+            unlink($f);
+            $purged++;
+        }
+    }
+
+    $sizeKb = (int)round(filesize($destPath) / 1024);
+    $result = [
+        'success'    => true,
+        'filename'   => $filename,
+        'path'       => $destPath,
+        'size_kb'    => $sizeKb,
+        'purged'     => $purged,
+        'created_at' => date('c'),
+    ];
+
+    // Update last-backup timestamp file
+    file_put_contents(BACKUP_LAST_TS_PATH, json_encode(['ts' => time(), 'filename' => $filename, 'size_kb' => $sizeKb]));
+
+    return $result;
+}
+
+/**
+ * List local backup files with metadata.
+ */
+function listLocalBackups(): array {
+    $backupDir = BACKUP_DIR;
+    $backups   = [];
+    foreach (glob("$backupDir/evershelf_*.db") ?: [] as $f) {
+        $backups[] = [
+            'filename'   => basename($f),
+            'size_kb'    => (int)round(filesize($f) / 1024),
+            'created_at' => date('c', filemtime($f)),
+        ];
+    }
+    usort($backups, fn($a, $b) => strcmp($b['created_at'], $a['created_at']));
+
+    $lastTs = [];
+    if (file_exists(BACKUP_LAST_TS_PATH)) {
+        $lastTs = json_decode(file_get_contents(BACKUP_LAST_TS_PATH), true) ?: [];
+    }
+
+    return [
+        'success'         => true,
+        'backups'         => $backups,
+        'last_backup_ts'  => $lastTs['ts'] ?? null,
+        'last_backup_file'=> $lastTs['filename'] ?? null,
+        'retention_days'  => max(1, (int)env('BACKUP_RETENTION_DAYS', '3')),
+    ];
+}
+
+/**
+ * Delete a specific local backup file.
+ */
+function deleteLocalBackup(string $filename): array {
+    if (!preg_match('/^evershelf_\d{4}-\d{2}-\d{2}_\d{4}\.db$/', $filename)) {
+        return ['success' => false, 'error' => 'Invalid backup filename'];
+    }
+    $path = BACKUP_DIR . '/' . $filename;
+    if (!file_exists($path)) {
+        return ['success' => false, 'error' => 'File not found'];
+    }
+    return unlink($path) ? ['success' => true] : ['success' => false, 'error' => 'Failed to delete file'];
+}
+
+/**
+ * Restore a local backup: replaces the current evershelf.db.
+ * Clears WAL/SHM files and invalidates smart shopping cache.
+ */
+function restoreLocalBackup(string $filename, PDO $db): array {
+    if (!preg_match('/^evershelf_\d{4}-\d{2}-\d{2}_\d{4}\.db$/', $filename)) {
+        return ['success' => false, 'error' => 'Invalid backup filename'];
+    }
+    $backupPath = BACKUP_DIR . '/' . $filename;
+    if (!file_exists($backupPath)) {
+        return ['success' => false, 'error' => 'Backup file not found'];
+    }
+    $dbPath = __DIR__ . '/../data/evershelf.db';
+
+    // Flush WAL before replacing DB
+    try { $db->exec('PRAGMA wal_checkpoint(FULL)'); } catch (Throwable $e) {}
+
+    if (!copy($backupPath, $dbPath)) {
+        return ['success' => false, 'error' => 'Failed to restore backup'];
+    }
+    // Remove stale WAL/SHM so next connection starts clean
+    @unlink($dbPath . '-wal');
+    @unlink($dbPath . '-shm');
+    // Invalidate dependent caches
+    @unlink(__DIR__ . '/../data/smart_shopping_cache.json');
+
+    EverLog::info('restoreLocalBackup', ['filename' => $filename]);
+    return ['success' => true, 'message' => 'Restore complete — reload the page to see the restored data.'];
+}
+
+// ===== GOOGLE DRIVE BACKUP =====
+
+/** Write / overwrite a single key in the .env file (used by OAuth callback). */
+function _gdriveSetEnvVar(string $key, string $value): void {
+    $envFile = __DIR__ . '/../.env';
+    $envVars = loadEnv();
+    $envVars[$key] = $value;
+    $lines = [];
+    foreach ($envVars as $k => $v) { $lines[] = "$k=$v"; }
+    file_put_contents($envFile, implode("\n", $lines) . "\n");
+}
+
+/**
+ * Build the OAuth 2.0 redirect URI for the server-side callback.
+ * Used only for _gdriveHandleOAuthCallback (legacy flow).
+ * The interactive auth URL now uses GDRIVE_REDIRECT_URI or http://localhost instead.
+ */
+function _gdriveRedirectUri(): string {
+    $override = env('GDRIVE_REDIRECT_URI', '');
+    if (!empty($override)) return $override;
+    $scheme = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http';
+    $host   = $_SERVER['HTTP_HOST'] ?? 'localhost';
+    return "$scheme://$host/api/index.php?action=gdrive_oauth_callback";
+}
+
+/**
+ * Get an access token using a stored OAuth 2.0 refresh token.
+ */
+function _gdriveGetTokenOAuth(): array {
+    $clientId     = env('GDRIVE_CLIENT_ID', '');
+    $clientSecret = env('GDRIVE_CLIENT_SECRET', '');
+    $refreshToken = env('GDRIVE_REFRESH_TOKEN', '');
+    if (!$clientId || !$clientSecret) {
+        return ['error' => 'GDRIVE_CLIENT_ID and GDRIVE_CLIENT_SECRET are required for OAuth'];
+    }
+    if (!$refreshToken) {
+        return ['error' => 'Not authorized yet — click "Authorize with Google" first'];
+    }
+    $ch = curl_init('https://oauth2.googleapis.com/token');
+    curl_setopt_array($ch, [
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_POST           => true,
+        CURLOPT_POSTFIELDS     => http_build_query([
+            'client_id'     => $clientId,
+            'client_secret' => $clientSecret,
+            'refresh_token' => $refreshToken,
+            'grant_type'    => 'refresh_token',
+        ]),
+        CURLOPT_TIMEOUT        => 15,
+        CURLOPT_SSL_VERIFYPEER => true,
+    ]);
+    $response = curl_exec($ch);
+    $curlErr  = curl_error($ch);
+    curl_close($ch);
+    if (!$response) return ['error' => 'cURL failed: ' . $curlErr];
+    $data = json_decode($response, true);
+    if (!empty($data['access_token'])) return ['token' => $data['access_token']];
+    return ['error' => 'OAuth refresh error: ' . ($data['error_description'] ?? $data['error'] ?? $response)];
+}
+
+/**
+ * Handle the OAuth 2.0 callback: exchange the code for tokens, store refresh_token.
+ * Returns HTML (not JSON) — must be called before Content-Type header is sent.
+ */
+function _gdriveHandleOAuthCallback(): void {
+    $code = $_GET['code'] ?? '';
+    if (empty($code)) {
+        http_response_code(400);
+        header('Content-Type: text/html; charset=utf-8');
+        echo '<html><body style="font-family:sans-serif;padding:2rem"><h2>&#10060; Error</h2><p>No authorization code received.</p></body></html>';
+        return;
+    }
+    $clientId     = env('GDRIVE_CLIENT_ID', '');
+    $clientSecret = env('GDRIVE_CLIENT_SECRET', '');
+    $redirectUri  = _gdriveRedirectUri();
+    $ch = curl_init('https://oauth2.googleapis.com/token');
+    curl_setopt_array($ch, [
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_POST           => true,
+        CURLOPT_POSTFIELDS     => http_build_query([
+            'client_id'     => $clientId,
+            'client_secret' => $clientSecret,
+            'code'          => $code,
+            'redirect_uri'  => $redirectUri,
+            'grant_type'    => 'authorization_code',
+        ]),
+        CURLOPT_TIMEOUT        => 15,
+        CURLOPT_SSL_VERIFYPEER => true,
+    ]);
+    $response = curl_exec($ch);
+    curl_close($ch);
+    $data = json_decode($response, true);
+    header('Content-Type: text/html; charset=utf-8');
+    if (!empty($data['refresh_token'])) {
+        _gdriveSetEnvVar('GDRIVE_REFRESH_TOKEN', $data['refresh_token']);
+        echo '<html><head><title>EverShelf &#10004;</title></head><body style="font-family:sans-serif;text-align:center;padding:3rem;background:#f0fdf4">'
+           . '<h2 style="color:#15803d">&#10004; Google Drive Authorized!</h2>'
+           . '<p>EverShelf can now back up to your Google Drive.</p>'
+           . '<p style="color:#94a3b8;font-size:0.9rem">This tab will close automatically.</p>'
+           . '<script>setTimeout(()=>{try{window.close()}catch(e){}},2500)</script>'
+           . '</body></html>';
+    } else {
+        $err = htmlspecialchars($data['error_description'] ?? $data['error'] ?? 'Unknown error');
+        http_response_code(400);
+        echo "<html><body style='font-family:sans-serif;padding:2rem'><h2>&#10060; Authorization failed</h2><p>$err</p></body></html>";
+    }
+}
+
+/**
+ * Obtain a short-lived Google API access token via OAuth 2.0 refresh token.
+ * Returns ['token' => string] on success, ['error' => string] on failure.
+ */
+function _gdriveGetToken(): ?string { return _gdriveGetTokenOAuth()['token'] ?? null; }
+function _gdriveGetTokenEx(): array { return _gdriveGetTokenOAuth(); }
+
+/**
+ * Upload a file to Google Drive using multipart upload.
+ * Returns the Drive file ID on success, null on failure.
+ */
+/** Returns ['id' => string] on success or ['error' => string] on failure. */
+function _gdriveUploadFile(string $token, string $folderId, string $filePath, string $remoteName): array {
+    if (!file_exists($filePath)) return ['error' => 'Local backup file not found: ' . $filePath];
+    $mimeType    = 'application/x-sqlite3';
+    $metadata    = json_encode(['name' => $remoteName, 'parents' => [$folderId]]);
+    $fileContent = file_get_contents($filePath);
+    $boundary    = 'es_backup_' . bin2hex(random_bytes(8));
+    $body        = "--$boundary\r\n"
+                 . "Content-Type: application/json; charset=UTF-8\r\n\r\n"
+                 . $metadata . "\r\n"
+                 . "--$boundary\r\n"
+                 . "Content-Type: $mimeType\r\n\r\n"
+                 . $fileContent . "\r\n"
+                 . "--$boundary--";
+
+    $ch = curl_init('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart');
+    curl_setopt_array($ch, [
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_POST           => true,
+        CURLOPT_POSTFIELDS     => $body,
+        CURLOPT_HTTPHEADER     => [
+            "Authorization: Bearer $token",
+            "Content-Type: multipart/related; boundary=$boundary",
+            "Content-Length: " . strlen($body),
+        ],
+        CURLOPT_TIMEOUT        => 120,
+        CURLOPT_SSL_VERIFYPEER => true,
+    ]);
+    $response = curl_exec($ch);
+    $curlErr  = curl_error($ch);
+    curl_close($ch);
+    if (!$response) return ['error' => 'cURL upload failed: ' . $curlErr];
+    $data = json_decode($response, true);
+    if (!empty($data['id'])) return ['id' => $data['id']];
+    $apiErr = $data['error']['message'] ?? $data['error']['status'] ?? json_encode($data);
+    return ['error' => 'Drive API error: ' . $apiErr];
+}
+
+/**
+ * Delete Drive backups older than $retentionDays.
+ * Returns count of deleted files.
+ */
+function _gdrivePurgeOld(string $token, string $folderId, int $retentionDays): int {
+    if ($retentionDays <= 0) return 0;
+    $cutoff = date('c', strtotime("-{$retentionDays} days"));
+    $q      = "'$folderId' in parents and name contains 'evershelf_' and trashed=false";
+    $url    = 'https://www.googleapis.com/drive/v3/files?'
+            . http_build_query(['q' => $q, 'fields' => 'files(id,name,createdTime)', 'pageSize' => '1000']);
+
+    $ch = curl_init($url);
+    curl_setopt_array($ch, [
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_HTTPHEADER     => ["Authorization: Bearer $token"],
+        CURLOPT_TIMEOUT        => 30,
+    ]);
+    $response = curl_exec($ch);
+    curl_close($ch);
+    if (!$response) return 0;
+    $data    = json_decode($response, true);
+    $deleted = 0;
+    foreach ($data['files'] ?? [] as $file) {
+        if (!empty($file['createdTime']) && $file['createdTime'] < $cutoff) {
+            $ch = curl_init("https://www.googleapis.com/drive/v3/files/{$file['id']}");
+            curl_setopt_array($ch, [
+                CURLOPT_RETURNTRANSFER => true,
+                CURLOPT_CUSTOMREQUEST  => 'DELETE',
+                CURLOPT_HTTPHEADER     => ["Authorization: Bearer $token"],
+                CURLOPT_TIMEOUT        => 15,
+            ]);
+            curl_exec($ch);
+            $code = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
+            curl_close($ch);
+            if ($code === 204) $deleted++;
+        }
+    }
+    return $deleted;
+}
+
+/**
+ * Full backup flow: create local snapshot, upload to Google Drive, purge old Drive files.
+ */
+function backupToGDrive(?PDO $db = null): array {
+    EverLog::info('backupToGDrive');
+    if (env('GDRIVE_ENABLED', 'false') !== 'true') {
+        return ['success' => false, 'error' => 'Google Drive backup is not enabled'];
+    }
+    $folderId = env('GDRIVE_FOLDER_ID', '');
+    if (empty($folderId)) {
+        return ['success' => false, 'error' => 'GDRIVE_FOLDER_ID not configured'];
+    }
+
+    // 1. Create (or reuse recent) local backup
+    $local = createLocalBackup($db);
+    if (!$local['success']) return $local;
+
+    // 2. Authenticate with Google
+    $tokResult = _gdriveGetTokenEx();
+    if (empty($tokResult['token'])) {
+        return ['success' => false, 'error' => $tokResult['error'] ?? 'Google Drive authentication failed'];
+    }
+    $token = $tokResult['token'];
+
+    // 3. Upload
+    $uploadResult = _gdriveUploadFile($token, $folderId, $local['path'], $local['filename']);
+    if (empty($uploadResult['id'])) {
+        return ['success' => false, 'error' => $uploadResult['error'] ?? 'Upload to Google Drive failed'];
+    }
+    $driveFileId = $uploadResult['id'];
+
+    // 4. Purge old files on Drive
+    $retentionDays = max(0, (int)env('GDRIVE_RETENTION_DAYS', '30'));
+    $purgedRemote  = $retentionDays > 0 ? _gdrivePurgeOld($token, $folderId, $retentionDays) : 0;
+
+    EverLog::info('backupToGDrive ok', ['file' => $local['filename'], 'drive_id' => $driveFileId, 'purged_remote' => $purgedRemote]);
+    return [
+        'success'       => true,
+        'filename'      => $local['filename'],
+        'size_kb'       => $local['size_kb'],
+        'drive_file_id' => $driveFileId,
+        'purged_local'  => $local['purged'],
+        'purged_remote' => $purgedRemote,
+        'created_at'    => $local['created_at'],
+    ];
 }
 
 /**

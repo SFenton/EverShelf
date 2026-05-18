@@ -841,6 +841,7 @@
             <button class="settings-tab" onclick="switchSettingsTab(this, 'tab-security')" data-tab="tab-security" title="Sicurezza">🔒</button>
             <button class="settings-tab" onclick="switchSettingsTab(this, 'tab-tts')" data-tab="tab-tts" title="Voce (TTS)" data-i18n-title="settings.tab_tts">🔊</button>
             <button class="settings-tab" onclick="switchSettingsTab(this, 'tab-scale')" data-tab="tab-scale" title="Bilancia Smart" data-i18n-title="settings.scale.tab">⚖️</button>
+            <button class="settings-tab" onclick="switchSettingsTab(this, 'tab-backup'); _loadBackupTab();" data-tab="tab-backup" data-i18n-title="settings.backup.tab" title="Backup">💾</button>
             <button class="settings-tab" onclick="switchSettingsTab(this, 'tab-info'); _loadInfoTab();" data-tab="tab-info" data-i18n-title="settings.info.tab" title="Info">ℹ️</button>
         </div>
         <div class="settings-panels">
@@ -1341,6 +1342,93 @@
                 </div>
             </div>
             <!-- Language Tab -->
+
+            <!-- Backup Tab -->
+            <div class="settings-panel" id="tab-backup">
+                <!-- Local Backup -->
+                <div class="settings-card">
+                    <h4 data-i18n="settings.backup.local_title">💾 Backup Locale</h4>
+                    <p class="settings-hint" data-i18n="settings.backup.local_hint">Snapshot giornaliero automatico del database. Massimo 3 giorni di storico (configurabile).</p>
+                    <div id="backup-last-info" style="margin-bottom:12px;padding:10px 12px;background:var(--bg-secondary,#f8fafc);border-radius:8px;font-size:0.83rem;color:var(--text-secondary)">
+                        <span data-i18n="settings.info.loading">Caricamento…</span>
+                    </div>
+                    <div class="form-group" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:14px">
+                        <label data-i18n="settings.backup.retention_days" style="flex-shrink:0">Retention (giorni):</label>
+                        <input type="number" id="setting-backup-retention-days" class="form-input" style="width:80px" min="1" max="90" value="3">
+                    </div>
+                    <button class="btn btn-large btn-accent full-width" onclick="_backupNow()" id="btn-backup-now" data-i18n="settings.backup.backup_now">💾 Backup Ora</button>
+                    <div id="backup-status" style="display:none;margin-top:8px" class="settings-status"></div>
+                    <!-- List of backups -->
+                    <div id="backup-list-container" style="margin-top:14px">
+                        <p class="settings-hint" data-i18n="settings.info.loading">Caricamento…</p>
+                    </div>
+                </div>
+                <!-- Google Drive -->
+                <div class="settings-card">
+                    <h4 data-i18n="settings.backup.gdrive_title">☁️ Google Drive</h4>
+                    <p class="settings-hint" data-i18n="settings.backup.gdrive_hint">Carica automaticamente il backup su Google Drive usando un Service Account.</p>
+                    <div class="form-group" style="margin-bottom:10px">
+                        <label class="toggle-row">
+                            <span data-i18n="settings.backup.gdrive_enabled">Abilita backup Google Drive</span>
+                            <span class="toggle-switch">
+                                <input type="checkbox" id="setting-gdrive-enabled" onchange="saveSettings()">
+                                <span class="toggle-slider"></span>
+                            </span>
+                        </label>
+                    </div>
+                    <div id="gdrive-config-section">
+                        <!-- Folder ID (shared between both methods) -->
+                        <div class="form-group">
+                            <label data-i18n="settings.backup.gdrive_folder_id">ID Cartella Drive</label>
+                            <input type="text" id="setting-gdrive-folder-id" class="form-input" placeholder="1ABCdef_xyz…">
+                            <p class="settings-hint" data-i18n="settings.backup.gdrive_folder_id_hint">Copia l'ID dalla URL della cartella Drive: …/folders/<strong>ID</strong></p>
+                        </div>
+                        <!-- OAuth 2.0 section -->
+                        <div id="gdrive-oauth-section">
+                            <details style="margin-bottom:14px;background:var(--bg-secondary,#f8fafc);border-radius:8px;padding:10px 14px">
+                                <summary style="cursor:pointer;font-weight:600;font-size:0.83rem" data-i18n="settings.backup.gdrive_oauth_how_to">📋 Come configurare OAuth 2.0 (passo dopo passo)</summary>
+                                <ol style="margin:10px 0 0 16px;font-size:0.8rem;color:var(--text-secondary);line-height:1.8" data-i18n-html="settings.backup.gdrive_oauth_steps"></ol>
+                            </details>
+                            <div class="form-group">
+                                <label data-i18n="settings.backup.gdrive_client_id">Client ID</label>
+                                <input type="text" id="setting-gdrive-client-id" class="form-input" placeholder="1234567890-abc….apps.googleusercontent.com">
+                            </div>
+                            <div class="form-group">
+                                <label data-i18n="settings.backup.gdrive_client_secret">Client Secret</label>
+                                <input type="password" id="setting-gdrive-client-secret" class="form-input" placeholder="GOCSPX-…">
+                            </div>
+                            <div class="form-group" style="background:var(--bg-secondary,#f8fafc);border-radius:8px;padding:10px 14px;font-size:0.82rem">
+                                <span data-i18n="settings.backup.gdrive_redirect_uri_label">Redirect URI (aggiungi in Google Cloud Console):</span>
+                                <code id="gdrive-redirect-uri-display" style="display:block;margin-top:4px;word-break:break-all;color:var(--text-primary);font-size:0.78rem">http://localhost</code>
+                                <p class="settings-hint" style="margin-top:6px;margin-bottom:0" data-i18n="settings.backup.gdrive_redirect_uri_hint">Registra questo URI in Google Cloud Console come "URI di reindirizzamento autorizzato". Per le installazioni senza dominio pubblico usa <strong>http://localhost</strong>.</p>
+                            </div>
+                            <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:8px">
+                                <button class="btn btn-secondary" onclick="_gdriveAuthorize()" id="btn-gdrive-authorize" data-i18n="settings.backup.gdrive_oauth_authorize">🔑 Autorizza con Google</button>
+                                <span id="gdrive-oauth-token-status" style="font-size:0.83rem"></span>
+                            </div>
+                            <!-- Manual code entry (appears after clicking Authorize) -->
+                            <div id="gdrive-code-section" style="display:none;margin-top:12px;padding:12px 14px;background:var(--bg-secondary,#f8fafc);border-radius:8px;border:1px solid var(--border)">
+                                <p style="font-size:0.82rem;margin-bottom:8px;font-weight:600" data-i18n="settings.backup.gdrive_code_title">Incolla l'URL o il codice di autorizzazione</p>
+                                <p class="settings-hint" style="margin-bottom:8px" data-i18n="settings.backup.gdrive_code_hint">Dopo aver autorizzato su Google, il browser proverà ad aprire <code>http://localhost</code> e mostrerà un errore. Copia l'intero URL dalla barra degli indirizzi e incollalo qui sotto.</p>
+                                <div style="display:flex;gap:8px;flex-wrap:wrap">
+                                    <input type="text" id="gdrive-code-input" class="form-input" style="flex:1;min-width:0" placeholder="http://localhost/?code=4%2F0A… oppure solo il codice">
+                                    <button class="btn btn-primary" onclick="_gdriveSubmitCode()" id="btn-gdrive-submit-code" data-i18n="settings.backup.gdrive_code_submit">Conferma</button>
+                                </div>
+                            </div>
+                        </div>
+                        <!-- Retention + action buttons (shared) -->
+                        <div class="form-group" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:10px">
+                            <label data-i18n="settings.backup.gdrive_retention_days" style="flex-shrink:0">Retention Drive (giorni, 0=tutto):</label>
+                            <input type="number" id="setting-gdrive-retention-days" class="form-input" style="width:80px" min="0" max="365" value="30">
+                        </div>
+                        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px">
+                            <button class="btn btn-secondary" onclick="_gdriveTest()" id="btn-gdrive-test" data-i18n="settings.backup.gdrive_test">🔗 Testa Connessione</button>
+                            <button class="btn btn-accent" onclick="_gdrivePushNow()" id="btn-gdrive-push" data-i18n="settings.backup.gdrive_push_now">☁️ Carica Ora su Drive</button>
+                        </div>
+                        <div id="gdrive-test-status" style="display:none;margin-top:8px" class="settings-status"></div>
+                    </div>
+                </div>
+            </div>
 
             <!-- Info Tab -->
             <div class="settings-panel" id="tab-info">
