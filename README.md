@@ -198,6 +198,13 @@ SETTINGS_TOKEN=
 
 # Optional: Demo mode — block all write operations at the router level
 DEMO_MODE=false
+
+# Optional: Logging
+# LOG_LEVEL sets the minimum severity written to disk (DEBUG / INFO / WARN / ERROR)
+# DEBUG also logs every SQL query executed against the database
+LOG_LEVEL=INFO
+LOG_ROTATE_HOURS=24   # hours before opening a new log file (default: 24)
+LOG_MAX_FILES=14      # maximum number of rotated files to keep (default: 14)
 ```
 
 ### Web Server Configuration
