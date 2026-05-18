@@ -1226,7 +1226,8 @@ function _showExportModal() {
                 🖨️ ${t('export.btn_pdf')}
             </button>
         </div>`;
-    openModal(html);
+    document.getElementById('modal-content').innerHTML = html;
+    document.getElementById('modal-overlay').style.display = 'flex';
 }
 
 const LOCATIONS = {
