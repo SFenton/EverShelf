@@ -1,30 +1,30 @@
 # logs/
 
-Questa cartella contiene i log di runtime di EverShelf.
+This directory contains EverShelf runtime log files.
 
-I file vengono generati automaticamente da `api/logger.php` e hanno la forma:
+Files are generated automatically by `api/logger.php` and follow the naming pattern:
 
 ```
 evershelf_YYYY-MM-DD_HH.log
 ```
 
-La cartella è inclusa in git (tramite questo README) ma i file `.log` sono ignorati via `.gitignore`.
+The directory is tracked in git (via this README) but `.log` files are ignored via `.gitignore`.
 
-## Configurazione (`.env`)
+## Configuration (`.env`)
 
-| Variabile | Default | Descrizione |
+| Variable | Default | Description |
 |---|---|---|
-| `LOG_LEVEL` | `INFO` | Livello minimo: `DEBUG`, `INFO`, `WARN`, `ERROR` |
-| `LOG_ROTATE_HOURS` | `24` | Ore per file prima di ruotare |
-| `LOG_MAX_FILES` | `14` | Numero massimo di file da conservare |
+| `LOG_LEVEL` | `INFO` | Minimum log level: `DEBUG`, `INFO`, `WARN`, `ERROR` |
+| `LOG_ROTATE_HOURS` | `24` | Hours per file before rotating |
+| `LOG_MAX_FILES` | `14` | Maximum number of rotated files to keep |
 
-## Formato
+## Format
 
 ```
-[2026-05-18 14:23:11] [INFO ] [rid=a1b2c3d4] [action] Messaggio {"ctx":"value"}
+[2026-05-18 14:23:11] [INFO ] [rid=a1b2c3d4] [action] Message {"ctx":"value"}
 ```
 
-## Inspection remota
+## Remote inspection
 
 ```
 GET /api/?action=get_logs&lines=100&level=WARN
