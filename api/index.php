@@ -409,7 +409,13 @@ if (($_GET['action'] ?? '') === 'health_check') {
         }
     }
 
-    // Legacy DB still present alongside evershelf.db → warn
+    // Auto-delete legacy dispensa.db if evershelf.db already exists (it's just an empty leftover)
+    if ($hasLegacy && file_exists($dbPath) && filesize($legacyDb) < 1024) {
+        @unlink($legacyDb);
+        $hasLegacy = false;
+    }
+
+    // Legacy DB still present alongside evershelf.db → warn (should be rare now)
     $checks['db_legacy'] = [
         'ok'       => !$hasLegacy,
         'optional' => true,
@@ -896,6 +902,10 @@ try {
 
         case 'check_update':
             checkUpdate();
+            break;
+
+        case 'db_cleanup':
+            dbCleanup(getDB());
             break;
 
         case 'gemini_product_hint':
@@ -2492,14 +2502,19 @@ function getStats(PDO $db): void {
         LIMIT 4
     ")->fetchAll();
     
-    // Expired
-    $expired = $db->query("
+    // Expired — vacuum-sealed items get extra days beyond printed expiry before being flagged
+    $vacExtDays = (int)env('VACUUM_EXPIRY_EXTENSION_DAYS', '30');
+    $expiredStmt = $db->prepare("
         SELECT i.*, p.name, p.brand, p.category, p.unit, p.default_quantity, p.package_unit,
                COALESCE(i.vacuum_sealed, 0) as vacuum_sealed
         FROM inventory i JOIN products p ON i.product_id = p.id 
-        WHERE i.expiry_date IS NOT NULL AND i.expiry_date < date('now') AND i.quantity > 0
+        WHERE i.expiry_date IS NOT NULL
+          AND julianday('now') - julianday(i.expiry_date) > CASE WHEN COALESCE(i.vacuum_sealed,0)=1 THEN ? ELSE 0 END
+          AND i.quantity > 0
         ORDER BY i.expiry_date ASC
-    ")->fetchAll();
+    ");
+    $expiredStmt->execute([$vacExtDays]);
+    $expired = $expiredStmt->fetchAll();
     
     // Opened (items with opened_at set by the app, OR fractional-qty items as legacy fallback)
     // opened_at IS NOT NULL → already has recalculated expiry_date stored when first opened
@@ -2899,7 +2914,29 @@ function getServerSettings(): void {
         'price_country' => env('PRICE_COUNTRY', 'Italia'),
         'price_currency' => env('PRICE_CURRENCY', 'EUR'),
         'price_update_months' => (int)env('PRICE_UPDATE_MONTHS', '3'),
+        'recipe_retention_days' => (int)env('RECIPE_RETENTION_DAYS', '7'),
+        'transaction_retention_days' => (int)env('TRANSACTION_RETENTION_DAYS', '7'),
+        'vacuum_expiry_extension_days' => (int)env('VACUUM_EXPIRY_EXTENSION_DAYS', '30'),
     ]);
+}
+
+function dbCleanup(?PDO $db = null): void {
+    $recipeDays = max(1, (int)env('RECIPE_RETENTION_DAYS', '7'));
+    $txDays     = max(1, (int)env('TRANSACTION_RETENTION_DAYS', '7'));
+    $pdo = $db ?? getDB();
+    try {
+        // Delete old recipes (generated recipe plans)
+        $pdo->prepare("DELETE FROM recipes WHERE date < date('now', ? || ' days')")
+            ->execute(["-$recipeDays"]);
+        // Delete old transactions (keep at least the last $txDays of history)
+        $pdo->prepare("DELETE FROM transactions WHERE created_at < datetime('now', ? || ' days') AND undone = 0")
+            ->execute(["-$txDays"]);
+        // Compact the database
+        $pdo->exec('VACUUM');
+        echo json_encode(['success' => true, 'recipe_retention_days' => $recipeDays, 'transaction_retention_days' => $txDays]);
+    } catch (Throwable $e) {
+        echo json_encode(['success' => false, 'error' => $e->getMessage()]);
+    }
 }
 
 function saveSettings(): void {
@@ -2957,9 +2994,12 @@ function saveSettings(): void {
     ];
     // Integer keys
     $intMap = [
-        'default_persons'    => 'DEFAULT_PERSONS',
-        'screensaver_timeout' => 'SCREENSAVER_TIMEOUT',
-        'price_update_months' => 'PRICE_UPDATE_MONTHS',
+        'default_persons'             => 'DEFAULT_PERSONS',
+        'screensaver_timeout'         => 'SCREENSAVER_TIMEOUT',
+        'price_update_months'         => 'PRICE_UPDATE_MONTHS',
+        'recipe_retention_days'       => 'RECIPE_RETENTION_DAYS',
+        'transaction_retention_days'  => 'TRANSACTION_RETENTION_DAYS',
+        'vacuum_expiry_extension_days'=> 'VACUUM_EXPIRY_EXTENSION_DAYS',
     ];
     // Float keys
     $floatMap = [

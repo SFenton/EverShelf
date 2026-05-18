@@ -3116,6 +3116,8 @@ async function saveSettings() {
             scale_gateway_url: s.scale_gateway_url,
             meal_plan_enabled: s.meal_plan_enabled,
             screensaver_enabled: s.screensaver_enabled,
+            screensaver_timeout: s.screensaver_timeout || 5,
+            zerowaste_tips_enabled: s.zerowaste_tips_enabled,
             tts_enabled: s.tts_enabled,
             tts_url: s.tts_url,
             tts_token: s.tts_token,
@@ -3133,6 +3135,9 @@ async function saveSettings() {
             price_country: s.price_country,
             price_currency: s.price_currency,
             price_update_months: s.price_update_months,
+            recipe_retention_days: s.recipe_retention_days || 7,
+            transaction_retention_days: s.transaction_retention_days || 7,
+            vacuum_expiry_extension_days: s.vacuum_expiry_extension_days || 30,
         }, tokenHeader);
         const statusEl = document.getElementById('settings-status');
         if (result.success) {
