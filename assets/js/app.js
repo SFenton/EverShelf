@@ -2192,7 +2192,9 @@ function _applySyncedSettings(serverSettings) {
         'tts_engine','tts_rate','tts_pitch','tts_auth_header_name','tts_auth_header_value','tts_extra_fields',
         'screensaver_enabled','screensaver_timeout',
         'price_enabled','price_country','price_currency','price_update_months',
-        'zerowaste_tips_enabled'];
+        'zerowaste_tips_enabled',
+        'shopping_enabled','shopping_mode','shopping_smart_suggestions',
+        'shopping_forecast','shopping_auto_add_threshold'];
     let changed = false;
     for (const key of serverKeys) {
         if (serverSettings[key] !== undefined && serverSettings[key] !== null && serverSettings[key] !== '') {
@@ -2852,7 +2854,9 @@ async function loadSettingsUI() {
             'meal_plan_enabled',
             'tts_enabled','tts_url','tts_token','tts_method','tts_auth_type',
             'tts_content_type','tts_payload_key',
-            'price_enabled','price_country','price_currency','price_update_months'];
+            'price_enabled','price_country','price_currency','price_update_months',
+            'shopping_enabled','shopping_mode','shopping_smart_suggestions',
+            'shopping_forecast','shopping_auto_add_threshold'];
         // Note: gemini_key is never sent from server; settings_token_set is metadata only
         const settingsTokenRequired = !!serverSettings.settings_token_set;
         const tokenHintEl = document.getElementById('settings-token-status-hint');
