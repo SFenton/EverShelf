@@ -1050,8 +1050,12 @@ if (!_SUPPORTED_LANGS[_currentLang]) _currentLang = 'en';
 // Apply theme IMMEDIATELY to prevent flash of unstyled content
 (function _earlyTheme() {
     try {
-        const s = JSON.parse(localStorage.getItem('evershelf_settings') || '{}');
-        const mode = s.dark_mode || 'auto';
+        // Use dedicated key (server-synced); fall back to old full-settings object for back-compat
+        let mode = localStorage.getItem('evershelf_dark_mode');
+        if (!mode) {
+            const s = JSON.parse(localStorage.getItem('evershelf_settings') || '{}');
+            mode = s.dark_mode || 'auto';
+        }
         const h = new Date().getHours();
         const dark = mode === 'on' || (mode === 'auto' && (h >= 20 || h < 7));
         document.documentElement.setAttribute('data-theme', dark ? 'dark' : 'light');
@@ -1887,7 +1891,8 @@ async function flipCamera() {
     const current = s.camera_facing || 'environment';
     const next = current === 'environment' ? 'user' : 'environment';
     s.camera_facing = next;
-    try { localStorage.setItem('evershelf_settings', JSON.stringify(s)); } catch(_) {}
+    _settingsCache = s;
+    _saveSettingToServer({ camera_facing: next });
     showToast(next === 'user' ? t('scan.flip_front') : t('scan.flip_back'), 'info');
     stopScanner();
     setTimeout(() => initScanner(), 150);
@@ -2060,9 +2065,9 @@ let _settingsDirty = false;
 
 function getSettings() {
     if (!_settingsCache) {
-        try {
-            _settingsCache = JSON.parse(localStorage.getItem('evershelf_settings') || '{}');
-        } catch(e) { _settingsCache = {}; }
+        // Settings come from server — do NOT read from localStorage (per-device storage).
+        // _settingsCache is populated by _applySyncedSettings() on app init.
+        _settingsCache = {};
     }
     const s = _settingsCache;
     // Build recipe_prefs array from individual booleans
@@ -2079,10 +2084,17 @@ function getSettings() {
 
 function saveSettingsToStorage(settings) {
     _settingsCache = settings;
-    localStorage.setItem('evershelf_settings', JSON.stringify(settings));
-    // Persist to DB
+    // Store ONLY dark_mode locally for the pre-render early-theme IIFE.
+    // All other settings are server-side only (centralised, shared across clients).
+    try { localStorage.setItem('evershelf_dark_mode', settings.dark_mode || 'auto'); } catch(_) {}
+    // Persist user-prefs subset to DB
     _settingsDirty = true;
     _debouncedSyncSettings();
+}
+
+/** Save one or more settings directly to server .env (partial update). */
+async function _saveSettingToServer(data) {
+    try { await api('save_settings', {}, 'POST', data); } catch(e) { /* offline */ }
 }
 
 const _debouncedSyncSettings = debounce(function() {
@@ -2125,13 +2137,12 @@ async function syncSettingsFromDB() {
                 const s = getSettings();
                 s.meal_plan = srv.meal_plan;
                 _settingsCache = s;
-                localStorage.setItem('evershelf_settings', JSON.stringify(s));
                 if (document.getElementById('meal-plan-grid')) renderMealPlanEditor();
             }
             // tts_voice preference (best-effort cross-device — falls back if voice unavailable)
             if (srv.tts_voice) {
                 const s = getSettings();
-                if (!s.tts_voice) { s.tts_voice = srv.tts_voice; _settingsCache = s; localStorage.setItem('evershelf_settings', JSON.stringify(s)); }
+                if (!s.tts_voice) { s.tts_voice = srv.tts_voice; _settingsCache = s; }
             }
 
             // ── User data previously stored in localStorage, now server-synced ──
@@ -2174,7 +2185,7 @@ async function syncSettingsFromDB() {
 }
 
 /**
- * Apply server settings object into localStorage cache.
+ * Apply server settings object into in-memory cache (_settingsCache).
  * Called both from _initApp (to reuse an already-fetched response) and syncSettingsFromDB.
  */
 function _applySyncedSettings(serverSettings) {
@@ -2204,7 +2215,8 @@ function _applySyncedSettings(serverSettings) {
     }
     if (changed) {
         _settingsCache = s;
-        localStorage.setItem('evershelf_settings', JSON.stringify(s));
+        // Persist dark_mode locally for early-theme only
+        try { localStorage.setItem('evershelf_dark_mode', s.dark_mode || 'auto'); } catch(_) {}
     }
 }
 
@@ -2870,7 +2882,6 @@ async function loadSettingsUI() {
         }
         if (changed) {
             _settingsCache = s;
-            localStorage.setItem('evershelf_settings', JSON.stringify(s));
             // Re-populate UI with merged values
             document.getElementById('setting-gemini-key').value = s.gemini_key || '';
             document.getElementById('setting-bring-email').value = s.bring_email || '';
@@ -3296,6 +3307,7 @@ function onShoppingEnabledChange() {
     const s = getSettings();
     s.shopping_enabled = document.getElementById('setting-shopping-enabled').checked;
     saveSettingsToStorage(s);
+    _saveSettingToServer({ shopping_enabled: s.shopping_enabled });
 }
 
 function onShoppingModeChange(value) {
@@ -3304,6 +3316,7 @@ function onShoppingModeChange(value) {
     const s = getSettings();
     s.shopping_mode = value;
     saveSettingsToStorage(s);
+    _saveSettingToServer({ shopping_mode: value });
 }
 
 async function saveSettings() {
