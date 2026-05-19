@@ -833,7 +833,7 @@
         <div class="settings-tabs">
             <button class="settings-tab active" onclick="switchSettingsTab(this, 'tab-general')" data-tab="tab-general" data-i18n-title="settings.tab_general" title="Generali">⚙️</button>
             <button class="settings-tab" onclick="switchSettingsTab(this, 'tab-api')" data-tab="tab-api" title="API Keys">🔑</button>
-            <button class="settings-tab" onclick="switchSettingsTab(this, 'tab-bring')" data-tab="tab-bring" title="Bring!">🛒</button>
+            <button class="settings-tab" onclick="switchSettingsTab(this, 'tab-bring')" data-tab="tab-bring" data-i18n-title="settings.shopping.tab" title="Lista spesa">🛒</button>
             <button class="settings-tab" onclick="switchSettingsTab(this, 'tab-recipe')" data-tab="tab-recipe" title="Ricette">🍳</button>
             <button class="settings-tab" onclick="switchSettingsTab(this, 'tab-mealplan')" data-tab="tab-mealplan" title="Piano Settimanale">📅</button>
             <button class="settings-tab" onclick="switchSettingsTab(this, 'tab-appliances')" data-tab="tab-appliances" title="Elettrodomestici">🔌</button>
@@ -955,9 +955,36 @@
             </div>
             <!-- Bring! Tab -->
             <div class="settings-panel" id="tab-bring">
+                <!-- Shopping enable + provider -->
                 <div class="settings-card">
-                    <h4 data-i18n="settings.bring.title">🛒 Bring! Shopping List</h4>
-                    <p class="settings-hint" data-i18n="settings.bring.hint">Credenziali per l'integrazione con la lista della spesa Bring!</p>
+                    <h4 data-i18n="settings.shopping.title">🛒 Lista della spesa</h4>
+                    <p class="settings-hint" data-i18n="settings.shopping.hint">Configura la lista della spesa integrata o collega Bring!.</p>
+                    <div class="form-group">
+                        <label class="toggle-row">
+                            <span data-i18n="settings.shopping.enable_label">Abilita lista della spesa</span>
+                            <span class="toggle-switch">
+                                <input type="checkbox" id="setting-shopping-enabled" onchange="onShoppingEnabledChange()">
+                                <span class="toggle-slider"></span>
+                            </span>
+                        </label>
+                    </div>
+                    <div class="form-group" id="shopping-mode-group">
+                        <label data-i18n="settings.shopping.mode_label">Provider</label>
+                        <div class="radio-group" style="margin-top:6px">
+                            <label class="radio-option">
+                                <input type="radio" name="shopping-mode" value="internal" onchange="onShoppingModeChange(this.value)">
+                                <span data-i18n="settings.shopping.mode_internal">Interno (senza Bring!)</span>
+                            </label>
+                            <label class="radio-option" style="margin-left:16px">
+                                <input type="radio" name="shopping-mode" value="bring" onchange="onShoppingModeChange(this.value)">
+                                <span data-i18n="settings.shopping.mode_bring">Bring! (app esterna)</span>
+                            </label>
+                        </div>
+                    </div>
+                </div>
+                <!-- Bring! sub-section (shown only when mode = bring) -->
+                <div class="settings-card" id="bring-subsection" style="display:none;margin-top:12px">
+                    <h4 data-i18n="settings.shopping.bring_section_title">Configurazione Bring!</h4>
                     <div class="form-group">
                         <label data-i18n="settings.bring.email_label">📧 Email Bring!</label>
                         <input type="email" id="setting-bring-email" class="form-input" placeholder="email@esempio.com">
@@ -966,6 +993,37 @@
                         <label data-i18n="settings.bring.password_label">🔒 Password Bring!</label>
                         <input type="password" id="setting-bring-password" class="form-input" placeholder="Password">
                         <button class="btn btn-small btn-secondary mt-2" onclick="togglePasswordVisibility('setting-bring-password')" data-i18n="btn.toggle_password">👁️ Mostra/Nascondi</button>
+                    </div>
+                </div>
+                <!-- Smart suggestions + forecast -->
+                <div class="settings-card" style="margin-top:12px">
+                    <h4 data-i18n="settings.shopping.ai_section_title">Assistenza AI</h4>
+                    <div class="form-group">
+                        <label class="toggle-row">
+                            <span data-i18n="settings.shopping.smart_suggestions_label">Suggerimenti AI</span>
+                            <span class="toggle-switch">
+                                <input type="checkbox" id="setting-shopping-smart-suggestions">
+                                <span class="toggle-slider"></span>
+                            </span>
+                        </label>
+                    </div>
+                    <div class="form-group">
+                        <label class="toggle-row">
+                            <span data-i18n="settings.shopping.forecast_label">Previsione prodotti in esaurimento</span>
+                            <span class="toggle-switch">
+                                <input type="checkbox" id="setting-shopping-forecast">
+                                <span class="toggle-slider"></span>
+                            </span>
+                        </label>
+                    </div>
+                    <div class="form-group" style="margin-top:8px">
+                        <label data-i18n="settings.shopping.auto_add_label">Aggiungi automaticamente quando</label>
+                        <div class="qty-control" style="margin-top:6px">
+                            <button type="button" class="qty-btn" onclick="adjustQty('setting-shopping-auto-add', -1, 0, 20)">−</button>
+                            <input type="number" id="setting-shopping-auto-add" value="0" min="0" max="20" class="qty-input">
+                            <button type="button" class="qty-btn" onclick="adjustQty('setting-shopping-auto-add', 1, 0, 20)">+</button>
+                        </div>
+                        <p class="settings-hint" data-i18n="settings.shopping.auto_add_suffix">rimasto in magazzino (0 = solo quando esaurito)</p>
                     </div>
                 </div>
                 <!-- Price Estimation Settings -->

@@ -849,7 +849,22 @@
       "currency_title": "Währung",
       "currency_hint": "Die Währung, die für alle Kosten und Preise in der App verwendet wird."
     },
-    "tab_general": "Allgemein"
+    "tab_general": "Allgemein",
+    "shopping": {
+      "tab": "Einkaufsliste",
+      "title": "Einkaufsliste",
+      "hint": "Konfiguriere die integrierte Einkaufsliste oder verbinde Bring!.",
+      "enable_label": "Einkaufsliste aktivieren",
+      "mode_label": "Anbieter",
+      "mode_internal": "Intern (ohne Bring!)",
+      "mode_bring": "Bring! (externe App)",
+      "bring_section_title": "Bring!-Konfiguration",
+      "ai_section_title": "KI-Unterstützung",
+      "smart_suggestions_label": "KI-Vorschläge",
+      "forecast_label": "Prognose für bald leere Produkte",
+      "auto_add_label": "Automatisch hinzufügen wenn",
+      "auto_add_suffix": "im Lager verbleibend (0 = nur wenn leer)"
+    }
   },
   "expiry": {
     "today": "HEUTE",

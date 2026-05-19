@@ -849,7 +849,22 @@
       "currency_title": "Valuta",
       "currency_hint": "La valuta usata per tutti i costi e i prezzi nell'app."
     },
-    "tab_general": "Generali"
+    "tab_general": "Generali",
+    "shopping": {
+      "tab": "Lista spesa",
+      "title": "Lista della spesa",
+      "hint": "Configura la lista della spesa integrata o collega Bring!.",
+      "enable_label": "Abilita lista della spesa",
+      "mode_label": "Provider",
+      "mode_internal": "Interno (senza Bring!)",
+      "mode_bring": "Bring! (app esterna)",
+      "bring_section_title": "Configurazione Bring!",
+      "ai_section_title": "Assistenza AI",
+      "smart_suggestions_label": "Suggerimenti AI",
+      "forecast_label": "Previsione prodotti in esaurimento",
+      "auto_add_label": "Aggiungi automaticamente quando",
+      "auto_add_suffix": "rimasto in magazzino (0 = solo quando esaurito)"
+    }
   },
   "expiry": {
     "today": "OGGI",

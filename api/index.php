@@ -661,6 +661,7 @@ $_writeActions = [
     'inventory_add','inventory_use','inventory_update','inventory_remove',
     'product_save','product_delete','product_merge',
     'bring_add','bring_remove','bring_sync','bring_set_spec','bring_migrate_names',
+    'shopping_add','shopping_remove',
     'dismiss_anomaly','save_settings',
 ];
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && in_array($rateLimitAction, $_writeActions, true)) {
@@ -834,6 +835,19 @@ try {
             bringMigrateNames($db);
             break;
         case 'bring_suggest':
+            bringSuggestItems($db);
+            break;
+        // Shopping abstraction layer (delegates to internal DB or Bring!)
+        case 'shopping_list':
+            shoppingGetList($db);
+            break;
+        case 'shopping_add':
+            shoppingAdd($db);
+            break;
+        case 'shopping_remove':
+            shoppingRemove($db);
+            break;
+        case 'shopping_suggest':
             bringSuggestItems($db);
             break;
         case 'smart_shopping':
@@ -3031,6 +3045,12 @@ function getServerSettings(): void {
         'gdrive_retention_days' => (int)env('GDRIVE_RETENTION_DAYS', '30'),
         'gdrive_client_id_set'    => !empty(env('GDRIVE_CLIENT_ID')),
         'gdrive_refresh_token_set'=> !empty(env('GDRIVE_REFRESH_TOKEN')),
+        // Shopping list
+        'shopping_enabled'            => env('SHOPPING_ENABLED', 'true') === 'true',
+        'shopping_mode'               => env('SHOPPING_MODE', 'internal'),
+        'shopping_smart_suggestions'  => env('SHOPPING_SMART_SUGGESTIONS', 'true') === 'true',
+        'shopping_forecast'           => env('SHOPPING_FORECAST', 'true') === 'true',
+        'shopping_auto_add_threshold' => (int)env('SHOPPING_AUTO_ADD_THRESHOLD', '0'),
     ]);
 }
 
@@ -3095,6 +3115,7 @@ function saveSettings(): void {
         'gdrive_folder_id'   => 'GDRIVE_FOLDER_ID',
         'gdrive_client_id'   => 'GDRIVE_CLIENT_ID',
         'gdrive_client_secret'          => 'GDRIVE_CLIENT_SECRET',
+        'shopping_mode'      => 'SHOPPING_MODE',
     ];
     // Boolean keys
     $boolMap = [
@@ -3112,6 +3133,9 @@ function saveSettings(): void {
         'zerowaste_tips_enabled' => 'ZEROWASTE_TIPS_ENABLED',
         'backup_enabled' => 'BACKUP_ENABLED',
         'gdrive_enabled' => 'GDRIVE_ENABLED',
+        'shopping_enabled'           => 'SHOPPING_ENABLED',
+        'shopping_smart_suggestions' => 'SHOPPING_SMART_SUGGESTIONS',
+        'shopping_forecast'          => 'SHOPPING_FORECAST',
     ];
     // Integer keys
     $intMap = [
@@ -3122,7 +3146,8 @@ function saveSettings(): void {
         'transaction_retention_days'  => 'TRANSACTION_RETENTION_DAYS',
         'vacuum_expiry_extension_days'=> 'VACUUM_EXPIRY_EXTENSION_DAYS',
         'backup_retention_days'       => 'BACKUP_RETENTION_DAYS',
-        'gdrive_retention_days'       => 'GDRIVE_RETENTION_DAYS',
+        'gdrive_retention_days'           => 'GDRIVE_RETENTION_DAYS',
+        'shopping_auto_add_threshold'    => 'SHOPPING_AUTO_ADD_THRESHOLD',
     ];
     // Float keys
     $floatMap = [
@@ -6232,18 +6257,14 @@ function computeShoppingName(string $name, string $category = '', string $brand 
 }
 
 /**
- * Real-time Bring! sync for a single product.
- * Called after inventory changes (use/update/add) to keep Bring! in sync immediately
- * instead of waiting for the next cron cycle.
+ * Real-time shopping sync for a single product.
+ * Called after inventory changes (use/update/add) to keep the shopping list in sync immediately.
+ * Delegates to Bring! or internal DB depending on SHOPPING_MODE.
  */
 function bringQuickSyncProduct(PDO $db, int $productId): void {
     $stmt = $db->prepare("SELECT SUM(quantity) FROM inventory WHERE product_id = ? AND quantity > 0");
     $stmt->execute([$productId]);
     $totalQty = (float)($stmt->fetchColumn() ?: 0);
-
-    $auth = bringAuth();
-    if (!$auth) return;
-    $listUUID = $auth['bringListUUID'];
 
     $stmt = $db->prepare("SELECT name, brand, shopping_name FROM products WHERE id = ?");
     $stmt->execute([$productId]);
@@ -6251,29 +6272,52 @@ function bringQuickSyncProduct(PDO $db, int $productId): void {
     if (!$prod) return;
 
     $genericName = $prod['shopping_name'] ?: computeShoppingName($prod['name'], '', $prod['brand']);
-    $bringName   = italianToBring($genericName);
 
-    $listData = bringRequest('GET', "https://api.getbring.com/rest/v2/bringlists/{$listUUID}");
-    if (!$listData || !isset($listData['purchase'])) return;
+    if (isShoppingBringMode()) {
+        // Delegate to Bring!
+        $auth = bringAuth();
+        if (!$auth) return;
+        $listUUID = $auth['bringListUUID'];
+        $bringName = italianToBring($genericName);
 
-    $onBring = false;
-    foreach ($listData['purchase'] as $item) {
-        if (strcasecmp($item['name'] ?? '', $bringName) === 0) { $onBring = true; break; }
-    }
+        $listData = bringRequest('GET', "https://api.getbring.com/rest/v2/bringlists/{$listUUID}");
+        if (!$listData || !isset($listData['purchase'])) return;
 
-    if ($totalQty <= 0 && !$onBring) {
-        // Out of stock — add to Bring!
-        $spec = $genericName !== $prod['name']
-            ? $prod['name'] . ($prod['brand'] ? ' · ' . $prod['brand'] : '') . ' · 🛒 Esaurito'
-            : ($prod['brand'] ? $prod['brand'] . ' · ' : '') . '🛒 Esaurito';
-        bringRequest('PUT', "https://api.getbring.com/rest/v2/bringlists/{$listUUID}",
-            http_build_query(['uuid' => $listUUID, 'purchase' => $bringName, 'specification' => $spec]));
-        EverLog::info('bringQuickSync: added to Bring!', ['product_id' => $productId, 'name' => $bringName]);
-    } elseif ($totalQty > 0 && $onBring) {
-        // Back in stock — remove from Bring!
-        bringRequest('PUT', "https://api.getbring.com/rest/v2/bringlists/{$listUUID}",
-            http_build_query(['uuid' => $listUUID, 'remove' => $bringName]));
-        EverLog::info('bringQuickSync: removed from Bring!', ['product_id' => $productId, 'name' => $bringName]);
+        $onBring = false;
+        foreach ($listData['purchase'] as $item) {
+            if (strcasecmp($item['name'] ?? '', $bringName) === 0) { $onBring = true; break; }
+        }
+
+        if ($totalQty <= 0 && !$onBring) {
+            $spec = $genericName !== $prod['name']
+                ? $prod['name'] . ($prod['brand'] ? ' · ' . $prod['brand'] : '') . ' · 🛒 Esaurito'
+                : ($prod['brand'] ? $prod['brand'] . ' · ' : '') . '🛒 Esaurito';
+            bringRequest('PUT', "https://api.getbring.com/rest/v2/bringlists/{$listUUID}",
+                http_build_query(['uuid' => $listUUID, 'purchase' => $bringName, 'specification' => $spec]));
+            EverLog::info('bringQuickSync: added to Bring!', ['product_id' => $productId, 'name' => $bringName]);
+        } elseif ($totalQty > 0 && $onBring) {
+            bringRequest('PUT', "https://api.getbring.com/rest/v2/bringlists/{$listUUID}",
+                http_build_query(['uuid' => $listUUID, 'remove' => $bringName]));
+            EverLog::info('bringQuickSync: removed from Bring!', ['product_id' => $productId, 'name' => $bringName]);
+        }
+    } else {
+        // Internal mode
+        $threshold = (int)env('SHOPPING_AUTO_ADD_THRESHOLD', '0');
+        $stmtCheck = $db->prepare("SELECT id FROM shopping_list WHERE lower(name) = lower(?)");
+        $stmtCheck->execute([$genericName]);
+        $onList = (bool)$stmtCheck->fetch();
+
+        if ($totalQty <= $threshold && !$onList) {
+            $spec = $genericName !== $prod['name']
+                ? $prod['name'] . ($prod['brand'] ? ' · ' . $prod['brand'] : '')
+                : ($prod['brand'] ?: '');
+            $db->prepare("INSERT OR IGNORE INTO shopping_list (name, raw_name, specification) VALUES (?, ?, ?)")
+               ->execute([$genericName, $prod['name'], $spec]);
+            EverLog::info('shoppingQuickSync: added to internal list', ['product_id' => $productId, 'name' => $genericName]);
+        } elseif ($totalQty > $threshold && $onList) {
+            $db->prepare("DELETE FROM shopping_list WHERE lower(name) = lower(?)")->execute([$genericName]);
+            EverLog::info('shoppingQuickSync: removed from internal list', ['product_id' => $productId, 'name' => $genericName]);
+        }
     }
 }
 
@@ -8039,6 +8083,82 @@ function bringSuggestItems(PDO $db): void {
         'seasonal_tip' => $seasonalTip,
         'listUUID'     => $listUUID,
     ], JSON_UNESCAPED_UNICODE);
+}
+
+// ===== SHOPPING ABSTRACTION (internal DB or Bring!) =====
+
+function isShoppingBringMode(): bool {
+    return env('SHOPPING_MODE', 'internal') === 'bring'
+        && !empty(env('BRING_EMAIL'))
+        && !empty(env('BRING_PASSWORD'));
+}
+
+function shoppingGetList(PDO $db): void {
+    if (isShoppingBringMode()) {
+        bringGetList();
+        return;
+    }
+    $items   = $db->query(
+        "SELECT name, raw_name, specification FROM shopping_list ORDER BY sort_order ASC, added_at ASC"
+    )->fetchAll();
+    $purchase = array_map(fn($r) => [
+        'name'          => $r['name'],
+        'rawName'       => $r['raw_name'] ?: $r['name'],
+        'specification' => $r['specification'],
+    ], $items);
+    echo json_encode([
+        'success'   => true,
+        'listUUID'  => 'internal-list',
+        'purchase'  => $purchase,
+        'recently'  => [],
+    ], JSON_UNESCAPED_UNICODE);
+}
+
+function shoppingAdd(PDO $db): void {
+    if (isShoppingBringMode()) {
+        bringAddItems();
+        return;
+    }
+    $input = json_decode(file_get_contents('php://input'), true) ?? [];
+    $items = $input['items'] ?? [];
+    $added = 0; $updated = 0; $skipped = 0;
+    foreach ($items as $item) {
+        $name    = trim($item['name'] ?? '');
+        if ($name === '') continue;
+        $rawName = trim($item['rawName'] ?? $item['raw_name'] ?? $name);
+        $spec    = $item['specification'] ?? '';
+        $updateSpec = !empty($item['update_spec']);
+        $stmt = $db->prepare("SELECT id, specification FROM shopping_list WHERE lower(name) = lower(?)");
+        $stmt->execute([$name]);
+        $existing = $stmt->fetch();
+        if ($existing) {
+            if ($updateSpec && $existing['specification'] !== $spec) {
+                $db->prepare("UPDATE shopping_list SET specification=?, raw_name=? WHERE id=?")->execute([$spec, $rawName, $existing['id']]);
+                $updated++;
+            } else {
+                $skipped++;
+            }
+        } else {
+            $db->prepare("INSERT INTO shopping_list (name, raw_name, specification) VALUES (?, ?, ?)")->execute([$name, $rawName, $spec]);
+            $added++;
+        }
+    }
+    echo json_encode(['success' => true, 'added' => $added, 'updated' => $updated, 'skipped' => $skipped, 'errors' => []]);
+}
+
+function shoppingRemove(PDO $db): void {
+    if (isShoppingBringMode()) {
+        bringRemoveItem();
+        return;
+    }
+    $input = json_decode(file_get_contents('php://input'), true) ?? [];
+    $name  = trim($input['name'] ?? '');
+    if ($name === '') {
+        echo json_encode(['success' => false, 'error' => 'Missing name']);
+        return;
+    }
+    $db->prepare("DELETE FROM shopping_list WHERE lower(name) = lower(?)")->execute([$name]);
+    echo json_encode(['success' => true]);
 }
 
 // ===== SHARED APP DATA FUNCTIONS =====

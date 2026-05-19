@@ -806,6 +806,21 @@
       "gdrive_oauth_window_opened": "Fenêtre ouverte — autorisez et revenez ici",
       "gdrive_oauth_how_to": "Configurer OAuth 2.0 (étape par étape)",
       "gdrive_oauth_steps": "<li>Allez sur <a href='https://console.cloud.google.com/' target='_blank' rel='noopener'>console.cloud.google.com</a> et sélectionnez votre projet</li><li>Activez l’<strong>API Google Drive</strong> : <em>API et services → Activer les API → Google Drive API</em></li><li>Allez dans <em>API et services → Identifiants → Créer des identifiants → ID client OAuth</em></li><li>Type d’application : <strong>Application Web</strong> ; ajoutez l’URL affichée ci-dessous comme <em>URI de redirection autorisé</em></li><li>Copiez le <strong>Client ID</strong> et le <strong>Client Secret</strong> dans les champs ci-dessus et enregistrez</li><li>Cliquez sur <strong>Autoriser avec Google</strong> : connectez-vous et accordez l’accès</li><li>La fenêtre se ferme automatiquement une fois terminé et les sauvegardes sont prêtes</li>"
+    },
+    "shopping": {
+      "tab": "Liste de courses",
+      "title": "Liste de courses",
+      "hint": "Configurez la liste de courses intégrée ou connectez Bring!.",
+      "enable_label": "Activer la liste de courses",
+      "mode_label": "Fournisseur",
+      "mode_internal": "Intégré (sans Bring!)",
+      "mode_bring": "Bring! (application externe)",
+      "bring_section_title": "Configuration Bring!",
+      "ai_section_title": "Assistance IA",
+      "smart_suggestions_label": "Suggestions IA",
+      "forecast_label": "Prévision des produits bientôt épuisés",
+      "auto_add_label": "Ajouter automatiquement quand",
+      "auto_add_suffix": "restant en stock (0 = seulement quand épuisé)"
     }
   },
   "expiry": {

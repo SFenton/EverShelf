@@ -87,9 +87,43 @@ try {
         ob_end_clean();
         echo '[' . date('Y-m-d H:i:s') . '] DB cleanup done'
             . ' (recipes >' . env('RECIPE_RETENTION_DAYS','7') . 'd'
-            . ', tx >' . env('TRANSACTION_RETENTION_DAYS','7') . 'd' . ")\n";
+            . ', tx >' . env('TRANSACTION_RETENTION_DAYS','90') . 'd' . ")\n";
     } catch (Throwable $ce) {
         echo '[' . date('Y-m-d H:i:s') . '] DB cleanup warning: ' . $ce->getMessage() . "\n";
+    }
+
+    // ── Daily incremental backup ──────────────────────────────────────────
+    // Create a local backup at most once every 23 h; also push to Google Drive
+    // if GDRIVE_ENABLED=true.  The guard prevents multiple backups per day even
+    // though the cron runs every 5 minutes.
+    if (env('BACKUP_ENABLED', 'true') === 'true') {
+        try {
+            $lastBackupTs = 0;
+            if (file_exists(BACKUP_LAST_TS_PATH)) {
+                $lastData     = json_decode(file_get_contents(BACKUP_LAST_TS_PATH), true) ?: [];
+                $lastBackupTs = (int)($lastData['ts'] ?? 0);
+            }
+            if (time() - $lastBackupTs >= 82800) { // 23 h
+                $backupResult = createLocalBackup($db);
+                if ($backupResult['success']) {
+                    echo '[' . date('Y-m-d H:i:s') . '] Backup local: ' . $backupResult['filename']
+                        . ' (' . $backupResult['size_kb'] . 'KB, purged ' . $backupResult['purged'] . " old)\n";
+                    if (env('GDRIVE_ENABLED', 'false') === 'true') {
+                        $gResult = backupToGDrive($db);
+                        if ($gResult['success']) {
+                            echo '[' . date('Y-m-d H:i:s') . '] Backup GDrive: OK'
+                                . ' (purged remote: ' . ($gResult['purged_remote'] ?? 0) . ")\n";
+                        } else {
+                            echo '[' . date('Y-m-d H:i:s') . '] Backup GDrive warning: ' . ($gResult['error'] ?? 'unknown') . "\n";
+                        }
+                    }
+                } else {
+                    echo '[' . date('Y-m-d H:i:s') . '] Backup warning: ' . ($backupResult['error'] ?? 'unknown') . "\n";
+                }
+            }
+        } catch (Throwable $be) {
+            echo '[' . date('Y-m-d H:i:s') . '] Backup error: ' . $be->getMessage() . "\n";
+        }
     }
 
 } catch (Throwable $e) {

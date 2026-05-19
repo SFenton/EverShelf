@@ -2903,6 +2903,8 @@ async function loadSettingsUI() {
             if (priceCountryEl) priceCountryEl.value = s.price_country || 'Italia';
             if (priceCurrencyEl) priceCurrencyEl.value = s.price_currency || 'EUR';
             if (priceMonthsEl) priceMonthsEl.value = s.price_update_months || 3;
+            // Shopping settings (server merge)
+            _applyShoppingSettingsUI(s);
         }
     } catch(e) { /* offline, use local */ }
     // Price settings
@@ -2936,6 +2938,8 @@ async function loadSettingsUI() {
     if (gdriveFolderUiEl && !gdriveFolderUiEl.dataset.loaded) gdriveFolderUiEl.value = s.gdrive_folder_id || '';
     const gdriveRetUiEl = document.getElementById('setting-gdrive-retention-days');
     if (gdriveRetUiEl && !gdriveRetUiEl.dataset.loaded) gdriveRetUiEl.value = s.gdrive_retention_days || 30;
+    // Shopping settings
+    _applyShoppingSettingsUI(s);
     // Hide kiosk download banner if running inside Android WebView (kiosk mode)
     const kioskBanner = document.getElementById('kiosk-download-banner');
     if (kioskBanner && /; wv\)/.test(navigator.userAgent)) {
@@ -3269,6 +3273,35 @@ function removeAppliance(idx) {
     renderAppliances(s.appliances);
 }
 
+function _applyShoppingSettingsUI(s) {
+    const enabledEl = document.getElementById('setting-shopping-enabled');
+    if (enabledEl) enabledEl.checked = s.shopping_enabled !== false;
+    const mode = s.shopping_mode || 'internal';
+    document.querySelectorAll('input[name="shopping-mode"]').forEach(r => { r.checked = (r.value === mode); });
+    const bringSection = document.getElementById('bring-subsection');
+    if (bringSection) bringSection.style.display = mode === 'bring' ? '' : 'none';
+    const suggestEl = document.getElementById('setting-shopping-smart-suggestions');
+    if (suggestEl) suggestEl.checked = s.shopping_smart_suggestions !== false;
+    const forecastEl = document.getElementById('setting-shopping-forecast');
+    if (forecastEl) forecastEl.checked = s.shopping_forecast !== false;
+    const autoAddEl = document.getElementById('setting-shopping-auto-add');
+    if (autoAddEl) autoAddEl.value = s.shopping_auto_add_threshold || 0;
+}
+
+function onShoppingEnabledChange() {
+    const s = getSettings();
+    s.shopping_enabled = document.getElementById('setting-shopping-enabled').checked;
+    saveSettingsToStorage(s);
+}
+
+function onShoppingModeChange(value) {
+    const bringSection = document.getElementById('bring-subsection');
+    if (bringSection) bringSection.style.display = value === 'bring' ? '' : 'none';
+    const s = getSettings();
+    s.shopping_mode = value;
+    saveSettingsToStorage(s);
+}
+
 async function saveSettings() {
     const s = getSettings();
     // Only update gemini_key if user actually typed something; preserve existing key otherwise
@@ -3354,6 +3387,17 @@ async function saveSettings() {
     if (gdriveFolderEl) s.gdrive_folder_id = gdriveFolderEl.value.trim();
     const gdriveRetentionEl = document.getElementById('setting-gdrive-retention-days');
     if (gdriveRetentionEl) s.gdrive_retention_days = parseInt(gdriveRetentionEl.value, 10) || 30;
+    // Shopping settings
+    const shoppingEnabledEl = document.getElementById('setting-shopping-enabled');
+    if (shoppingEnabledEl) s.shopping_enabled = shoppingEnabledEl.checked;
+    const shoppingModeEl = document.querySelector('input[name="shopping-mode"]:checked');
+    if (shoppingModeEl) s.shopping_mode = shoppingModeEl.value;
+    const shoppingSuggestEl = document.getElementById('setting-shopping-smart-suggestions');
+    if (shoppingSuggestEl) s.shopping_smart_suggestions = shoppingSuggestEl.checked;
+    const shoppingForecastEl = document.getElementById('setting-shopping-forecast');
+    if (shoppingForecastEl) s.shopping_forecast = shoppingForecastEl.checked;
+    const shoppingAutoAddEl = document.getElementById('setting-shopping-auto-add');
+    if (shoppingAutoAddEl) s.shopping_auto_add_threshold = parseInt(shoppingAutoAddEl.value, 10) || 0;
     // OAuth fields
     const gdriveClientIdEl = document.getElementById('setting-gdrive-client-id');
     if (gdriveClientIdEl && gdriveClientIdEl.value.trim()) s.gdrive_client_id = gdriveClientIdEl.value.trim();
@@ -3412,6 +3456,11 @@ async function saveSettings() {
             gdrive_retention_days: s.gdrive_retention_days || 30,
             ...(s.gdrive_client_id     ? { gdrive_client_id:     s.gdrive_client_id }     : {}),
             ...(s.gdrive_client_secret ? { gdrive_client_secret: s.gdrive_client_secret } : {}),
+            shopping_enabled:            s.shopping_enabled !== false,
+            shopping_mode:               s.shopping_mode || 'internal',
+            shopping_smart_suggestions:  s.shopping_smart_suggestions !== false,
+            shopping_forecast:           s.shopping_forecast !== false,
+            shopping_auto_add_threshold: s.shopping_auto_add_threshold || 0,
         }, tokenHeader);
         const statusEl = document.getElementById('settings-status');
         if (result.success) {
@@ -3471,14 +3520,15 @@ function togglePasswordVisibility(inputId) {
 
 // ===== API HELPER =====
 async function api(action, params = {}, method = 'GET', body = null, extraHeaders = {}) {
-    // In demo mode, all Bring! write operations are no-ops
+    // In demo mode, all shopping write operations are no-ops
     if (_demoMode) {
-        const BRING_WRITE_ACTIONS = ['bring_add', 'bring_remove', 'bring_migrate_names', 'bring_set_spec'];
+        const BRING_WRITE_ACTIONS = ['bring_add', 'bring_remove', 'bring_migrate_names', 'bring_set_spec',
+                                      'shopping_add', 'shopping_remove'];
         if (BRING_WRITE_ACTIONS.includes(action)) {
             return { success: true, added: 0, removed: 0, skipped: 0, _demo: true };
         }
-        // bring_list returns the in-memory demo list
-        if (action === 'bring_list') {
+        // shopping_list / bring_list return the in-memory demo list
+        if (action === 'shopping_list' || action === 'bring_list') {
             return { success: true, purchase: shoppingItems, listUUID: 'demo-list', _demo: true };
         }
     }
@@ -8246,7 +8296,7 @@ async function submitAdd(e) {
                 // try a client-side fuzzy remove using the already-loaded shoppingItems
                 const match = _findSimilarItem(currentProduct.name, shoppingItems);
                 if (match) {
-                    api('bring_remove', {}, 'POST', {
+                    api('shopping_remove', {}, 'POST', {
                         name: match.name,
                         rawName: match.rawName || '',
                         listUUID: shoppingListUUID
@@ -8869,7 +8919,7 @@ function showLowStockBringPrompt(result, afterCallback) {
                 try {
                     const payload = { items: [{ name: shoppingName, specification: spec }] };
                     if (shoppingListUUID) payload.listUUID = shoppingListUUID;
-                    const data = await api('bring_add', {}, 'POST', payload);
+                    const data = await api('shopping_add', {}, 'POST', payload);
                     if (data.success && data.added > 0) {
                         showToast('🛒 Prodotto finito → aggiunto a Bring!', 'info');
                     }
@@ -8959,7 +9009,7 @@ async function addLowStockToBring() {
         window._lowStockSpec = null;
         const payload = { items: [{ name: bringName, specification: spec }] };
         if (shoppingListUUID) payload.listUUID = shoppingListUUID;
-        const data = await api('bring_add', {}, 'POST', payload);
+        const data = await api('shopping_add', {}, 'POST', payload);
         if (data.success && data.added > 0) {
             // Pin as user-added so cleanup never auto-removes it
             const pinned = Object.assign({}, _pinnedBringCache || {});
@@ -9965,7 +10015,7 @@ function toggleShoppingTag(itemIdx, tag) {
         if (tag === 'urgente' && shoppingListUUID) {
             const isNowUrgent = existing.includes('urgente');
             const newSpec = isNowUrgent ? t('shopping.urgency_spec_critical') : '';
-            api('bring_add', {}, 'POST', {
+            api('shopping_add', {}, 'POST', {
                 items: [{ name: item.name, specification: newSpec, update_spec: true }],
                 listUUID: shoppingListUUID,
             }).catch(() => {});
@@ -9993,7 +10043,7 @@ async function confirmShoppingItemFound() {
     _spesaScanTarget = null;
     document.getElementById('shopping-scan-target-banner').style.display = 'none';
     try {
-        const r = await api('bring_remove', {}, 'POST', { name, rawName, listUUID: shoppingListUUID });
+        const r = await api('shopping_remove', {}, 'POST', { name, rawName, listUUID: shoppingListUUID });
         if (r.success) {
             const idx = shoppingItems.findIndex(i => i.name.toLowerCase() === name.toLowerCase());
             if (idx >= 0) shoppingItems.splice(idx, 1);
@@ -10113,7 +10163,7 @@ async function autoAddCriticalItems() {
     if (toAdd.length === 0) return;
     const itemsToAdd = toAdd.map(i => ({ name: i.name, specification: _urgencyToSpec(i.urgency, i.brand) }));
     try {
-        const result = await api('bring_add', {}, 'POST', { items: itemsToAdd, listUUID: shoppingListUUID });
+        const result = await api('shopping_add', {}, 'POST', { items: itemsToAdd, listUUID: shoppingListUUID });
         if (result.success && result.added > 0) {
             // Track these as auto-added so cleanupObsoleteBringItems can safely remove them later
             _markAutoAddedBring(itemsToAdd.map(i => i.name));
@@ -10508,7 +10558,7 @@ async function cleanupObsoleteBringItems() {
     const removedNames = [];
     for (const item of toRemove) {
         try {
-            const r = await api('bring_remove', {}, 'POST', {
+            const r = await api('shopping_remove', {}, 'POST', {
                 name: item.name,
                 rawName: item.rawName || '',
                 listUUID: shoppingListUUID
@@ -10934,7 +10984,7 @@ async function addSmartToBring() {
 
     showLoading(true);
     try {
-        const result = await api('bring_add', {}, 'POST', {
+        const result = await api('shopping_add', {}, 'POST', {
             items: itemsToAdd,
             listUUID: shoppingListUUID,
         });
@@ -10968,7 +11018,7 @@ async function loadShoppingCount() {
     const el = document.getElementById('stat-spesa');
     if (el) el.classList.add('stat-loading');
     try {
-        const data = await api('bring_list');
+        const data = await api('shopping_list');
         if (el) {
             if (data.success && data.purchase) {
                 el.textContent = data.purchase.length;
@@ -11097,7 +11147,7 @@ async function autoSyncUrgencySpecs() {
     }
     if (toUpdate.length === 0) return;
     try {
-        await api('bring_add', {}, 'POST', { items: toUpdate, listUUID: shoppingListUUID });
+        await api('shopping_add', {}, 'POST', { items: toUpdate, listUUID: shoppingListUUID });
     } catch (e) { /* ignore - sync is best-effort */ }
 }
 
@@ -11114,7 +11164,7 @@ async function loadShoppingList() {
     loadShoppingList._bgCall = false;
     if (isBackgroundCall) {
         try {
-            const data = await api('bring_list');
+            const data = await api('shopping_list');
             if (data.success) {
                 const newItems = data.purchase || [];
                 const newNames = new Set(newItems.map(i => i.name.toLowerCase()));
@@ -11164,7 +11214,7 @@ async function loadShoppingList() {
     }
     
     try {
-        const data = await api('bring_list');
+        const data = await api('shopping_list');
         statusEl.style.display = 'none';
         
         if (!data.success) {
@@ -11401,7 +11451,7 @@ async function removeBringItem(idx) {
     const item = shoppingItems[idx];
     if (!item) return;
     try {
-        const data = await api('bring_remove', {}, 'POST', { 
+        const data = await api('shopping_remove', {}, 'POST', { 
             name: item.name, 
             rawName: item.rawName || '', 
             listUUID: shoppingListUUID 
@@ -11428,7 +11478,7 @@ async function generateSuggestions() {
     suggestionsEl.style.display = 'none';
     
     try {
-        const data = await api('bring_suggest', {}, 'POST', {});
+        const data = await api('shopping_suggest', {}, 'POST', {});
         
         btn.disabled = false;
         btn.innerHTML = `🤖 ${t('shopping.suggest_btn').replace('🤖 ', '')}`;
@@ -11578,7 +11628,7 @@ async function addSelectedSuggestions() {
             return { name: s.name };
         });
         
-        const data = await api('bring_add', {}, 'POST', { items, listUUID: shoppingListUUID });
+        const data = await api('shopping_add', {}, 'POST', { items, listUUID: shoppingListUUID });
         
         if (data.success) {
             let msg = data.added === 1 ? t('shopping.bring_added_one') : t('shopping.bring_added_many').replace('{n}', data.added);
@@ -14635,7 +14685,7 @@ async function loadScreensaverData() {
         const [statsRes, invRes, bringRes] = await Promise.all([
             api('stats'),
             api('inventory_list'),
-            api('bring_list').catch(() => null)
+            api('shopping_list').catch(() => null)
         ]);
         _screensaverData = {
             stats: statsRes,
@@ -15816,7 +15866,7 @@ async function _backgroundBringSync() {
 
     try {
         const [bringData, smartData] = await Promise.all([
-            api('bring_list').catch(() => null),
+            api('shopping_list').catch(() => null),
             api('smart_shopping').catch(() => null),
         ]);
 
@@ -15893,12 +15943,12 @@ async function _backgroundBringSync() {
 
         const allChanges = [...toAdd, ...toUpdate];
         if (allChanges.length > 0) {
-            await api('bring_add', {}, 'POST', { items: allChanges, listUUID });
+            await api('shopping_add', {}, 'POST', { items: allChanges, listUUID });
             logOperation('bg_bring_sync', { added: toAdd.map(i=>i.name), updated: toUpdate.map(i=>i.name) });
         }
 
         if (toRemove.length > 0) {
-            await api('bring_remove', {}, 'POST', { items: toRemove.map(n => ({ name: n })), listUUID });
+            await api('shopping_remove', {}, 'POST', { items: toRemove.map(n => ({ name: n })), listUUID });
             logOperation('bg_bring_remove', { removed: toRemove });
         }
 

@@ -849,7 +849,22 @@
       "currency_title": "Currency",
       "currency_hint": "The currency used for all costs and prices in the app."
     },
-    "tab_general": "General"
+    "tab_general": "General",
+    "shopping": {
+      "tab": "Shopping list",
+      "title": "Shopping list",
+      "hint": "Configure the built-in shopping list or connect Bring!.",
+      "enable_label": "Enable shopping list",
+      "mode_label": "Provider",
+      "mode_internal": "Built-in (no Bring!)",
+      "mode_bring": "Bring! (external app)",
+      "bring_section_title": "Bring! configuration",
+      "ai_section_title": "AI assistance",
+      "smart_suggestions_label": "AI suggestions",
+      "forecast_label": "Forecast low-stock products",
+      "auto_add_label": "Auto-add to list when",
+      "auto_add_suffix": "remaining in stock (0 = only when empty)"
+    }
   },
   "expiry": {
     "today": "TODAY",

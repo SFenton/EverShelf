@@ -48,6 +48,13 @@ function getDB(): PDO {
         ? new LoggingPDO('sqlite:' . DB_PATH)
         : new PDO('sqlite:' . DB_PATH);
     $db->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+    // Set a busy timeout to prevent "database is locked" errors under high concurrency.
+    // This gives SQLite up to 5 seconds to acquire a lock before throwing an exception.
+    $db->setAttribute(PDO::ATTR_TIMEOUT, 5); // PDO::ATTR_TIMEOUT is in seconds for MySQL, but not directly for SQLite.
+                                             // For SQLite, we use PRAGMA busy_timeout.
+    $db->exec('PRAGMA journal_mode = WAL;');
+    $db->exec('PRAGMA busy_timeout = 5000;'); // 5000 milliseconds = 5 seconds
+
     $db->setAttribute(PDO::ATTR_DEFAULT_FETCH_MODE, PDO::FETCH_ASSOC);
     $db->exec("PRAGMA journal_mode=WAL");
     $db->exec("PRAGMA foreign_keys=ON");
@@ -244,6 +251,22 @@ function migrateDB(PDO $db): void {
     // Ensure composite indexes exist (added in v1.7.5 for performance)
     $db->exec("CREATE INDEX IF NOT EXISTS idx_transactions_type_date ON transactions(type, created_at)");
     $db->exec("CREATE INDEX IF NOT EXISTS idx_transactions_pid_type_undone ON transactions(product_id, type, undone)");
+
+    // Internal shopping list table (v1.8.0) — used when SHOPPING_MODE=internal
+    $shopTables = $db->query("SELECT name FROM sqlite_master WHERE type='table' AND name='shopping_list'")->fetchAll();
+    if (empty($shopTables)) {
+        $db->exec("
+            CREATE TABLE shopping_list (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                name          TEXT NOT NULL,
+                raw_name      TEXT NOT NULL DEFAULT '',
+                specification TEXT NOT NULL DEFAULT '',
+                added_at      INTEGER DEFAULT (strftime('%s','now')),
+                sort_order    INTEGER DEFAULT 0
+            )
+        ");
+        $db->exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_shopping_list_name ON shopping_list(lower(name))");
+    }
 }
 
 /**
