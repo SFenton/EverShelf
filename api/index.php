@@ -7630,48 +7630,25 @@ function smartShopping(PDO $db): void {
             }
             if ($coveredByEquivalent) continue;
 
-            if ($isFrequent && $isRecent && $buyCount >= 2) {
-                // Frequently used, recently active, AND bought multiple times → critical
-                $urgency = 'critical';
-                $reasons[] = 'Esaurito';
-                $score += 100;
-                if ($useCount >= 5) { $score += 20; $reasons[] = "Uso frequente ({$useCount}x)"; }
-            } elseif ($isFrequent && $isRecent && $buyCount == 1 && $useCount >= 3) {
-                // Bought once but used ≥3 times → proven consumption pattern → high
-                $urgency = 'high';
-                $reasons[] = 'Esaurito';
-                $score += 75;
-                if ($useCount >= 5) { $score += 10; $reasons[] = "Uso frequente ({$useCount}x)"; }
-            } elseif ($isFrequent && $isRecent && $buyCount == 1) {
-                // Frequent use, bought once, <3 uses — not yet proven → medium
-                $urgency = 'medium';
-                $reasons[] = 'Esaurito';
-                $score += 45;
-            } elseif ($isRegular && $isRecent && ($useCount >= 3 || $buyCount >= 2)) {
-                // Regularly used, recently active → high
-                $urgency = 'high';
-                $reasons[] = 'Esaurito';
-                $score += 70;
-            } elseif ($isRecent && $buyCount >= 2) {
-                // At least bought a couple times recently → low
-                $urgency = 'low';
-                $reasons[] = 'Esaurito';
-                $score += 30;
+            // For DEPLETED products: recency is misleading — the product may not have been
+            // "used recently" precisely because it ran out. Base urgency on usage rate only.
+            $reasons[] = 'Esaurito';
+            if ($isFrequent && $useCount >= 5) {
+                $urgency = 'critical'; $score += 120;
+                $reasons[] = "Uso frequente ({$useCount}x)";
+            } elseif ($isFrequent && $useCount >= 2) {
+                $urgency = 'critical'; $score += 100;
+            } elseif ($isFrequent) {
+                // usesPerMonth >= 1.5 but few recorded uses (new product) → high
+                $urgency = 'high'; $score += 75;
+            } elseif ($isRegular && ($useCount >= 3 || $buyCount >= 2)) {
+                $urgency = 'high'; $score += 65;
+            } elseif ($isRegular) {
+                $urgency = 'medium'; $score += 45;
+            } elseif ($useCount >= 2 || $buyCount >= 2) {
+                $urgency = 'low'; $score += 30;
             } else {
-                // Product is depleted. Use internal history variables to set urgency:
-                // bought ≥2 times → medium (proven restock item), once → low (might want it),
-                // never bought (manually added) → low.
-                $reasons[] = 'Esaurito';
-                if ($buyCount >= 2) {
-                    $urgency = 'medium';
-                    $score += 45;
-                } elseif ($buyCount >= 1 || $useCount >= 2) {
-                    $urgency = 'low';
-                    $score += 25;
-                } else {
-                    $urgency = 'low';
-                    $score += 10;
-                }
+                $urgency = 'low'; $score += 10;
             }
         }
 
