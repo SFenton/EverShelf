@@ -2395,7 +2395,7 @@ function listTransactions(PDO $db): void {
     $productId = $_GET['product_id'] ?? '';
     
     $query = "
-        SELECT t.*, p.name, p.brand, p.unit
+        SELECT t.*, p.name, p.brand, p.unit, p.default_quantity, p.package_unit
         FROM transactions t
         JOIN products p ON t.product_id = p.id
     ";
@@ -7658,8 +7658,11 @@ function smartShopping(PDO $db): void {
                 $reasons[] = 'Esaurito';
                 $score += 30;
             } else {
-                // Rarely used or not used recently — skip
-                continue;
+                // Product is depleted. Even without a proven usage pattern, always
+                // show at minimum 'low' so the user can restock it.
+                $urgency = 'low';
+                $reasons[] = 'Esaurito';
+                $score += 15;
             }
         }
 

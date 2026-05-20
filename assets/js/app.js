@@ -8571,9 +8571,27 @@ async function loadUseInventoryInfo() {
             // Show unit switch
             unitSwitch.style.display = 'flex';
             document.getElementById('use-unit-sub').textContent = subLabel;
-            
-            // Default to sub-unit mode
-            switchUseUnit('sub');
+
+            // Default to conf mode — users think in packages; scale auto-switches to sub
+            switchUseUnit('conf');
+
+            // Fraction shortcut buttons for conf mode (½, 1, 2 packages)
+            const existingConfFrac = document.getElementById('conf-fraction-btns');
+            if (existingConfFrac) existingConfFrac.remove();
+            const confFracDiv = document.createElement('div');
+            confFracDiv.id = 'conf-fraction-btns';
+            confFracDiv.className = 'pz-fraction-btns';
+            const maxConf = Math.min(4, Math.ceil(_useConfMode.totalConf));
+            const confFracs = [0.25, 0.5, 1];
+            if (maxConf >= 2) confFracs.push(2);
+            confFracDiv.innerHTML = `<div class="fraction-btn-row">${
+                confFracs.filter(f => f <= _useConfMode.totalConf + 0.01).map(f => {
+                    const label = f === 0.25 ? '¼' : f === 0.5 ? '½' : f;
+                    return `<button type="button" class="frac-btn${f === 1 ? ' active' : ''}" data-frac="${f}" onclick="setConfFraction(${f})">${label} ${t('units.conf') || 'conf'}</button>`;
+                }).join('')
+            }</div>`;
+            document.querySelector('#page-use .use-partial').appendChild(confFracDiv);
+
             // Trigger a live-box refresh with the latest reading if on scale
             if (_scaleLatestWeight) _scaleAutoFillUse(_scaleLatestWeight);
         } else {
@@ -8625,6 +8643,10 @@ function switchUseUnit(mode) {
     const qtyInput = document.getElementById('use-quantity');
     const hint = document.getElementById('use-partial-hint');
 
+    // Show/hide fraction buttons depending on mode
+    const confFracBtns = document.getElementById('conf-fraction-btns');
+    const pzFracBtns   = document.getElementById('pz-fraction-btns');
+
     if (mode === 'sub') {
         subBtn.classList.add('active');
         confBtn.classList.remove('active');
@@ -8634,15 +8656,26 @@ function switchUseUnit(mode) {
         qtyInput.step = 'any';
         qtyInput.min = 1;
         hint.textContent = t('recipes.quantity_in_total', { unit: _useConfMode.subLabel, total: `${Math.round(_useConfMode.totalSub)}${_useConfMode.subLabel}` });
+        if (confFracBtns) confFracBtns.style.display = 'none';
     } else {
         confBtn.classList.add('active');
         subBtn.classList.remove('active');
         _useConfMode._activeUnit = 'conf';
-        qtyInput.value = 1;
+        qtyInput.value = Math.min(1, _useConfMode.totalConf); // start at 1 or max if < 1
         qtyInput.step = 'any';
-        qtyInput.min = 0.1;
+        qtyInput.min = 0.25;
         hint.textContent = t('recipes.packs_of_have', { size: `${_useConfMode.packageSize}${_useConfMode.subLabel}`, count: _useConfMode.totalConf.toFixed(1) });
+        if (confFracBtns) confFracBtns.style.display = '';
     }
+}
+
+function setConfFraction(f) {
+    const input = document.getElementById('use-quantity');
+    if (!input) return;
+    input.value = Math.min(f, _useConfMode?.totalConf ?? f);
+    document.querySelectorAll('#conf-fraction-btns .frac-btn').forEach(b =>
+        b.classList.toggle('active', parseFloat(b.dataset.frac) === f)
+    );
 }
 
 function getSubUnitStep(pkgUnit) {
@@ -11927,7 +11960,10 @@ async function loadLog(more = false) {
                 html += `<span class="log-icon">${icon}</span>`;
                 html += `<div class="log-info">`;
                 html += `<div class="log-product"><strong>${escapeHtml(tx.name)}</strong>${brand}${undone ? ` <span class="log-undone-badge">${t('log.undone_badge')}</span>` : ''}</div>`;
-                html += `<div class="log-detail">${typeLabel} ${tx.type !== 'bring' ? (tx.quantity + ' ' + (tx.unit || '')) + ' · ' : ''}${locStr}${notes} · ${timeStr}</div>`;
+                const txQtyStr = tx.type !== 'bring'
+                    ? formatQuantity(parseFloat(tx.quantity), tx.unit, tx.default_quantity, tx.package_unit) + ' · '
+                    : '';
+                html += `<div class="log-detail">${typeLabel} ${txQtyStr}${locStr}${notes} · ${timeStr}</div>`;
                 html += recipeNote;
                 html += `</div>`;
                 if (canUndo) {
