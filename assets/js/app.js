@@ -3123,16 +3123,31 @@ https://github.com/dadaloop82/EverShelf/releases/download/kiosk-latest/evershelf
 function _injectKioskOverlay() {
     if (typeof _kioskBridge === 'undefined') return;
 
-    // Always mark header as kiosk-mode (idempotent) — must happen even if buttons
-    // were already injected by the native onPageFinished Kotlin callback.
+    // Always mark header as kiosk-mode (idempotent).
     const appHeader = document.querySelector('.app-header');
     if (appHeader) appHeader.classList.add('kiosk-mode');
 
+    // Permanently hide the native Android settings button.
+    // Kiosk configuration is accessible ONLY through the web settings page (⚙️ below).
+    try { _kioskBridge.setNativeSettingsVisible(false); } catch (_) {}
+
     const btnStyle = 'background:rgba(255,255,255,0.2);border:none;color:#fff;width:34px;height:34px;border-radius:50%;font-size:15px;cursor:pointer;display:flex;align-items:center;justify-content:center;-webkit-tap-highlight-color:transparent;touch-action:manipulation;';
 
-    // If the Kotlin onPageFinished already injected #_kiosk_overlay (with only ✕ and ↻),
-    // nothing more to do — the native Android btnSettings (top-right) opens SettingsActivity.
-    if (document.getElementById('_kiosk_overlay')) return;
+    // If the Kotlin onPageFinished already injected #_kiosk_overlay (with ✕ and ↻),
+    // just add the ⚙️ button if missing (do not duplicate the other buttons).
+    const existing = document.getElementById('_kiosk_overlay');
+    if (existing) {
+        if (!document.getElementById('_kiosk_settings_btn')) {
+            const sBtn = document.createElement('button');
+            sBtn.id = '_kiosk_settings_btn';
+            sBtn.textContent = '⚙️';
+            sBtn.title = t('settings.title') || 'Impostazioni';
+            sBtn.style.cssText = btnStyle;
+            sBtn.addEventListener('click', (e) => { e.stopPropagation(); showPage('settings'); });
+            existing.appendChild(sBtn);
+        }
+        return;
+    }
 
     const headerLeft = document.getElementById('header-left');
     if (!headerLeft) return;
@@ -3163,12 +3178,17 @@ function _injectKioskOverlay() {
         _kioskBridge.hardReload();
     });
 
-    // NOTE: No ⚙️ button here — the native Android settings button (top-right, injected by
-    // Kotlin) opens SettingsActivity (server URL, BLE scale, screensaver). Do NOT call
-    // setNativeSettingsVisible(false) — that would hide the only way to reconfigure the kiosk.
+    // Settings button — only web settings, native button is permanently hidden
+    const settingsBtn = document.createElement('button');
+    settingsBtn.id = '_kiosk_settings_btn';
+    settingsBtn.textContent = '⚙️';
+    settingsBtn.title = t('settings.title') || 'Impostazioni';
+    settingsBtn.style.cssText = btnStyle;
+    settingsBtn.addEventListener('click', (e) => { e.stopPropagation(); showPage('settings'); });
 
     wrap.appendChild(exitBtn);
     wrap.appendChild(refBtn);
+    wrap.appendChild(settingsBtn);
     headerLeft.appendChild(wrap);
 }
 
@@ -5792,8 +5812,6 @@ function showItemDetail(inventoryId, productId) {
 function closeModal() {
     document.getElementById('modal-overlay').style.display = 'none';
     clearMoveModalTimer();
-    // Restore the native kiosk settings button when the modal closes.
-    try { if (typeof _kioskBridge !== 'undefined') _kioskBridge.setNativeSettingsVisible(true); } catch (_) {}
     _cancelScaleAutoConfirm(false);
     _scaleRecipeAutoFillPaused = false;
     _scaleUserDismissed = false;
@@ -9165,8 +9183,6 @@ function showMoveAfterUseModal(product, fromLoc, remaining, openedId, openedVacu
         </div>
     `;
     document.getElementById('modal-overlay').style.display = 'flex';
-    // Hide the native kiosk settings button while the modal is open (prevents touch bleed-through)
-    try { if (typeof _kioskBridge !== 'undefined') _kioskBridge.setNativeSettingsVisible(false); } catch (_) {}
     startMoveModalCountdown('btn-move-stay', () => { _saveVacuumAndStay(openedId || 0); });
 }
 
@@ -12833,7 +12849,6 @@ function showRecipeMoveModal(productId, fromLoc, remaining, openedId, wasVacuum)
         </div>
     `;
     document.getElementById('modal-overlay').style.display = 'flex';
-    try { if (typeof _kioskBridge !== 'undefined') _kioskBridge.setNativeSettingsVisible(false); } catch (_) {}
     startMoveModalCountdown('btn-move-stay', () => { _recipeMoveCancelStay(productId, fromLoc, openedId || 0); });
 }
 
