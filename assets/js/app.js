@@ -2073,7 +2073,9 @@ function getSettings() {
     if (!_settingsCache) {
         // Settings come from server — do NOT read from localStorage (per-device storage).
         // _settingsCache is populated by _applySyncedSettings() on app init.
+        // Exception: dark_mode is intentionally device-local (stored in localStorage).
         _settingsCache = {};
+        try { const dm = localStorage.getItem('evershelf_dark_mode'); if (dm) _settingsCache.dark_mode = dm; } catch(_) {}
     }
     const s = _settingsCache;
     // Build recipe_prefs array from individual booleans
