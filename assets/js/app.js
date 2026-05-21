@@ -455,7 +455,11 @@ function _scaleAutoFillUse(msg) {
 
     // Determine target unit
     let unit;
-    if (_useConfMode && _useConfMode._activeUnit === 'sub') {
+    if (_useConfMode) {
+        // Scale always reads weight (g/ml) — auto-switch to sub-unit mode if still in conf mode
+        if (_useConfMode._activeUnit !== 'sub') {
+            switchUseUnit('sub');
+        }
         unit = (_useConfMode.packageUnit || '').toLowerCase();
     } else {
         unit = _useNormalUnit;
@@ -944,7 +948,9 @@ function updateScaleReadButtons() {
     }
     const btnUse = document.getElementById('btn-scale-use');
     if (btnUse) {
-        btnUse.style.display = (ready && (_useNormalUnit === 'g' || _useNormalUnit === 'ml')) ? '' : 'none';
+        const canUseByWeight = _useNormalUnit === 'g' || _useNormalUnit === 'ml' ||
+                               (_useConfMode && (_useConfMode.packageUnit === 'g' || _useConfMode.packageUnit === 'ml'));
+        btnUse.style.display = (ready && canUseByWeight) ? '' : 'none';
     }
     // Live box: visible when scale enabled + connected + on use page + compatible unit
     const liveBox = document.getElementById('scale-live-box');
@@ -1050,8 +1056,12 @@ if (!_SUPPORTED_LANGS[_currentLang]) _currentLang = 'en';
 // Apply theme IMMEDIATELY to prevent flash of unstyled content
 (function _earlyTheme() {
     try {
-        const s = JSON.parse(localStorage.getItem('evershelf_settings') || '{}');
-        const mode = s.dark_mode || 'auto';
+        // Use dedicated key (server-synced); fall back to old full-settings object for back-compat
+        let mode = localStorage.getItem('evershelf_dark_mode');
+        if (!mode) {
+            const s = JSON.parse(localStorage.getItem('evershelf_settings') || '{}');
+            mode = s.dark_mode || 'auto';
+        }
         const h = new Date().getHours();
         const dark = mode === 'on' || (mode === 'auto' && (h >= 20 || h < 7));
         document.documentElement.setAttribute('data-theme', dark ? 'dark' : 'light');
@@ -1887,7 +1897,8 @@ async function flipCamera() {
     const current = s.camera_facing || 'environment';
     const next = current === 'environment' ? 'user' : 'environment';
     s.camera_facing = next;
-    try { localStorage.setItem('evershelf_settings', JSON.stringify(s)); } catch(_) {}
+    _settingsCache = s;
+    _saveSettingToServer({ camera_facing: next });
     showToast(next === 'user' ? t('scan.flip_front') : t('scan.flip_back'), 'info');
     stopScanner();
     setTimeout(() => initScanner(), 150);
@@ -2060,9 +2071,9 @@ let _settingsDirty = false;
 
 function getSettings() {
     if (!_settingsCache) {
-        try {
-            _settingsCache = JSON.parse(localStorage.getItem('evershelf_settings') || '{}');
-        } catch(e) { _settingsCache = {}; }
+        // Settings come from server — do NOT read from localStorage (per-device storage).
+        // _settingsCache is populated by _applySyncedSettings() on app init.
+        _settingsCache = {};
     }
     const s = _settingsCache;
     // Build recipe_prefs array from individual booleans
@@ -2079,10 +2090,17 @@ function getSettings() {
 
 function saveSettingsToStorage(settings) {
     _settingsCache = settings;
-    localStorage.setItem('evershelf_settings', JSON.stringify(settings));
-    // Persist to DB
+    // Cache dark_mode in localStorage ONLY as a hint for the pre-render _earlyTheme() IIFE
+    // (prevents flash before server fetch). Authoritative value is in server .env.
+    try { localStorage.setItem('evershelf_dark_mode', settings.dark_mode || 'auto'); } catch(_) {}
+    // Persist user-prefs subset to DB
     _settingsDirty = true;
     _debouncedSyncSettings();
+}
+
+/** Save one or more settings directly to server .env (partial update). */
+async function _saveSettingToServer(data) {
+    try { await api('save_settings', {}, 'POST', data); } catch(e) { /* offline */ }
 }
 
 const _debouncedSyncSettings = debounce(function() {
@@ -2125,13 +2143,12 @@ async function syncSettingsFromDB() {
                 const s = getSettings();
                 s.meal_plan = srv.meal_plan;
                 _settingsCache = s;
-                localStorage.setItem('evershelf_settings', JSON.stringify(s));
                 if (document.getElementById('meal-plan-grid')) renderMealPlanEditor();
             }
             // tts_voice preference (best-effort cross-device — falls back if voice unavailable)
             if (srv.tts_voice) {
                 const s = getSettings();
-                if (!s.tts_voice) { s.tts_voice = srv.tts_voice; _settingsCache = s; localStorage.setItem('evershelf_settings', JSON.stringify(s)); }
+                if (!s.tts_voice) { s.tts_voice = srv.tts_voice; _settingsCache = s; }
             }
 
             // ── User data previously stored in localStorage, now server-synced ──
@@ -2174,7 +2191,7 @@ async function syncSettingsFromDB() {
 }
 
 /**
- * Apply server settings object into localStorage cache.
+ * Apply server settings object into in-memory cache (_settingsCache).
  * Called both from _initApp (to reuse an already-fetched response) and syncSettingsFromDB.
  */
 function _applySyncedSettings(serverSettings) {
@@ -2192,7 +2209,10 @@ function _applySyncedSettings(serverSettings) {
         'tts_engine','tts_rate','tts_pitch','tts_auth_header_name','tts_auth_header_value','tts_extra_fields',
         'screensaver_enabled','screensaver_timeout',
         'price_enabled','price_country','price_currency','price_update_months',
-        'zerowaste_tips_enabled'];
+        'zerowaste_tips_enabled',
+        'shopping_enabled','shopping_mode','shopping_smart_suggestions',
+        'shopping_forecast','shopping_auto_add_threshold',
+        'dark_mode'];
     let changed = false;
     for (const key of serverKeys) {
         if (serverSettings[key] !== undefined && serverSettings[key] !== null && serverSettings[key] !== '') {
@@ -2202,19 +2222,262 @@ function _applySyncedSettings(serverSettings) {
     }
     if (changed) {
         _settingsCache = s;
-        localStorage.setItem('evershelf_settings', JSON.stringify(s));
+        // Update localStorage hint for _earlyTheme() IIFE on next load
+        try { localStorage.setItem('evershelf_dark_mode', s.dark_mode || 'auto'); } catch(_) {}
     }
 }
 
-let _infoTabTimer = null;
+let _infoTabTimer  = null;
+let _backupTabTimer = null;
 
 /**
  * Load the Info tab: Gemini token usage + cost, log size, DB size, log level.
  * Called on tab click; auto-refreshes every 30s while the tab is open.
  */
+// ── Backup Tab ────────────────────────────────────────────────────────────────
+
+async function _loadBackupTab() {
+    if (_backupTabTimer) { clearInterval(_backupTabTimer); _backupTabTimer = null; }
+    await _renderBackupTab();
+    // Pull server settings to populate inputs if not yet loaded
+    try {
+        const ss = await api('get_settings');
+        if (ss) {
+            const bkRetEl = document.getElementById('setting-backup-retention-days');
+            if (bkRetEl) { bkRetEl.value = ss.backup_retention_days || 3; bkRetEl.dataset.loaded = '1'; }
+            const gdriveEnEl = document.getElementById('setting-gdrive-enabled');
+            if (gdriveEnEl) gdriveEnEl.checked = !!ss.gdrive_enabled;
+            const gdriveFolderEl = document.getElementById('setting-gdrive-folder-id');
+            if (gdriveFolderEl) { gdriveFolderEl.value = ss.gdrive_folder_id || ''; gdriveFolderEl.dataset.loaded = '1'; }
+            const gdriveRetEl = document.getElementById('setting-gdrive-retention-days');
+            if (gdriveRetEl) { gdriveRetEl.value = ss.gdrive_retention_days || 30; gdriveRetEl.dataset.loaded = '1'; }
+            // Pre-fill client_id (never show secret back)
+            if (ss.gdrive_client_id_set) {
+                const ciEl = document.getElementById('setting-gdrive-client-id');
+                if (ciEl && !ciEl.value) ciEl.placeholder = '● ● ● already configured ● ● ●';
+            }
+            // OAuth token status
+            const oauthStatusEl = document.getElementById('gdrive-oauth-token-status');
+            if (oauthStatusEl) {
+                oauthStatusEl.textContent = ss.gdrive_refresh_token_set
+                    ? ('✅ ' + (t('settings.backup.gdrive_oauth_authorized') || 'Authorized'))
+                    : ('⚠️ ' + (t('settings.backup.gdrive_oauth_not_authorized') || 'Not authorized yet'));
+                oauthStatusEl.style.color = ss.gdrive_refresh_token_set ? '#15803d' : '#b45309';
+            }
+            // Redirect URI for OAuth setup — always http://localhost for self-hosted compat
+            // (can be overridden server-side via GDRIVE_REDIRECT_URI env var)
+            const rdEl = document.getElementById('gdrive-redirect-uri-display');
+            if (rdEl) rdEl.textContent = 'http://localhost';
+        }
+    } catch(e) { /* non-critical */ }
+}
+
+async function _renderBackupTab() {
+    const lastInfoEl = document.getElementById('backup-last-info');
+    const listEl     = document.getElementById('backup-list-container');
+    try {
+        const data = await api('backup_list');
+        if (!data || !data.success) {
+            if (lastInfoEl) lastInfoEl.innerHTML = '<span style="color:#ef4444">Error loading backup info</span>';
+            return;
+        }
+        // Last backup info
+        if (lastInfoEl) {
+            if (data.last_backup_ts) {
+                const secsAgo = Math.floor(Date.now() / 1000) - data.last_backup_ts;
+                let ago;
+                if (secsAgo < 120)           ago = secsAgo < 5 ? t('time.just_now') || 'adesso' : `${secsAgo}s fa`;
+                else if (secsAgo < 3600)     ago = `${Math.floor(secsAgo / 60)} min fa`;
+                else if (secsAgo < 86400)    ago = `${Math.floor(secsAgo / 3600)}h fa`;
+                else                         ago = `${Math.floor(secsAgo / 86400)}gg fa`;
+                const name = data.last_backup_file || '';
+                lastInfoEl.innerHTML = `<strong>${t('settings.backup.last_backup') || 'Ultimo backup'}</strong>: ${ago} <span style="color:#94a3b8;font-size:0.78rem">(${name})</span>`;
+            } else {
+                lastInfoEl.innerHTML = `<em style="color:#f59e0b">${t('settings.backup.no_backup_yet') || 'Nessun backup ancora'}</em>`;
+            }
+        }
+        // Backup list
+        if (listEl) {
+            if (!data.backups || data.backups.length === 0) {
+                listEl.innerHTML = `<p class="settings-hint" style="text-align:center;padding:12px">${t('settings.backup.list_empty') || 'Nessun backup disponibile'}</p>`;
+            } else {
+                const rows = data.backups.map(b => {
+                    const d = new Date(b.created_at);
+                    const dateStr = d.toLocaleString();
+                    return `<div style="display:flex;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid var(--border-color,#e2e8f0);font-size:0.83rem">
+                        <span style="flex:1;color:var(--text-primary)">${b.filename}</span>
+                        <span style="color:#94a3b8;white-space:nowrap">${b.size_kb} KB · ${dateStr}</span>
+                        <button class="btn btn-small btn-secondary" onclick="_backupRestore('${b.filename}')" style="flex-shrink:0" title="${t('settings.backup.restore_btn') || 'Ripristina'}">${t('settings.backup.restore_btn') || '↩ Ripristina'}</button>
+                        <button class="btn btn-small btn-danger" onclick="_backupDelete('${b.filename}')" style="flex-shrink:0" title="${t('settings.backup.delete_btn') || 'Elimina'}">🗑</button>
+                    </div>`;
+                }).join('');
+                listEl.innerHTML = `<p style="font-size:0.78rem;color:#94a3b8;margin-bottom:6px">${t('settings.backup.retention_info') || ''} ${data.retention_days} ${t('settings.backup.retention_days') || 'gg'}</p>${rows}`;
+            }
+        }
+    } catch(e) {
+        if (lastInfoEl) lastInfoEl.innerHTML = '<span style="color:#ef4444">Error: ' + e.message + '</span>';
+    }
+}
+
+async function _backupNow() {
+    const btn = document.getElementById('btn-backup-now');
+    const statusEl = document.getElementById('backup-status');
+    if (btn) btn.disabled = true;
+    if (statusEl) { statusEl.className = 'settings-status'; statusEl.textContent = t('settings.backup.backing_up') || '⏳ Backup in corso…'; statusEl.style.display = 'block'; }
+    try {
+        const r = await api('backup_now');
+        if (r && r.success) {
+            if (statusEl) { statusEl.className = 'settings-status success'; statusEl.textContent = `✅ ${r.filename} (${r.size_kb} KB)`; }
+            await _renderBackupTab();
+        } else {
+            if (statusEl) { statusEl.className = 'settings-status error'; statusEl.textContent = `❌ ${r?.error || 'Error'}`; }
+        }
+    } catch(e) {
+        if (statusEl) { statusEl.className = 'settings-status error'; statusEl.textContent = `❌ ${e.message}`; }
+    } finally {
+        if (btn) btn.disabled = false;
+        if (statusEl) setTimeout(() => { statusEl.style.display = 'none'; }, 5000);
+    }
+}
+
+async function _backupDelete(filename) {
+    if (!confirm(`${t('settings.backup.delete_confirm') || 'Eliminare il backup'} ${filename}?`)) return;
+    const r = await api('backup_delete', {}, 'POST', { filename });
+    if (r && r.success) await _renderBackupTab();
+    else alert(`❌ ${r?.error || 'Error deleting backup'}`);
+}
+
+async function _backupRestore(filename) {
+    if (!confirm(`${t('settings.backup.restore_confirm') || 'Ripristinare il backup'} "${filename}"?\n\n⚠️ ATTENZIONE: tutti i dati attuali verranno SOSTITUITI. Questa azione è irreversibile.`)) return;
+    const statusEl = document.getElementById('backup-status');
+    if (statusEl) { statusEl.className = 'settings-status'; statusEl.textContent = '⏳ Ripristino in corso…'; statusEl.style.display = 'block'; }
+    try {
+        const r = await api('backup_restore', {}, 'POST', { filename });
+        if (r && r.success) {
+            alert(`✅ ${r.message || 'Ripristino completato!'}\n\nLa pagina verrà ricaricata.`);
+            location.reload();
+        } else {
+            if (statusEl) { statusEl.className = 'settings-status error'; statusEl.textContent = `❌ ${r?.error || 'Error'}`; }
+        }
+    } catch(e) {
+        if (statusEl) { statusEl.className = 'settings-status error'; statusEl.textContent = `❌ ${e.message}`; }
+    }
+}
+
+async function _gdriveTest() {
+    const btn = document.getElementById('btn-gdrive-test');
+    const statusEl = document.getElementById('gdrive-test-status');
+    if (btn) btn.disabled = true;
+    if (statusEl) { statusEl.className = 'settings-status'; statusEl.textContent = '⏳ Test connessione…'; statusEl.style.display = 'block'; }
+    try {
+        // Save current settings first so the server has the latest JSON/folder
+        await saveSettings();
+        const r = await api('gdrive_test');
+        if (r && r.success) {
+            if (statusEl) { statusEl.className = 'settings-status success'; statusEl.textContent = `✅ ${t('settings.backup.gdrive_ok') || 'Connessione riuscita!'}`; }
+        } else {
+            if (statusEl) { statusEl.className = 'settings-status error'; statusEl.textContent = `❌ ${r?.error || 'Error'}`; }
+        }
+    } catch(e) {
+        if (statusEl) { statusEl.className = 'settings-status error'; statusEl.textContent = `❌ ${e.message}`; }
+    } finally {
+        if (btn) btn.disabled = false;
+        if (statusEl) setTimeout(() => { statusEl.style.display = 'none'; }, 6000);
+    }
+}
+
+async function _gdrivePushNow() {
+    const btn = document.getElementById('btn-gdrive-push');
+    const statusEl = document.getElementById('gdrive-test-status');
+    if (btn) btn.disabled = true;
+    if (statusEl) { statusEl.className = 'settings-status'; statusEl.textContent = t('settings.backup.gdrive_pushing') || '⏳ Upload in corso…'; statusEl.style.display = 'block'; }
+    try {
+        await saveSettings();
+        const r = await api('gdrive_push');
+        if (r && r.success) {
+            if (statusEl) { statusEl.className = 'settings-status success'; statusEl.textContent = `✅ ${r.filename} → Drive (purged: ${r.purged_remote || 0})`; }
+        } else {
+            if (statusEl) { statusEl.className = 'settings-status error'; statusEl.textContent = `❌ ${r?.error || 'Error'}`; }
+        }
+    } catch(e) {
+        if (statusEl) { statusEl.className = 'settings-status error'; statusEl.textContent = `❌ ${e.message}`; }
+    } finally {
+        if (btn) btn.disabled = false;
+        if (statusEl) setTimeout(() => { statusEl.style.display = 'none'; }, 6000);
+    }
+}
+
+async function _gdriveAuthorize() {
+    const btn = document.getElementById('btn-gdrive-authorize');
+    if (btn) btn.disabled = true;
+    try {
+        await saveSettings();
+        const r = await api('gdrive_oauth_url');
+        if (r && r.success) {
+            window.open(r.url, '_blank', 'width=600,height=700,noopener');
+            // Store redirect_uri used so gdrive_oauth_exchange can match it
+            window._gdriveLastRedirectUri = r.redirect_uri || 'http://localhost';
+            // Show manual code input section
+            const codeSection = document.getElementById('gdrive-code-section');
+            if (codeSection) codeSection.style.display = '';
+            const statusEl = document.getElementById('gdrive-oauth-token-status');
+            if (statusEl) {
+                statusEl.textContent = t('settings.backup.gdrive_oauth_window_opened') || '🔑 Authorization page opened — authorize and paste the URL below';
+                statusEl.style.color = '#2563eb';
+            }
+        } else {
+            alert('❌ ' + (r?.error || 'Failed to get OAuth URL'));
+        }
+    } catch(e) {
+        alert('❌ ' + e.message);
+    } finally {
+        if (btn) btn.disabled = false;
+    }
+}
+
+async function _gdriveSubmitCode() {
+    const inputEl = document.getElementById('gdrive-code-input');
+    const btn     = document.getElementById('btn-gdrive-submit-code');
+    const raw     = (inputEl?.value || '').trim();
+    if (!raw) { alert(t('settings.backup.gdrive_code_empty') || 'Paste the URL or code first'); return; }
+
+    // Accept either a full URL (extract code param) or just the bare code
+    let code = raw;
+    try {
+        const u = new URL(raw);
+        const c = u.searchParams.get('code');
+        if (c) code = c;
+    } catch(e) { /* not a URL, use as-is */ }
+
+    if (btn) btn.disabled = true;
+    try {
+        const r = await api('gdrive_oauth_exchange', null, 'POST', {
+            code,
+            redirect_uri: window._gdriveLastRedirectUri || 'http://localhost'
+        });
+        if (r && r.success) {
+            const statusEl = document.getElementById('gdrive-oauth-token-status');
+            if (statusEl) {
+                statusEl.textContent = '✅ ' + (t('settings.backup.gdrive_oauth_authorized') || 'Authorized');
+                statusEl.style.color = '#15803d';
+            }
+            const codeSection = document.getElementById('gdrive-code-section');
+            if (codeSection) codeSection.style.display = 'none';
+            if (inputEl) inputEl.value = '';
+        } else {
+            alert('❌ ' + (r?.error || 'Code exchange failed'));
+        }
+    } catch(e) {
+        alert('❌ ' + e.message);
+    } finally {
+        if (btn) btn.disabled = false;
+    }
+}
+
 async function _loadInfoTab() {
     // Cancel any previous auto-refresh
-    if (_infoTabTimer) { clearInterval(_infoTabTimer); _infoTabTimer = null; }
+    if (_infoTabTimer)   { clearInterval(_infoTabTimer);   _infoTabTimer  = null; }
+    if (_backupTabTimer) { clearInterval(_backupTabTimer); _backupTabTimer = null; }
     await _renderInfoTab();
     // Auto-refresh every 30s while Info tab is visible
     _infoTabTimer = setInterval(_renderInfoTab, 30_000);
@@ -2610,7 +2873,9 @@ async function loadSettingsUI() {
             'meal_plan_enabled',
             'tts_enabled','tts_url','tts_token','tts_method','tts_auth_type',
             'tts_content_type','tts_payload_key',
-            'price_enabled','price_country','price_currency','price_update_months'];
+            'price_enabled','price_country','price_currency','price_update_months',
+            'shopping_enabled','shopping_mode','shopping_smart_suggestions',
+            'shopping_forecast','shopping_auto_add_threshold'];
         // Note: gemini_key is never sent from server; settings_token_set is metadata only
         const settingsTokenRequired = !!serverSettings.settings_token_set;
         const tokenHintEl = document.getElementById('settings-token-status-hint');
@@ -2624,7 +2889,6 @@ async function loadSettingsUI() {
         }
         if (changed) {
             _settingsCache = s;
-            localStorage.setItem('evershelf_settings', JSON.stringify(s));
             // Re-populate UI with merged values
             document.getElementById('setting-gemini-key').value = s.gemini_key || '';
             document.getElementById('setting-bring-email').value = s.bring_email || '';
@@ -2661,6 +2925,8 @@ async function loadSettingsUI() {
             if (priceCountryEl) priceCountryEl.value = s.price_country || 'Italia';
             if (priceCurrencyEl) priceCurrencyEl.value = s.price_currency || 'EUR';
             if (priceMonthsEl) priceMonthsEl.value = s.price_update_months || 3;
+            // Shopping settings (server merge)
+            _applyShoppingSettingsUI(s);
         }
     } catch(e) { /* offline, use local */ }
     // Price settings
@@ -2685,6 +2951,17 @@ async function loadSettingsUI() {
     if (scaleEnabledUiEl) scaleEnabledUiEl.checked = !!s.scale_enabled;
     const scaleUrlUiEl = document.getElementById('setting-scale-url');
     if (scaleUrlUiEl) scaleUrlUiEl.value = s.scale_gateway_url || '';
+    // Backup settings pre-fill (populated fully when _loadBackupTab() is called)
+    const bkRetEl = document.getElementById('setting-backup-retention-days');
+    if (bkRetEl && !bkRetEl.dataset.loaded) bkRetEl.value = s.backup_retention_days || 3;
+    const gdriveEnUiEl = document.getElementById('setting-gdrive-enabled');
+    if (gdriveEnUiEl) gdriveEnUiEl.checked = !!s.gdrive_enabled;
+    const gdriveFolderUiEl = document.getElementById('setting-gdrive-folder-id');
+    if (gdriveFolderUiEl && !gdriveFolderUiEl.dataset.loaded) gdriveFolderUiEl.value = s.gdrive_folder_id || '';
+    const gdriveRetUiEl = document.getElementById('setting-gdrive-retention-days');
+    if (gdriveRetUiEl && !gdriveRetUiEl.dataset.loaded) gdriveRetUiEl.value = s.gdrive_retention_days || 30;
+    // Shopping settings
+    _applyShoppingSettingsUI(s);
     // Hide kiosk download banner if running inside Android WebView (kiosk mode)
     const kioskBanner = document.getElementById('kiosk-download-banner');
     if (kioskBanner && /; wv\)/.test(navigator.userAgent)) {
@@ -2744,7 +3021,7 @@ function _openKioskNativeSettings() {
         _kioskBridge.openNativeSettings();
     } catch(e) {
         // Older APK without openNativeSettings bridge — inform user to update
-        showToast(t('settings.kiosk.native_update_hint') || 'Aggiorna l\'app kiosk per usare questa funzione', 'warning', 4000);
+        showToast(t('settings.kiosk.native_update_hint'), 'warning', 4000);
     }
 }
 
@@ -2853,16 +3130,31 @@ https://github.com/dadaloop82/EverShelf/releases/download/kiosk-latest/evershelf
 function _injectKioskOverlay() {
     if (typeof _kioskBridge === 'undefined') return;
 
-    // Always mark header as kiosk-mode (idempotent) — must happen even if buttons
-    // were already injected by the native onPageFinished Kotlin callback.
+    // Always mark header as kiosk-mode (idempotent).
     const appHeader = document.querySelector('.app-header');
     if (appHeader) appHeader.classList.add('kiosk-mode');
 
+    // Permanently hide the native Android settings button.
+    // Kiosk configuration is accessible ONLY through the web settings page (⚙️ below).
+    try { _kioskBridge.setNativeSettingsVisible(false); } catch (_) {}
+
     const btnStyle = 'background:rgba(255,255,255,0.2);border:none;color:#fff;width:34px;height:34px;border-radius:50%;font-size:15px;cursor:pointer;display:flex;align-items:center;justify-content:center;-webkit-tap-highlight-color:transparent;touch-action:manipulation;';
 
-    // If the Kotlin onPageFinished already injected #_kiosk_overlay (with only ✕ and ↻),
-    // nothing more to do — the native Android btnSettings (top-right) opens SettingsActivity.
-    if (document.getElementById('_kiosk_overlay')) return;
+    // If the Kotlin onPageFinished already injected #_kiosk_overlay (with ✕ and ↻),
+    // just add the ⚙️ button if missing (do not duplicate the other buttons).
+    const existing = document.getElementById('_kiosk_overlay');
+    if (existing) {
+        if (!document.getElementById('_kiosk_settings_btn')) {
+            const sBtn = document.createElement('button');
+            sBtn.id = '_kiosk_settings_btn';
+            sBtn.textContent = '⚙️';
+            sBtn.title = t('settings.title') || 'Impostazioni';
+            sBtn.style.cssText = btnStyle;
+            sBtn.addEventListener('click', (e) => { e.stopPropagation(); showPage('settings'); });
+            existing.appendChild(sBtn);
+        }
+        return;
+    }
 
     const headerLeft = document.getElementById('header-left');
     if (!headerLeft) return;
@@ -2893,12 +3185,17 @@ function _injectKioskOverlay() {
         _kioskBridge.hardReload();
     });
 
-    // NOTE: No ⚙️ button here — the native Android settings button (top-right, injected by
-    // Kotlin) opens SettingsActivity (server URL, BLE scale, screensaver). Do NOT call
-    // setNativeSettingsVisible(false) — that would hide the only way to reconfigure the kiosk.
+    // Settings button — only web settings, native button is permanently hidden
+    const settingsBtn = document.createElement('button');
+    settingsBtn.id = '_kiosk_settings_btn';
+    settingsBtn.textContent = '⚙️';
+    settingsBtn.title = t('settings.title') || 'Impostazioni';
+    settingsBtn.style.cssText = btnStyle;
+    settingsBtn.addEventListener('click', (e) => { e.stopPropagation(); showPage('settings'); });
 
     wrap.appendChild(exitBtn);
     wrap.appendChild(refBtn);
+    wrap.appendChild(settingsBtn);
     headerLeft.appendChild(wrap);
 }
 
@@ -3018,6 +3315,37 @@ function removeAppliance(idx) {
     renderAppliances(s.appliances);
 }
 
+function _applyShoppingSettingsUI(s) {
+    const enabledEl = document.getElementById('setting-shopping-enabled');
+    if (enabledEl) enabledEl.checked = s.shopping_enabled !== false;
+    const mode = s.shopping_mode || 'internal';
+    document.querySelectorAll('input[name="shopping-mode"]').forEach(r => { r.checked = (r.value === mode); });
+    const bringSection = document.getElementById('bring-subsection');
+    if (bringSection) bringSection.style.display = mode === 'bring' ? '' : 'none';
+    const suggestEl = document.getElementById('setting-shopping-smart-suggestions');
+    if (suggestEl) suggestEl.checked = s.shopping_smart_suggestions !== false;
+    const forecastEl = document.getElementById('setting-shopping-forecast');
+    if (forecastEl) forecastEl.checked = s.shopping_forecast !== false;
+    const autoAddEl = document.getElementById('setting-shopping-auto-add');
+    if (autoAddEl) autoAddEl.value = s.shopping_auto_add_threshold || 0;
+}
+
+function onShoppingEnabledChange() {
+    const s = getSettings();
+    s.shopping_enabled = document.getElementById('setting-shopping-enabled').checked;
+    saveSettingsToStorage(s);
+    _saveSettingToServer({ shopping_enabled: s.shopping_enabled });
+}
+
+function onShoppingModeChange(value) {
+    const bringSection = document.getElementById('bring-subsection');
+    if (bringSection) bringSection.style.display = value === 'bring' ? '' : 'none';
+    const s = getSettings();
+    s.shopping_mode = value;
+    saveSettingsToStorage(s);
+    _saveSettingToServer({ shopping_mode: value });
+}
+
 async function saveSettings() {
     const s = getSettings();
     // Only update gemini_key if user actually typed something; preserve existing key otherwise
@@ -3092,6 +3420,33 @@ async function saveSettings() {
     if (priceCurrencySaveEl) s.price_currency = priceCurrencySaveEl.value;
     const priceMonthsSaveEl = document.getElementById('setting-price-update-months');
     if (priceMonthsSaveEl) s.price_update_months = parseInt(priceMonthsSaveEl.value, 10) || 3;
+    // Backup settings
+    const backupEnabledEl = document.getElementById('setting-backup-enabled');
+    if (backupEnabledEl) s.backup_enabled = backupEnabledEl.checked;
+    const backupRetentionEl = document.getElementById('setting-backup-retention-days');
+    if (backupRetentionEl) s.backup_retention_days = parseInt(backupRetentionEl.value, 10) || 3;
+    const gdriveEnabledEl = document.getElementById('setting-gdrive-enabled');
+    if (gdriveEnabledEl) s.gdrive_enabled = gdriveEnabledEl.checked;
+    const gdriveFolderEl = document.getElementById('setting-gdrive-folder-id');
+    if (gdriveFolderEl) s.gdrive_folder_id = gdriveFolderEl.value.trim();
+    const gdriveRetentionEl = document.getElementById('setting-gdrive-retention-days');
+    if (gdriveRetentionEl) s.gdrive_retention_days = parseInt(gdriveRetentionEl.value, 10) || 30;
+    // Shopping settings
+    const shoppingEnabledEl = document.getElementById('setting-shopping-enabled');
+    if (shoppingEnabledEl) s.shopping_enabled = shoppingEnabledEl.checked;
+    const shoppingModeEl = document.querySelector('input[name="shopping-mode"]:checked');
+    if (shoppingModeEl) s.shopping_mode = shoppingModeEl.value;
+    const shoppingSuggestEl = document.getElementById('setting-shopping-smart-suggestions');
+    if (shoppingSuggestEl) s.shopping_smart_suggestions = shoppingSuggestEl.checked;
+    const shoppingForecastEl = document.getElementById('setting-shopping-forecast');
+    if (shoppingForecastEl) s.shopping_forecast = shoppingForecastEl.checked;
+    const shoppingAutoAddEl = document.getElementById('setting-shopping-auto-add');
+    if (shoppingAutoAddEl) s.shopping_auto_add_threshold = parseInt(shoppingAutoAddEl.value, 10) || 0;
+    // OAuth fields
+    const gdriveClientIdEl = document.getElementById('setting-gdrive-client-id');
+    if (gdriveClientIdEl && gdriveClientIdEl.value.trim()) s.gdrive_client_id = gdriveClientIdEl.value.trim();
+    const gdriveClientSecretEl = document.getElementById('setting-gdrive-client-secret');
+    if (gdriveClientSecretEl && gdriveClientSecretEl.value.trim()) s.gdrive_client_secret = gdriveClientSecretEl.value.trim();
     saveSettingsToStorage(s);
     
     // Save ALL settings to server .env
@@ -3136,8 +3491,20 @@ async function saveSettings() {
             price_currency: s.price_currency,
             price_update_months: s.price_update_months,
             recipe_retention_days: s.recipe_retention_days || 7,
-            transaction_retention_days: s.transaction_retention_days || 7,
+            transaction_retention_days: s.transaction_retention_days || 90,
             vacuum_expiry_extension_days: s.vacuum_expiry_extension_days || 30,
+            backup_enabled: s.backup_enabled !== false,
+            backup_retention_days: s.backup_retention_days || 3,
+            gdrive_enabled: !!s.gdrive_enabled,
+            gdrive_folder_id: s.gdrive_folder_id || '',
+            gdrive_retention_days: s.gdrive_retention_days || 30,
+            ...(s.gdrive_client_id     ? { gdrive_client_id:     s.gdrive_client_id }     : {}),
+            ...(s.gdrive_client_secret ? { gdrive_client_secret: s.gdrive_client_secret } : {}),
+            shopping_enabled:            s.shopping_enabled !== false,
+            shopping_mode:               s.shopping_mode || 'internal',
+            shopping_smart_suggestions:  s.shopping_smart_suggestions !== false,
+            shopping_forecast:           s.shopping_forecast !== false,
+            shopping_auto_add_threshold: s.shopping_auto_add_threshold || 0,
         }, tokenHeader);
         const statusEl = document.getElementById('settings-status');
         if (result.success) {
@@ -3197,14 +3564,15 @@ function togglePasswordVisibility(inputId) {
 
 // ===== API HELPER =====
 async function api(action, params = {}, method = 'GET', body = null, extraHeaders = {}) {
-    // In demo mode, all Bring! write operations are no-ops
+    // In demo mode, all shopping write operations are no-ops
     if (_demoMode) {
-        const BRING_WRITE_ACTIONS = ['bring_add', 'bring_remove', 'bring_migrate_names', 'bring_set_spec'];
+        const BRING_WRITE_ACTIONS = ['bring_add', 'bring_remove', 'bring_migrate_names', 'bring_set_spec',
+                                      'shopping_add', 'shopping_remove'];
         if (BRING_WRITE_ACTIONS.includes(action)) {
             return { success: true, added: 0, removed: 0, skipped: 0, _demo: true };
         }
-        // bring_list returns the in-memory demo list
-        if (action === 'bring_list') {
+        // shopping_list / bring_list return the in-memory demo list
+        if (action === 'shopping_list' || action === 'bring_list') {
             return { success: true, purchase: shoppingItems, listUUID: 'demo-list', _demo: true };
         }
     }
@@ -5451,8 +5819,6 @@ function showItemDetail(inventoryId, productId) {
 function closeModal() {
     document.getElementById('modal-overlay').style.display = 'none';
     clearMoveModalTimer();
-    // Restore the native kiosk settings button when the modal closes.
-    try { if (typeof _kioskBridge !== 'undefined') _kioskBridge.setNativeSettingsVisible(true); } catch (_) {}
     _cancelScaleAutoConfirm(false);
     _scaleRecipeAutoFillPaused = false;
     _scaleUserDismissed = false;
@@ -7972,7 +8338,7 @@ async function submitAdd(e) {
                 // try a client-side fuzzy remove using the already-loaded shoppingItems
                 const match = _findSimilarItem(currentProduct.name, shoppingItems);
                 if (match) {
-                    api('bring_remove', {}, 'POST', {
+                    api('shopping_remove', {}, 'POST', {
                         name: match.name,
                         rawName: match.rawName || '',
                         listUUID: shoppingListUUID
@@ -8230,9 +8596,29 @@ async function loadUseInventoryInfo() {
             // Show unit switch
             unitSwitch.style.display = 'flex';
             document.getElementById('use-unit-sub').textContent = subLabel;
-            
-            // Default to sub-unit mode
-            switchUseUnit('sub');
+
+            // If scale is active, start in sub-unit (g/ml) mode — scale always reads weight.
+            // Otherwise default to conf so the user thinks in packages.
+            const _scaleActiveNow = getSettings().scale_enabled && getSettings().scale_gateway_url && _scaleConnected;
+            switchUseUnit(_scaleActiveNow ? 'sub' : 'conf');
+
+            // Fraction shortcut buttons for conf mode (½, 1, 2 packages)
+            const existingConfFrac = document.getElementById('conf-fraction-btns');
+            if (existingConfFrac) existingConfFrac.remove();
+            const confFracDiv = document.createElement('div');
+            confFracDiv.id = 'conf-fraction-btns';
+            confFracDiv.className = 'pz-fraction-btns';
+            const maxConf = Math.min(4, Math.ceil(_useConfMode.totalConf));
+            const confFracs = [0.25, 0.5, 1];
+            if (maxConf >= 2) confFracs.push(2);
+            confFracDiv.innerHTML = `<div class="fraction-btn-row">${
+                confFracs.filter(f => f <= _useConfMode.totalConf + 0.01).map(f => {
+                    const label = f === 0.25 ? '¼' : f === 0.5 ? '½' : f;
+                    return `<button type="button" class="frac-btn${f === 1 ? ' active' : ''}" data-frac="${f}" onclick="setConfFraction(${f})">${label} ${t('units.conf') || 'conf'}</button>`;
+                }).join('')
+            }</div>`;
+            document.querySelector('#page-use .use-partial').appendChild(confFracDiv);
+
             // Trigger a live-box refresh with the latest reading if on scale
             if (_scaleLatestWeight) _scaleAutoFillUse(_scaleLatestWeight);
         } else {
@@ -8284,6 +8670,10 @@ function switchUseUnit(mode) {
     const qtyInput = document.getElementById('use-quantity');
     const hint = document.getElementById('use-partial-hint');
 
+    // Show/hide fraction buttons depending on mode
+    const confFracBtns = document.getElementById('conf-fraction-btns');
+    const pzFracBtns   = document.getElementById('pz-fraction-btns');
+
     if (mode === 'sub') {
         subBtn.classList.add('active');
         confBtn.classList.remove('active');
@@ -8293,15 +8683,26 @@ function switchUseUnit(mode) {
         qtyInput.step = 'any';
         qtyInput.min = 1;
         hint.textContent = t('recipes.quantity_in_total', { unit: _useConfMode.subLabel, total: `${Math.round(_useConfMode.totalSub)}${_useConfMode.subLabel}` });
+        if (confFracBtns) confFracBtns.style.display = 'none';
     } else {
         confBtn.classList.add('active');
         subBtn.classList.remove('active');
         _useConfMode._activeUnit = 'conf';
-        qtyInput.value = 1;
+        qtyInput.value = Math.min(1, _useConfMode.totalConf); // start at 1 or max if < 1
         qtyInput.step = 'any';
-        qtyInput.min = 0.1;
+        qtyInput.min = 0.25;
         hint.textContent = t('recipes.packs_of_have', { size: `${_useConfMode.packageSize}${_useConfMode.subLabel}`, count: _useConfMode.totalConf.toFixed(1) });
+        if (confFracBtns) confFracBtns.style.display = '';
     }
+}
+
+function setConfFraction(f) {
+    const input = document.getElementById('use-quantity');
+    if (!input) return;
+    input.value = Math.min(f, _useConfMode?.totalConf ?? f);
+    document.querySelectorAll('#conf-fraction-btns .frac-btn').forEach(b =>
+        b.classList.toggle('active', parseFloat(b.dataset.frac) === f)
+    );
 }
 
 function getSubUnitStep(pkgUnit) {
@@ -8595,7 +8996,7 @@ function showLowStockBringPrompt(result, afterCallback) {
                 try {
                     const payload = { items: [{ name: shoppingName, specification: spec }] };
                     if (shoppingListUUID) payload.listUUID = shoppingListUUID;
-                    const data = await api('bring_add', {}, 'POST', payload);
+                    const data = await api('shopping_add', {}, 'POST', payload);
                     if (data.success && data.added > 0) {
                         showToast('🛒 Prodotto finito → aggiunto a Bring!', 'info');
                     }
@@ -8685,7 +9086,7 @@ async function addLowStockToBring() {
         window._lowStockSpec = null;
         const payload = { items: [{ name: bringName, specification: spec }] };
         if (shoppingListUUID) payload.listUUID = shoppingListUUID;
-        const data = await api('bring_add', {}, 'POST', payload);
+        const data = await api('shopping_add', {}, 'POST', payload);
         if (data.success && data.added > 0) {
             // Pin as user-added so cleanup never auto-removes it
             const pinned = Object.assign({}, _pinnedBringCache || {});
@@ -8791,8 +9192,6 @@ function showMoveAfterUseModal(product, fromLoc, remaining, openedId, openedVacu
         </div>
     `;
     document.getElementById('modal-overlay').style.display = 'flex';
-    // Hide the native kiosk settings button while the modal is open (prevents touch bleed-through)
-    try { if (typeof _kioskBridge !== 'undefined') _kioskBridge.setNativeSettingsVisible(false); } catch (_) {}
     startMoveModalCountdown('btn-move-stay', () => { _saveVacuumAndStay(openedId || 0); });
 }
 
@@ -9691,7 +10090,7 @@ function toggleShoppingTag(itemIdx, tag) {
         if (tag === 'urgente' && shoppingListUUID) {
             const isNowUrgent = existing.includes('urgente');
             const newSpec = isNowUrgent ? t('shopping.urgency_spec_critical') : '';
-            api('bring_add', {}, 'POST', {
+            api('shopping_add', {}, 'POST', {
                 items: [{ name: item.name, specification: newSpec, update_spec: true }],
                 listUUID: shoppingListUUID,
             }).catch(() => {});
@@ -9719,7 +10118,7 @@ async function confirmShoppingItemFound() {
     _spesaScanTarget = null;
     document.getElementById('shopping-scan-target-banner').style.display = 'none';
     try {
-        const r = await api('bring_remove', {}, 'POST', { name, rawName, listUUID: shoppingListUUID });
+        const r = await api('shopping_remove', {}, 'POST', { name, rawName, listUUID: shoppingListUUID });
         if (r.success) {
             const idx = shoppingItems.findIndex(i => i.name.toLowerCase() === name.toLowerCase());
             if (idx >= 0) shoppingItems.splice(idx, 1);
@@ -9839,7 +10238,7 @@ async function autoAddCriticalItems() {
     if (toAdd.length === 0) return;
     const itemsToAdd = toAdd.map(i => ({ name: i.name, specification: _urgencyToSpec(i.urgency, i.brand) }));
     try {
-        const result = await api('bring_add', {}, 'POST', { items: itemsToAdd, listUUID: shoppingListUUID });
+        const result = await api('shopping_add', {}, 'POST', { items: itemsToAdd, listUUID: shoppingListUUID });
         if (result.success && result.added > 0) {
             // Track these as auto-added so cleanupObsoleteBringItems can safely remove them later
             _markAutoAddedBring(itemsToAdd.map(i => i.name));
@@ -10234,7 +10633,7 @@ async function cleanupObsoleteBringItems() {
     const removedNames = [];
     for (const item of toRemove) {
         try {
-            const r = await api('bring_remove', {}, 'POST', {
+            const r = await api('shopping_remove', {}, 'POST', {
                 name: item.name,
                 rawName: item.rawName || '',
                 listUUID: shoppingListUUID
@@ -10660,7 +11059,7 @@ async function addSmartToBring() {
 
     showLoading(true);
     try {
-        const result = await api('bring_add', {}, 'POST', {
+        const result = await api('shopping_add', {}, 'POST', {
             items: itemsToAdd,
             listUUID: shoppingListUUID,
         });
@@ -10694,7 +11093,7 @@ async function loadShoppingCount() {
     const el = document.getElementById('stat-spesa');
     if (el) el.classList.add('stat-loading');
     try {
-        const data = await api('bring_list');
+        const data = await api('shopping_list');
         if (el) {
             if (data.success && data.purchase) {
                 el.textContent = data.purchase.length;
@@ -10823,7 +11222,7 @@ async function autoSyncUrgencySpecs() {
     }
     if (toUpdate.length === 0) return;
     try {
-        await api('bring_add', {}, 'POST', { items: toUpdate, listUUID: shoppingListUUID });
+        await api('shopping_add', {}, 'POST', { items: toUpdate, listUUID: shoppingListUUID });
     } catch (e) { /* ignore - sync is best-effort */ }
 }
 
@@ -10840,7 +11239,7 @@ async function loadShoppingList() {
     loadShoppingList._bgCall = false;
     if (isBackgroundCall) {
         try {
-            const data = await api('bring_list');
+            const data = await api('shopping_list');
             if (data.success) {
                 const newItems = data.purchase || [];
                 const newNames = new Set(newItems.map(i => i.name.toLowerCase()));
@@ -10890,7 +11289,7 @@ async function loadShoppingList() {
     }
     
     try {
-        const data = await api('bring_list');
+        const data = await api('shopping_list');
         statusEl.style.display = 'none';
         
         if (!data.success) {
@@ -11127,7 +11526,7 @@ async function removeBringItem(idx) {
     const item = shoppingItems[idx];
     if (!item) return;
     try {
-        const data = await api('bring_remove', {}, 'POST', { 
+        const data = await api('shopping_remove', {}, 'POST', { 
             name: item.name, 
             rawName: item.rawName || '', 
             listUUID: shoppingListUUID 
@@ -11154,7 +11553,7 @@ async function generateSuggestions() {
     suggestionsEl.style.display = 'none';
     
     try {
-        const data = await api('bring_suggest', {}, 'POST', {});
+        const data = await api('shopping_suggest', {}, 'POST', {});
         
         btn.disabled = false;
         btn.innerHTML = `🤖 ${t('shopping.suggest_btn').replace('🤖 ', '')}`;
@@ -11304,7 +11703,7 @@ async function addSelectedSuggestions() {
             return { name: s.name };
         });
         
-        const data = await api('bring_add', {}, 'POST', { items, listUUID: shoppingListUUID });
+        const data = await api('shopping_add', {}, 'POST', { items, listUUID: shoppingListUUID });
         
         if (data.success) {
             let msg = data.added === 1 ? t('shopping.bring_added_one') : t('shopping.bring_added_many').replace('{n}', data.added);
@@ -11452,14 +11851,14 @@ async function analyzeExpiryImage(dataUrl) {
             if (expiryInput) {
                 expiryInput.value = result.expiry_date;
             }
-            statusDiv.innerHTML = `<p style="color:var(--success);font-weight:600">✅ Data trovata: ${formatDate(result.expiry_date)}</p>`;
+            statusDiv.innerHTML = `<p style="color:var(--success);font-weight:600">✅ ${t('scanner.expiry_found')}: ${formatDate(result.expiry_date)}</p>`;
             
             // Close modal after delay
             setTimeout(() => closeExpiryScanner(), 1500);
         } else if (result.error === 'no_api_key') {
             statusDiv.innerHTML = `<p style="color:var(--warning)">${t('ai.no_api_key').replace(/\n/g, '<br>')}</p>`;
         } else {
-            statusDiv.innerHTML = `<p style="color:var(--danger)">❌ Non riesco a leggere la data. ${result.raw_text ? '<br><small>Letto: ' + escapeHtml(result.raw_text) + '</small>' : ''}</p>
+            statusDiv.innerHTML = `<p style="color:var(--danger)">❌ ${t('scanner.expiry_read_fail')} ${result.raw_text ? '<br><small>' + t('scanner.expiry_raw_label') + ': ' + escapeHtml(result.raw_text) + '</small>' : ''}</p>
                 <button class="btn btn-secondary" onclick="retakeExpiry()" style="margin-top:8px">${t('btn.retry')}</button>`;
         }
     } catch (err) {
@@ -11586,7 +11985,10 @@ async function loadLog(more = false) {
                 html += `<span class="log-icon">${icon}</span>`;
                 html += `<div class="log-info">`;
                 html += `<div class="log-product"><strong>${escapeHtml(tx.name)}</strong>${brand}${undone ? ` <span class="log-undone-badge">${t('log.undone_badge')}</span>` : ''}</div>`;
-                html += `<div class="log-detail">${typeLabel} ${tx.type !== 'bring' ? (tx.quantity + ' ' + (tx.unit || '')) + ' · ' : ''}${locStr}${notes} · ${timeStr}</div>`;
+                const txQtyStr = tx.type !== 'bring'
+                    ? formatQuantity(parseFloat(tx.quantity), tx.unit, tx.default_quantity, tx.package_unit) + ' · '
+                    : '';
+                html += `<div class="log-detail">${typeLabel} ${txQtyStr}${locStr}${notes} · ${timeStr}</div>`;
                 html += recipeNote;
                 html += `</div>`;
                 if (canUndo) {
@@ -12393,11 +12795,13 @@ async function submitRecipeUse(useAll) {
                 setTimeout(() => showToast(t('recipes.finished_added_bring_toast'), 'info'), 1500);
             }
             
-            // Check low stock → Bring! prompt, then offer move
+            // Check low stock → shopping prompt, then offer move
             const moveCallback = result.remaining > 0
                 ? () => setTimeout(() => {
-                    const ingData = _cachedRecipe?.recipe?.ingredients?.[_recipeUseContext?.idx];
-                    const wasVacuum = !!(ingData?.vacuum_sealed);
+                    // Get vacuum state from the actual inventory item at this location
+                    const cachedItems = _recipeUseContext?.items || [];
+                    const itemAtLoc = cachedItems.find(i => i.location === location);
+                    const wasVacuum = !!(itemAtLoc?.vacuum_sealed);
                     showRecipeMoveModal(productId, location, result.remaining, result.opened_id, wasVacuum);
                   }, 300)
                 : null;
@@ -12417,6 +12821,21 @@ async function submitRecipeUse(useAll) {
 }
 
 function showRecipeMoveModal(productId, fromLoc, remaining, openedId, wasVacuum) {
+    // Set context for recording the choice
+    _pendingMoveCtx = { productId, fromLoc, openedId };
+
+    // If a preference exists, skip the modal entirely
+    const prefMoveLoc = _getPreferredMoveLoc(productId, fromLoc);
+    if (prefMoveLoc) {
+        if (prefMoveLoc === fromLoc) {
+            closeModal();
+        } else {
+            confirmRecipeMove(productId, fromLoc, prefMoveLoc, openedId, wasVacuum);
+        }
+        _pendingMoveCtx = null;
+        return;
+    }
+
     const otherLocs = Object.entries(LOCATIONS).filter(([k]) => k !== fromLoc);
     const locButtons = otherLocs.map(([k, v]) =>
         `<button type="button" class="loc-btn" onclick="clearMoveModalTimer();confirmRecipeMove(${productId}, '${fromLoc}', '${k}', ${openedId || 0})">${v.icon} ${v.label}</button>`
@@ -12435,18 +12854,24 @@ function showRecipeMoveModal(productId, fromLoc, remaining, openedId, wasVacuum)
             <p style="margin-bottom:12px">${t('move.question_short').replace('{thing}', openedId ? t('move.thing_opened') : t('move.thing_rest'))}</p>
             <div class="location-selector">${locButtons}</div>
             ${vacuumRow}
-            <button type="button" id="btn-move-stay" class="btn btn-secondary full-width move-countdown-btn" style="margin-top:12px" onclick="clearMoveModalTimer();closeModal()">${t('move.stay_btn').replace('{location}', LOCATIONS[fromLoc]?.label || fromLoc)}</button>
+            <button type="button" id="btn-move-stay" class="btn btn-secondary full-width move-countdown-btn" style="margin-top:12px" onclick="clearMoveModalTimer();_recipeMoveCancelStay(${productId}, '${fromLoc}', ${openedId || 0})">${t('move.stay_btn').replace('{location}', LOCATIONS[fromLoc]?.label || fromLoc)}</button>
         </div>
     `;
     document.getElementById('modal-overlay').style.display = 'flex';
-    // Hide the native kiosk settings button while the modal is open (prevents touch bleed-through)
-    try { if (typeof _kioskBridge !== 'undefined') _kioskBridge.setNativeSettingsVisible(false); } catch (_) {}
-    startMoveModalCountdown('btn-move-stay', () => { closeModal(); });
+    startMoveModalCountdown('btn-move-stay', () => { _recipeMoveCancelStay(productId, fromLoc, openedId || 0); });
 }
 
-async function confirmRecipeMove(productId, fromLoc, toLoc, openedId) {
+function _recipeMoveCancelStay(productId, fromLoc, openedId) {
+    _recordMoveLocChoice(productId, fromLoc, fromLoc);
+    _pendingMoveCtx = null;
+    closeModal();
+}
+
+async function confirmRecipeMove(productId, fromLoc, toLoc, openedId, forcedVacuum) {
     clearMoveModalTimer();
-    const newVacuum = document.getElementById('move-vacuum-check')?.checked ? 1 : 0;
+    _recordMoveLocChoice(productId, fromLoc, toLoc);
+    _pendingMoveCtx = null;
+    const newVacuum = forcedVacuum !== undefined ? (forcedVacuum ? 1 : 0) : (document.getElementById('move-vacuum-check')?.checked ? 1 : 0);
     closeModal();
     try {
         if (openedId) {
@@ -12671,6 +13096,8 @@ function startCookingMode() {
     _cookingTTS = true;
     document.getElementById('cooking-title').textContent = _cookingRecipe.title || '';
     document.getElementById('cooking-tts-btn').textContent = '🔊';
+    // Unlock the AudioContext now while we have a user gesture (the Start button tap)
+    _ensureAudioUnlocked();
     // Tools bar
     const toolsBar = document.getElementById('cooking-tools-bar');
     if (toolsBar) {
@@ -13222,13 +13649,13 @@ let _cookingTimers = [];          // { id, label, total, seconds, running, inter
 let _cookingTimerIdCounter = 0;
 let _cookingSuggestedSeconds = 0;
 let _cookingSuggestedLabel = '';
+let _sharedAudioCtx = null;       // pre-unlocked AudioContext (created on user gesture)
 
 function _playCookingTimerSound(type = 'done') {
     try {
         const Ctx = window.AudioContext || window.webkitAudioContext;
         if (!Ctx) return;
         const ctx = new Ctx();
-        const now = ctx.currentTime;
         const pattern = type === 'warning'
             ? [{ f: 880, d: 0.08, o: 0.00 }, { f: 1046, d: 0.10, o: 0.14 }]
             : [
@@ -13237,36 +13664,52 @@ function _playCookingTimerSound(type = 'done') {
                 { f: 1318, d: 0.14, o: 0.38 }
             ];
 
-        for (const p of pattern) {
-            const osc = ctx.createOscillator();
-            const gain = ctx.createGain();
-            osc.type = 'sine';
-            osc.frequency.value = p.f;
-            gain.gain.setValueAtTime(0.0001, now + p.o);
-            gain.gain.exponentialRampToValueAtTime(0.12, now + p.o + 0.02);
-            gain.gain.exponentialRampToValueAtTime(0.0001, now + p.o + p.d);
-            osc.connect(gain);
-            gain.connect(ctx.destination);
-            osc.start(now + p.o);
-            osc.stop(now + p.o + p.d + 0.02);
-        }
+        const doPlay = () => {
+            const now = ctx.currentTime;
+            for (const p of pattern) {
+                const osc = ctx.createOscillator();
+                const gain = ctx.createGain();
+                osc.type = 'sine';
+                osc.frequency.value = p.f;
+                gain.gain.setValueAtTime(0.0001, now + p.o);
+                gain.gain.exponentialRampToValueAtTime(0.12, now + p.o + 0.02);
+                gain.gain.exponentialRampToValueAtTime(0.0001, now + p.o + p.d);
+                osc.connect(gain);
+                gain.connect(ctx.destination);
+                osc.start(now + p.o);
+                osc.stop(now + p.o + p.d + 0.02);
+            }
+            const endAt = now + Math.max(...pattern.map(p => p.o + p.d)) + 0.08;
+            setTimeout(() => { try { ctx.close(); } catch (_) { /* ignore */ } }, Math.max(120, Math.round((endAt - now) * 1000)));
+        };
 
-        const endAt = now + Math.max(...pattern.map(p => p.o + p.d)) + 0.08;
-        setTimeout(() => { try { ctx.close(); } catch (_) { /* ignore */ } }, Math.max(120, Math.round((endAt - now) * 1000)));
+        // AudioContext starts suspended on mobile/Android after autoplay policy —
+        // must call resume() before scheduling nodes, even outside a user gesture.
+        if (ctx.state === 'suspended') {
+            ctx.resume().then(doPlay).catch(() => {});
+        } else {
+            doPlay();
+        }
     } catch (_) { /* ignore */ }
 }
 
 function _notifyCookingTimer(type, label) {
     const key = type === 'warning' ? 'cooking.timer_warning_tts' : 'cooking.timer_expired_tts';
     const msg = t(key).replace('{label}', label || t('cooking.timer'));
+
+    // Always play the beep (uses pre-unlocked shared AudioContext)
+    _playCookingTimerSound(type === 'warning' ? 'warning' : 'done');
+
+    // Timer alerts always speak — they are alarms, not step narration.
+    // Do NOT gate on _cookingTTS; that toggle is for step-by-step reading only.
+    // Also include the kiosk native TTS bridge which works even when
+    // window.speechSynthesis is absent on older Android WebView.
     const s = getSettings();
     const hasBrowserTts = typeof window !== 'undefined' && 'speechSynthesis' in window;
-    const hasCustomTts = (s.tts_engine === 'custom' && !!s.tts_url);
-
-    if (_cookingTTS && (hasBrowserTts || hasCustomTts)) {
+    const hasCustomTts  = s.tts_engine === 'custom' && !!s.tts_url;
+    const hasKioskTts   = typeof _kioskBridge !== 'undefined' && typeof _kioskBridge.speak === 'function';
+    if (hasBrowserTts || hasCustomTts || hasKioskTts) {
         speakCookingStep(msg);
-    } else {
-        _playCookingTimerSound(type === 'warning' ? 'warning' : 'done');
     }
 }
 
@@ -13411,6 +13854,7 @@ function addSuggestedCookingTimer() {
 }
 
 function addCookingTimer(seconds, label) {
+    _ensureAudioUnlocked(); // unlock AudioContext on this user gesture
     const id = ++_cookingTimerIdCounter;
     _cookingTimers.push({ id, label, total: seconds, seconds, running: false, interval: null });
     renderTimersBar();
@@ -13472,8 +13916,12 @@ function _cookingTimerDoneById(id) {
     timer.running = false;
     timer.seconds = 0;
 
+    // Show the done state in the card before removing it
+    _updateTimerCard(id);
+    _updateScreenFlash();
     _notifyCookingTimer('done', timer.label);
-    removeCookingTimer(id); // auto-cancel finished timer (do not continue past 00:00)
+    // Keep the done card visible for 3 s so the user sees which timer finished
+    setTimeout(() => removeCookingTimer(id), 3000);
 }
 
 function _updateTimerCard(id) {
@@ -14361,7 +14809,7 @@ async function loadScreensaverData() {
         const [statsRes, invRes, bringRes] = await Promise.all([
             api('stats'),
             api('inventory_list'),
-            api('bring_list').catch(() => null)
+            api('shopping_list').catch(() => null)
         ]);
         _screensaverData = {
             stats: statsRes,
@@ -14857,7 +15305,7 @@ document.addEventListener('DOMContentLoaded', () => {
 // ===== SETUP WIZARD =====
 let _setupStep = 0;
 let _setupPendingSteps = [];
-const _setupData = { lang: _currentLang, gemini_key: '', bring_email: '', bring_password: '' };
+const _setupData = { lang: _currentLang, gemini_key: '', bring_email: '', bring_password: '', gdrive_folder_id: '', gdrive_client_id: '', gdrive_client_secret: '' };
 
 /**
  * Returns indices of setup steps that still need configuration.
@@ -14880,8 +15328,10 @@ function _getMissingSetupSteps(serverSettings) {
         if (!s.gemini_key && !srv.gemini_key_set) missing.push(1);
         // Step 2 — Bring! credentials (check both localStorage and server .env)
         if ((!s.bring_email && !srv.bring_email) || (!s.bring_password && !srv.bring_password_set)) missing.push(2);
+        // Step 3 — Google Drive backup (always optional on first run, skippable)
+        if (!srv.gdrive_refresh_token_set && !srv.gdrive_folder_id) missing.push(3);
     }
-    // Note: step 3 (done screen) gets appended automatically when there are missing steps
+    // Note: step 4 (done screen) gets appended automatically when there are missing steps
 
     return missing;
 }
@@ -14931,6 +15381,30 @@ function _setupSteps() {
             `
         },
         {
+            title: '☁️ Google Drive Backup',
+            desc: t('settings.backup.gdrive_wizard_hint') || 'Optional: automatically back up to Google Drive daily.',
+            render: () => `
+                <details style="margin-bottom:14px;background:var(--bg-secondary,#f8fafc);border-radius:8px;padding:10px 14px">
+                    <summary style="cursor:pointer;font-weight:600;font-size:0.85rem;color:var(--text-primary)">${t('settings.backup.gdrive_oauth_how_to') || '📋 Setup guide'}</summary>
+                    <ol style="margin:10px 0 0 16px;font-size:0.8rem;color:var(--text-secondary);line-height:1.8">${t('settings.backup.gdrive_oauth_steps') || ''}</ol>
+                </details>
+                <div class="form-group">
+                    <label>${t('settings.backup.gdrive_folder_id') || 'Folder ID Drive'}</label>
+                    <input type="text" id="setup-gdrive-folder" class="form-input" placeholder="1ABCdef_xyz…" value="${_setupData.gdrive_folder_id}">
+                </div>
+                <div class="form-group">
+                    <label>${t('settings.backup.gdrive_client_id') || 'Client ID'}</label>
+                    <input type="text" id="setup-gdrive-client-id" class="form-input" placeholder="1234567890-abc….apps.googleusercontent.com" value="${_setupData.gdrive_client_id}">
+                </div>
+                <div class="form-group">
+                    <label>${t('settings.backup.gdrive_client_secret') || 'Client Secret'}</label>
+                    <input type="password" id="setup-gdrive-client-secret" class="form-input" placeholder="GOCSPX-…" value="${_setupData.gdrive_client_secret}">
+                </div>
+                <p class="settings-hint" style="font-size:0.78rem">${t('settings.backup.gdrive_redirect_uri_label') || 'Redirect URI:'} <code>http://localhost</code></p>
+                <span class="setup-skip-link" onclick="_setupSkipStep()">${t('settings.backup.gdrive_skip') || 'Skip — configure later in Settings'}</span>
+            `
+        },
+        {
             title: '✅ ' + (_currentLang === 'it' ? 'Tutto pronto!' : _currentLang === 'de' ? 'Alles bereit!' : _currentLang === 'fr' ? 'Tout est prêt !' : _currentLang === 'es' ? '¡Todo listo!' : 'All set!'),
             desc: _currentLang === 'it' ? 'La configurazione è completata. Puoi sempre modificare queste impostazioni dalla pagina Configurazione.'
                  : _currentLang === 'de' ? 'Die Konfiguration ist abgeschlossen. Du kannst diese Einstellungen jederzeit ändern.'
@@ -14948,8 +15422,8 @@ function _setupSteps() {
 function showSetupWizard(pendingSteps) {
     _setupPendingSteps = pendingSteps || _getMissingSetupSteps();
     if (_setupPendingSteps.length === 0) return;
-    // Append the "done" step (3) at the end
-    _setupPendingSteps.push(3);
+    // Append the "done" step (4) at the end
+    _setupPendingSteps.push(4);
     _setupStep = 0;
     // Pre-fill _setupData from existing settings so we don't lose them
     const s = getSettings();
@@ -15012,6 +15486,13 @@ function _setupCollectCurrent() {
         const pass = document.getElementById('setup-bring-password');
         if (email) _setupData.bring_email = email.value.trim();
         if (pass) _setupData.bring_password = pass.value.trim();
+    } else if (realIndex === 3) {
+        const folderEl = document.getElementById('setup-gdrive-folder');
+        const clientIdEl = document.getElementById('setup-gdrive-client-id');
+        const clientSecretEl = document.getElementById('setup-gdrive-client-secret');
+        if (folderEl) _setupData.gdrive_folder_id = folderEl.value.trim();
+        if (clientIdEl) _setupData.gdrive_client_id = clientIdEl.value.trim();
+        if (clientSecretEl) _setupData.gdrive_client_secret = clientSecretEl.value.trim();
     }
 }
 
@@ -15052,6 +15533,9 @@ async function _finishSetup() {
     if (_setupData.gemini_key) envPayload.gemini_key = _setupData.gemini_key;
     if (_setupData.bring_email) envPayload.bring_email = _setupData.bring_email;
     if (_setupData.bring_password) envPayload.bring_password = _setupData.bring_password;
+    if (_setupData.gdrive_folder_id) envPayload.gdrive_folder_id = _setupData.gdrive_folder_id;
+    if (_setupData.gdrive_client_id) { envPayload.gdrive_client_id = _setupData.gdrive_client_id; envPayload.gdrive_enabled = true; }
+    if (_setupData.gdrive_client_secret) envPayload.gdrive_client_secret = _setupData.gdrive_client_secret;
     try {
         if (Object.keys(envPayload).length > 0) {
             await api('save_settings', {}, 'POST', envPayload);
@@ -15506,7 +15990,7 @@ async function _backgroundBringSync() {
 
     try {
         const [bringData, smartData] = await Promise.all([
-            api('bring_list').catch(() => null),
+            api('shopping_list').catch(() => null),
             api('smart_shopping').catch(() => null),
         ]);
 
@@ -15583,12 +16067,12 @@ async function _backgroundBringSync() {
 
         const allChanges = [...toAdd, ...toUpdate];
         if (allChanges.length > 0) {
-            await api('bring_add', {}, 'POST', { items: allChanges, listUUID });
+            await api('shopping_add', {}, 'POST', { items: allChanges, listUUID });
             logOperation('bg_bring_sync', { added: toAdd.map(i=>i.name), updated: toUpdate.map(i=>i.name) });
         }
 
         if (toRemove.length > 0) {
-            await api('bring_remove', {}, 'POST', { items: toRemove.map(n => ({ name: n })), listUUID });
+            await api('shopping_remove', {}, 'POST', { items: toRemove.map(n => ({ name: n })), listUUID });
             logOperation('bg_bring_remove', { removed: toRemove });
         }
 

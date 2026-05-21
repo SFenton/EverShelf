@@ -7133,6 +7133,7 @@ body.cooking-mode-active .app-header {
     --bg: #0f172a;
     --bg-card: #1e293b;
     --bg-dark: #020617;
+    --bg-secondary: #263448;
     --text: #e2e8f0;
     --text-light: #94a3b8;
     --text-muted: #64748b;
@@ -7384,3 +7385,159 @@ body.cooking-mode-active .app-header {
     color: var(--primary-light);
 }
 /* @media prefers-color-scheme: auto handled in JS */
+
+/* ===== DARK MODE — EXTENDED COMPONENT OVERRIDES ===== */
+
+/* ── Inventory badges ── */
+[data-theme="dark"] .badge-location { background: #0c2a4e; color: #7dd3fc; }
+[data-theme="dark"] .badge-category { background: #1e293b; color: #94a3b8; }
+[data-theme="dark"] .badge-qty      { background: #0f2a1a; color: #86efac; }
+[data-theme="dark"] .badge-expiry   { background: #2a1a00; color: #fcd34d; }
+[data-theme="dark"] .badge-expired  { background: #2a0808; color: #fca5a5; }
+
+/* ── Urgency / priority badges ── */
+[data-theme="dark"] .badge-critical  { background: #2a0808; color: #fca5a5; }
+[data-theme="dark"] .badge-high      { background: #2a1200; color: #fdba74; }
+[data-theme="dark"] .badge-medium    { background: #2a1e00; color: #fde68a; }
+[data-theme="dark"] .badge-low       { background: #0f2a1a; color: #86efac; }
+[data-theme="dark"] .badge-freq-high { background: #2e0d1a; color: #f9a8d4; }
+[data-theme="dark"] .badge-tag-add   { background: #1e293b; color: #94a3b8; }
+
+/* ── Smart shopping badges ── */
+[data-theme="dark"] .smart-freq-badge.freq-suggest        { background: #0c2a4e; color: #7dd3fc; }
+[data-theme="dark"] .smart-freq-badge.freq-suggest-approx { background: #0c1f3a; color: #93c5fd; font-style: italic; }
+[data-theme="dark"] .smart-pred-badge                     { background: #2a1e00; color: #fde68a; }
+[data-theme="dark"] .smart-pred-badge.pred-urgent         { background: #2a0808; color: #fca5a5; }
+[data-theme="dark"] .smart-pred-badge.pred-soon           { background: #2a1200; color: #fdba74; }
+[data-theme="dark"] .smart-bring-badge                    { background: #0c2a4e; color: #7dd3fc; }
+
+/* ── AW trend mini-cards ── */
+[data-theme="dark"] .aw-tcard-good { background: #0f2a1a; border-color: #166534; }
+[data-theme="dark"] .aw-tcard-ok   { background: #1c1300; border-color: #78350f; }
+[data-theme="dark"] .aw-tcard-bad  { background: #2a0808; border-color: #7f1d1d; }
+
+/* ── Alert sections ── */
+[data-theme="dark"] .alert-danger                { background: #2a0808; border-color: var(--danger); }
+[data-theme="dark"] .alert-item                  { background: rgba(255,255,255,0.04); }
+[data-theme="dark"] .alert-item-qty              { background: rgba(255,255,255,0.06); }
+[data-theme="dark"] .alert-review                { background: #1c1300; border-color: #78350f; }
+[data-theme="dark"] .alert-review h3             { color: #fcd34d; }
+[data-theme="dark"] .alert-opened               { background: #0c1f3a; border-color: #1e3a8a; }
+[data-theme="dark"] .alert-opened h3             { color: #7dd3fc; }
+[data-theme="dark"] .alert-item-badge.opened     { background: #1e40af; }
+
+/* ── Opened expiry badges ── */
+[data-theme="dark"] .opened-expiry-ok     { background: #0f2a1a; color: #86efac; }
+[data-theme="dark"] .opened-expiry-soon   { background: #2a1e00; color: #fde68a; }
+[data-theme="dark"] .opened-expiry-urgent { background: #2a0808; color: #fca5a5; }
+
+/* ── Alert banner: gradient overrides ── */
+[data-theme="dark"] .alert-banner.banner-expired            { background: #2a0808; border-color: #7f1d1d; }
+[data-theme="dark"] .banner-expired .alert-banner-title     { color: #fca5a5; }
+[data-theme="dark"] .banner-expired .alert-banner-counter   { color: #f87171; }
+[data-theme="dark"] .alert-banner.banner-expiring           { background: #1c1300; border-color: #78350f; }
+[data-theme="dark"] .banner-expiring .alert-banner-title    { color: #fdba74; }
+[data-theme="dark"] .banner-expiring .alert-banner-counter  { color: #fb923c; }
+[data-theme="dark"] .alert-banner.banner-expired-ok              { background: #0f2a1a; border-color: #166534; }
+[data-theme="dark"] .banner-expired-ok .alert-banner-title       { color: #86efac; }
+[data-theme="dark"] .banner-expired-ok .alert-banner-counter     { color: #4ade80; }
+[data-theme="dark"] .alert-banner.banner-expired-warning         { background: #1c1300; border-color: #78350f; }
+[data-theme="dark"] .banner-expired-warning .alert-banner-title  { color: #fde68a; }
+[data-theme="dark"] .banner-expired-warning .alert-banner-counter { color: #fcd34d; }
+[data-theme="dark"] .alert-banner.banner-expired-danger          { background: #2a0808; border-color: #7f1d1d; border-width: 2px; }
+[data-theme="dark"] .banner-expired-danger .alert-banner-title   { color: #fca5a5; }
+[data-theme="dark"] .alert-banner.banner-prediction              { background: #1a1040; border-color: #6d28d9; }
+[data-theme="dark"] .banner-prediction .alert-banner-title       { color: #c4b5fd; }
+[data-theme="dark"] .banner-prediction .alert-banner-counter     { color: #a78bfa; }
+[data-theme="dark"] .alert-banner.banner-anomaly                 { background: #1a1200; border-color: #c2410c; }
+[data-theme="dark"] .banner-anomaly .alert-banner-title          { color: #fdba74; }
+[data-theme="dark"] .alert-banner.banner-no-expiry               { background: #0f2a1a; border-color: #166534; }
+[data-theme="dark"] .banner-no-expiry .alert-banner-title        { color: #86efac; }
+
+/* ── Alert banner: default text & close ── */
+[data-theme="dark"] .alert-banner-title  { color: #e2e8f0; }
+[data-theme="dark"] .alert-banner-detail { color: #94a3b8; }
+[data-theme="dark"] .alert-banner-close  { color: #94a3b8; background: rgba(255,255,255,0.06); }
+[data-theme="dark"] .banner-safety-warning { color: #fdba74; }
+[data-theme="dark"] .banner-safety-ok      { color: #86efac; }
+[data-theme="dark"] .banner-safety-danger  { color: #fca5a5; }
+
+/* ── Banner action buttons ── */
+[data-theme="dark"] .btn-banner-ok           { background: #0f2a1a; color: #86efac; }
+[data-theme="dark"] .btn-banner-edit         { background: #1a1040; color: #c4b5fd; }
+[data-theme="dark"] .btn-banner-ai           { background: #2e1a4a; color: #c4b5fd; }
+[data-theme="dark"] .btn-banner-weigh        { background: #2e1a4a; color: #c4b5fd; }
+[data-theme="dark"] .btn-banner-confirm      { background: #0f2a1a; color: #86efac; }
+[data-theme="dark"] .btn-banner-use          { background: #0c2a4e; color: #7dd3fc; }
+[data-theme="dark"] .btn-banner-throw        { background: #2a0808; color: #fca5a5; }
+[data-theme="dark"] .btn-banner-throw-primary { background: #dc2626; color: #fff; }
+[data-theme="dark"] .btn-banner-use-danger   { background: #1e293b; color: #64748b; }
+[data-theme="dark"] .btn-banner-vacuum       { background: #2e1a4a; color: #c4b5fd; }
+[data-theme="dark"] .btn-banner-edit2        { background: #0c2a4e; color: #7dd3fc; }
+
+/* ── Review items ── */
+[data-theme="dark"] .review-item          { background: rgba(255,255,255,0.04); }
+[data-theme="dark"] .review-item-meta     { color: #94a3b8; }
+[data-theme="dark"] .review-warn          { color: #fca5a5; }
+[data-theme="dark"] .review-qty-value     { background: #2a0808; color: #fca5a5; }
+[data-theme="dark"] .btn-review-ok        { background: #0f2a1a; color: #86efac; }
+[data-theme="dark"] .btn-review-ok:active { background: #0d2416; }
+[data-theme="dark"] .btn-review-edit        { background: #1a1040; color: #c4b5fd; }
+[data-theme="dark"] .btn-review-edit:active { background: #140d36; }
+
+/* ── Chat UI ── */
+[data-theme="dark"] .chat-header-bar    { background: var(--bg-card); border-color: var(--border); }
+[data-theme="dark"] .chat-title         { color: #818cf8; }
+[data-theme="dark"] .chat-suggestion    { background: #1a1040; border-color: #3730a3; color: #a5b4fc; }
+[data-theme="dark"] .chat-suggestion:active { background: #2e1a4a; }
+[data-theme="dark"] .chat-gemini        { background: var(--bg-card); color: var(--text); box-shadow: 0 1px 3px rgba(0,0,0,0.3); }
+[data-theme="dark"] .chat-gemini strong { color: #818cf8; }
+[data-theme="dark"] .chat-input-bar     { background: var(--bg-card); border-color: var(--border); }
+
+/* ── Settings status ── */
+[data-theme="dark"] .settings-status.success { background: #0f2a1a; color: #86efac; }
+[data-theme="dark"] .settings-status.error   { background: #2a0808; color: #fca5a5; }
+
+/* ── Inventory status bar ── */
+[data-theme="dark"] .inventory-status-bar {
+    background: linear-gradient(135deg, #0c2a4e 0%, #1a1040 100%);
+    border-color: #1e3a8a;
+}
+[data-theme="dark"] .inventory-status-bar .inv-status-title { color: #7dd3fc; }
+[data-theme="dark"] .inventory-status-bar .inv-status-total { color: #e2e8f0; background: rgba(0,0,0,0.3); }
+[data-theme="dark"] .inventory-status-bar .inv-status-item  { color: #93c5fd; background: rgba(0,0,0,0.2); }
+
+/* ── Use inventory info ── */
+[data-theme="dark"] .use-inventory-info { background: #0c2a4e; color: #7dd3fc; }
+[data-theme="dark"] #use-expiry-hint    { background: #2a1e00; border-color: #78350f; color: #fde68a; }
+
+/* ── Recipe components ── */
+[data-theme="dark"] .recipe-expiry-note  { background: #2a1e00; color: #fde68a; }
+[data-theme="dark"] .recipe-tools-banner { background: #1a1040; border-color: #3730a3; color: #c4b5fd; }
+[data-theme="dark"] .recipe-tool-chip    { background: #2e1a4a; color: #c4b5fd; }
+[data-theme="dark"] .recipe-subtype-chip { background: #1c1300; border-color: #78350f; color: var(--text); }
+[data-theme="dark"] .recipe-subtype-chip:has(input:checked) { background: #2a1e00; border-color: #d97706; }
+
+/* ── Bug report pills ── */
+[data-theme="dark"] .bug-type-pill { background: var(--bg-card); border-color: var(--border); color: var(--text-light); }
+
+/* ── Shopping tag menu ── */
+[data-theme="dark"] .shopping-tag-menu-container { background: #1a2336; }
+
+/* ── Edit unknown card ── */
+[data-theme="dark"] .edit-unknown-card.highlight { background: #1c1300; border-color: var(--warning); }
+
+/* ── AI match image ── */
+[data-theme="dark"] .ai-match-img { background: var(--bg-card); }
+
+/* ── Inline edit button ── */
+[data-theme="dark"] .btn-edit-inline { background: rgba(30,41,59,0.92); border-color: var(--border); color: var(--text); }
+
+/* ── Setup wizard ── */
+[data-theme="dark"] .setup-body p    { color: var(--text-muted); }
+[data-theme="dark"] .setup-footer    { border-color: var(--border); }
+[data-theme="dark"] .setup-skip-link       { color: var(--text-muted); }
+[data-theme="dark"] .setup-skip-link:hover { color: var(--text-light); }
+
+/* ── Appliance remove active ── */
+[data-theme="dark"] .appliance-item .appliance-remove:active { background: #2a0808; }

@@ -23,6 +23,8 @@ define('FOODFACTS_CACHE_PATH',     __DIR__ . '/../data/food_facts_cache.json');
 define('SHOPPING_NAME_CACHE_PATH', __DIR__ . '/../data/shopping_name_cache.json');
 define('BRING_TOKEN_PATH',         __DIR__ . '/../data/bring_token.json');
 define('AI_USAGE_PATH',            __DIR__ . '/../data/ai_usage.json');
+define('BACKUP_DIR',               __DIR__ . '/../data/backups');
+define('BACKUP_LAST_TS_PATH',      __DIR__ . '/../data/backup_last_ts.json');
 // Gemini pricing (USD per 1M tokens) — configurable in .env (GEMINI_COST_25F_IN etc.)
 // Defaults: gemini-2.5-flash $0.15/M in · $0.60/M out — gemini-2.0-flash $0.10/M in · $0.40/M out
 define('GEMINI_COST_25F_IN',  (float)(getenv('GEMINI_COST_25F_IN')  ?: 0.15));
@@ -116,6 +118,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
 // ── Ping / heartbeat — early response, no DB or rate-limit required ───────────
 if (($_GET['action'] ?? '') === 'ping') {
     echo json_encode(['ok' => true, 'ts' => time()]);
+    exit;
+}
+
+// ── Google Drive OAuth callback — returns HTML, not JSON ──────────────────────
+if (($_GET['action'] ?? '') === 'gdrive_oauth_callback') {
+    _gdriveHandleOAuthCallback();
     exit;
 }
 
@@ -391,7 +399,7 @@ if (($_GET['action'] ?? '') === 'health_check') {
         'ok'       => $freeBytes === false || $freeBytes > 50*1048576,
         'value'    => $freeMB !== null ? $freeMB.' MB liberi' : null,
         'optional' => true,
-        'hint'     => $freeBytes !== false && $freeBytes <= 50*1048576 ? 'Meno di 50 MB liberi — libera spazio sul disco' : null,
+        'hint'     => $freeBytes !== false && $freeBytes <= 50*1048576 ? 'Less than 50 MB free — free up disk space' : null,
     ];
 
     // ── 8. SQLite database ────────────────────────────────────────────────────
@@ -419,11 +427,11 @@ if (($_GET['action'] ?? '') === 'health_check') {
     $checks['db_legacy'] = [
         'ok'       => !$hasLegacy,
         'optional' => true,
-        'hint'     => $hasLegacy ? 'Trovato vecchio dispensa.db — il file è ormai obsoleto, puoi eliminarlo manualmente' : null,
+        'hint'     => $hasLegacy ? 'Legacy dispensa.db found — the file is obsolete, you can delete it manually' : null,
     ];
 
     if ($isFresh) {
-        $checks['db_connect']   = ['ok' => true, 'fresh' => true, 'value' => 'nuovo impianto'];
+        $checks['db_connect']   = ['ok' => true, 'fresh' => true, 'value' => 'fresh install'];
         $checks['db_tables']    = ['ok' => true, 'fresh' => true];
         $checks['db_integrity'] = ['ok' => true, 'fresh' => true];
         $checks['db_wal']       = ['ok' => true, 'fresh' => true, 'optional' => true];
@@ -441,7 +449,7 @@ if (($_GET['action'] ?? '') === 'health_check') {
             $checks['db_connect'] = ['ok' => true, 'value' => basename($dbPath)];
         } catch (\Throwable $e) {
             $checks['db_connect'] = ['ok' => false, 'error' => $e->getMessage(),
-                'hint' => 'Impossibile aprire il database — verifica permessi su data/evershelf.db'];
+                'hint' => 'Cannot open the database — check permissions on data/evershelf.db'];
         }
 
         if ($dbConnOk && $pdo) {
@@ -452,7 +460,7 @@ if (($_GET['action'] ?? '') === 'health_check') {
             $checks['db_tables'] = [
                 'ok'   => empty($missing),
                 'missing' => $missing,
-                'hint' => !empty($missing) ? 'Tabelle mancanti: ' . implode(', ', $missing) . ' — esegui una chiamata API per auto-inizializzare il DB' : null,
+                'hint' => !empty($missing) ? 'Missing tables: ' . implode(', ', $missing) . ' — call any API endpoint to auto-initialize the DB' : null,
             ];
 
             // Integrity
@@ -466,7 +474,7 @@ if (($_GET['action'] ?? '') === 'health_check') {
             // WAL
             $wal = $pdo->query("PRAGMA journal_mode")->fetchColumn();
             $checks['db_wal'] = ['ok' => $wal === 'wal', 'value' => $wal, 'optional' => true,
-                'hint' => $wal !== 'wal' ? 'Modalità journal non ottimale — sarà corretta automaticamente al primo avvio' : null];
+                'hint' => $wal !== 'wal' ? 'Journal mode not optimal — will be corrected automatically on next startup' : null];
 
             // Size & rows
             $checks['db_size']      = ['ok' => true, 'value' => round(filesize($dbPath)/1024).' KB', 'optional' => true];
@@ -474,7 +482,7 @@ if (($_GET['action'] ?? '') === 'health_check') {
             $checks['db_row_count'] = ['ok' => true, 'value' => $cnt.' prodotti in inventario', 'optional' => true];
         } else {
             foreach (['db_tables', 'db_integrity'] as $k)
-                $checks[$k] = ['ok' => false, 'hint' => 'Impossibile verificare — connessione DB fallita'];
+                $checks[$k] = ['ok' => false, 'hint' => 'Cannot verify — DB connection failed'];
             foreach (['db_wal', 'db_size', 'db_row_count'] as $k)
                 $checks[$k] = ['ok' => false, 'optional' => true];
         }
@@ -492,18 +500,39 @@ if (($_GET['action'] ?? '') === 'health_check') {
     $geminiKey = $envGet('GEMINI_API_KEY');
     if (!empty($geminiKey)) {
         $checks['gemini_key'] = ['ok' => strlen($geminiKey) > 20, 'optional' => true,
-            'hint' => strlen($geminiKey) <= 20 ? 'Chiave Gemini AI sembra troppo corta — verifica il valore in .env' : null];
+            'hint' => strlen($geminiKey) <= 20 ? 'Gemini AI key looks too short — check the value in .env' : null];
     } else {
         $checks['gemini_key'] = ['ok' => true, 'optional' => true,
-            'value' => 'non configurata', 'hint' => 'Configura GEMINI_API_KEY in .env per abilitare le funzioni AI'];
+            'value' => 'not configured', 'hint' => 'Set GEMINI_API_KEY in .env to enable AI features'];
     }
 
     // ── 11. Bring! — solo se EMAIL+PASSWORD sono impostate ───────────────────
     // Se non configurata, l'utente ha scelto di non usarla → nessun check, nessun warning.
     $bringEmail    = $envGet('BRING_EMAIL');
     $bringPassword = $envGet('BRING_PASSWORD');
-    $bringEnabled  = !empty($bringEmail) && !empty($bringPassword);
-    // If Bring! not configured, skip entirely — not a warning, it's a user choice
+    $shoppingMode  = $envGet('SHOPPING_MODE') ?: 'native';
+    $bringEnabled  = !empty($bringEmail) && !empty($bringPassword) && $shoppingMode === 'bring';
+    if ($bringEnabled) {
+        $checks['bring_credentials'] = ['ok' => true, 'optional' => true];
+        // Token file is created automatically on first shopping list access — not an error if missing
+        $bringTokenFile = $dataDir . '/bring_token.json';
+        $bringTokenOk   = true; // default: fine (missing = not yet obtained, will auto-create)
+        $bringTokenHint = null;
+        if (file_exists($bringTokenFile)) {
+            $bringData    = @json_decode(@file_get_contents($bringTokenFile), true);
+            $hasToken     = !empty($bringData['access_token'] ?? ($bringData['accessToken'] ?? ''));
+            $expired      = isset($bringData['expires']) && $bringData['expires'] < time();
+            if (!$hasToken && !$expired) {
+                // File exists but token field missing — corrupt
+                $bringTokenOk   = false;
+                $bringTokenHint = 'Bring! token file present but appears invalid — delete data/bring_token.json to regenerate';
+            }
+            // Expired token is OK: it will be refreshed automatically
+        }
+        // Missing token file = first launch, will be created automatically → no warning
+        $checks['bring_token'] = ['ok' => $bringTokenOk, 'optional' => true, 'hint' => $bringTokenHint];
+    }
+    // If Bring! not configured or SHOPPING_MODE != bring, skip entirely — not a warning, it is a deliberate user choice
 
     // ── 12. TTS — solo se TTS_ENABLED ────────────────────────────────────────
     if ($envGet('TTS_ENABLED') === 'true') {
@@ -511,7 +540,7 @@ if (($_GET['action'] ?? '') === 'health_check') {
         $checks['tts_url'] = [
             'ok'       => !empty($ttsUrl),
             'optional' => true,
-            'hint'     => empty($ttsUrl) ? 'TTS_ENABLED=true ma TTS_URL non configurata' : null,
+            'hint'     => empty($ttsUrl) ? 'TTS_ENABLED=true but TTS_URL not configured' : null,
         ];
     }
 
@@ -521,7 +550,7 @@ if (($_GET['action'] ?? '') === 'health_check') {
         $checks['scale_gateway'] = [
             'ok'       => !empty($scaleUrl),
             'optional' => true,
-            'hint'     => empty($scaleUrl) ? 'SCALE_ENABLED=true ma SCALE_GATEWAY_URL non configurata' : null,
+            'hint'     => empty($scaleUrl) ? 'SCALE_ENABLED=true but SCALE_GATEWAY_URL not configured' : null,
         ];
     }
 
@@ -546,7 +575,7 @@ if (($_GET['action'] ?? '') === 'health_check') {
         curl_close($ch);
         $internetOk = $httpCode > 0 || $curlErrNo === 0;
         $checks['internet'] = ['ok' => $internetOk, 'optional' => true,
-            'hint' => !$internetOk ? 'Impossibile raggiungere i server Gemini — le funzioni AI non funzioneranno senza connessione internet' : null];
+            'hint' => !$internetOk ? 'Cannot reach Gemini servers — AI features will not work without an internet connection' : null];
     }
 
     // ── Compute overall result ────────────────────────────────────────────────
@@ -653,6 +682,7 @@ $_writeActions = [
     'inventory_add','inventory_use','inventory_update','inventory_remove',
     'product_save','product_delete','product_merge',
     'bring_add','bring_remove','bring_sync','bring_set_spec','bring_migrate_names',
+    'shopping_add','shopping_remove',
     'dismiss_anomaly','save_settings',
 ];
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && in_array($rateLimitAction, $_writeActions, true)) {
@@ -690,6 +720,7 @@ try {
             'save_settings', 'product_save', 'product_delete', 'product_merge',
             'inventory_add', 'inventory_use', 'inventory_update', 'inventory_remove',
             'dismiss_anomaly', 'bring_add', 'bring_remove', 'bring_sync',
+            'backup_delete', 'backup_restore',
         ];
         if (in_array($action, $demoBlocked, true)) {
             EverLog::warn('demo_mode blocked (403)');
@@ -827,6 +858,19 @@ try {
         case 'bring_suggest':
             bringSuggestItems($db);
             break;
+        // Shopping abstraction layer (delegates to internal DB or Bring!)
+        case 'shopping_list':
+            shoppingGetList($db);
+            break;
+        case 'shopping_add':
+            shoppingAdd($db);
+            break;
+        case 'shopping_remove':
+            shoppingRemove($db);
+            break;
+        case 'shopping_suggest':
+            bringSuggestItems($db);
+            break;
         case 'smart_shopping':
             smartShoppingCached($db);
             break;
@@ -906,6 +950,98 @@ try {
 
         case 'db_cleanup':
             dbCleanup(getDB());
+            break;
+
+        case 'backup_now':
+            echo json_encode(createLocalBackup($db));
+            break;
+        case 'backup_list':
+            echo json_encode(listLocalBackups());
+            break;
+        case 'backup_delete':
+            $fn = json_decode(file_get_contents('php://input'), true)['filename'] ?? '';
+            echo json_encode(deleteLocalBackup($fn));
+            break;
+        case 'backup_restore':
+            $fn = json_decode(file_get_contents('php://input'), true)['filename'] ?? '';
+            echo json_encode(restoreLocalBackup($fn, $db));
+            break;
+        case 'gdrive_push':
+            echo json_encode(backupToGDrive($db));
+            break;
+        case 'gdrive_test':
+            $tokResult = _gdriveGetTokenEx();
+            if (!empty($tokResult['token'])) {
+                echo json_encode(['success' => true]);
+            } else {
+                echo json_encode(['success' => false, 'error' => $tokResult['error'] ?? 'Auth failed']);
+            }
+            break;
+        case 'gdrive_oauth_url':
+            $clientId = env('GDRIVE_CLIENT_ID', '');
+            if (empty($clientId)) {
+                echo json_encode(['success' => false, 'error' => 'GDRIVE_CLIENT_ID not configured — save settings first']);
+            } else {
+                // Use http://localhost so the flow works on any self-hosted server (IP, local domain, etc.).
+                // Google will redirect to http://localhost?code=... after auth; user copies and pastes the URL.
+                // Override via GDRIVE_REDIRECT_URI env var for installations with a real public domain.
+                $redirectUri = env('GDRIVE_REDIRECT_URI', '') ?: 'http://localhost';
+                $url = 'https://accounts.google.com/o/oauth2/v2/auth?' . http_build_query([
+                    'client_id'     => $clientId,
+                    'redirect_uri'  => $redirectUri,
+                    'scope'         => 'https://www.googleapis.com/auth/drive.file',
+                    'response_type' => 'code',
+                    'access_type'   => 'offline',
+                    'prompt'        => 'consent',
+                ]);
+                echo json_encode(['success' => true, 'url' => $url, 'redirect_uri' => $redirectUri]);
+            }
+            break;
+
+        case 'gdrive_oauth_exchange':
+            // Manual code exchange: accepts {code, redirect_uri} from the JS after user copies URL.
+            $_exchangeBody = json_decode(file_get_contents('php://input'), true) ?? [];
+            $code        = trim($_exchangeBody['code'] ?? '');
+            $redirectUri = trim($_exchangeBody['redirect_uri'] ?? '') ?: (env('GDRIVE_REDIRECT_URI', '') ?: 'http://localhost');
+            if (empty($code)) {
+                echo json_encode(['success' => false, 'error' => 'No authorization code provided']);
+                break;
+            }
+            $clientId     = env('GDRIVE_CLIENT_ID', '');
+            $clientSecret = env('GDRIVE_CLIENT_SECRET', '');
+            if (!$clientId || !$clientSecret) {
+                echo json_encode(['success' => false, 'error' => 'Client ID/Secret not configured — save settings first']);
+                break;
+            }
+            $ch = curl_init('https://oauth2.googleapis.com/token');
+            curl_setopt_array($ch, [
+                CURLOPT_RETURNTRANSFER => true,
+                CURLOPT_POST           => true,
+                CURLOPT_POSTFIELDS     => http_build_query([
+                    'client_id'     => $clientId,
+                    'client_secret' => $clientSecret,
+                    'code'          => $code,
+                    'redirect_uri'  => $redirectUri,
+                    'grant_type'    => 'authorization_code',
+                ]),
+                CURLOPT_TIMEOUT        => 15,
+                CURLOPT_SSL_VERIFYPEER => true,
+            ]);
+            $gdriveExResp = curl_exec($ch);
+            $gdriveExErr  = curl_error($ch);
+            curl_close($ch);
+            if (!$gdriveExResp) {
+                echo json_encode(['success' => false, 'error' => 'cURL error: ' . $gdriveExErr]);
+                break;
+            }
+            $gdriveExData = json_decode($gdriveExResp, true);
+            if (!empty($gdriveExData['refresh_token'])) {
+                _gdriveSetEnvVar('GDRIVE_REFRESH_TOKEN', $gdriveExData['refresh_token']);
+                echo json_encode(['success' => true]);
+            } else {
+                $errDesc = $gdriveExData['error_description'] ?? $gdriveExData['error'] ?? $gdriveExResp;
+                echo json_encode(['success' => false, 'error' => 'Token exchange failed: ' . $errDesc]);
+            }
             break;
 
         case 'gemini_product_hint':
@@ -2116,36 +2252,50 @@ function updateInventory(PDO $db): void {
     $fields[] = "updated_at = CURRENT_TIMESTAMP";
     $params[] = $id;
 
-    $stmt = $db->prepare("UPDATE inventory SET " . implode(', ', $fields) . " WHERE id = ?");
-    $stmt->execute($params);
+    // Wrap all writes in a single transaction to avoid concurrent lock failures.
+    $db->beginTransaction();
+    try {
+        $stmt = $db->prepare("UPDATE inventory SET " . implode(', ', $fields) . " WHERE id = ?");
+        $stmt->execute($params);
 
-    // Record a compensating transaction so anomaly detection stays accurate
-    if (isset($input['quantity']) && $prevRow) {
-        $oldQty = (float)$prevRow['quantity'];
-        $newQty = (float)$input['quantity'];
-        $diff   = round($newQty - $oldQty, 6);
-        $loc    = $input['location'] ?? $prevRow['location'];
-        $pid    = (int)$prevRow['product_id'];
-        if (abs($diff) > 0.001) {
-            $txType = $diff > 0 ? 'in' : 'out';
-            $txQty  = abs($diff);
-            $db->prepare("INSERT INTO transactions (product_id, type, quantity, location, notes) VALUES (?, ?, ?, ?, '[Correzione manuale]')")
-               ->execute([$pid, $txType, $txQty, $loc]);
+        // Record a compensating transaction so anomaly detection stays accurate
+        if (isset($input['quantity']) && $prevRow) {
+            $oldQty = (float)$prevRow['quantity'];
+            $newQty = (float)$input['quantity'];
+            $diff   = round($newQty - $oldQty, 6);
+            $loc    = $input['location'] ?? $prevRow['location'];
+            $pid    = (int)$prevRow['product_id'];
+            if (abs($diff) > 0.001) {
+                $txType = $diff > 0 ? 'in' : 'out';
+                $txQty  = abs($diff);
+                $db->prepare("INSERT INTO transactions (product_id, type, quantity, location, notes) VALUES (?, ?, ?, ?, '[Manual correction]')")
+                   ->execute([$pid, $txType, $txQty, $loc]);
+            }
         }
+
+        // Update unit on the product if provided
+        if (isset($input['unit']) && isset($input['product_id'])) {
+            $stmt = $db->prepare("UPDATE products SET unit = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?");
+            $stmt->execute([$input['unit'], $input['product_id']]);
+        }
+
+        // Update package info if provided
+        if (isset($input['package_unit']) && isset($input['product_id'])) {
+            $stmt = $db->prepare("UPDATE products SET package_unit = ?, default_quantity = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?");
+            $stmt->execute([$input['package_unit'], $input['package_size'] ?? 0, $input['product_id']]);
+        }
+
+        $db->commit();
+    } catch (Throwable $e) {
+        if ($db->inTransaction()) $db->rollBack();
+        throw $e;
     }
 
-    // Update unit on the product if provided
-    if (isset($input['unit']) && isset($input['product_id'])) {
-        $stmt = $db->prepare("UPDATE products SET unit = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?");
-        $stmt->execute([$input['unit'], $input['product_id']]);
+    // Real-time Bring! sync: done after commit so DB lock is not held during HTTP call
+    if (isset($input['quantity']) && $prevRow && abs((float)$input['quantity'] - (float)$prevRow['quantity']) > 0.001) {
+        try { bringQuickSyncProduct($db, (int)$prevRow['product_id']); } catch (Throwable $e) {}
     }
-    
-    // Update package info if provided
-    if (isset($input['package_unit']) && isset($input['product_id'])) {
-        $stmt = $db->prepare("UPDATE products SET package_unit = ?, default_quantity = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?");
-        $stmt->execute([$input['package_unit'], $input['package_size'] ?? 0, $input['product_id']]);
-    }
-    
+
     echo json_encode(['success' => true]);
 }
 
@@ -2254,7 +2404,7 @@ function listTransactions(PDO $db): void {
     $productId = $_GET['product_id'] ?? '';
     
     $query = "
-        SELECT t.*, p.name, p.brand, p.unit
+        SELECT t.*, p.name, p.brand, p.unit, p.default_quantity, p.package_unit
         FROM transactions t
         JOIN products p ON t.product_id = p.id
     ";
@@ -2331,7 +2481,7 @@ function undoTransaction(PDO $db): void {
                 }
             }
             // Log counter-transaction
-            $db->prepare("INSERT INTO transactions (product_id, type, quantity, location, notes) VALUES (?, 'out', ?, ?, '[Annullato]')")->execute([$productId, $quantity, $location]);
+            $db->prepare("INSERT INTO transactions (product_id, type, quantity, location, notes) VALUES (?, 'out', ?, ?, '[Undone]')")->execute([$productId, $quantity, $location]);
 
         } elseif ($type === 'out' || $type === 'waste') {
             // Reverse a USE: add quantity back to inventory
@@ -2345,7 +2495,7 @@ function undoTransaction(PDO $db): void {
                 $db->prepare("INSERT INTO inventory (product_id, location, quantity) VALUES (?, ?, ?)")->execute([$productId, $location, $quantity]);
             }
             // Log counter-transaction
-            $db->prepare("INSERT INTO transactions (product_id, type, quantity, location, notes) VALUES (?, 'in', ?, ?, '[Annullato]')")->execute([$productId, $quantity, $location]);
+            $db->prepare("INSERT INTO transactions (product_id, type, quantity, location, notes) VALUES (?, 'in', ?, ?, '[Undone]')")->execute([$productId, $quantity, $location]);
         }
 
         // Mark original as undone
@@ -2915,14 +3065,31 @@ function getServerSettings(): void {
         'price_currency' => env('PRICE_CURRENCY', 'EUR'),
         'price_update_months' => (int)env('PRICE_UPDATE_MONTHS', '3'),
         'recipe_retention_days' => (int)env('RECIPE_RETENTION_DAYS', '7'),
-        'transaction_retention_days' => (int)env('TRANSACTION_RETENTION_DAYS', '7'),
+        'transaction_retention_days' => (int)env('TRANSACTION_RETENTION_DAYS', '90'),
         'vacuum_expiry_extension_days' => (int)env('VACUUM_EXPIRY_EXTENSION_DAYS', '30'),
+        // Backup
+        'backup_enabled' => env('BACKUP_ENABLED', 'true') === 'true',
+        'backup_retention_days' => (int)env('BACKUP_RETENTION_DAYS', '3'),
+        'gdrive_enabled' => env('GDRIVE_ENABLED', 'false') === 'true',
+        'gdrive_folder_id' => env('GDRIVE_FOLDER_ID', ''),
+        'gdrive_retention_days' => (int)env('GDRIVE_RETENTION_DAYS', '30'),
+        'gdrive_client_id_set'    => !empty(env('GDRIVE_CLIENT_ID')),
+        'gdrive_refresh_token_set'=> !empty(env('GDRIVE_REFRESH_TOKEN')),
+        // Shopping list
+        'shopping_enabled'            => env('SHOPPING_ENABLED', 'true') === 'true',
+        'shopping_mode'               => env('SHOPPING_MODE', 'internal'),
+        'shopping_smart_suggestions'  => env('SHOPPING_SMART_SUGGESTIONS', 'true') === 'true',
+        'shopping_forecast'           => env('SHOPPING_FORECAST', 'true') === 'true',
+        'shopping_auto_add_threshold' => (int)env('SHOPPING_AUTO_ADD_THRESHOLD', '0'),
+        'dark_mode'                   => env('DARK_MODE', 'auto'),
     ]);
 }
 
 function dbCleanup(?PDO $db = null): void {
     $recipeDays = max(1, (int)env('RECIPE_RETENTION_DAYS', '7'));
-    $txDays     = max(1, (int)env('TRANSACTION_RETENTION_DAYS', '7'));
+    // Minimum 90 days: smart shopping needs months of history to compute frequencies.
+    // A value below 30 will cause the shopping list to appear nearly empty.
+    $txDays     = max(30, (int)env('TRANSACTION_RETENTION_DAYS', '90'));
     $pdo = $db ?? getDB();
     try {
         // Delete old recipes (generated recipe plans)
@@ -2976,6 +3143,11 @@ function saveSettings(): void {
         'tts_auth_header_name'  => 'TTS_AUTH_HEADER_NAME',
         'tts_auth_header_value' => 'TTS_AUTH_HEADER_VALUE',
         'tts_extra_fields'      => 'TTS_EXTRA_FIELDS',
+        'gdrive_folder_id'   => 'GDRIVE_FOLDER_ID',
+        'gdrive_client_id'   => 'GDRIVE_CLIENT_ID',
+        'gdrive_client_secret'          => 'GDRIVE_CLIENT_SECRET',
+        'shopping_mode'      => 'SHOPPING_MODE',
+        'dark_mode'         => 'DARK_MODE',
     ];
     // Boolean keys
     $boolMap = [
@@ -2991,6 +3163,11 @@ function saveSettings(): void {
         'screensaver_enabled' => 'SCREENSAVER_ENABLED',
         'price_enabled' => 'PRICE_ENABLED',
         'zerowaste_tips_enabled' => 'ZEROWASTE_TIPS_ENABLED',
+        'backup_enabled' => 'BACKUP_ENABLED',
+        'gdrive_enabled' => 'GDRIVE_ENABLED',
+        'shopping_enabled'           => 'SHOPPING_ENABLED',
+        'shopping_smart_suggestions' => 'SHOPPING_SMART_SUGGESTIONS',
+        'shopping_forecast'          => 'SHOPPING_FORECAST',
     ];
     // Integer keys
     $intMap = [
@@ -3000,6 +3177,9 @@ function saveSettings(): void {
         'recipe_retention_days'       => 'RECIPE_RETENTION_DAYS',
         'transaction_retention_days'  => 'TRANSACTION_RETENTION_DAYS',
         'vacuum_expiry_extension_days'=> 'VACUUM_EXPIRY_EXTENSION_DAYS',
+        'backup_retention_days'       => 'BACKUP_RETENTION_DAYS',
+        'gdrive_retention_days'           => 'GDRIVE_RETENTION_DAYS',
+        'shopping_auto_add_threshold'    => 'SHOPPING_AUTO_ADD_THRESHOLD',
     ];
     // Float keys
     $floatMap = [
@@ -3031,7 +3211,7 @@ function saveSettings(): void {
     if (array_key_exists('appliances', $input)) {
         $envVars['APPLIANCES'] = is_array($input['appliances']) ? implode(',', $input['appliances']) : (string)$input['appliances'];
     }
-    
+
     // Write .env file
     $lines = [];
     foreach ($envVars as $key => $val) {
@@ -3599,7 +3779,7 @@ function geminiChat(PDO $db): void {
     $langName = recipeLangName($lang);
 
     if (empty($message)) {
-        echo json_encode(['success' => false, 'error' => 'Messaggio vuoto']);
+        echo json_encode(['success' => false, 'error' => 'Empty message']);
         return;
     }
 
@@ -3703,7 +3883,7 @@ PROMPT;
     $httpCode = $result['http_code'];
 
     if ($httpCode !== 200) {
-        $errMsg = $result['data']['error']['message'] ?? 'Errore API Gemini';
+        $errMsg = $result['data']['error']['message'] ?? 'Gemini API error';
         echo json_encode(['success' => false, 'error' => $errMsg, 'http_code' => $httpCode]);
         return;
     }
@@ -3711,7 +3891,7 @@ PROMPT;
     $reply = $result['data']['candidates'][0]['content']['parts'][0]['text'] ?? '';
 
     if (empty($reply)) {
-        echo json_encode(['success' => false, 'error' => 'Risposta vuota da Gemini']);
+        echo json_encode(['success' => false, 'error' => 'Empty response from Gemini']);
         return;
     }
 
@@ -4371,6 +4551,7 @@ PROMPT;
                             }
                             
                             // Convert qty_number to inventory unit if mismatch detected
+                            $confAlreadyInSubUnit = false;
                             if ($recipeUnit && $recipeUnit !== $invUnit) {
                                 // Weight conversions (both should be 'g' now, but handle legacy 'kg')
                                 if ($recipeUnit === 'g' && $invUnit === 'kg') {
@@ -4382,22 +4563,31 @@ PROMPT;
                                     $qtyNum = $recipeVal / 1000;
                                 } elseif ($recipeUnit === 'ml' && $invUnit === 'ml') {
                                     $qtyNum = $recipeVal;
-                                // g/ml → pz/conf (approximate to nearest piece)
-                                } elseif ($invUnit === 'pz' || $invUnit === 'conf') {
+                                // g/ml → conf with weight/volume pkg_unit: keep in sub-units so JS modal works
+                                } elseif ($invUnit === 'conf') {
+                                    $defQty = (float)($bestMatch['default_quantity'] ?? 0);
+                                    $pkgUnitLC = strtolower($bestMatch['package_unit'] ?? '');
+                                    if ($defQty > 0 && ($pkgUnitLC === 'g' || $pkgUnitLC === 'ml')
+                                        && ($recipeUnit === 'g' || $recipeUnit === 'ml')) {
+                                        // Keep qty_number in sub-units; JS handles g↔conf conversion
+                                        $qtyNum = $recipeVal;
+                                        $ing['qty'] = round($qtyNum) . ' ' . $pkgUnitLC;
+                                        $confAlreadyInSubUnit = true;
+                                    } else {
+                                        // conf without weight pkg_unit: fractional conf
+                                        $qtyNum = $defQty > 0 ? max(0.25, round(($recipeVal / $defQty) * 4) / 4) : 1;
+                                    }
+                                // g/ml → pz (approximate to nearest piece)
+                                } elseif ($invUnit === 'pz') {
                                     $defQty = (float)($bestMatch['default_quantity'] ?? 0);
                                     if ($defQty > 0) {
-                                        // Convert recipe grams/ml to pieces using default_quantity
-                                        $qtyNum = $recipeVal / $defQty;
-                                        $qtyNum = max(0.25, round($qtyNum * 4) / 4); // round to nearest quarter
+                                        $qtyNum = max(0.25, round(($recipeVal / $defQty) * 4) / 4);
                                     } else {
-                                        // No default_quantity: AI was told to use pieces but sent grams.
-                                        // If the original qty_number looks like a piece count (≤ invQty and ≤ 100)
-                                        // keep it; otherwise fall back to 1.
                                         $origQtyNum = (float)($ing['qty_number'] ?? 0);
                                         if ($origQtyNum >= 1 && $origQtyNum <= $invQty && $origQtyNum <= 100) {
-                                            $qtyNum = $origQtyNum; // already a plausible piece count
+                                            $qtyNum = $origQtyNum;
                                         } else {
-                                            $qtyNum = 1; // safe minimum: 1 piece
+                                            $qtyNum = 1;
                                         }
                                     }
                                 }
@@ -4409,6 +4599,17 @@ PROMPT;
                                 }
                             }
                             
+                            // Conf+weight post-normalisation: if qty_number wasn't already set to
+                            // sub-units above, and it looks like a fractional conf value (≤ available
+                            // conf count), convert to grams so the JS modal shows correct grams.
+                            if (!$confAlreadyInSubUnit && $invUnit === 'conf' && $qtyNum > 0) {
+                                $defQty = (float)($bestMatch['default_quantity'] ?? 0);
+                                $pkgUnitLC = strtolower($bestMatch['package_unit'] ?? '');
+                                if ($defQty > 0 && ($pkgUnitLC === 'g' || $pkgUnitLC === 'ml') && $qtyNum <= $invQty) {
+                                    $qtyNum = round($qtyNum * $defQty);
+                                    $ing['qty'] = $qtyNum . ' ' . $pkgUnitLC;
+                                }
+                            }
                             // Sanity check: qty_number should not exceed available
                             if ($qtyNum > $invQty) {
                                 $qtyNum = $invQty; // cap to available
@@ -4771,14 +4972,29 @@ function _enrichChatIngredients(array &$ingredients, array $items): void {
                     elseif (strpos($ru, 'pz') === 0 || strpos($ru, 'pezz') === 0) $recipeUnit = 'pz';
                     elseif (strpos($ru, 'conf') === 0) $recipeUnit = 'conf';
                 }
+                $confAlreadyInSubUnit = false;
                 if ($recipeUnit && $recipeUnit !== $invUnit) {
                     if ($recipeUnit === 'g' && $invUnit === 'g') $qtyNum = $recipeVal;
                     elseif ($recipeUnit === 'g' && $invUnit === 'kg') $qtyNum = $recipeVal / 1000;
                     elseif ($recipeUnit === 'ml' && $invUnit === 'ml') $qtyNum = $recipeVal;
                     elseif ($recipeUnit === 'ml' && $invUnit === 'l') $qtyNum = $recipeVal / 1000;
-                    elseif ($invUnit === 'pz' || $invUnit === 'conf') {
+                    elseif ($invUnit === 'conf') {
+                        $defQty = (float)($bestMatch['default_quantity'] ?? 0);
+                        $pkgUnitLC = strtolower($bestMatch['package_unit'] ?? '');
+                        if ($defQty > 0 && ($pkgUnitLC === 'g' || $pkgUnitLC === 'ml') && ($recipeUnit === 'g' || $recipeUnit === 'ml')) {
+                            $qtyNum = $recipeVal; $ing['qty'] = round($qtyNum) . ' ' . $pkgUnitLC; $confAlreadyInSubUnit = true;
+                        } else { $qtyNum = $defQty > 0 ? max(0.25, round(($recipeVal / $defQty) * 4) / 4) : 1; }
+                    } elseif ($invUnit === 'pz') {
                         $defQty = (float)($bestMatch['default_quantity'] ?? 0);
                         $qtyNum = $defQty > 0 ? max(0.25, round(($recipeVal / $defQty) * 4) / 4) : max(1, round($recipeVal / 100));
+                    }
+                }
+                // Conf+weight: normalise fractional conf to sub-units
+                if (!$confAlreadyInSubUnit && $invUnit === 'conf' && $qtyNum > 0) {
+                    $defQty = (float)($bestMatch['default_quantity'] ?? 0);
+                    $pkgUnitLC = strtolower($bestMatch['package_unit'] ?? '');
+                    if ($defQty > 0 && ($pkgUnitLC === 'g' || $pkgUnitLC === 'ml') && $qtyNum <= $invQty) {
+                        $qtyNum = round($qtyNum * $defQty); $ing['qty'] = $qtyNum . ' ' . $pkgUnitLC;
                     }
                 }
                 if ($qtyNum > $invQty) $qtyNum = $invQty;
@@ -5291,15 +5507,30 @@ PROMPT;
                         elseif (strpos($ru, 'pz') === 0 || strpos($ru, 'pezz') === 0) $recipeUnit = 'pz';
                         elseif (strpos($ru, 'conf') === 0)                $recipeUnit = 'conf';
                     }
+                    $confAlreadyInSubUnit = false;
                     if ($recipeUnit && $recipeUnit !== $invUnit) {
                         if ($recipeUnit === 'g'  && $invUnit === 'kg')  $qtyNum = $recipeVal / 1000;
                         elseif ($recipeUnit === 'g'  && $invUnit === 'g')   $qtyNum = $recipeVal;
                         elseif ($recipeUnit === 'ml' && $invUnit === 'l')   $qtyNum = $recipeVal / 1000;
                         elseif ($recipeUnit === 'ml' && $invUnit === 'ml')  $qtyNum = $recipeVal;
-                        elseif ($invUnit === 'pz' || $invUnit === 'conf') {
+                        elseif ($invUnit === 'conf') {
+                            $defQty = (float)($bestMatch['default_quantity'] ?? 0);
+                            $pkgUnitLC = strtolower($bestMatch['package_unit'] ?? '');
+                            if ($defQty > 0 && ($pkgUnitLC === 'g' || $pkgUnitLC === 'ml') && ($recipeUnit === 'g' || $recipeUnit === 'ml')) {
+                                $qtyNum = $recipeVal; $ing['qty'] = round($qtyNum) . ' ' . $pkgUnitLC; $confAlreadyInSubUnit = true;
+                            } else { $qtyNum = $defQty > 0 ? max(0.25, round(($recipeVal / $defQty) * 4) / 4) : 1; }
+                        } elseif ($invUnit === 'pz') {
                             $defQty = (float)($bestMatch['default_quantity'] ?? 0);
                             if ($defQty > 0) { $qtyNum = $recipeVal / $defQty; $qtyNum = max(0.25, round($qtyNum * 4) / 4); }
                             else $qtyNum = max(1, round($recipeVal / 100));
+                        }
+                    }
+                    // Conf+weight: normalise fractional conf to sub-units
+                    if (!$confAlreadyInSubUnit && $invUnit === 'conf' && $qtyNum > 0) {
+                        $defQty = (float)($bestMatch['default_quantity'] ?? 0);
+                        $pkgUnitLC = strtolower($bestMatch['package_unit'] ?? '');
+                        if ($defQty > 0 && ($pkgUnitLC === 'g' || $pkgUnitLC === 'ml') && $qtyNum <= $invQty) {
+                            $qtyNum = round($qtyNum * $defQty); $ing['qty'] = $qtyNum . ' ' . $pkgUnitLC;
                         }
                     }
                     if ($qtyNum > $invQty) $qtyNum = $invQty;
@@ -5371,7 +5602,7 @@ PROMPT;
     $httpCode = $result['http_code'];
 
     if ($httpCode !== 200) {
-        $errMsg = $result['data']['error']['message'] ?? 'Errore API Gemini';
+        $errMsg = $result['data']['error']['message'] ?? 'Gemini API error';
         echo json_encode(['success' => false, 'error' => $errMsg, 'http_code' => $httpCode]);
         return;
     }
@@ -5386,7 +5617,7 @@ PROMPT;
     $identified = json_decode($text, true);
 
     if (!$identified || empty($identified['name'])) {
-        echo json_encode(['success' => false, 'error' => 'Impossibile identificare il prodotto', 'raw' => $text]);
+        echo json_encode(['success' => false, 'error' => 'Cannot identify the product', 'raw' => $text]);
         return;
     }
 
@@ -6109,6 +6340,447 @@ function computeShoppingName(string $name, string $category = '', string $brand 
 }
 
 /**
+ * Real-time shopping sync for a single product.
+ * Called after inventory changes (use/update/add) to keep the shopping list in sync immediately.
+ * Delegates to Bring! or internal DB depending on SHOPPING_MODE.
+ */
+function bringQuickSyncProduct(PDO $db, int $productId): void {
+    $stmt = $db->prepare("SELECT SUM(quantity) FROM inventory WHERE product_id = ? AND quantity > 0");
+    $stmt->execute([$productId]);
+    $totalQty = (float)($stmt->fetchColumn() ?: 0);
+
+    $stmt = $db->prepare("SELECT name, brand, shopping_name FROM products WHERE id = ?");
+    $stmt->execute([$productId]);
+    $prod = $stmt->fetch();
+    if (!$prod) return;
+
+    $genericName = $prod['shopping_name'] ?: computeShoppingName($prod['name'], '', $prod['brand']);
+
+    if (isShoppingBringMode()) {
+        // Delegate to Bring!
+        $auth = bringAuth();
+        if (!$auth) return;
+        $listUUID = $auth['bringListUUID'];
+        $bringName = italianToBring($genericName);
+
+        $listData = bringRequest('GET', "https://api.getbring.com/rest/v2/bringlists/{$listUUID}");
+        if (!$listData || !isset($listData['purchase'])) return;
+
+        $onBring = false;
+        foreach ($listData['purchase'] as $item) {
+            if (strcasecmp($item['name'] ?? '', $bringName) === 0) { $onBring = true; break; }
+        }
+
+        if ($totalQty <= 0 && !$onBring) {
+            $spec = $genericName !== $prod['name']
+                ? $prod['name'] . ($prod['brand'] ? ' · ' . $prod['brand'] : '') . ' · 🛒 Esaurito'
+                : ($prod['brand'] ? $prod['brand'] . ' · ' : '') . '🛒 Esaurito';
+            bringRequest('PUT', "https://api.getbring.com/rest/v2/bringlists/{$listUUID}",
+                http_build_query(['uuid' => $listUUID, 'purchase' => $bringName, 'specification' => $spec]));
+            EverLog::info('bringQuickSync: added to Bring!', ['product_id' => $productId, 'name' => $bringName]);
+        } elseif ($totalQty > 0 && $onBring) {
+            bringRequest('PUT', "https://api.getbring.com/rest/v2/bringlists/{$listUUID}",
+                http_build_query(['uuid' => $listUUID, 'remove' => $bringName]));
+            EverLog::info('bringQuickSync: removed from Bring!', ['product_id' => $productId, 'name' => $bringName]);
+        }
+    } else {
+        // Internal mode
+        $threshold = (int)env('SHOPPING_AUTO_ADD_THRESHOLD', '0');
+        $stmtCheck = $db->prepare("SELECT id FROM shopping_list WHERE lower(name) = lower(?)");
+        $stmtCheck->execute([$genericName]);
+        $onList = (bool)$stmtCheck->fetch();
+
+        if ($totalQty <= $threshold && !$onList) {
+            $spec = $genericName !== $prod['name']
+                ? $prod['name'] . ($prod['brand'] ? ' · ' . $prod['brand'] : '')
+                : ($prod['brand'] ?: '');
+            $db->prepare("INSERT OR IGNORE INTO shopping_list (name, raw_name, specification) VALUES (?, ?, ?)")
+               ->execute([$genericName, $prod['name'], $spec]);
+            EverLog::info('shoppingQuickSync: added to internal list', ['product_id' => $productId, 'name' => $genericName]);
+        } elseif ($totalQty > $threshold && $onList) {
+            $db->prepare("DELETE FROM shopping_list WHERE lower(name) = lower(?)")->execute([$genericName]);
+            EverLog::info('shoppingQuickSync: removed from internal list', ['product_id' => $productId, 'name' => $genericName]);
+        }
+    }
+}
+
+// ===== LOCAL BACKUP =====
+
+/**
+ * Create a timestamped local backup of evershelf.db.
+ * WAL-checkpointed before copy. Purges backups older than BACKUP_RETENTION_DAYS.
+ */
+function createLocalBackup(?PDO $db = null): array {
+    EverLog::info('createLocalBackup');
+    $backupDir = BACKUP_DIR;
+    if (!is_dir($backupDir) && !mkdir($backupDir, 0755, true)) {
+        return ['success' => false, 'error' => 'Cannot create backup directory'];
+    }
+
+    $dbFile = __DIR__ . '/../data/evershelf.db';
+    if (!file_exists($dbFile)) {
+        return ['success' => false, 'error' => 'Database file not found'];
+    }
+
+    // WAL checkpoint: flush WAL into main DB file before copying
+    try {
+        $pdo = $db ?? getDB();
+        $pdo->exec('PRAGMA wal_checkpoint(FULL)');
+    } catch (Throwable $e) { /* non-fatal */ }
+
+    $date     = date('Y-m-d_Hi');
+    $filename = "evershelf_{$date}.db";
+    $destPath = "$backupDir/$filename";
+
+    if (!copy($dbFile, $destPath)) {
+        return ['success' => false, 'error' => 'Failed to copy database file'];
+    }
+
+    // Purge local backups older than retention
+    $retentionDays = max(1, (int)env('BACKUP_RETENTION_DAYS', '3'));
+    $cutoff = strtotime("-{$retentionDays} days");
+    $purged = 0;
+    foreach (glob("$backupDir/evershelf_*.db") ?: [] as $f) {
+        if ($f !== $destPath && filemtime($f) < $cutoff) {
+            unlink($f);
+            $purged++;
+        }
+    }
+
+    $sizeKb = (int)round(filesize($destPath) / 1024);
+    $result = [
+        'success'    => true,
+        'filename'   => $filename,
+        'path'       => $destPath,
+        'size_kb'    => $sizeKb,
+        'purged'     => $purged,
+        'created_at' => date('c'),
+    ];
+
+    // Update last-backup timestamp file
+    file_put_contents(BACKUP_LAST_TS_PATH, json_encode(['ts' => time(), 'filename' => $filename, 'size_kb' => $sizeKb]));
+
+    return $result;
+}
+
+/**
+ * List local backup files with metadata.
+ */
+function listLocalBackups(): array {
+    $backupDir = BACKUP_DIR;
+    $backups   = [];
+    foreach (glob("$backupDir/evershelf_*.db") ?: [] as $f) {
+        $backups[] = [
+            'filename'   => basename($f),
+            'size_kb'    => (int)round(filesize($f) / 1024),
+            'created_at' => date('c', filemtime($f)),
+        ];
+    }
+    usort($backups, fn($a, $b) => strcmp($b['created_at'], $a['created_at']));
+
+    $lastTs = [];
+    if (file_exists(BACKUP_LAST_TS_PATH)) {
+        $lastTs = json_decode(file_get_contents(BACKUP_LAST_TS_PATH), true) ?: [];
+    }
+
+    return [
+        'success'         => true,
+        'backups'         => $backups,
+        'last_backup_ts'  => $lastTs['ts'] ?? null,
+        'last_backup_file'=> $lastTs['filename'] ?? null,
+        'retention_days'  => max(1, (int)env('BACKUP_RETENTION_DAYS', '3')),
+    ];
+}
+
+/**
+ * Delete a specific local backup file.
+ */
+function deleteLocalBackup(string $filename): array {
+    if (!preg_match('/^evershelf_\d{4}-\d{2}-\d{2}_\d{4}\.db$/', $filename)) {
+        return ['success' => false, 'error' => 'Invalid backup filename'];
+    }
+    $path = BACKUP_DIR . '/' . $filename;
+    if (!file_exists($path)) {
+        return ['success' => false, 'error' => 'File not found'];
+    }
+    return unlink($path) ? ['success' => true] : ['success' => false, 'error' => 'Failed to delete file'];
+}
+
+/**
+ * Restore a local backup: replaces the current evershelf.db.
+ * Clears WAL/SHM files and invalidates smart shopping cache.
+ */
+function restoreLocalBackup(string $filename, PDO $db): array {
+    if (!preg_match('/^evershelf_\d{4}-\d{2}-\d{2}_\d{4}\.db$/', $filename)) {
+        return ['success' => false, 'error' => 'Invalid backup filename'];
+    }
+    $backupPath = BACKUP_DIR . '/' . $filename;
+    if (!file_exists($backupPath)) {
+        return ['success' => false, 'error' => 'Backup file not found'];
+    }
+    $dbPath = __DIR__ . '/../data/evershelf.db';
+
+    // Flush WAL before replacing DB
+    try { $db->exec('PRAGMA wal_checkpoint(FULL)'); } catch (Throwable $e) {}
+
+    if (!copy($backupPath, $dbPath)) {
+        return ['success' => false, 'error' => 'Failed to restore backup'];
+    }
+    // Remove stale WAL/SHM so next connection starts clean
+    @unlink($dbPath . '-wal');
+    @unlink($dbPath . '-shm');
+    // Invalidate dependent caches
+    @unlink(__DIR__ . '/../data/smart_shopping_cache.json');
+
+    EverLog::info('restoreLocalBackup', ['filename' => $filename]);
+    return ['success' => true, 'message' => 'Restore complete — reload the page to see the restored data.'];
+}
+
+// ===== GOOGLE DRIVE BACKUP =====
+
+/** Write / overwrite a single key in the .env file (used by OAuth callback). */
+function _gdriveSetEnvVar(string $key, string $value): void {
+    $envFile = __DIR__ . '/../.env';
+    $envVars = loadEnv();
+    $envVars[$key] = $value;
+    $lines = [];
+    foreach ($envVars as $k => $v) { $lines[] = "$k=$v"; }
+    file_put_contents($envFile, implode("\n", $lines) . "\n");
+}
+
+/**
+ * Build the OAuth 2.0 redirect URI for the server-side callback.
+ * Used only for _gdriveHandleOAuthCallback (legacy flow).
+ * The interactive auth URL now uses GDRIVE_REDIRECT_URI or http://localhost instead.
+ */
+function _gdriveRedirectUri(): string {
+    $override = env('GDRIVE_REDIRECT_URI', '');
+    if (!empty($override)) return $override;
+    $scheme = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http';
+    $host   = $_SERVER['HTTP_HOST'] ?? 'localhost';
+    return "$scheme://$host/api/index.php?action=gdrive_oauth_callback";
+}
+
+/**
+ * Get an access token using a stored OAuth 2.0 refresh token.
+ */
+function _gdriveGetTokenOAuth(): array {
+    $clientId     = env('GDRIVE_CLIENT_ID', '');
+    $clientSecret = env('GDRIVE_CLIENT_SECRET', '');
+    $refreshToken = env('GDRIVE_REFRESH_TOKEN', '');
+    if (!$clientId || !$clientSecret) {
+        return ['error' => 'GDRIVE_CLIENT_ID and GDRIVE_CLIENT_SECRET are required for OAuth'];
+    }
+    if (!$refreshToken) {
+        return ['error' => 'Not authorized yet — click "Authorize with Google" first'];
+    }
+    $ch = curl_init('https://oauth2.googleapis.com/token');
+    curl_setopt_array($ch, [
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_POST           => true,
+        CURLOPT_POSTFIELDS     => http_build_query([
+            'client_id'     => $clientId,
+            'client_secret' => $clientSecret,
+            'refresh_token' => $refreshToken,
+            'grant_type'    => 'refresh_token',
+        ]),
+        CURLOPT_TIMEOUT        => 15,
+        CURLOPT_SSL_VERIFYPEER => true,
+    ]);
+    $response = curl_exec($ch);
+    $curlErr  = curl_error($ch);
+    curl_close($ch);
+    if (!$response) return ['error' => 'cURL failed: ' . $curlErr];
+    $data = json_decode($response, true);
+    if (!empty($data['access_token'])) return ['token' => $data['access_token']];
+    return ['error' => 'OAuth refresh error: ' . ($data['error_description'] ?? $data['error'] ?? $response)];
+}
+
+/**
+ * Handle the OAuth 2.0 callback: exchange the code for tokens, store refresh_token.
+ * Returns HTML (not JSON) — must be called before Content-Type header is sent.
+ */
+function _gdriveHandleOAuthCallback(): void {
+    $code = $_GET['code'] ?? '';
+    if (empty($code)) {
+        http_response_code(400);
+        header('Content-Type: text/html; charset=utf-8');
+        echo '<html><body style="font-family:sans-serif;padding:2rem"><h2>&#10060; Error</h2><p>No authorization code received.</p></body></html>';
+        return;
+    }
+    $clientId     = env('GDRIVE_CLIENT_ID', '');
+    $clientSecret = env('GDRIVE_CLIENT_SECRET', '');
+    $redirectUri  = _gdriveRedirectUri();
+    $ch = curl_init('https://oauth2.googleapis.com/token');
+    curl_setopt_array($ch, [
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_POST           => true,
+        CURLOPT_POSTFIELDS     => http_build_query([
+            'client_id'     => $clientId,
+            'client_secret' => $clientSecret,
+            'code'          => $code,
+            'redirect_uri'  => $redirectUri,
+            'grant_type'    => 'authorization_code',
+        ]),
+        CURLOPT_TIMEOUT        => 15,
+        CURLOPT_SSL_VERIFYPEER => true,
+    ]);
+    $response = curl_exec($ch);
+    curl_close($ch);
+    $data = json_decode($response, true);
+    header('Content-Type: text/html; charset=utf-8');
+    if (!empty($data['refresh_token'])) {
+        _gdriveSetEnvVar('GDRIVE_REFRESH_TOKEN', $data['refresh_token']);
+        echo '<html><head><title>EverShelf &#10004;</title></head><body style="font-family:sans-serif;text-align:center;padding:3rem;background:#f0fdf4">'
+           . '<h2 style="color:#15803d">&#10004; Google Drive Authorized!</h2>'
+           . '<p>EverShelf can now back up to your Google Drive.</p>'
+           . '<p style="color:#94a3b8;font-size:0.9rem">This tab will close automatically.</p>'
+           . '<script>setTimeout(()=>{try{window.close()}catch(e){}},2500)</script>'
+           . '</body></html>';
+    } else {
+        $err = htmlspecialchars($data['error_description'] ?? $data['error'] ?? 'Unknown error');
+        http_response_code(400);
+        echo "<html><body style='font-family:sans-serif;padding:2rem'><h2>&#10060; Authorization failed</h2><p>$err</p></body></html>";
+    }
+}
+
+/**
+ * Obtain a short-lived Google API access token via OAuth 2.0 refresh token.
+ * Returns ['token' => string] on success, ['error' => string] on failure.
+ */
+function _gdriveGetToken(): ?string { return _gdriveGetTokenOAuth()['token'] ?? null; }
+function _gdriveGetTokenEx(): array { return _gdriveGetTokenOAuth(); }
+
+/**
+ * Upload a file to Google Drive using multipart upload.
+ * Returns the Drive file ID on success, null on failure.
+ */
+/** Returns ['id' => string] on success or ['error' => string] on failure. */
+function _gdriveUploadFile(string $token, string $folderId, string $filePath, string $remoteName): array {
+    if (!file_exists($filePath)) return ['error' => 'Local backup file not found: ' . $filePath];
+    $mimeType    = 'application/x-sqlite3';
+    $metadata    = json_encode(['name' => $remoteName, 'parents' => [$folderId]]);
+    $fileContent = file_get_contents($filePath);
+    $boundary    = 'es_backup_' . bin2hex(random_bytes(8));
+    $body        = "--$boundary\r\n"
+                 . "Content-Type: application/json; charset=UTF-8\r\n\r\n"
+                 . $metadata . "\r\n"
+                 . "--$boundary\r\n"
+                 . "Content-Type: $mimeType\r\n\r\n"
+                 . $fileContent . "\r\n"
+                 . "--$boundary--";
+
+    $ch = curl_init('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart');
+    curl_setopt_array($ch, [
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_POST           => true,
+        CURLOPT_POSTFIELDS     => $body,
+        CURLOPT_HTTPHEADER     => [
+            "Authorization: Bearer $token",
+            "Content-Type: multipart/related; boundary=$boundary",
+            "Content-Length: " . strlen($body),
+        ],
+        CURLOPT_TIMEOUT        => 120,
+        CURLOPT_SSL_VERIFYPEER => true,
+    ]);
+    $response = curl_exec($ch);
+    $curlErr  = curl_error($ch);
+    curl_close($ch);
+    if (!$response) return ['error' => 'cURL upload failed: ' . $curlErr];
+    $data = json_decode($response, true);
+    if (!empty($data['id'])) return ['id' => $data['id']];
+    $apiErr = $data['error']['message'] ?? $data['error']['status'] ?? json_encode($data);
+    return ['error' => 'Drive API error: ' . $apiErr];
+}
+
+/**
+ * Delete Drive backups older than $retentionDays.
+ * Returns count of deleted files.
+ */
+function _gdrivePurgeOld(string $token, string $folderId, int $retentionDays): int {
+    if ($retentionDays <= 0) return 0;
+    $cutoff = date('c', strtotime("-{$retentionDays} days"));
+    $q      = "'$folderId' in parents and name contains 'evershelf_' and trashed=false";
+    $url    = 'https://www.googleapis.com/drive/v3/files?'
+            . http_build_query(['q' => $q, 'fields' => 'files(id,name,createdTime)', 'pageSize' => '1000']);
+
+    $ch = curl_init($url);
+    curl_setopt_array($ch, [
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_HTTPHEADER     => ["Authorization: Bearer $token"],
+        CURLOPT_TIMEOUT        => 30,
+    ]);
+    $response = curl_exec($ch);
+    curl_close($ch);
+    if (!$response) return 0;
+    $data    = json_decode($response, true);
+    $deleted = 0;
+    foreach ($data['files'] ?? [] as $file) {
+        if (!empty($file['createdTime']) && $file['createdTime'] < $cutoff) {
+            $ch = curl_init("https://www.googleapis.com/drive/v3/files/{$file['id']}");
+            curl_setopt_array($ch, [
+                CURLOPT_RETURNTRANSFER => true,
+                CURLOPT_CUSTOMREQUEST  => 'DELETE',
+                CURLOPT_HTTPHEADER     => ["Authorization: Bearer $token"],
+                CURLOPT_TIMEOUT        => 15,
+            ]);
+            curl_exec($ch);
+            $code = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
+            curl_close($ch);
+            if ($code === 204) $deleted++;
+        }
+    }
+    return $deleted;
+}
+
+/**
+ * Full backup flow: create local snapshot, upload to Google Drive, purge old Drive files.
+ */
+function backupToGDrive(?PDO $db = null): array {
+    EverLog::info('backupToGDrive');
+    if (env('GDRIVE_ENABLED', 'false') !== 'true') {
+        return ['success' => false, 'error' => 'Google Drive backup is not enabled'];
+    }
+    $folderId = env('GDRIVE_FOLDER_ID', '');
+    if (empty($folderId)) {
+        return ['success' => false, 'error' => 'GDRIVE_FOLDER_ID not configured'];
+    }
+
+    // 1. Create (or reuse recent) local backup
+    $local = createLocalBackup($db);
+    if (!$local['success']) return $local;
+
+    // 2. Authenticate with Google
+    $tokResult = _gdriveGetTokenEx();
+    if (empty($tokResult['token'])) {
+        return ['success' => false, 'error' => $tokResult['error'] ?? 'Google Drive authentication failed'];
+    }
+    $token = $tokResult['token'];
+
+    // 3. Upload
+    $uploadResult = _gdriveUploadFile($token, $folderId, $local['path'], $local['filename']);
+    if (empty($uploadResult['id'])) {
+        return ['success' => false, 'error' => $uploadResult['error'] ?? 'Upload to Google Drive failed'];
+    }
+    $driveFileId = $uploadResult['id'];
+
+    // 4. Purge old files on Drive
+    $retentionDays = max(0, (int)env('GDRIVE_RETENTION_DAYS', '30'));
+    $purgedRemote  = $retentionDays > 0 ? _gdrivePurgeOld($token, $folderId, $retentionDays) : 0;
+
+    EverLog::info('backupToGDrive ok', ['file' => $local['filename'], 'drive_id' => $driveFileId, 'purged_remote' => $purgedRemote]);
+    return [
+        'success'       => true,
+        'filename'      => $local['filename'],
+        'size_kb'       => $local['size_kb'],
+        'drive_file_id' => $driveFileId,
+        'purged_local'  => $local['purged'],
+        'purged_remote' => $purgedRemote,
+        'created_at'    => $local['created_at'],
+    ];
+}
+
+/**
  * Server-side Bring! cleanup: remove items from Bring! that the app auto-added
  * but are no longer flagged by smart shopping (stock is now adequate).
  * Called by the cron after recomputing the smart shopping cache.
@@ -6290,7 +6962,7 @@ function bringGetList(): void {
     $auth = bringAuth();
     if (!$auth) {
         EverLog::info('bringGetList');
-        echo json_encode(['success' => false, 'error' => 'Credenziali Bring! non configurate. Aggiungi BRING_EMAIL e BRING_PASSWORD al file .env']);
+        echo json_encode(['success' => false, 'error' => 'Bring! credentials not configured. Add BRING_EMAIL and BRING_PASSWORD to .env']);
         return;
     }
     
@@ -6301,14 +6973,14 @@ function bringGetList(): void {
         if ($lists && isset($lists['lists'][0]['listUuid'])) {
             $listUUID = $lists['lists'][0]['listUuid'];
         } else {
-            echo json_encode(['success' => false, 'error' => 'Nessuna lista Bring! trovata']);
+            echo json_encode(['success' => false, 'error' => 'No Bring! list found']);
             return;
         }
     }
     
     $data = bringRequest('GET', "https://api.getbring.com/rest/v2/bringlists/{$listUUID}");
     if (!$data) {
-        echo json_encode(['success' => false, 'error' => 'Errore nel recupero della lista']);
+        echo json_encode(['success' => false, 'error' => 'Error fetching the list']);
         return;
     }
     
@@ -6368,7 +7040,7 @@ function bringAddItems(): void {
     $auth = bringAuth();
     if (!$auth) {
         EverLog::info('bringAddItems');
-        echo json_encode(['success' => false, 'error' => 'Credenziali Bring! non configurate']);
+        echo json_encode(['success' => false, 'error' => 'Bring! credentials not configured']);
         return;
     }
 
@@ -6377,7 +7049,7 @@ function bringAddItems(): void {
     $listUUID = $input['listUUID'] ?? $auth['bringListUUID'];
     
     if (empty($listUUID)) {
-        echo json_encode(['success' => false, 'error' => 'Lista non trovata']);
+        echo json_encode(['success' => false, 'error' => 'List not found']);
         return;
     }
     
@@ -6446,7 +7118,7 @@ function bringRemoveItem(): void {
     $auth = bringAuth();
     if (!$auth) {
         EverLog::info('bringRemoveItem');
-        echo json_encode(['success' => false, 'error' => 'Credenziali Bring! non configurate']);
+        echo json_encode(['success' => false, 'error' => 'Bring! credentials not configured']);
         return;
     }
     
@@ -6455,7 +7127,7 @@ function bringRemoveItem(): void {
     $listUUID = $input['listUUID'] ?? $auth['bringListUUID'];
     
     if (empty($name) || empty($listUUID)) {
-        echo json_encode(['success' => false, 'error' => 'Parametri mancanti']);
+        echo json_encode(['success' => false, 'error' => 'Missing parameters']);
         return;
     }
     
@@ -6494,19 +7166,19 @@ function bringCleanSpecs(): void {
     $auth = bringAuth();
     if (!$auth) {
         EverLog::info('bringCleanSpecs');
-        echo json_encode(['success' => false, 'error' => 'Credenziali Bring! non configurate']);
+        echo json_encode(['success' => false, 'error' => 'Bring! credentials not configured']);
         return;
     }
 
     $listUUID = $auth['bringListUUID'];
     if (empty($listUUID)) {
-        echo json_encode(['success' => false, 'error' => 'Lista non trovata']);
+        echo json_encode(['success' => false, 'error' => 'List not found']);
         return;
     }
 
     $data = bringRequest('GET', "https://api.getbring.com/rest/v2/bringlists/{$listUUID}");
     if (!$data || !isset($data['purchase'])) {
-        echo json_encode(['success' => false, 'error' => 'Errore nel recupero della lista']);
+        echo json_encode(['success' => false, 'error' => 'Error fetching the list']);
         return;
     }
 
@@ -6605,17 +7277,17 @@ function bringMigrateNames(PDO $db): void {
     $auth = bringAuth();
     if (!$auth) {
         EverLog::info('bringMigrateNames');
-        echo json_encode(['success' => false, 'error' => 'Credenziali Bring! non configurate']);
+        echo json_encode(['success' => false, 'error' => 'Bring! credentials not configured']);
         return;
     }
     $listUUID = $auth['bringListUUID'];
     if (empty($listUUID)) {
-        echo json_encode(['success' => false, 'error' => 'Lista non trovata']);
+        echo json_encode(['success' => false, 'error' => 'List not found']);
         return;
     }
     $data = bringRequest('GET', "https://api.getbring.com/rest/v2/bringlists/{$listUUID}");
     if (!$data || !isset($data['purchase'])) {
-        echo json_encode(['success' => false, 'error' => 'Errore nel recupero della lista']);
+        echo json_encode(['success' => false, 'error' => 'Error fetching the list']);
         return;
     }
 
@@ -6969,36 +7641,25 @@ function smartShopping(PDO $db): void {
             }
             if ($coveredByEquivalent) continue;
 
-            if ($isFrequent && $isRecent && $buyCount >= 2) {
-                // Frequently used, recently active, AND bought multiple times → critical
-                $urgency = 'critical';
-                $reasons[] = 'Esaurito';
-                $score += 100;
-                if ($useCount >= 5) { $score += 20; $reasons[] = "Uso frequente ({$useCount}x)"; }
-            } elseif ($isFrequent && $isRecent && $buyCount == 1 && $useCount >= 3) {
-                // Bought once but used ≥3 times → proven consumption pattern → high
-                $urgency = 'high';
-                $reasons[] = 'Esaurito';
-                $score += 75;
-                if ($useCount >= 5) { $score += 10; $reasons[] = "Uso frequente ({$useCount}x)"; }
-            } elseif ($isFrequent && $isRecent && $buyCount == 1) {
-                // Frequent use, bought once, <3 uses — not yet proven → medium
-                $urgency = 'medium';
-                $reasons[] = 'Esaurito';
-                $score += 45;
-            } elseif ($isRegular && $isRecent && ($useCount >= 3 || $buyCount >= 2)) {
-                // Regularly used, recently active → high
-                $urgency = 'high';
-                $reasons[] = 'Esaurito';
-                $score += 70;
-            } elseif ($isRecent && $buyCount >= 2) {
-                // At least bought a couple times recently → low
-                $urgency = 'low';
-                $reasons[] = 'Esaurito';
-                $score += 30;
+            // For DEPLETED products: recency is misleading — the product may not have been
+            // "used recently" precisely because it ran out. Base urgency on usage rate only.
+            $reasons[] = 'Esaurito';
+            if ($isFrequent && $useCount >= 5) {
+                $urgency = 'critical'; $score += 120;
+                $reasons[] = "Uso frequente ({$useCount}x)";
+            } elseif ($isFrequent && $useCount >= 2) {
+                $urgency = 'critical'; $score += 100;
+            } elseif ($isFrequent) {
+                // usesPerMonth >= 1.5 but few recorded uses (new product) → high
+                $urgency = 'high'; $score += 75;
+            } elseif ($isRegular && ($useCount >= 3 || $buyCount >= 2)) {
+                $urgency = 'high'; $score += 65;
+            } elseif ($isRegular) {
+                $urgency = 'medium'; $score += 45;
+            } elseif ($useCount >= 2 || $buyCount >= 2) {
+                $urgency = 'low'; $score += 30;
             } else {
-                // Rarely used or not used recently — skip
-                continue;
+                $urgency = 'low'; $score += 10;
             }
         }
 
@@ -7494,6 +8155,82 @@ function bringSuggestItems(PDO $db): void {
         'seasonal_tip' => $seasonalTip,
         'listUUID'     => $listUUID,
     ], JSON_UNESCAPED_UNICODE);
+}
+
+// ===== SHOPPING ABSTRACTION (internal DB or Bring!) =====
+
+function isShoppingBringMode(): bool {
+    return env('SHOPPING_MODE', 'internal') === 'bring'
+        && !empty(env('BRING_EMAIL'))
+        && !empty(env('BRING_PASSWORD'));
+}
+
+function shoppingGetList(PDO $db): void {
+    if (isShoppingBringMode()) {
+        bringGetList();
+        return;
+    }
+    $items   = $db->query(
+        "SELECT name, raw_name, specification FROM shopping_list ORDER BY sort_order ASC, added_at ASC"
+    )->fetchAll();
+    $purchase = array_map(fn($r) => [
+        'name'          => $r['name'],
+        'rawName'       => $r['raw_name'] ?: $r['name'],
+        'specification' => $r['specification'],
+    ], $items);
+    echo json_encode([
+        'success'   => true,
+        'listUUID'  => 'internal-list',
+        'purchase'  => $purchase,
+        'recently'  => [],
+    ], JSON_UNESCAPED_UNICODE);
+}
+
+function shoppingAdd(PDO $db): void {
+    if (isShoppingBringMode()) {
+        bringAddItems();
+        return;
+    }
+    $input = json_decode(file_get_contents('php://input'), true) ?? [];
+    $items = $input['items'] ?? [];
+    $added = 0; $updated = 0; $skipped = 0;
+    foreach ($items as $item) {
+        $name    = trim($item['name'] ?? '');
+        if ($name === '') continue;
+        $rawName = trim($item['rawName'] ?? $item['raw_name'] ?? $name);
+        $spec    = $item['specification'] ?? '';
+        $updateSpec = !empty($item['update_spec']);
+        $stmt = $db->prepare("SELECT id, specification FROM shopping_list WHERE lower(name) = lower(?)");
+        $stmt->execute([$name]);
+        $existing = $stmt->fetch();
+        if ($existing) {
+            if ($updateSpec && $existing['specification'] !== $spec) {
+                $db->prepare("UPDATE shopping_list SET specification=?, raw_name=? WHERE id=?")->execute([$spec, $rawName, $existing['id']]);
+                $updated++;
+            } else {
+                $skipped++;
+            }
+        } else {
+            $db->prepare("INSERT INTO shopping_list (name, raw_name, specification) VALUES (?, ?, ?)")->execute([$name, $rawName, $spec]);
+            $added++;
+        }
+    }
+    echo json_encode(['success' => true, 'added' => $added, 'updated' => $updated, 'skipped' => $skipped, 'errors' => []]);
+}
+
+function shoppingRemove(PDO $db): void {
+    if (isShoppingBringMode()) {
+        bringRemoveItem();
+        return;
+    }
+    $input = json_decode(file_get_contents('php://input'), true) ?? [];
+    $name  = trim($input['name'] ?? '');
+    if ($name === '') {
+        echo json_encode(['success' => false, 'error' => 'Missing name']);
+        return;
+    }
+    $db->prepare("DELETE FROM shopping_list WHERE lower(name) = lower(?)")->execute([$name]);
+    echo json_encode(['success' => true]);
 }
 
 // ===== SHARED APP DATA FUNCTIONS =====

@@ -25,7 +25,7 @@
 [![SQLite](https://img.shields.io/badge/SQLite-3-blue.svg)](https://www.sqlite.org/)
 [![Docker](https://img.shields.io/badge/Docker-Ready-2496ED.svg)](Dockerfile)
 [![i18n](https://img.shields.io/badge/i18n-IT%20%7C%20EN%20%7C%20DE%20%7C%20FR%20%7C%20ES-orange.svg)](translations/)
-[![Version](https://img.shields.io/badge/version-1.7.19-brightgreen.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-1.7.24-brightgreen.svg)](CHANGELOG.md)
 [![GitHub stars](https://img.shields.io/github/stars/dadaloop82/EverShelf?style=social)](https://github.com/dadaloop82/EverShelf/stargazers)
 [![Last commit](https://img.shields.io/github/last-commit/dadaloop82/EverShelf/main)](https://github.com/dadaloop82/EverShelf/commits/main)
 [![Contributors](https://img.shields.io/github/contributors/dadaloop82/EverShelf)](https://github.com/dadaloop82/EverShelf/graphs/contributors)
@@ -39,7 +39,7 @@
 ## ✨ Features
 
 > ⚙️ **New in v1.7.23 — Global settings tab, DB auto-cleanup, vacuum-sealed expiry**
-> A new **Generali** tab groups all global settings (language, currency, theme, screensaver, zero-waste, export) in one place.
+> A new **General** tab groups all global settings (language, currency, theme, screensaver, zero-waste, export) in one place.
 > Recipes older than `RECIPE_RETENTION_DAYS` and transactions older than `TRANSACTION_RETENTION_DAYS` are deleted automatically every cron cycle, followed by a SQLite `VACUUM` to keep the database small.
 > Vacuum-sealed products get an extended grace period (`VACUUM_EXPIRY_EXTENSION_DAYS`, default 30 days) before being flagged as expired.
 > Auto theme now follows **time of day** (dark 20:00–07:00) instead of the OS setting, making it server-friendly.
@@ -100,7 +100,7 @@
 
 ### 🌙 Appearance
 - **Dark mode** — Three modes: Light, Dark, and Auto (time-based: dark from 20:00 to 07:00, light otherwise); applies immediately without page reload; auto mode re-evaluates every 5 minutes, so night/day transitions happen automatically even on always-on kiosk displays; theme is applied before the first render to prevent a white flash
-- **Global settings tab** — A dedicated **⚙️ Generali** tab groups all system-wide settings (language, currency, theme, screensaver, zero-waste tips, export) at the top of the Settings panel
+- **Global settings tab** — A dedicated **⚙️ General** tab groups all system-wide settings (language, currency, theme, screensaver, zero-waste tips, export) at the top of the Settings panel
 
 ### �️ Database Maintenance
 - **Automatic cleanup** — Recipes older than `RECIPE_RETENTION_DAYS` (default 7) and transactions older than `TRANSACTION_RETENTION_DAYS` (default 7) are deleted automatically on every cron cycle; SQLite `VACUUM` runs after each cleanup to keep the file compact
@@ -296,6 +296,24 @@ The included `backup.sh` creates local daily backups of your database:
 0 3 * * * /path/to/evershelf/backup.sh
 ```
 
+### Google Drive Backup (Optional)
+
+EverShelf supports automatic daily backups to Google Drive via OAuth 2.0. This works on any server, including private IP / local network setups (no public domain required).
+
+**Setup:**
+
+1. Go to [console.cloud.google.com](https://console.cloud.google.com) and select or create a project.
+2. Enable the **Google Drive API** (`APIs & Services → Enable APIs → Google Drive API`).
+3. Go to `APIs & Services → Credentials → Create Credentials → OAuth client ID`.
+4. Application type: **Web application**.
+5. Add **`http://localhost`** as an Authorized Redirect URI (this is the key — it works even without a real domain).
+6. Copy **Client ID** and **Client Secret** into EverShelf Settings → Backup.
+7. Enter your **Google Drive Folder ID** (the last part of the folder URL).
+8. Click **Authorize with Google** and sign in.
+9. The browser will redirect to `http://localhost` and may show a connection error — **this is expected**. Copy the full URL from the address bar (e.g. `http://localhost/?code=4%2F0A...`) and paste it into the field that appears in EverShelf, then click **Submit**.
+
+> **Note:** While the OAuth app is in *Testing* status in Google Cloud Console, you must add your Google account as a test user under `APIs & Services → OAuth consent screen → Test users`.
+
 ---
 
 ## 🏗️ Architecture
@@ -418,6 +436,54 @@ Contributions are welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for detailed g
 3. Commit your changes (`git commit -m 'Add my feature'`)
 4. Push to the branch (`git push origin feature/my-feature`)
 5. Open a Pull Request
+
+---
+
+## 🤝 Contributing
+
+EverShelf is a community project and contributions of any size are welcome!
+
+### Easiest way to start — translate EverShelf into your language
+
+Translations are just JSON files. No coding, no setup — fork → edit → PR.
+
+```
+translations/
+├── it.json   ✅ Italian (base)
+├── en.json   ✅ English
+├── de.json   ✅ German
+├── fr.json   ✅ French
+├── es.json   ✅ Spanish
+├── pt.json   ❌ Portuguese — wanted!
+├── nl.json   ❌ Dutch — wanted!
+└── ...       ❌ Your language here!
+```
+
+👉 See [issue #93](https://github.com/dadaloop82/EverShelf/issues/93) to claim a language.
+
+### Other ways to contribute
+
+| What | Skill needed |
+|---|---|
+| 🐛 Report a bug | None |
+| 📖 Improve the wiki | Markdown |
+| 🌍 Add a translation | JSON editing |
+| 🎨 Fix a CSS/UI issue | CSS / HTML |
+| ⚙️ Implement a feature | PHP / JS |
+| ⭐ Star the repo | Clicking |
+
+👉 Browse [`help wanted`](https://github.com/dadaloop82/EverShelf/labels/help%20wanted) issues for good starting points.
+
+Read [CONTRIBUTING.md](CONTRIBUTING.md) for the full guide (branch naming, code style, how to run locally).
+
+---
+
+## 💬 Community
+
+Join the conversation in [GitHub Discussions](https://github.com/dadaloop82/EverShelf/discussions):
+- **Vote on upcoming features** — tell us what to build next
+- **Show your setup** — share your kitchen kiosk
+- **Ask questions** — get help from the community
 
 ---
 
