@@ -9272,7 +9272,13 @@ async function submitUseAll() {
         return;
     }
 
-    // No opened packages → standard destructive confirm
+    // No opened packages → if there is only one item row, it's unambiguous — skip confirm
+    if (items0.length === 1) {
+        _doSubmitUseAll();
+        return;
+    }
+
+    // Multiple rows, no opened packages → standard destructive confirm
     const totalQty = items0.reduce((s, i) => s + parseFloat(i.quantity || 0), 0);
     const unit = items0[0]?.unit || 'pz';
     const qtyStr = stripHtml(formatQuantity(totalQty, unit, items0[0]?.default_quantity, items0[0]?.package_unit));
