@@ -133,3 +133,67 @@ try {
     _phpErrorReport($msg, $e->getFile(), $e->getLine(), $e->getTraceAsString(), get_class($e));
     exit(1);
 }
+
+// ── Home Assistant: expiry alerts ─────────────────────────────────────────────
+// Fire one HA webhook per expiring item (once per day guard via a simple flag file).
+if (env('HA_ENABLED', 'false') === 'true' && env('HA_WEBHOOK_ID', '') !== '') {
+    try {
+        $haFlagFile = __DIR__ . '/../data/ha_expiry_notified_' . date('Y-m-d') . '.json';
+        if (!file_exists($haFlagFile)) {
+            $expiryDays = max(1, (int)env('HA_EXPIRY_DAYS', '3'));
+            $expiringItems = $db->query(
+                "SELECT p.name, i.quantity, i.unit, i.expiry_date, i.location
+                 FROM inventory i JOIN products p ON i.product_id = p.id
+                 WHERE i.quantity > 0 AND i.expiry_date IS NOT NULL
+                   AND i.expiry_date BETWEEN date('now') AND date('now', '+{$expiryDays} days')
+                 ORDER BY i.expiry_date ASC LIMIT 20"
+            )->fetchAll(PDO::FETCH_ASSOC);
+
+            $expiredItems = $db->query(
+                "SELECT p.name, i.quantity, i.unit, i.expiry_date, i.location
+                 FROM inventory i JOIN products p ON i.product_id = p.id
+                 WHERE i.quantity > 0 AND i.expiry_date IS NOT NULL
+                   AND i.expiry_date < date('now')
+                 ORDER BY i.expiry_date ASC LIMIT 10"
+            )->fetchAll(PDO::FETCH_ASSOC);
+
+            if (!empty($expiringItems)) {
+                $names = implode(', ', array_column($expiringItems, 'name'));
+                _fireHaWebhook('expiry_alert', [
+                    'count'    => count($expiringItems),
+                    'items'    => $expiringItems,
+                    'type'     => 'expiring_soon',
+                    'days'     => $expiryDays,
+                    'summary'  => $names,
+                ]);
+                // Also send HA notification if service configured
+                if (env('HA_NOTIFY_SERVICE', '') !== '') {
+                    $msg = count($expiringItems) . ' product(s) expiring within ' . $expiryDays . ' days: ' . $names;
+                    _sendHaNotify($msg, ['expiring_items' => $expiringItems]);
+                }
+                echo '[' . date('Y-m-d H:i:s') . '] HA expiry_alert fired: ' . count($expiringItems) . " items\n";
+            }
+
+            if (!empty($expiredItems)) {
+                $expNames = implode(', ', array_column($expiredItems, 'name'));
+                _fireHaWebhook('expiry_alert', [
+                    'count'   => count($expiredItems),
+                    'items'   => $expiredItems,
+                    'type'    => 'expired',
+                    'summary' => $expNames,
+                ]);
+                echo '[' . date('Y-m-d H:i:s') . '] HA expired fired: ' . count($expiredItems) . " items\n";
+            }
+
+            // Mark as done for today
+            file_put_contents($haFlagFile, json_encode(['ts' => time(), 'expiring' => count($expiringItems ?? []), 'expired' => count($expiredItems ?? [])]));
+            // Clean up old flag files (keep last 7 days)
+            foreach (glob(__DIR__ . '/../data/ha_expiry_notified_*.json') as $oldFlag) {
+                $flagDate = str_replace([__DIR__ . '/../data/ha_expiry_notified_', '.json'], '', $oldFlag);
+                if ($flagDate < date('Y-m-d', strtotime('-7 days'))) @unlink($oldFlag);
+            }
+        }
+    } catch (Throwable $haE) {
+        echo '[' . date('Y-m-d H:i:s') . '] HA expiry hook warning: ' . $haE->getMessage() . "\n";
+    }
+}

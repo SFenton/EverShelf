@@ -2212,7 +2212,10 @@ function _applySyncedSettings(serverSettings) {
         'zerowaste_tips_enabled',
         'shopping_enabled','shopping_mode','shopping_smart_suggestions',
         'shopping_forecast','shopping_auto_add_threshold',
-        'dark_mode'];
+        'dark_mode',
+        // Home Assistant
+        'ha_enabled','ha_url','ha_tts_entity','ha_webhook_id','ha_webhook_events',
+        'ha_notify_service','ha_expiry_days'];
     let changed = false;
     for (const key of serverKeys) {
         if (serverSettings[key] !== undefined && serverSettings[key] !== null && serverSettings[key] !== '') {
@@ -2834,6 +2837,18 @@ async function loadSettingsUI() {
         s._tts_initialized = true;
         saveSettingsToStorage(s);
     }
+    // HA settings — init defaults on first load
+    if (!s._ha_initialized) {
+        s.ha_enabled = s.ha_enabled || false;
+        s.ha_url = s.ha_url || '';
+        s.ha_tts_entity = s.ha_tts_entity || '';
+        s.ha_webhook_id = s.ha_webhook_id || '';
+        s.ha_webhook_events = s.ha_webhook_events || 'expiry,shopping_add,stock_update';
+        s.ha_notify_service = s.ha_notify_service || '';
+        s.ha_expiry_days = s.ha_expiry_days || 3;
+        s._ha_initialized = true;
+        saveSettingsToStorage(s);
+    }
     const ttsEnabledEl = document.getElementById('setting-tts-enabled');
     if (ttsEnabledEl) ttsEnabledEl.checked = s.tts_enabled === true;
     const ttsEngineEl = document.getElementById('setting-tts-engine');
@@ -2875,7 +2890,9 @@ async function loadSettingsUI() {
             'tts_content_type','tts_payload_key',
             'price_enabled','price_country','price_currency','price_update_months',
             'shopping_enabled','shopping_mode','shopping_smart_suggestions',
-            'shopping_forecast','shopping_auto_add_threshold'];
+            'shopping_forecast','shopping_auto_add_threshold',
+            'ha_enabled','ha_url','ha_tts_entity','ha_webhook_id','ha_webhook_events',
+            'ha_notify_service','ha_expiry_days'];
         // Note: gemini_key is never sent from server; settings_token_set is metadata only
         const settingsTokenRequired = !!serverSettings.settings_token_set;
         const tokenHintEl = document.getElementById('settings-token-status-hint');
@@ -2927,6 +2944,8 @@ async function loadSettingsUI() {
             if (priceMonthsEl) priceMonthsEl.value = s.price_update_months || 3;
             // Shopping settings (server merge)
             _applyShoppingSettingsUI(s);
+            // HA settings (server merge)
+            _applyHaSettingsUI(s);
         }
     } catch(e) { /* offline, use local */ }
     // Price settings
@@ -3506,6 +3525,15 @@ async function saveSettings() {
             shopping_forecast:           s.shopping_forecast !== false,
             shopping_auto_add_threshold: s.shopping_auto_add_threshold || 0,
             dark_mode:                   s.dark_mode || 'auto',
+            // Home Assistant
+            ha_enabled:         !!s.ha_enabled,
+            ha_url:             s.ha_url || '',
+            ...(s.ha_token ? { ha_token: s.ha_token } : {}),
+            ha_tts_entity:      s.ha_tts_entity || '',
+            ha_webhook_id:      s.ha_webhook_id || '',
+            ha_webhook_events:  s.ha_webhook_events || '',
+            ha_notify_service:  s.ha_notify_service || '',
+            ha_expiry_days:     s.ha_expiry_days || 3,
         }, tokenHeader);
         const statusEl = document.getElementById('settings-status');
         if (result.success) {
@@ -13589,6 +13617,24 @@ function _buildTtsRequest(text, s) {
     return { url, method, headers, body };
 }
 
+/**
+ * Build a proxy request to call Home Assistant tts.speak service.
+ * Requires HA URL, bearer token and entity_id (media player) in settings.
+ */
+function _buildHaTtsRequest(text, s) {
+    const haUrl = (s.ha_url || '').replace(/\/$/, '');
+    const url     = haUrl + '/api/services/tts/speak';
+    const headers = {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer ' + (s.ha_token || ''),
+    };
+    const body = JSON.stringify({
+        entity_id: s.ha_tts_entity || '',
+        message: text,
+    });
+    return { url, method: 'POST', headers, body };
+}
+
 async function _ttsViaProxy(req) {
     // Route through server-side proxy to avoid mixed-content / CORS issues
     return fetch('api/index.php?action=tts_proxy', {
@@ -13609,7 +13655,12 @@ async function speakCookingStep(text) {
     // Use custom TTS endpoint only when explicitly configured; otherwise always use browser TTS.
     // Do NOT gate on s.tts_enabled — the _cookingTTS toggle in cooking mode is the only gate.
     try {
-        if (s.tts_engine === 'custom' && s.tts_url) {
+        // 1. HA TTS — if HA is enabled and a media player entity is configured
+        if (s.ha_enabled && s.ha_tts_entity && s.ha_url) {
+            const req = _buildHaTtsRequest(text, s);
+            await _ttsViaProxy(req);
+        // 2. Generic external endpoint ('server' or legacy 'custom' engine)
+        } else if ((s.tts_engine === 'server' || s.tts_engine === 'custom') && s.tts_url) {
             const req = _buildTtsRequest(text, s);
             await _ttsViaProxy(req);
         } else {
@@ -13636,7 +13687,229 @@ function onTtsEngineChange(engine) {
     const browserSect = document.getElementById('tts-browser-section');
     const serverSect = document.getElementById('tts-server-section');
     if (browserSect) browserSect.style.display = engine === 'browser' ? '' : 'none';
-    if (serverSect) serverSect.style.display = engine === 'server' ? '' : 'none';
+    if (serverSect) serverSect.style.display = (engine === 'server' || engine === 'custom') ? '' : 'none';
+}
+
+// ===== HOME ASSISTANT PANEL =====
+
+function onHaEnabledChange() {
+    const enabled = document.getElementById('setting-ha-enabled')?.checked;
+    const cfg = document.getElementById('ha-config-section');
+    if (cfg) cfg.style.display = enabled ? '' : 'none';
+}
+
+function _applyHaSettingsUI(s) {
+    const haEnabled = document.getElementById('setting-ha-enabled');
+    if (haEnabled) { haEnabled.checked = !!s.ha_enabled; onHaEnabledChange(); }
+    const haUrl = document.getElementById('setting-ha-url');
+    if (haUrl) haUrl.value = s.ha_url || '';
+    // Never pre-fill token (write-only field); only show placeholder if already set
+    const haTokenEl = document.getElementById('setting-ha-token');
+    if (haTokenEl) haTokenEl.placeholder = s.ha_token_set ? '••••••••••••' : 'eyJhbGci...';
+    const haEntity = document.getElementById('setting-ha-tts-entity');
+    if (haEntity) haEntity.value = s.ha_tts_entity || '';
+    const haWebhook = document.getElementById('setting-ha-webhook-id');
+    if (haWebhook) haWebhook.value = s.ha_webhook_id || '';
+    const haNotify = document.getElementById('setting-ha-notify-service');
+    if (haNotify) haNotify.value = s.ha_notify_service || '';
+    const haExpiry = document.getElementById('setting-ha-expiry-days');
+    if (haExpiry) haExpiry.value = s.ha_expiry_days || 3;
+    // Checkboxes for events
+    const events = (s.ha_webhook_events || '').split(',').map(e => e.trim());
+    const cbExpiry = document.getElementById('ha-event-expiry');
+    if (cbExpiry) cbExpiry.checked = events.includes('expiry');
+    const cbShopping = document.getElementById('ha-event-shopping');
+    if (cbShopping) cbShopping.checked = events.includes('shopping_add');
+    const cbStock = document.getElementById('ha-event-stock');
+    if (cbStock) cbStock.checked = events.includes('stock_update');
+}
+
+function _loadHaTab() {
+    const s = getSettings();
+    _applyHaSettingsUI(s);
+    _renderHaSensorYaml();
+}
+
+function _renderHaSensorYaml() {
+    const el = document.getElementById('ha-sensor-yaml');
+    if (!el) return;
+    const base = (window.location.origin + window.location.pathname).replace(/\/$/, '').replace(/\/index\.html$/, '');
+    el.textContent = `# Add to configuration.yaml (Home Assistant)
+# Restart HA after editing.
+
+sensor:
+  - platform: rest
+    name: "EverShelf Overview"
+    unique_id: evershelf_overview
+    resource: "${base}/api/?action=ha_sensor"
+    scan_interval: 300
+    value_template: "{{ value_json.state }}"
+    json_attributes:
+      - expiring_soon
+      - expiring_3d
+      - expired_items
+      - total_items
+      - shopping_items
+      - expiring_list
+      - last_updated
+    unit_of_measurement: "items"
+    device_class: null
+
+  - platform: rest
+    name: "EverShelf Expired Items"
+    unique_id: evershelf_expired
+    resource: "${base}/api/?action=ha_sensor&sensor=expired"
+    scan_interval: 600
+    value_template: "{{ value_json.state }}"
+    unit_of_measurement: "items"
+
+  - platform: rest
+    name: "EverShelf Shopping Count"
+    unique_id: evershelf_shopping
+    resource: "${base}/api/?action=ha_sensor&sensor=shopping"
+    scan_interval: 180
+    value_template: "{{ value_json.state }}"
+    unit_of_measurement: "items"`;
+}
+
+function copyHaSensorYaml() {
+    const el = document.getElementById('ha-sensor-yaml');
+    if (!el) return;
+    navigator.clipboard.writeText(el.textContent).then(() => {
+        showToast(t('settings.ha.sensor_copied'));
+    }).catch(() => {
+        showToast(t('error.copy_failed'));
+    });
+}
+
+async function testHaConnection() {
+    const statusEl = document.getElementById('ha-test-status');
+    const haUrl = document.getElementById('setting-ha-url')?.value.trim();
+    const haToken = document.getElementById('setting-ha-token')?.value.trim();
+    const s = getSettings();
+    const tokenToUse = haToken || (s.ha_token_set ? '__server__' : '');
+
+    if (!haUrl) {
+        if (statusEl) { statusEl.style.display = 'block'; statusEl.className = 'settings-status error'; statusEl.textContent = t('settings.ha.error_no_url'); }
+        return;
+    }
+    if (statusEl) { statusEl.style.display = 'block'; statusEl.className = 'settings-status'; statusEl.textContent = t('settings.ha.testing'); }
+
+    try {
+        const result = await api('ha_test', {}, 'POST', { url: haUrl, token: tokenToUse });
+        if (result.ok) {
+            if (statusEl) { statusEl.className = 'settings-status success'; statusEl.textContent = '✅ ' + t('settings.ha.test_ok').replace('{version}', result.version || 'HA'); }
+        } else {
+            if (statusEl) { statusEl.className = 'settings-status error'; statusEl.textContent = '❌ ' + t('settings.ha.test_fail').replace('{error}', result.error || result.http_code || ''); }
+        }
+    } catch(e) {
+        if (statusEl) { statusEl.className = 'settings-status error'; statusEl.textContent = '❌ ' + e.message; }
+    }
+}
+
+function applyHaTtsPreset() {
+    const s = getSettings();
+    const haUrl = (document.getElementById('setting-ha-url')?.value || s.ha_url || '').replace(/\/$/, '');
+    const entity = document.getElementById('setting-ha-tts-entity')?.value || s.ha_tts_entity || '';
+
+    if (!haUrl) {
+        showToast(t('settings.ha.error_no_url'));
+        return;
+    }
+
+    // Switch to TTS tab and fill fields
+    const ttsTab = document.querySelector('[data-tab="tab-tts"]');
+    if (ttsTab) ttsTab.click();
+
+    const engineEl = document.getElementById('setting-tts-engine');
+    if (engineEl) { engineEl.value = 'server'; onTtsEngineChange('server'); }
+
+    const urlEl = document.getElementById('setting-tts-url');
+    if (urlEl) urlEl.value = haUrl + '/api/services/tts/speak';
+
+    const methodEl = document.getElementById('setting-tts-method');
+    if (methodEl) methodEl.value = 'POST';
+
+    const authTypeEl = document.getElementById('setting-tts-auth-type');
+    if (authTypeEl) { authTypeEl.value = 'bearer'; onTtsAuthTypeChange('bearer'); }
+
+    const tokenEl = document.getElementById('setting-tts-token');
+    if (tokenEl) {
+        const haToken = document.getElementById('setting-ha-token')?.value.trim() || s.ha_token || '';
+        tokenEl.value = haToken;
+    }
+
+    const payloadKeyEl = document.getElementById('setting-tts-payload-key');
+    if (payloadKeyEl) payloadKeyEl.value = 'message';
+
+    const ctEl = document.getElementById('setting-tts-content-type');
+    if (ctEl) ctEl.value = 'application/json';
+
+    const extraEl = document.getElementById('setting-tts-extra-fields');
+    if (extraEl) extraEl.value = entity ? JSON.stringify({ entity_id: entity }) : '';
+
+    showToast(t('settings.ha.tts_preset_applied'));
+}
+
+function showHaWebhookHelp() {
+    const msg = t('settings.ha.webhook_help');
+    showToast(msg, 8000);
+}
+
+async function saveHaSettings() {
+    const s = getSettings();
+    const haEnabled = document.getElementById('setting-ha-enabled')?.checked || false;
+    const haUrl = document.getElementById('setting-ha-url')?.value.trim() || '';
+    const haToken = document.getElementById('setting-ha-token')?.value.trim() || '';
+    const haTtsEntity = document.getElementById('setting-ha-tts-entity')?.value.trim() || '';
+    const haWebhookId = document.getElementById('setting-ha-webhook-id')?.value.trim() || '';
+    const haNotify = document.getElementById('setting-ha-notify-service')?.value.trim() || '';
+    const haExpiryDays = parseInt(document.getElementById('setting-ha-expiry-days')?.value, 10) || 3;
+
+    const events = [];
+    if (document.getElementById('ha-event-expiry')?.checked) events.push('expiry');
+    if (document.getElementById('ha-event-shopping')?.checked) events.push('shopping_add');
+    if (document.getElementById('ha-event-stock')?.checked) events.push('stock_update');
+    const haEvents = events.join(',');
+
+    s.ha_enabled = haEnabled;
+    s.ha_url = haUrl;
+    if (haToken) s.ha_token = haToken;
+    s.ha_tts_entity = haTtsEntity;
+    s.ha_webhook_id = haWebhookId;
+    s.ha_webhook_events = haEvents;
+    s.ha_notify_service = haNotify;
+    s.ha_expiry_days = haExpiryDays;
+    saveSettingsToStorage(s);
+
+    const statusEl = document.getElementById('ha-save-status');
+    try {
+        const settingsToken = document.getElementById('setting-settings-token')?.value.trim() || '';
+        const tokenHeader = settingsToken ? { 'X-Settings-Token': settingsToken } : {};
+        const result = await api('save_settings', {}, 'POST', {
+            ha_enabled: haEnabled,
+            ha_url: haUrl,
+            ...(haToken ? { ha_token: haToken } : {}),
+            ha_tts_entity: haTtsEntity,
+            ha_webhook_id: haWebhookId,
+            ha_webhook_events: haEvents,
+            ha_notify_service: haNotify,
+            ha_expiry_days: haExpiryDays,
+        }, tokenHeader);
+        if (statusEl) {
+            statusEl.style.display = 'block';
+            statusEl.className = result.success ? 'settings-status success' : 'settings-status error';
+            statusEl.textContent = result.success ? '✅ ' + t('settings.saved') : '❌ ' + (result.error || t('settings.saved_local_error'));
+            setTimeout(() => { if (statusEl) statusEl.style.display = 'none'; }, 4000);
+        }
+    } catch(e) {
+        if (statusEl) {
+            statusEl.style.display = 'block';
+            statusEl.className = 'settings-status success';
+            statusEl.textContent = '✅ ' + t('settings.saved_local');
+            setTimeout(() => { if (statusEl) statusEl.style.display = 'none'; }, 4000);
+        }
+    }
 }
 
 /** Populate voice selector from Web Speech API. Called on settings load and on voiceschanged. */

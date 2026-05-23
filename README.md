@@ -42,6 +42,10 @@
 
 ## ✨ Features
 
+> 🏠 **New — Native Home Assistant Integration**
+> Connect EverShelf to your smart home: expose pantry counts as **REST sensors**, fire **webhook automations** on expiry/shopping/stock events, receive **push notifications** via any `notify.*` service, and read recipe steps aloud on **smart speakers** with full TTS support.
+> Configure everything from the new **Settings → 🏠** tab — no YAML editing required. See the [Home Assistant wiki page](docs/wiki/Home-Assistant.md) for details.
+
 > ⚙️ **New in v1.7.23 — Global settings tab, DB auto-cleanup, vacuum-sealed expiry**
 > A new **General** tab groups all global settings (language, currency, theme, screensaver, zero-waste, export) in one place.
 > Recipes older than `RECIPE_RETENTION_DAYS` and transactions older than `TRANSACTION_RETENTION_DAYS` are deleted automatically every cron cycle, followed by a SQLite `VACUUM` to keep the database small.

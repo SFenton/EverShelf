@@ -927,6 +927,14 @@ try {
             ttsProxy();
             break;
 
+        case 'ha_sensor':
+            haInventorySensor(getDB());
+            break;
+
+        case 'ha_test':
+            haTestConnection();
+            break;
+
         case 'expiry_history':
             getExpiryHistory($db);
             break;
@@ -1246,7 +1254,220 @@ function ttsProxy() {
     echo json_encode(['status' => $httpCode, 'body' => $response]);
 }
 
+// ===== HOME ASSISTANT INTEGRATION =====
+
+/**
+ * Fire an outbound webhook to Home Assistant.
+ * Respects HA_ENABLED, HA_URL, HA_WEBHOOK_ID and HA_WEBHOOK_EVENTS.
+ * Non-blocking: uses a 5 s cURL timeout; failures are logged but never thrown.
+ */
+function _fireHaWebhook(string $event, array $data): void {
+    if (env('HA_ENABLED', 'false') !== 'true') return;
+    $haUrl     = rtrim(env('HA_URL', ''), '/');
+    $webhookId = env('HA_WEBHOOK_ID', '');
+    if (!$haUrl || !$webhookId) return;
+
+    $allowed = array_map('trim', explode(',', env('HA_WEBHOOK_EVENTS', 'expiry,shopping_add,stock_update,barcode_scan')));
+    if (!in_array($event, $allowed, true)) return;
+
+    $url     = $haUrl . '/api/webhook/' . urlencode($webhookId);
+    $payload = json_encode(array_merge(['event' => $event, 'source' => 'evershelf', 'ts' => time()], $data), JSON_UNESCAPED_UNICODE);
+
+    $ch = curl_init($url);
+    curl_setopt_array($ch, [
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_POST           => true,
+        CURLOPT_POSTFIELDS     => $payload,
+        CURLOPT_HTTPHEADER     => ['Content-Type: application/json'],
+        CURLOPT_TIMEOUT        => 5,
+        CURLOPT_SSL_VERIFYPEER => false,
+        CURLOPT_CONNECTTIMEOUT => 3,
+    ]);
+    $resp = curl_exec($ch);
+    $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    $err  = curl_error($ch);
+    curl_close($ch);
+
+    if ($err) {
+        EverLog::warn("_fireHaWebhook[$event]: cURL error – $err");
+    } else {
+        EverLog::debug("_fireHaWebhook[$event]: HTTP $code");
+    }
+}
+
+/**
+ * Send a notification via HA notify service (e.g. notify.mobile_app_phone).
+ * Used for expiry alerts when HA_NOTIFY_SERVICE is configured.
+ */
+function _sendHaNotify(string $message, array $data = []): void {
+    if (env('HA_ENABLED', 'false') !== 'true') return;
+    $haUrl   = rtrim(env('HA_URL', ''), '/');
+    $token   = env('HA_TOKEN', '');
+    $service = env('HA_NOTIFY_SERVICE', '');
+    if (!$haUrl || !$token || !$service) return;
+
+    // service format: "notify.mobile_app_xyz" → POST /api/services/notify/mobile_app_xyz
+    [$domain, $svcName] = array_pad(explode('.', $service, 2), 2, '');
+    if (!$svcName) return;
+
+    $url     = $haUrl . '/api/services/' . urlencode($domain) . '/' . urlencode($svcName);
+    $payload = json_encode(array_merge(['message' => $message, 'data' => $data], []), JSON_UNESCAPED_UNICODE);
+
+    $ch = curl_init($url);
+    curl_setopt_array($ch, [
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_POST           => true,
+        CURLOPT_POSTFIELDS     => $payload,
+        CURLOPT_HTTPHEADER     => [
+            'Content-Type: application/json',
+            'Authorization: Bearer ' . $token,
+        ],
+        CURLOPT_TIMEOUT        => 8,
+        CURLOPT_SSL_VERIFYPEER => false,
+        CURLOPT_CONNECTTIMEOUT => 4,
+    ]);
+    $resp = curl_exec($ch);
+    $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    $err  = curl_error($ch);
+    curl_close($ch);
+
+    if ($err) {
+        EverLog::warn("_sendHaNotify: cURL error – $err");
+    } else {
+        EverLog::debug("_sendHaNotify: HTTP $code");
+    }
+}
+
+/**
+ * HA REST sensor endpoint — returns pantry state in Home Assistant-compatible format.
+ * Use with platform: rest in configuration.yaml.
+ *
+ * GET /api/?action=ha_sensor[&sensor=NAME]
+ * Available sensor names: expiring, expired, total, shopping
+ */
+function haInventorySensor(PDO $db): void {
+    header('Content-Type: application/json; charset=utf-8');
+    header('Access-Control-Allow-Origin: *');
+
+    $sensor = strtolower(trim($_GET['sensor'] ?? 'overview'));
+
+    try {
+        $expiring = (int)$db->query(
+            "SELECT COUNT(*) FROM inventory WHERE quantity > 0 AND expiry_date IS NOT NULL
+             AND expiry_date BETWEEN date('now') AND date('now', '+3 days')"
+        )->fetchColumn();
+
+        $expired = (int)$db->query(
+            "SELECT COUNT(*) FROM inventory WHERE quantity > 0 AND expiry_date IS NOT NULL
+             AND expiry_date < date('now')"
+        )->fetchColumn();
+
+        $total = (int)$db->query(
+            "SELECT COUNT(*) FROM inventory WHERE quantity > 0"
+        )->fetchColumn();
+
+        $shoppingCount = 0;
+        if (isShoppingBringMode()) {
+            $auth = bringAuth();
+            if ($auth) {
+                $listData = bringRequest('GET', "https://api.getbring.com/rest/v2/bringlists/{$auth['bringListUUID']}");
+                $shoppingCount = isset($listData['purchase']) ? count($listData['purchase']) : 0;
+            }
+        } else {
+            $shoppingCount = (int)$db->query("SELECT COUNT(*) FROM shopping_list")->fetchColumn();
+        }
+
+        // Expiring items details
+        $expiringItems = $db->query(
+            "SELECT name, quantity, unit, expiry_date FROM inventory
+             WHERE quantity > 0 AND expiry_date IS NOT NULL AND expiry_date BETWEEN date('now') AND date('now', '+7 days')
+             ORDER BY expiry_date ASC LIMIT 10"
+        )->fetchAll(PDO::FETCH_ASSOC);
+
+        $stateValue = match($sensor) {
+            'expired'  => $expired,
+            'shopping' => $shoppingCount,
+            'total'    => $total,
+            default    => $expiring,  // 'expiring' or 'overview'
+        };
+
+        echo json_encode([
+            'state'      => $stateValue,
+            'attributes' => [
+                'expiring_soon'      => $expiring,
+                'expiring_3d'        => $expiring,
+                'expired_items'      => $expired,
+                'total_items'        => $total,
+                'shopping_items'     => $shoppingCount,
+                'expiring_list'      => array_map(fn($r) => [
+                    'name'       => $r['name'],
+                    'quantity'   => (float)$r['quantity'],
+                    'unit'       => $r['unit'],
+                    'expiry_date'=> $r['expiry_date'],
+                ], $expiringItems),
+                'unit_of_measurement'=> 'items',
+                'friendly_name'      => 'EverShelf Pantry',
+                'icon'               => 'mdi:fridge',
+                'last_updated'       => date('c'),
+            ],
+        ], JSON_UNESCAPED_UNICODE);
+    } catch (Throwable $e) {
+        http_response_code(500);
+        echo json_encode(['error' => $e->getMessage()]);
+    }
+}
+
 // ===== CLIENT LOG =====
+
+/**
+ * Test reachability of a Home Assistant instance.
+ * Accepts POST body: {url, token}
+ * Uses server-env HA_TOKEN if token === '__server__' (token already saved on server).
+ */
+function haTestConnection(): void {
+    header('Content-Type: application/json; charset=utf-8');
+    $input = json_decode(file_get_contents('php://input'), true) ?? [];
+    $url   = rtrim($input['url'] ?? '', '/');
+    $token = $input['token'] ?? '';
+    if ($token === '__server__') {
+        $token = env('HA_TOKEN', '');
+    }
+    if (!$url) {
+        http_response_code(400);
+        echo json_encode(['ok' => false, 'error' => 'No URL provided']);
+        return;
+    }
+    $ch = curl_init();
+    curl_setopt_array($ch, [
+        CURLOPT_URL            => $url . '/api/',
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_TIMEOUT        => 8,
+        CURLOPT_SSL_VERIFYPEER => false,
+        CURLOPT_SSL_VERIFYHOST => false,
+        CURLOPT_HTTPHEADER     => array_filter([
+            'Content-Type: application/json',
+            $token ? 'Authorization: Bearer ' . $token : null,
+        ]),
+    ]);
+    $raw  = curl_exec($ch);
+    $code = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    $err  = curl_error($ch);
+    curl_close($ch);
+    if ($err) {
+        echo json_encode(['ok' => false, 'error' => $err, 'http_code' => 0]);
+        return;
+    }
+    $data = json_decode($raw, true);
+    $version = $data['version'] ?? null;
+    if ($code === 200) {
+        echo json_encode(['ok' => true, 'version' => $version, 'http_code' => $code]);
+    } elseif ($code === 401) {
+        echo json_encode(['ok' => false, 'error' => 'bad_token', 'http_code' => $code]);
+    } else {
+        echo json_encode(['ok' => false, 'error' => 'http_' . $code, 'http_code' => $code]);
+    }
+}
+
 
 // ===== FOOD FACTS (cached daily) =====
 function getFoodFacts(): void {
@@ -2433,6 +2654,13 @@ function updateInventory(PDO $db): void {
     // Real-time Bring! sync: done after commit so DB lock is not held during HTTP call
     if (isset($input['quantity']) && $prevRow && abs((float)$input['quantity'] - (float)$prevRow['quantity']) > 0.001) {
         try { bringQuickSyncProduct($db, (int)$prevRow['product_id']); } catch (Throwable $e) {}
+        // HA: stock update event
+        $prodRow = $db->prepare("SELECT name FROM products WHERE id = ?")->execute([(int)$prevRow['product_id']]) ? $db->query("SELECT name FROM products WHERE id = " . (int)$prevRow['product_id'])->fetchColumn() : '';
+        _fireHaWebhook('stock_update', [
+            'item'     => (string)$prodRow,
+            'quantity' => (float)$input['quantity'],
+            'location' => $input['location'] ?? $prevRow['location'] ?? '',
+        ]);
     }
 
     echo json_encode(['success' => true]);
@@ -3221,6 +3449,15 @@ function getServerSettings(): void {
         'shopping_forecast'           => env('SHOPPING_FORECAST', 'true') === 'true',
         'shopping_auto_add_threshold' => (int)env('SHOPPING_AUTO_ADD_THRESHOLD', '0'),
         'dark_mode'                   => env('DARK_MODE', 'auto'),
+        // Home Assistant Integration
+        'ha_enabled'                  => env('HA_ENABLED', 'false') === 'true',
+        'ha_url'                      => env('HA_URL', ''),
+        'ha_token'                    => env('HA_TOKEN', ''),
+        'ha_tts_entity'               => env('HA_TTS_ENTITY', ''),
+        'ha_webhook_id'               => env('HA_WEBHOOK_ID', ''),
+        'ha_webhook_events'           => env('HA_WEBHOOK_EVENTS', 'expiry,shopping_add,stock_update,barcode_scan'),
+        'ha_notify_service'           => env('HA_NOTIFY_SERVICE', ''),
+        'ha_expiry_days'              => (int)env('HA_EXPIRY_DAYS', '3'),
     ]);
 }
 
@@ -3287,6 +3524,13 @@ function saveSettings(): void {
         'gdrive_client_secret'          => 'GDRIVE_CLIENT_SECRET',
         'shopping_mode'      => 'SHOPPING_MODE',
         'dark_mode'         => 'DARK_MODE',
+        // Home Assistant
+        'ha_url'             => 'HA_URL',
+        'ha_token'           => 'HA_TOKEN',
+        'ha_tts_entity'      => 'HA_TTS_ENTITY',
+        'ha_webhook_id'      => 'HA_WEBHOOK_ID',
+        'ha_webhook_events'  => 'HA_WEBHOOK_EVENTS',
+        'ha_notify_service'  => 'HA_NOTIFY_SERVICE',
     ];
     // Boolean keys
     $boolMap = [
@@ -3307,6 +3551,8 @@ function saveSettings(): void {
         'shopping_enabled'           => 'SHOPPING_ENABLED',
         'shopping_smart_suggestions' => 'SHOPPING_SMART_SUGGESTIONS',
         'shopping_forecast'          => 'SHOPPING_FORECAST',
+        // Home Assistant
+        'ha_enabled'    => 'HA_ENABLED',
     ];
     // Integer keys
     $intMap = [
@@ -3319,6 +3565,8 @@ function saveSettings(): void {
         'backup_retention_days'       => 'BACKUP_RETENTION_DAYS',
         'gdrive_retention_days'           => 'GDRIVE_RETENTION_DAYS',
         'shopping_auto_add_threshold'    => 'SHOPPING_AUTO_ADD_THRESHOLD',
+        // Home Assistant
+        'ha_expiry_days' => 'HA_EXPIRY_DAYS',
     ];
     // Float keys
     $floatMap = [
@@ -7280,6 +7528,12 @@ function bringAddItems(): void {
     if ($added > 0 || $updated > 0) {
         // Invalidate cache so next smart_shopping request reflects the updated Bring! list
         @unlink(__DIR__ . '/../data/smart_shopping_cache.json');
+        // Fire HA webhook for each newly added item
+        foreach ($items as $item) {
+            $iName = $item['name'] ?? '';
+            if ($iName === '') continue;
+            _fireHaWebhook('shopping_add', ['item' => $iName, 'specification' => $item['specification'] ?? '']);
+        }
     }
     echo json_encode(['success' => true, 'added' => $added, 'updated' => $updated, 'skipped' => $skipped, 'errors' => $errors]);
 }
@@ -8383,6 +8637,7 @@ function shoppingAdd(PDO $db): void {
         } else {
             $db->prepare("INSERT INTO shopping_list (name, raw_name, specification) VALUES (?, ?, ?)")->execute([$name, $rawName, $spec]);
             $added++;
+            _fireHaWebhook('shopping_add', ['item' => $name, 'specification' => $spec]);
         }
     }
     echo json_encode(['success' => true, 'added' => $added, 'updated' => $updated, 'skipped' => $skipped, 'errors' => []]);
