@@ -931,6 +931,14 @@ try {
             haInventorySensor(getDB());
             break;
 
+        case 'ha_info':
+            haGetInfo(getDB());
+            break;
+
+        case 'ha_shopping_items':
+            haGetShoppingItems(getDB());
+            break;
+
         case 'ha_test':
             haTestConnection();
             break;
@@ -1349,12 +1357,13 @@ function haInventorySensor(PDO $db): void {
     header('Content-Type: application/json; charset=utf-8');
     header('Access-Control-Allow-Origin: *');
 
-    $sensor = strtolower(trim($_GET['sensor'] ?? 'overview'));
+    $sensor     = strtolower(trim($_GET['sensor'] ?? 'overview'));
+    $expiryDays = max(1, min(90, (int)($_GET['expiry_days'] ?? env('HA_EXPIRY_DAYS', 3))));
 
     try {
         $expiring = (int)$db->query(
             "SELECT COUNT(*) FROM inventory WHERE quantity > 0 AND expiry_date IS NOT NULL
-             AND expiry_date BETWEEN date('now') AND date('now', '+3 days')"
+             AND expiry_date BETWEEN date('now') AND date('now', '+{$expiryDays} days')"
         )->fetchColumn();
 
         $expired = (int)$db->query(
@@ -1465,6 +1474,70 @@ function haTestConnection(): void {
         echo json_encode(['ok' => false, 'error' => 'bad_token', 'http_code' => $code]);
     } else {
         echo json_encode(['ok' => false, 'error' => 'http_' . $code, 'http_code' => $code]);
+    }
+}
+
+
+// ===== HA DISCOVERY INFO =====
+
+/**
+ * Returns device info for HA Zeroconf discovery confirmation.
+ * GET /api/index.php?action=ha_info
+ * Response: { name, instance, version, unique_id, has_token, api_version, items_count }
+ */
+function haGetInfo(PDO $db): void {
+    header('Content-Type: application/json; charset=utf-8');
+    header('Access-Control-Allow-Origin: *');
+    // Stable unique_id derived from server identity (survives restarts)
+    $uniqueId    = 'evershelf_' . substr(md5(__DIR__ . php_uname('n')), 0, 12);
+    $itemsCount  = (int)$db->query("SELECT COUNT(*) FROM inventory WHERE quantity > 0")->fetchColumn();
+    echo json_encode([
+        'name'        => 'EverShelf',
+        'instance'    => env('INSTANCE_NAME', php_uname('n')),
+        'version'     => _appVersion(),
+        'unique_id'   => $uniqueId,
+        'has_token'   => !empty(env('SETTINGS_TOKEN', '')),
+        'api_version' => 1,
+        'items_count' => $itemsCount,
+    ], JSON_UNESCAPED_UNICODE);
+}
+
+/**
+ * Returns shopping list items in a clean format suitable for HA todo entity.
+ * GET /api/index.php?action=ha_shopping_items
+ * Response: { items: [{id, name, note}], count, mode }
+ */
+function haGetShoppingItems(PDO $db): void {
+    header('Content-Type: application/json; charset=utf-8');
+    header('Access-Control-Allow-Origin: *');
+    try {
+        if (isShoppingBringMode()) {
+            $auth = bringAuth();
+            if (!$auth) {
+                echo json_encode(['items' => [], 'count' => 0, 'mode' => 'bring']);
+                return;
+            }
+            $listData = bringRequest('GET', "https://api.getbring.com/rest/v2/bringlists/{$auth['bringListUUID']}");
+            $items = array_map(fn($r) => [
+                'id'   => $r['uuid'] ?? md5(($r['name'] ?? '') . uniqid()),
+                'name' => $r['name'] ?? '',
+                'note' => $r['specification'] ?? '',
+            ], $listData['purchase'] ?? []);
+            echo json_encode(['items' => $items, 'count' => count($items), 'mode' => 'bring'], JSON_UNESCAPED_UNICODE);
+        } else {
+            $rows = $db->query(
+                "SELECT rowid AS id, name, specification AS note FROM shopping_list ORDER BY sort_order ASC, added_at ASC"
+            )->fetchAll(PDO::FETCH_ASSOC);
+            $items = array_map(fn($r) => [
+                'id'   => (string)$r['id'],
+                'name' => $r['name'],
+                'note' => $r['note'] ?? '',
+            ], $rows);
+            echo json_encode(['items' => $items, 'count' => count($items), 'mode' => 'internal'], JSON_UNESCAPED_UNICODE);
+        }
+    } catch (Throwable $e) {
+        http_response_code(500);
+        echo json_encode(['error' => $e->getMessage()]);
     }
 }
 

@@ -197,3 +197,23 @@ if (env('HA_ENABLED', 'false') === 'true' && env('HA_WEBHOOK_ID', '') !== '') {
         echo '[' . date('Y-m-d H:i:s') . '] HA expiry hook warning: ' . $haE->getMessage() . "\n";
     }
 }
+
+// ── Avahi/mDNS discovery registration ─────────────────────────────────────────
+// If avahi-daemon is running on this host, register the _evershelf._tcp service
+// so that Home Assistant can auto-discover this instance via Zeroconf.
+if (function_exists('shell_exec')) {
+    try {
+        $avahiService = '/etc/avahi/services/evershelf.xml';
+        // Only create/update if avahi-daemon is installed and the file doesn't exist yet
+        if (!file_exists($avahiService) && (shell_exec('which avahi-daemon 2>/dev/null') || shell_exec('which avahi-publish 2>/dev/null'))) {
+            $template = __DIR__ . '/../docker/avahi-evershelf.xml';
+            if (file_exists($template)) {
+                $xml = file_get_contents($template);
+                @file_put_contents($avahiService, $xml);
+                echo '[' . date('Y-m-d H:i:s') . '] Avahi mDNS service registered at ' . $avahiService . "\n";
+            }
+        }
+    } catch (Throwable $avahiE) {
+        // Non-fatal: avahi not available
+    }
+}
