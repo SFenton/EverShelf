@@ -943,6 +943,22 @@ try {
             haTestConnection();
             break;
 
+        case 'ha_calendar':
+            haCalendar(getDB());
+            break;
+
+        case 'ha_suggest_recipe':
+            haSuggestRecipe(getDB());
+            break;
+
+        case 'ha_refresh_prices':
+            haRefreshPrices(getDB());
+            break;
+
+        case 'ha_clear_expired':
+            haClearExpired(getDB());
+            break;
+
         case 'expiry_history':
             getExpiryHistory($db);
             break;
@@ -1415,6 +1431,48 @@ function haInventorySensor(PDO $db): void {
              AND expiry_date <= date('now', '+1 days')"
         )->fetchColumn();
 
+        // Location breakdown
+        $locationRows = $db->query(
+            "SELECT location, COUNT(*) as n FROM inventory WHERE quantity > 0 GROUP BY location"
+        )->fetchAll(PDO::FETCH_ASSOC);
+        $locationMap = [];
+        foreach ($locationRows as $row) $locationMap[$row['location']] = (int)$row['n'];
+        $itemsDispensa = $locationMap['dispensa'] ?? 0;
+        $itemsFrigo    = $locationMap['frigo']    ?? 0;
+        $itemsFreezer  = $locationMap['freezer']  ?? 0;
+        $itemsOther    = array_sum($locationMap) - $itemsDispensa - $itemsFrigo - $itemsFreezer;
+
+        // Low stock (qty > 0 but <= 1) and zero stock
+        $lowStockItems  = (int)$db->query("SELECT COUNT(*) FROM inventory WHERE quantity > 0 AND quantity <= 1")->fetchColumn();
+        $zeroStockItems = (int)$db->query("SELECT COUNT(*) FROM inventory WHERE quantity <= 0")->fetchColumn();
+
+        // AI calls this month
+        $aiCallsToday = 0;
+        $aiUsagePath = __DIR__ . '/../data/ai_usage.json';
+        if (file_exists($aiUsagePath)) {
+            $aiData = json_decode(file_get_contents($aiUsagePath), true) ?? [];
+            $monthKey = date('Y-m');
+            $aiCallsToday = (int)(($aiData[$monthKey]['calls'] ?? 0));
+        }
+
+        // Last backup
+        $lastBackupAt = null;
+        $backupPath = __DIR__ . '/../data/backup_last_ts.json';
+        if (file_exists($backupPath)) {
+            $bk = json_decode(file_get_contents($backupPath), true) ?? [];
+            if (!empty($bk['ts'])) $lastBackupAt = date('c', (int)$bk['ts']);
+        }
+
+        // Bring! connected
+        $bringConnected = isShoppingBringMode() && (bool)bringAuth();
+
+        // Days to next expiry
+        $daysToNextExpiry = null;
+        if (!empty($expiringItems)) {
+            $diff = (new DateTime('today'))->diff(new DateTime($expiringItems[0]['expiry_date']));
+            $daysToNextExpiry = (int)$diff->format('%r%a');
+        }
+
         // Shopping total from server-side total cache (max 1 hour old)
         $priceEnabled  = env('PRICE_ENABLED', 'false') === 'true';
         $priceCurrency = env('PRICE_CURRENCY', 'EUR');
@@ -1454,6 +1512,16 @@ function haInventorySensor(PDO $db): void {
                 'expired_items'          => $expired,
                 'total_items'            => $total,
                 'opened_items'           => $openedItems,
+                'items_dispensa'         => $itemsDispensa,
+                'items_frigo'            => $itemsFrigo,
+                'items_freezer'          => $itemsFreezer,
+                'items_other'            => $itemsOther,
+                'low_stock_items'        => $lowStockItems,
+                'zero_stock_items'       => $zeroStockItems,
+                'ai_calls_month'         => $aiCallsToday,
+                'last_backup_at'         => $lastBackupAt,
+                'days_to_next_expiry'    => $daysToNextExpiry,
+                'bring_connected'        => $bringConnected,
                 'shopping_items'         => $shoppingCount,
                 'shopping_total'         => $shoppingTotal,
                 'price_tracking_enabled' => $priceEnabled,
@@ -1473,6 +1541,217 @@ function haInventorySensor(PDO $db): void {
                 'last_updated'           => date('c'),
             ],
         ], JSON_UNESCAPED_UNICODE);
+    } catch (Throwable $e) {
+        http_response_code(500);
+        echo json_encode(['error' => $e->getMessage()]);
+    }
+}
+
+// ===== HA CALENDAR =====
+
+/**
+ * Returns all inventory items with expiry dates as calendar events.
+ * GET /api/index.php?action=ha_calendar
+ */
+function haCalendar(PDO $db): void {
+    header('Content-Type: application/json; charset=utf-8');
+    header('Access-Control-Allow-Origin: *');
+    try {
+        $rows = $db->query(
+            "SELECT p.name, i.quantity, p.unit, i.location, i.expiry_date
+             FROM inventory i
+             JOIN products p ON p.id = i.product_id
+             WHERE i.quantity > 0 AND i.expiry_date IS NOT NULL
+             ORDER BY i.expiry_date ASC"
+        )->fetchAll(PDO::FETCH_ASSOC);
+
+        $events = array_map(fn($r) => [
+            'summary'      => $r['name'],
+            'description'  => number_format((float)$r['quantity'], 2, '.', '') . ' ' . $r['unit'] . ' — ' . $r['location'],
+            'start'        => $r['expiry_date'],
+            'end'          => $r['expiry_date'],
+            'location'     => $r['location'],
+            'quantity'     => (float)$r['quantity'],
+            'unit'         => $r['unit'],
+        ], $rows);
+
+        echo json_encode(['events' => $events], JSON_UNESCAPED_UNICODE);
+    } catch (Throwable $e) {
+        http_response_code(500);
+        echo json_encode(['error' => $e->getMessage()]);
+    }
+}
+
+// ===== HA SUGGEST RECIPE =====
+
+/**
+ * Suggests a recipe using items that expire soonest.
+ * GET /api/index.php?action=ha_suggest_recipe[&location=frigo]
+ */
+function haSuggestRecipe(PDO $db): void {
+    header('Content-Type: application/json; charset=utf-8');
+    header('Access-Control-Allow-Origin: *');
+
+    $apiKey = env('GEMINI_API_KEY', '');
+    if (!$apiKey) {
+        http_response_code(503);
+        echo json_encode(['error' => 'GEMINI_API_KEY not configured']);
+        return;
+    }
+
+    $location = trim($_GET['location'] ?? '');
+    $limit    = max(3, min(12, (int)($_GET['limit'] ?? 8)));
+
+    try {
+        $where = "i.quantity > 0";
+        if ($location) $where .= " AND i.location = " . $db->quote($location);
+
+        $expiringRows = $db->query(
+            "SELECT p.name, i.quantity, p.unit, i.expiry_date, i.location
+             FROM inventory i
+             JOIN products p ON p.id = i.product_id
+             WHERE $where AND i.expiry_date IS NOT NULL
+             ORDER BY i.expiry_date ASC LIMIT $limit"
+        )->fetchAll(PDO::FETCH_ASSOC);
+
+        // Also grab other available items (no expiry)
+        $otherRows = $db->query(
+            "SELECT p.name, i.quantity, p.unit
+             FROM inventory i
+             JOIN products p ON p.id = i.product_id
+             WHERE i.quantity > 0 AND i.expiry_date IS NULL" .
+            ($location ? " AND i.location = " . $db->quote($location) : "") .
+            " ORDER BY p.name LIMIT 15"
+        )->fetchAll(PDO::FETCH_ASSOC);
+
+        $expParts = array_map(fn($r) =>
+            "{$r['name']} ({$r['quantity']} {$r['unit']}, scade {$r['expiry_date']})",
+            $expiringRows
+        );
+        $otherParts = array_map(fn($r) =>
+            "{$r['name']} ({$r['quantity']} {$r['unit']})",
+            $otherRows
+        );
+
+        $locationHint = $location ? " nel $location" : " in dispensa/frigo/freezer";
+        $ingredientList = implode(', ', $expParts);
+        if ($otherParts) $ingredientList .= '. Altri disponibili: ' . implode(', ', $otherParts);
+
+        $prompt = "Sei uno chef italiano. Ho questi ingredienti$locationHint che scadono presto: $ingredientList. "
+            . "Proponi UNA ricetta completa che usa prioritariamente quelli in scadenza. "
+            . "Rispondi con: NOME RICETTA, poi INGREDIENTI (lista), poi PREPARAZIONE (passi numerati). "
+            . "Risposta concisa, massimo 300 parole. Solo italiano.";
+
+        $payload = [
+            'contents' => [['role' => 'user', 'parts' => [['text' => $prompt]]]],
+            'generationConfig' => ['temperature' => 0.7, 'maxOutputTokens' => 512,
+                'thinkingConfig' => ['thinkingBudget' => 0]],
+        ];
+
+        $result = callGeminiWithFallback($apiKey, $payload, 25);
+        $text = $result['candidates'][0]['content']['parts'][0]['text'] ?? null;
+
+        if (!$text) {
+            http_response_code(503);
+            echo json_encode(['error' => 'No recipe generated']);
+            return;
+        }
+
+        echo json_encode([
+            'recipe'      => trim($text),
+            'ingredients' => array_merge($expParts, $otherParts),
+            'location'    => $location ?: 'all',
+        ], JSON_UNESCAPED_UNICODE);
+    } catch (Throwable $e) {
+        http_response_code(500);
+        echo json_encode(['error' => $e->getMessage()]);
+    }
+}
+
+// ===== HA REFRESH PRICES =====
+
+/**
+ * Computes shopping list total using only existing price cache (no new AI calls).
+ * GET /api/index.php?action=ha_refresh_prices
+ */
+function haRefreshPrices(PDO $db): void {
+    header('Content-Type: application/json; charset=utf-8');
+    header('Access-Control-Allow-Origin: *');
+
+    try {
+        $country  = env('PRICE_COUNTRY', 'Italia');
+        $currency = env('PRICE_CURRENCY', 'EUR');
+
+        // Get shopping list
+        $shoppingItems = [];
+        if (isShoppingBringMode()) {
+            $auth = bringAuth();
+            if ($auth) {
+                $listData = bringRequest('GET', "https://api.getbring.com/rest/v2/bringlists/{$auth['bringListUUID']}");
+                foreach ($listData['purchase'] ?? [] as $item) {
+                    $shoppingItems[] = ['name' => $item['name'], 'quantity' => 1, 'unit' => 'pz', 'default_quantity' => 0, 'package_unit' => ''];
+                }
+            }
+        } else {
+            $rows = $db->query("SELECT name, quantity, unit FROM shopping_list WHERE checked = 0")->fetchAll(PDO::FETCH_ASSOC);
+            foreach ($rows as $r) {
+                $shoppingItems[] = ['name' => $r['name'], 'quantity' => (float)($r['quantity'] ?? 1), 'unit' => $r['unit'] ?? 'pz', 'default_quantity' => 0, 'package_unit' => ''];
+            }
+        }
+
+        $priceCache = _loadPriceCache();
+        $total = 0.0;
+        $priced = 0;
+        $missing = [];
+
+        foreach ($shoppingItems as $item) {
+            $key = _priceKey($item['name'], $country);
+            if (isset($priceCache[$key])) {
+                $entry = $priceCache[$key];
+                $est = _calcEstimatedTotal($entry['price_per_unit'], $entry['unit_label'] ?? '', $item['quantity'], $item['unit'], $item['default_quantity'], $item['package_unit']);
+                $total += $est ?? 0;
+                $priced++;
+            } else {
+                $missing[] = $item['name'];
+            }
+        }
+
+        $total = round($total, 2);
+
+        // Persist to total cache
+        $totalCachePath = __DIR__ . '/../data/shopping_total_cache.json';
+        $result = ['success' => true, 'total' => $total, 'total_label' => _formatPrice($total, $currency), 'priced_items' => $priced, 'missing_items' => count($missing)];
+        $tc = file_exists($totalCachePath) ? (json_decode(file_get_contents($totalCachePath), true) ?? []) : [];
+        $key = 'ha_refresh_' . date('Ymd');
+        $tc[$key] = ['ts' => time(), 'result' => $result];
+        if (count($tc) >= 10) $tc = array_slice($tc, -9, null, true);
+        file_put_contents($totalCachePath, json_encode($tc, JSON_UNESCAPED_UNICODE));
+
+        echo json_encode($result, JSON_UNESCAPED_UNICODE);
+    } catch (Throwable $e) {
+        http_response_code(500);
+        echo json_encode(['error' => $e->getMessage()]);
+    }
+}
+
+// ===== HA CLEAR EXPIRED =====
+
+/**
+ * Removes inventory rows that are expired AND have quantity <= 0.
+ * POST /api/index.php?action=ha_clear_expired
+ */
+function haClearExpired(PDO $db): void {
+    header('Content-Type: application/json; charset=utf-8');
+    header('Access-Control-Allow-Origin: *');
+
+    try {
+        $stmt = $db->prepare(
+            "DELETE FROM inventory WHERE expiry_date < date('now') AND quantity <= 0"
+        );
+        $stmt->execute();
+        $deleted = $stmt->rowCount();
+
+        echo json_encode(['success' => true, 'deleted' => $deleted], JSON_UNESCAPED_UNICODE);
     } catch (Throwable $e) {
         http_response_code(500);
         echo json_encode(['error' => $e->getMessage()]);
