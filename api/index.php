@@ -1388,9 +1388,12 @@ function haInventorySensor(PDO $db): void {
 
         // Expiring items details
         $expiringItems = $db->query(
-            "SELECT name, quantity, unit, expiry_date FROM inventory
-             WHERE quantity > 0 AND expiry_date IS NOT NULL AND expiry_date BETWEEN date('now') AND date('now', '+7 days')
-             ORDER BY expiry_date ASC LIMIT 10"
+            "SELECT p.name, i.quantity, p.unit, i.expiry_date
+             FROM inventory i
+             JOIN products p ON p.id = i.product_id
+             WHERE i.quantity > 0 AND i.expiry_date IS NOT NULL
+               AND i.expiry_date BETWEEN date('now') AND date('now', '+7 days')
+             ORDER BY i.expiry_date ASC LIMIT 10"
         )->fetchAll(PDO::FETCH_ASSOC);
 
         $stateValue = match($sensor) {
