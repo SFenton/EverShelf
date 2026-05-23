@@ -113,12 +113,15 @@ jobs:
 
       - name: Merge develop → main
         run: |
-          # WORKFLOW_PAT (classic PAT with repo+workflow scopes) is required to
-          # push commits that touch .github/workflows/ files.
-          # Falls back to GITHUB_TOKEN for non-workflow pushes.
-          PUSH_TOKEN="${{ secrets.WORKFLOW_PAT }}"
-          if [ -z "$PUSH_TOKEN" ]; then PUSH_TOKEN="${{ github.token }}"; fi
-          git remote set-url origin "https://x-access-token:${PUSH_TOKEN}@github.com/${{ github.repository }}.git"
+          # ── ROOT CAUSE FIX ──────────────────────────────────────────────────
+          # actions/checkout writes an http.extraheader (AUTHORIZATION: basic …)
+          # that silently overrides any credentials embedded in git remote URLs.
+          # We must clear it BEFORE setting the remote URL with WORKFLOW_PAT,
+          # otherwise GITHUB_TOKEN is always used for the push and workflow-file
+          # changes are rejected.
+          # ────────────────────────────────────────────────────────────────────
+          git config --local --unset-all http."https://github.com/".extraheader 2>/dev/null || true
+
           LAST=$(git log --oneline -1 origin/develop)
           git checkout main
           git pull --ff-only origin main
@@ -126,6 +129,26 @@ jobs:
             -m "chore: auto-merge develop → main
 
           Triggered by: $LAST"
+
+          # ── PUSH STRATEGY ───────────────────────────────────────────────────
+          # Priority 1: WORKFLOW_PAT (classic PAT, repo+workflow scopes)
+          #   → can push workflow file changes; set as a repo secret.
+          # Priority 2: GITHUB_TOKEN fallback
+          #   → cannot push workflow files; strip them from the merge commit.
+          # ────────────────────────────────────────────────────────────────────
+          PUSH_TOKEN="${{ secrets.WORKFLOW_PAT }}"
+          if [ -z "$PUSH_TOKEN" ]; then
+            WF=$(git diff --name-only origin/main -- .github/workflows/ 2>/dev/null || echo "")
+            if [ -n "$WF" ]; then
+              echo "::warning::WORKFLOW_PAT not set — stripping workflow changes from merge commit:"
+              echo "$WF"
+              git checkout origin/main -- .github/workflows/
+              git diff --cached --quiet || git commit --amend --no-edit
+            fi
+            PUSH_TOKEN="${{ github.token }}"
+          fi
+
+          git remote set-url origin "https://x-access-token:${PUSH_TOKEN}@github.com/${{ github.repository }}.git"
           git push origin main
 
   # ── Auto-create GitHub Release on main ───────────────────────────────────
