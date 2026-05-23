@@ -36,6 +36,10 @@
 
 ---
 
+> **⚠️ Name disambiguation:** There is an unrelated iOS app also called **EverShelf**, developed and published by [Joshumi Technologies LLC](https://evershelf.joshumi.com/) on the [Apple App Store](https://apps.apple.com/app/evershelf/id6759439940). That application is a **completely separate, independent product** with no affiliation, association, or collaboration with this open-source project. This repository has no connection to Joshumi Technologies LLC, its products, or its services.
+
+---
+
 ## ✨ Features
 
 > ⚙️ **New in v1.7.23 — Global settings tab, DB auto-cleanup, vacuum-sealed expiry**
