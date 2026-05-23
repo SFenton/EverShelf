@@ -1396,6 +1396,42 @@ function haInventorySensor(PDO $db): void {
              ORDER BY i.expiry_date ASC LIMIT 10"
         )->fetchAll(PDO::FETCH_ASSOC);
 
+        // Opened items
+        $openedItems = (int)$db->query(
+            "SELECT COUNT(*) FROM inventory WHERE quantity > 0 AND opened_at IS NOT NULL"
+        )->fetchColumn();
+
+        // Fixed 3-day expiry count (always 3 days, regardless of expiry_days param)
+        $expiring3d = ($expiryDays === 3)
+            ? $expiring
+            : (int)$db->query(
+                "SELECT COUNT(*) FROM inventory WHERE quantity > 0 AND expiry_date IS NOT NULL
+                 AND expiry_date BETWEEN date('now') AND date('now', '+3 days')"
+            )->fetchColumn();
+
+        // Shopping total from server-side total cache (max 1 hour old)
+        $priceEnabled  = env('PRICE_ENABLED', 'false') === 'true';
+        $priceCurrency = env('PRICE_CURRENCY', 'EUR');
+        $shoppingTotal = null;
+        if ($priceEnabled) {
+            $totalCachePath = __DIR__ . '/../data/shopping_total_cache.json';
+            if (file_exists($totalCachePath)) {
+                $tc = json_decode(file_get_contents($totalCachePath), true) ?? [];
+                // Find the most recent entry not older than 1 hour
+                $best = null;
+                $bestTs = 0;
+                foreach ($tc as $entry) {
+                    if (isset($entry['ts']) && $entry['ts'] > $bestTs) {
+                        $bestTs = $entry['ts'];
+                        $best   = $entry;
+                    }
+                }
+                if ($best && (time() - $bestTs) < 3600) {
+                    $shoppingTotal = round((float)($best['result']['total'] ?? 0), 2);
+                }
+            }
+        }
+
         $stateValue = match($sensor) {
             'expired'  => $expired,
             'shopping' => $shoppingCount,
@@ -1406,21 +1442,25 @@ function haInventorySensor(PDO $db): void {
         echo json_encode([
             'state'      => $stateValue,
             'attributes' => [
-                'expiring_soon'      => $expiring,
-                'expiring_3d'        => $expiring,
-                'expired_items'      => $expired,
-                'total_items'        => $total,
-                'shopping_items'     => $shoppingCount,
-                'expiring_list'      => array_map(fn($r) => [
+                'expiring_soon'          => $expiring,
+                'expiring_3d'            => $expiring3d,
+                'expired_items'          => $expired,
+                'total_items'            => $total,
+                'opened_items'           => $openedItems,
+                'shopping_items'         => $shoppingCount,
+                'shopping_total'         => $shoppingTotal,
+                'price_tracking_enabled' => $priceEnabled,
+                'price_currency'         => $priceCurrency,
+                'expiring_list'          => array_map(fn($r) => [
                     'name'       => $r['name'],
                     'quantity'   => (float)$r['quantity'],
                     'unit'       => $r['unit'],
                     'expiry_date'=> $r['expiry_date'],
                 ], $expiringItems),
-                'unit_of_measurement'=> 'items',
-                'friendly_name'      => 'EverShelf Pantry',
-                'icon'               => 'mdi:fridge',
-                'last_updated'       => date('c'),
+                'unit_of_measurement'    => 'items',
+                'friendly_name'          => 'EverShelf Pantry',
+                'icon'                   => 'mdi:fridge',
+                'last_updated'           => date('c'),
             ],
         ], JSON_UNESCAPED_UNICODE);
     } catch (Throwable $e) {
