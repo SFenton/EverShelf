@@ -102,9 +102,9 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          # WORKFLOW_PAT must be a classic PAT with repo+workflow scopes.
-          # Without it, pushes that touch .github/workflows/ will be rejected.
-          token: ${{ secrets.WORKFLOW_PAT || github.token }}
+          # Always use the built-in GITHUB_TOKEN for checkout (read-only fetch).
+          # WORKFLOW_PAT is only needed for the push step below.
+          token: ${{ github.token }}
 
       - name: Configure git bot identity
         run: |
@@ -113,7 +113,12 @@ jobs:
 
       - name: Merge develop → main
         run: |
-          git remote set-url origin https://x-access-token:${{ secrets.WORKFLOW_PAT || github.token }}@github.com/${{ github.repository }}.git
+          # WORKFLOW_PAT (classic PAT with repo+workflow scopes) is required to
+          # push commits that touch .github/workflows/ files.
+          # Falls back to GITHUB_TOKEN for non-workflow pushes.
+          PUSH_TOKEN="${{ secrets.WORKFLOW_PAT }}"
+          if [ -z "$PUSH_TOKEN" ]; then PUSH_TOKEN="${{ github.token }}"; fi
+          git remote set-url origin "https://x-access-token:${PUSH_TOKEN}@github.com/${{ github.repository }}.git"
           LAST=$(git log --oneline -1 origin/develop)
           git checkout main
           git pull --ff-only origin main
