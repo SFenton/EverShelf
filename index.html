@@ -841,6 +841,7 @@
             <button class="settings-tab" onclick="switchSettingsTab(this, 'tab-camera')" data-tab="tab-camera" title="Fotocamera">📷</button>
             <button class="settings-tab" onclick="switchSettingsTab(this, 'tab-security')" data-tab="tab-security" title="Sicurezza">🔒</button>
             <button class="settings-tab" onclick="switchSettingsTab(this, 'tab-tts')" data-tab="tab-tts" title="Voce (TTS)" data-i18n-title="settings.tab_tts">🔊</button>
+            <button class="settings-tab" onclick="switchSettingsTab(this, 'tab-ha'); _loadHaTab();" data-tab="tab-ha" title="Home Assistant" data-i18n-title="settings.ha.tab">🏠</button>
             <button class="settings-tab" onclick="switchSettingsTab(this, 'tab-scale')" data-tab="tab-scale" title="Bilancia Smart" data-i18n-title="settings.scale.tab">⚖️</button>
             <button class="settings-tab" onclick="switchSettingsTab(this, 'tab-backup'); _loadBackupTab();" data-tab="tab-backup" data-i18n-title="settings.backup.tab" title="Backup">💾</button>
             <button class="settings-tab" onclick="switchSettingsTab(this, 'tab-info'); _loadInfoTab();" data-tab="tab-info" data-i18n-title="settings.info.tab" title="Info">ℹ️</button>
@@ -1315,7 +1316,123 @@
 
                     <button class="btn btn-large btn-accent full-width mt-2" onclick="testTTS()" data-i18n="settings.tts.test_btn">🔊 Invia Test Vocale</button>
                     <div id="tts-test-status" style="display:none;margin-top:8px"></div>
+                    <!-- HA TTS quick-fill hint -->
+                    <div style="margin-top:12px;padding:10px 12px;background:rgba(3,169,244,0.07);border:1px solid rgba(3,169,244,0.25);border-radius:8px;font-size:0.82rem">
+                        <span data-i18n="settings.tts.ha_hint">🏠 Se usi Home Assistant, usa il tab <strong>Home Assistant</strong> per configurare TTS, webhook e sensori.</span>
+                    </div>
                 </div>
+            </div>
+            <!-- Home Assistant Tab -->
+            <div class="settings-panel" id="tab-ha">
+                <!-- Connection card -->
+                <div class="settings-card">
+                    <h4 data-i18n="settings.ha.title">🏠 Home Assistant</h4>
+                    <p class="settings-hint" data-i18n="settings.ha.hint">Integra EverShelf con Home Assistant: TTS su speaker smart, webhook per automazioni, sensori per la dashboard.</p>
+
+                    <div class="form-group" style="margin-bottom:10px">
+                        <label class="toggle-row">
+                            <span data-i18n="settings.ha.enabled">✅ Abilita integrazione Home Assistant</span>
+                            <span class="toggle-switch">
+                                <input type="checkbox" id="setting-ha-enabled" onchange="onHaEnabledChange()">
+                                <span class="toggle-slider"></span>
+                            </span>
+                        </label>
+                    </div>
+
+                    <div id="ha-config-section">
+                        <div class="form-group">
+                            <label data-i18n="settings.ha.url_label">🌐 Home Assistant URL</label>
+                            <input type="url" id="setting-ha-url" class="form-input" placeholder="http://192.168.1.50:8123">
+                            <p class="settings-hint" data-i18n="settings.ha.url_hint">URL base della tua istanza HA (senza slash finale). Es: <code>http://homeassistant.local:8123</code></p>
+                        </div>
+                        <div class="form-group">
+                            <label data-i18n="settings.ha.token_label">🔑 Long-Lived Access Token</label>
+                            <div style="display:flex;gap:8px;align-items:center">
+                                <input type="password" id="setting-ha-token" class="form-input" style="flex:1" placeholder="eyJhbGci...">
+                                <button class="btn btn-secondary" style="flex-shrink:0" onclick="togglePasswordVisibility('setting-ha-token')" data-i18n="btn.toggle_password">👁️</button>
+                            </div>
+                            <p class="settings-hint" data-i18n="settings.ha.token_hint">Genera un token in HA → Profilo → Token di accesso a lungo termine.</p>
+                        </div>
+                        <button class="btn btn-secondary full-width" onclick="testHaConnection()" data-i18n="settings.ha.test_btn">🔗 Testa connessione HA</button>
+                        <div id="ha-test-status" style="display:none;margin-top:8px" class="settings-status"></div>
+                    </div>
+                </div>
+
+                <!-- TTS via HA card -->
+                <div class="settings-card">
+                    <h4 data-i18n="settings.ha.tts_title">🔊 TTS su Speaker Smart</h4>
+                    <p class="settings-hint" data-i18n="settings.ha.tts_hint">Leggi i passi della ricetta su un altoparlante gestito da HA (Sonos, Echo, Google Home, ecc.).</p>
+
+                    <div class="form-group">
+                        <label data-i18n="settings.ha.tts_entity_label">🔈 Entity ID del media player</label>
+                        <input type="text" id="setting-ha-tts-entity" class="form-input" placeholder="media_player.living_room">
+                        <p class="settings-hint" data-i18n="settings.ha.tts_entity_hint">Copia l'entity ID del media player da HA → Strumenti sviluppatore → Stati.</p>
+                    </div>
+                    <div class="form-group">
+                        <label data-i18n="settings.ha.tts_platform_label">🎙️ Piattaforma TTS</label>
+                        <select id="setting-ha-tts-platform" class="form-input">
+                            <option value="tts.speak" data-i18n="settings.ha.tts_platform_speak">tts.speak (raccomandato)</option>
+                            <option value="notify" data-i18n="settings.ha.tts_platform_notify">notify.* (servizio notifiche)</option>
+                        </select>
+                    </div>
+                    <button class="btn btn-secondary full-width" onclick="applyHaTtsPreset()" data-i18n="settings.ha.tts_apply_btn">✅ Applica preset HA al TTS</button>
+                    <p class="settings-hint mt-2" data-i18n="settings.ha.tts_apply_hint">Configura automaticamente il tab TTS con i parametri HA corretti.</p>
+                </div>
+
+                <!-- Webhook card -->
+                <div class="settings-card">
+                    <h4 data-i18n="settings.ha.webhook_title">⚡ Automazioni Webhook</h4>
+                    <p class="settings-hint" data-i18n="settings.ha.webhook_hint">EverShelf chiama il webhook HA quando si verificano eventi (prodotto in scadenza, aggiunto alla lista, ecc.).</p>
+
+                    <div class="form-group">
+                        <label data-i18n="settings.ha.webhook_id_label">🔗 Webhook ID</label>
+                        <input type="text" id="setting-ha-webhook-id" class="form-input" placeholder="evershelf_events">
+                        <p class="settings-hint" data-i18n="settings.ha.webhook_id_hint">Crea un'automazione in HA con trigger "Webhook" e copia qui l'ID. <a href="#" onclick="showHaWebhookHelp();return false" style="color:var(--accent)">Come farlo?</a></p>
+                    </div>
+                    <div class="form-group">
+                        <label data-i18n="settings.ha.webhook_events_label">📋 Eventi da notificare</label>
+                        <div style="display:flex;flex-direction:column;gap:6px;margin-top:4px">
+                            <label style="display:flex;align-items:center;gap:8px;font-weight:normal">
+                                <input type="checkbox" id="ha-event-expiry" value="expiry"> <span data-i18n="settings.ha.event_expiry">Prodotti in scadenza (cron giornaliero)</span>
+                            </label>
+                            <label style="display:flex;align-items:center;gap:8px;font-weight:normal">
+                                <input type="checkbox" id="ha-event-shopping" value="shopping_add"> <span data-i18n="settings.ha.event_shopping">Aggiunta alla lista della spesa</span>
+                            </label>
+                            <label style="display:flex;align-items:center;gap:8px;font-weight:normal">
+                                <input type="checkbox" id="ha-event-stock" value="stock_update"> <span data-i18n="settings.ha.event_stock">Aggiornamento scorte (quantità modificata)</span>
+                            </label>
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label data-i18n="settings.ha.expiry_days_label">📅 Giorni anticipo per scadenze</label>
+                        <input type="number" id="setting-ha-expiry-days" class="form-input" min="1" max="30" value="3">
+                        <p class="settings-hint" data-i18n="settings.ha.expiry_days_hint">Quanti giorni prima della scadenza inviare l'alert.</p>
+                    </div>
+                </div>
+
+                <!-- Notify service card -->
+                <div class="settings-card">
+                    <h4 data-i18n="settings.ha.notify_title">📱 Notifiche Push</h4>
+                    <p class="settings-hint" data-i18n="settings.ha.notify_hint">EverShelf invia notifiche push tramite il servizio <code>notify.*</code> di HA (Telegram, Pushover, app mobile, ecc.).</p>
+
+                    <div class="form-group">
+                        <label data-i18n="settings.ha.notify_service_label">📣 Servizio notify</label>
+                        <input type="text" id="setting-ha-notify-service" class="form-input" placeholder="notify.mobile_app_mio_telefono">
+                        <p class="settings-hint" data-i18n="settings.ha.notify_service_hint">Formato: <code>notify.NOME_SERVIZIO</code>. Lascia vuoto per disabilitare. Richiede token HA configurato.</p>
+                    </div>
+                </div>
+
+                <!-- Sensor card (read-only info) -->
+                <div class="settings-card">
+                    <h4 data-i18n="settings.ha.sensor_title">📊 Sensori REST per HA</h4>
+                    <p class="settings-hint" data-i18n="settings.ha.sensor_hint">HA può leggere i dati dell'inventario via REST polling. Aggiungi questo snippet a <code>configuration.yaml</code>:</p>
+                    <div id="ha-sensor-yaml" style="background:var(--bg-secondary,#f1f5f9);border-radius:8px;padding:12px;font-family:monospace;font-size:0.75rem;white-space:pre;overflow-x:auto;max-height:220px;overflow-y:auto;border:1px solid var(--border,#e2e8f0)"></div>
+                    <button class="btn btn-secondary full-width mt-2" onclick="copyHaSensorYaml()" data-i18n="settings.ha.sensor_copy_btn">📋 Copia YAML</button>
+                </div>
+
+                <!-- Save button -->
+                <button class="btn btn-large btn-accent full-width" onclick="saveHaSettings()" data-i18n="settings.ha.save_btn">💾 Salva impostazioni HA</button>
+                <div id="ha-save-status" style="display:none;margin-top:8px" class="settings-status"></div>
             </div>
             <!-- Scale Tab -->
             <div class="settings-panel" id="tab-scale">
