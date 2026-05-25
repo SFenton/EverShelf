@@ -1180,6 +1180,21 @@ function _applyI18nToLabels() {
         const tKey = `locations.${key}`;
         if (_i18nStrings[tKey]) LOCATIONS[key].label = _i18nStrings[tKey];
     }
+    for (const key of Object.keys(CATEGORY_LABELS)) {
+        const tKey = `categories.${key}`;
+        const translated = _i18nStrings[tKey];
+        if (translated) {
+            const icon = CATEGORY_ICONS[key] || '📦';
+            CATEGORY_LABELS[key] = `${icon} ${translated}`;
+        }
+    }
+    const pfCat = document.getElementById('pf-category');
+    if (pfCat) {
+        const curVal = pfCat.value;
+        pfCat.innerHTML = `<option value="" data-i18n="categories.select">${t('categories.select')}</option>` +
+            Object.entries(CATEGORY_LABELS).map(([k, label]) => `<option value="${k}">${label}</option>`).join('');
+        if (curVal) pfCat.value = curVal;
+    }
     for (const sec of SHOPPING_SECTIONS) {
         const tKey = `shopping_sections.${sec.key}`;
         if (_i18nStrings[tKey]) sec.label = _i18nStrings[tKey];
