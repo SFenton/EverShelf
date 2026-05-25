@@ -13619,40 +13619,9 @@ function renderCookingStep() {
         }).join('');
     }
 
-    // Show ALL unused from_pantry ingredients only on the first step.
-    // On subsequent steps the ingredient panel stays hidden to avoid distraction.
-    const ings = _cookingStep === 0
-        ? (_cookingRecipe.ingredients || [])
-            .map((ing, idx) => ({ ...ing, _idx: idx }))
-            .filter(ing => ing.from_pantry && ing.product_id && ing.used !== true)
-        : [];
-
+    // Ingredients are shown in the recipe view only, not in cooking mode.
     const ingsEl = document.getElementById('cooking-step-ings');
-    if (ings.length > 0) {
-        const cookingLocLabels = Object.fromEntries(Object.entries(LOCATIONS).map(([k,v]) => [k, `${v.icon} ${v.label}`]));
-        ingsEl.innerHTML = ings.map(ing => {
-            const loc = (ing.location || 'dispensa').replace(/'/g, "\\'");
-            const qtyNum = Math.round((ing.qty_number || 0) * 10) / 10;
-            // Build info chips: brand, location, expiry
-            const chips = [];
-            if (ing.brand) chips.push(`<span class="cooking-ing-chip">${escapeHtml(ing.brand)}</span>`);
-            const locLabel = cookingLocLabels[ing.location] || (ing.location ? `📍 ${ing.location}` : `${LOCATIONS.dispensa.icon} ${LOCATIONS.dispensa.label}`);
-            chips.push(`<span class="cooking-ing-chip">${locLabel}</span>`);
-            if (ing.expiry_date) {
-                const daysLeft = Math.round((new Date(ing.expiry_date) - new Date()) / 86400000);
-                const expClass = daysLeft <= 3 ? 'exp-soon' : daysLeft <= 7 ? 'exp-close' : '';
-                chips.push(`<span class="cooking-ing-chip ${expClass}">📅 ${t('cooking.expires_chip').replace('{date}', formatDate(ing.expiry_date))}</span>`);
-            }
-            return `<div class="cooking-ing-row">
-                <div style="flex:1;min-width:0">
-                    <span class="cooking-ing-name">📦 <strong>${escapeHtml(ing.name)}</strong>: ${escapeHtml(ing.qty)}</span>
-                    <div class="cooking-ing-meta">${chips.join('')}</div>
-                </div>
-                <button class="cooking-use-btn" onclick="cookingUseIngredient(${ing._idx}, ${ing.product_id}, '${loc}', ${qtyNum}, this)">${t('cooking.ingredient_use_btn')}</button>
-            </div>`;
-        }).join('');
-        ingsEl.style.display = 'flex';
-    } else {
+    if (ingsEl) {
         ingsEl.innerHTML = '';
         ingsEl.style.display = 'none';
     }
