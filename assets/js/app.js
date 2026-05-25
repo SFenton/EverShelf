@@ -13273,7 +13273,8 @@ function renderRecipe(r) {
     // Steps
     html += `<h3>${t('recipes.steps_title')}</h3><ol>`;
     (r.steps || []).forEach(step => {
-        html += `<li>${_stepStr(step)}</li>`;
+        const appliance = _stepAppliance(step);
+        html += `<li>${_stepStr(step)}${appliance ? ` <span class="recipe-step-appliance">${appliance}</span>` : ''}</li>`;
     });
     html += '</ol>';
 
@@ -13291,9 +13292,29 @@ let _cookingStep = 0;
 let _cookingTTS = true;
 let _cookingVisited = new Set(); // indices of steps already seen
 
-// Safely extract step text regardless of whether it's a string or an object
-// (Gemini sometimes returns [{text:"..."}, ...] instead of ["...", ...])
-const _stepStr = s => String((s !== null && typeof s === 'object') ? (s.text ?? s.description ?? s.step ?? '') : (s ?? '')).replace(/^Passo\s*\d+\s*[:.]\s*/i, '');
+// Safely extract step text regardless of whether it's a string or an object.
+// Also handles JSON-encoded step objects emitted by older AI generations
+// (e.g. {"instruction":"…","appliance_function":"…"}).
+const _stepStr = s => {
+    if (typeof s === 'string' && s.trimStart().startsWith('{')) {
+        try { s = JSON.parse(s); } catch(e) {}
+    }
+    const text = (s !== null && typeof s === 'object')
+        ? (s.instruction ?? s.text ?? s.description ?? s.step ?? '')
+        : (s ?? '');
+    return String(text).replace(/^Passo\s*\d+\s*[:.]\s*/i, '').replace(/^Step\s*\d+\s*[:.]\s*/i, '');
+};
+// Returns the appliance/function hint for a step, or null if absent/Nessuno.
+const _stepAppliance = s => {
+    if (typeof s === 'string' && s.trimStart().startsWith('{')) {
+        try { s = JSON.parse(s); } catch(e) {}
+    }
+    if (s !== null && typeof s === 'object' && s.appliance_function) {
+        const a = s.appliance_function.trim();
+        if (a && a.toLowerCase() !== 'nessuno' && a.toLowerCase() !== 'none') return a;
+    }
+    return null;
+};
 
 let _cookingWheelBound = false;
 let _cookingWheelTouchStartY = null;
