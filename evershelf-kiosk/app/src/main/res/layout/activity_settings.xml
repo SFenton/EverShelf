@@ -224,6 +224,43 @@
             </LinearLayout>
         </LinearLayout>
 
+        <!-- Advanced / App Settings link -->
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="IMPOSTAZIONI AVANZATE"
+            android:textColor="#7c3aed"
+            android:textSize="12sp"
+            android:textStyle="bold"
+            android:letterSpacing="0.1"
+            android:layout_marginBottom="12dp" />
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:background="@drawable/card_background"
+            android:padding="16dp"
+            android:layout_marginBottom="24dp">
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Home Assistant, Gemini AI, Bring!, TTS, notifiche e tutte le altre funzionalità si configurano direttamente nell'app EverShelf."
+                android:textColor="#94a3b8"
+                android:textSize="13sp"
+                android:layout_marginBottom="12dp" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnOpenAppSettings"
+                android:layout_width="match_parent"
+                android:layout_height="44dp"
+                android:text="← Torna all'app per le impostazioni avanzate"
+                android:textSize="13sp"
+                android:textAllCaps="false"
+                android:backgroundTint="#7c3aed" />
+        </LinearLayout>
+
         <!-- Danger Zone -->
         <TextView
             android:layout_width="match_parent"

@@ -123,6 +123,9 @@ class SettingsActivity : AppCompatActivity() {
         // Back
         findViewById<android.widget.ImageButton>(R.id.btnBack).setOnClickListener { finish() }
 
+        // Advanced settings → back to webapp (where HA, Gemini, Bring! etc. are configured)
+        findViewById<MaterialButton>(R.id.btnOpenAppSettings).setOnClickListener { finish() }
+
         // Test connection
         findViewById<MaterialButton>(R.id.btnTestConnection).setOnClickListener { testConnection() }
 
