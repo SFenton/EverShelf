@@ -400,6 +400,7 @@ class SetupActivity : AppCompatActivity() {
             scaleTestCard.visibility   = View.GONE
             testWeightBox.visibility   = View.GONE
             bleSetupCard.visibility    = View.VISIBLE
+            step3NextButtons.visibility = View.VISIBLE   // restore nav buttons (back/next)
             tvSelectedScale.text       = ""
             tvSelectedScale.visibility = View.GONE
             tvScanStatus.text          = getString(R.string.ble_not_confirmed)
@@ -960,6 +961,8 @@ class SetupActivity : AppCompatActivity() {
             testWeightBox.visibility = View.GONE
             testHasWeight = false
             findViewById<MaterialButton>(R.id.btnTestConfirm).isEnabled = false
+            // Always re-enable retry so the user is never stuck
+            findViewById<MaterialButton>(R.id.btnTestRetry).isEnabled = true
         }
         override fun onWeightReceived(reading: WeightReading) {
             if (!isInTestMode) return
