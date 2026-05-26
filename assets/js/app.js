@@ -14186,7 +14186,7 @@ async function testTTS() {
             window._kioskTtsDone = (uid) => {
                 clearTimeout(_ttsTestTimer);
                 window._kioskTtsDone = null; window._kioskTtsError = null;
-                if (statusEl) { statusEl.className = 'settings-status success'; statusEl.textContent = '✅ Voce riprodotta correttamente.'; }
+                if (statusEl) { statusEl.className = 'settings-status success'; statusEl.textContent = '✅ ' + t('settings.tts.test_ok_kiosk'); }
             };
             window._kioskTtsError = (uid, code) => {
                 clearTimeout(_ttsTestTimer);
@@ -14194,11 +14194,28 @@ async function testTTS() {
                 const msg = code == -1 ? 'sintesi non riuscita' : code == -2 ? 'lingua non supportata' : code == -3 ? 'servizio non disponibile' : ('codice ' + code);
                 if (statusEl) { statusEl.className = 'settings-status error'; statusEl.textContent = '❌ Errore TTS Android (' + msg + ') — installa o aggiorna Google Text-to-Speech dal Play Store.'; }
             };
-            // Timeout: if Android doesn't callback within 4s, warn about media volume
+            // Timeout: if Android doesn't callback within 10s, ask user if they heard the voice
+            // (speech can take 6-8 s; UtteranceProgressListener may not fire on all firmware)
             _ttsTestTimer = setTimeout(() => {
                 window._kioskTtsDone = null; window._kioskTtsError = null;
-                if (statusEl) { statusEl.className = 'settings-status error'; statusEl.textContent = '⚠️ Nessun feedback ricevuto. Controlla: 1) volume media del dispositivo non sia 0; 2) Google Text-to-Speech installato e aggiornato; 3) pacchetto vocale italiano scaricato.'; }
-            }, 4000);
+                if (!statusEl) return;
+                statusEl.className = 'settings-status';
+                statusEl.style.display = 'block';
+                statusEl.innerHTML =
+                    '<strong>🔊 ' + t('settings.tts.heard_question') + '</strong><br>' +
+                    '<div style="display:flex;gap:8px;margin-top:8px">' +
+                    '<button onclick="window._ttsTestYes()" style="flex:1;padding:8px;background:#15803d;color:#fff;border:none;border-radius:6px;font-size:0.95rem;cursor:pointer">✅ ' + t('settings.tts.heard_yes') + '</button>' +
+                    '<button onclick="window._ttsTestNo()" style="flex:1;padding:8px;background:#dc2626;color:#fff;border:none;border-radius:6px;font-size:0.95rem;cursor:pointer">❌ ' + t('settings.tts.heard_no') + '</button>' +
+                    '</div>';
+                window._ttsTestYes = () => {
+                    window._ttsTestYes = null; window._ttsTestNo = null;
+                    if (statusEl) { statusEl.className = 'settings-status success'; statusEl.innerHTML = '✅ ' + t('settings.tts.test_ok'); }
+                };
+                window._ttsTestNo = () => {
+                    window._ttsTestYes = null; window._ttsTestNo = null;
+                    if (statusEl) { statusEl.className = 'settings-status error'; statusEl.innerHTML = '❌ ' + t('settings.tts.test_fail_steps'); }
+                };
+            }, 10000);
             _speakBrowser('Test vocale EverShelf. La sintesi vocale funziona correttamente.');
             return;
         }

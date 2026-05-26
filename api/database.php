@@ -126,6 +126,16 @@ function initializeDB(PDO $db): void {
 }
 
 function migrateDB(PDO $db): void {
+    // Guard: if core tables don't exist yet (e.g. DB file present but empty / partial init),
+    // run initializeDB first so all tables are created, then return — no ALTER TABLE needed.
+    $productsExists = $db->query(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='products'"
+    )->fetchColumn();
+    if (!$productsExists) {
+        initializeDB($db);
+        return;
+    }
+
     // Add package_unit column if missing
     $cols = $db->query("PRAGMA table_info(products)")->fetchAll();
     $colNames = array_column($cols, 'name');

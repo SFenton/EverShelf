@@ -701,7 +701,12 @@
             "voices_hint": "Verfügbare Stimmen hängen vom Betriebssystem und Browser ab. Auf macOS/iOS ist die Stimme Paola (Italienisch) verfügbar. Drücken Sie ↺ wenn die Liste nicht lädt.",
             "url_missing": "⚠️ Endpunkt-URL fehlt.",
             "test_sending": "⏳ Wird gesendet…",
-            "test_ok": "✅ Antwort {code} — prüfe ob der Lautsprecher gesprochen hat."
+            "test_ok": "✅ Antwort {code} — prüfe ob der Lautsprecher gesprochen hat.",
+            "heard_question": "Hast du die Stimme gehört?",
+            "heard_yes": "Ja, ich habe es gehört",
+            "heard_no": "Nein, ich habe nichts gehört",
+            "test_ok_kiosk": "TTS funktioniert.",
+            "test_fail_steps": "Prüfe: 1) Medienvolume ist nicht 0; 2) Google Text-to-Speech installiert und aktualisiert; 3) Deutsches Sprachpaket in den Android TTS-Einstellungen heruntergeladen."
         },
         "language": {
             "title": "🌐 Sprache",

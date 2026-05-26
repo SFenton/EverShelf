@@ -477,9 +477,13 @@ if (($_GET['action'] ?? '') === 'health_check') {
                 'hint' => $wal !== 'wal' ? 'Journal mode not optimal — will be corrected automatically on next startup' : null];
 
             // Size & rows
-            $checks['db_size']      = ['ok' => true, 'value' => round(filesize($dbPath)/1024).' KB', 'optional' => true];
-            $cnt = $pdo->query("SELECT COUNT(*) FROM inventory WHERE quantity > 0")->fetchColumn();
-            $checks['db_row_count'] = ['ok' => true, 'value' => $cnt.' prodotti in inventario', 'optional' => true];
+            $checks['db_size'] = ['ok' => true, 'value' => round(filesize($dbPath)/1024).' KB', 'optional' => true];
+            if (empty($missing) || !in_array('inventory', $missing)) {
+                $cnt = $pdo->query("SELECT COUNT(*) FROM inventory WHERE quantity > 0")->fetchColumn();
+                $checks['db_row_count'] = ['ok' => true, 'value' => $cnt.' prodotti in inventario', 'optional' => true];
+            } else {
+                $checks['db_row_count'] = ['ok' => true, 'value' => '0 prodotti in inventario', 'optional' => true];
+            }
         } else {
             foreach (['db_tables', 'db_integrity'] as $k)
                 $checks[$k] = ['ok' => false, 'hint' => 'Cannot verify — DB connection failed'];
@@ -2185,7 +2189,8 @@ function _offFetchProduct(string $barcode): ?array {
             }
 
             $ingredients = $p['ingredients_text_it'] ?? $p['ingredients_text'] ?? '';
-            $category = $p['categories_tags'][0] ?? end($p['categories_hierarchy'] ?? []) ?? $p['categories'] ?? '';
+            $catHierarchy = $p['categories_hierarchy'] ?? [];
+            $category = $p['categories_tags'][0] ?? (empty($catHierarchy) ? null : end($catHierarchy)) ?? $p['categories'] ?? '';
             $allergens = '';
             if (!empty($p['allergens_tags'])) {
                 $allergens = implode(', ', array_map(fn($a) => str_replace('en:', '', $a), $p['allergens_tags']));

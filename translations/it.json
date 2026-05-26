@@ -701,7 +701,12 @@
             "voices_hint": "Le voci disponibili dipendono dal sistema operativo e dal browser. Su macOS/iOS è disponibile la voce Paola (italiano). Premi ↺ se la lista non si carica.",
             "url_missing": "⚠️ URL endpoint mancante.",
             "test_sending": "⏳ Invio in corso…",
-            "test_ok": "✅ Risposta {code} — controlla che l'altoparlante abbia parlato."
+            "test_ok": "✅ Risposta {code} — controlla che l'altoparlante abbia parlato.",
+            "heard_question": "Hai sentito la voce?",
+            "heard_yes": "Sì, ho sentito",
+            "heard_no": "No, non ho sentito",
+            "test_ok_kiosk": "TTS funzionante.",
+            "test_fail_steps": "Controlla: 1) volume media del dispositivo non sia 0; 2) Google Text-to-Speech installato e aggiornato; 3) pacchetto vocale italiano scaricato nelle impostazioni TTS Android."
         },
         "language": {
             "title": "🌐 Lingua / Language",

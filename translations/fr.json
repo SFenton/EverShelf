@@ -694,7 +694,12 @@
             "voices_hint": "Les voix disponibles dépendent du système d'exploitation et du navigateur. Appuyez sur ↺ si la liste ne se charge pas.",
             "url_missing": "⚠️ URL de l'endpoint manquante.",
             "test_sending": "⏳ Envoi…",
-            "test_ok": "✅ Réponse {code} — vérifiez que le haut-parleur a parlé."
+            "test_ok": "✅ Réponse {code} — vérifiez que le haut-parleur a parlé.",
+            "heard_question": "Avez-vous entendu la voix ?",
+            "heard_yes": "Oui, je l'ai entendu",
+            "heard_no": "Non, je n'ai rien entendu",
+            "test_ok_kiosk": "TTS fonctionne.",
+            "test_fail_steps": "Vérifiez : 1) le volume média n'est pas 0 ; 2) Google Text-to-Speech est installé et mis à jour ; 3) le pack vocal français est téléchargé dans les paramètres TTS Android."
         },
         "language": {
             "title": "🌐 Langue",
