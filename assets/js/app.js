@@ -14113,17 +14113,17 @@ function _speakBrowser(text) {
             utt.voice = preferred;
             utt.lang  = preferred.lang;
         } else {
-            // 2. First Italian voice as fallback (avoids silent-failure on browsers with no 'it-IT' default)
-            const itVoice = voices.find(v => v.lang && v.lang.startsWith('it'));
-            if (itVoice) {
-                utt.voice = itVoice;
-                utt.lang  = itVoice.lang;
-            } else if (voices.length > 0) {
-                // 3. Any available voice
-                utt.voice = voices[0];
-                utt.lang  = voices[0].lang || 'it-IT';
+            // Prefer offline (localService) voices to avoid silent failure when no internet.
+            // Priority: local Italian → any Italian → local any-lang → first available → lang-only
+            const itLocal  = voices.find(v => v.lang && v.lang.startsWith('it') && v.localService);
+            const itCloud  = voices.find(v => v.lang && v.lang.startsWith('it'));
+            const anyLocal = voices.find(v => v.localService);
+            const chosen   = itLocal || itCloud || anyLocal || voices[0];
+            if (chosen) {
+                utt.voice = chosen;
+                utt.lang  = chosen.lang;
             } else {
-                // 4. No voices loaded yet — set lang and let the browser decide
+                // No voices loaded yet — set lang and let the browser decide
                 utt.lang = _currentLang === 'de' ? 'de-DE' : _currentLang === 'en' ? 'en-US' : 'it-IT';
             }
         }
@@ -14185,21 +14185,60 @@ async function testTTS() {
             if (statusEl) { statusEl.style.display = 'block'; statusEl.className = 'settings-status error'; statusEl.textContent = '❌ Web Speech API non supportata da questo browser.'; }
             return;
         }
+        // ── Audio beep test (AudioContext — works even if TTS is broken) ─────
+        _ensureAudioUnlocked();
+        _playCookingTimerSound('done');
         // Temporarily apply form values for the test
         const s = getSettings();
         const voiceName = document.getElementById('setting-tts-voice')?.value;
         s.tts_voice = voiceName || s.tts_voice;
-        s.tts_rate = parseFloat(document.getElementById('setting-tts-rate')?.value) || 1;
+        s.tts_rate  = parseFloat(document.getElementById('setting-tts-rate')?.value)  || 1;
         s.tts_pitch = parseFloat(document.getElementById('setting-tts-pitch')?.value) || 1;
         saveSettingsToStorage(s);
-        // Diagnostic: surface paused/no-voices state to user
+        // Diagnostic: surface problems before attempting TTS
         const voices = window.speechSynthesis.getVoices();
         if (!voices.length) {
-            if (statusEl) { statusEl.style.display = 'block'; statusEl.className = 'settings-status error'; statusEl.textContent = '❌ Nessuna voce disponibile nel browser. Installa un pacchetto vocale nelle impostazioni del sistema operativo.'; }
+            if (statusEl) { statusEl.style.display = 'block'; statusEl.className = 'settings-status error'; statusEl.textContent = '❌ Nessuna voce disponibile — installa un pacchetto vocale nelle impostazioni di sistema.'; }
             return;
         }
-        _speakBrowser('Test vocale EverShelf. La sintesi vocale funziona correttamente.');
-        if (statusEl) { statusEl.style.display = 'block'; statusEl.className = 'settings-status success'; statusEl.textContent = '✅ Riproduzione in corso — controlla l\'audio del dispositivo.'; }
+        // Warn if only cloud voices are available (won't work offline)
+        const itLocal  = voices.find(v => v.lang && v.lang.startsWith('it') && v.localService);
+        const anyLocal = voices.find(v => v.localService);
+        if (!itLocal && !anyLocal) {
+            if (statusEl) { statusEl.style.display = 'block'; statusEl.className = 'settings-status error'; statusEl.textContent = '❌ Solo voci cloud disponibili — la sintesi vocale offline richiede una voce locale installata sul dispositivo (es. Google Text-to-Speech → Scarica voci offline).'; }
+            return;
+        }
+        // onerror callback: update status if speak() fails
+        const _ttsErrHandler = (evt) => {
+            if (statusEl) { statusEl.style.display = 'block'; statusEl.className = 'settings-status error'; statusEl.textContent = '❌ Errore TTS: ' + (evt.error || 'sconosciuto') + ' — prova a riavviare il browser o a cambiare voce.'; }
+        };
+        // Temporarily hook onerror via a custom utterance
+        const testUtt = new SpeechSynthesisUtterance('Test vocale EverShelf. La sintesi vocale funziona correttamente.');
+        testUtt.rate  = s.tts_rate;
+        testUtt.pitch = s.tts_pitch;
+        const chosenVoice = s.tts_voice ? voices.find(v => v.name === s.tts_voice) : null;
+        const fallbackVoice = itLocal || voices.find(v => v.lang && v.lang.startsWith('it')) || anyLocal || voices[0];
+        const testVoice = chosenVoice || fallbackVoice;
+        if (testVoice) { testUtt.voice = testVoice; testUtt.lang = testVoice.lang; }
+        testUtt.onerror = _ttsErrHandler;
+        testUtt.onstart = () => {
+            if (statusEl) { statusEl.style.display = 'block'; statusEl.className = 'settings-status success'; statusEl.textContent = '✅ Voce attiva: ' + (testVoice ? testVoice.name + ' (' + testVoice.lang + (testVoice.localService ? ', offline' : ', cloud') + ')' : 'default'); }
+        };
+        window.speechSynthesis.cancel();
+        setTimeout(() => {
+            if (window.speechSynthesis.paused) window.speechSynthesis.resume();
+            window.speechSynthesis.speak(testUtt);
+            // If onstart doesn't fire within 2s, show a warning
+            setTimeout(() => {
+                if (statusEl && statusEl.className.includes('success')) return; // already started
+                if (!statusEl?.className.includes('error')) {
+                    statusEl.style.display = 'block';
+                    statusEl.className = 'settings-status error';
+                    statusEl.textContent = '❌ Nessuna risposta dalla voce — se il beep era udibile, il TTS è bloccato. Prova a ricaricare la pagina o a cambiare voce.';
+                }
+            }, 2000);
+        }, 50);
+        if (statusEl) { statusEl.style.display = 'block'; statusEl.className = 'settings-status'; statusEl.textContent = '🔊 Beep + TTS in corso...'; }
         return;
     }
     // Server engine
