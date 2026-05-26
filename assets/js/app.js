@@ -9390,14 +9390,6 @@ function showMoveAfterUseModal(product, fromLoc, remaining, openedId, openedVacu
         return;
     }
 
-    // If the product only exists at fromLoc (no other active locations), there is
-    // nothing to move — auto-stay silently without showing the modal.
-    const hasOtherLocs = (_useCurrentItems || []).some(i => i.location !== fromLoc);
-    if (!hasOtherLocs) {
-        _saveVacuumAndStay(openedId || 0);
-        return;
-    }
-
     const otherLocs = Object.entries(LOCATIONS).filter(([k]) => k !== fromLoc);
     const locButtons = otherLocs.map(([k, v]) =>
         `<button type="button" class="loc-btn" onclick="clearMoveModalTimer();confirmMoveAfterUse(${product.id}, '${fromLoc}', '${k}', ${openedId || 0})">${v.icon} ${v.label}</button>`
@@ -14153,6 +14145,17 @@ function _speakBrowser(text) {
         }, 500);
     } else {
         _doSpeak();
+    }
+}
+
+function testSound() {
+    const statusEl = document.getElementById('tts-test-status');
+    _ensureAudioUnlocked();
+    _playCookingTimerSound('done');
+    if (statusEl) {
+        statusEl.style.display = 'block';
+        statusEl.className = 'settings-status success';
+        statusEl.textContent = '🔔 Suono inviato — hai sentito un beep?';
     }
 }
 

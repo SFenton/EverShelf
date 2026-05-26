@@ -693,6 +693,7 @@
             "extra_fields_label": "➕ Extra fields (JSON)",
             "extra_fields_placeholder": "{\"entity_id\": \"media_player.living_room\"}",
             "extra_fields_hint": "Additional fields to include in the payload, in JSON format. Leave empty if not needed.",
+            "test_sound_btn": "🔔 Run Sound Test",
             "test_btn": "🔊 Send Test Voice",
             "voices_loading": "Loading voices…",
             "voice_not_supported": "Voice not supported by this browser",
