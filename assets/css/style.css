@@ -6535,6 +6535,108 @@ body.cooking-mode-active .app-header {
     flex-wrap: wrap;
 }
 
+/* ===== RECIPE FAVORITES (#124) ===== */
+.recipe-fav-badge {
+    margin-left: auto;
+    font-size: 1.1rem;
+    color: #f59e0b;
+    flex-shrink: 0;
+}
+
+.recipe-archive-card-fav {
+    border-left: 3px solid #f59e0b;
+}
+
+.btn-recipe-fav {
+    background: none;
+    border: none;
+    font-size: 1.4rem;
+    cursor: pointer;
+    color: var(--text-muted);
+    padding: 0 4px;
+    line-height: 1;
+    transition: color 0.2s, transform 0.15s;
+    margin-left: auto;
+}
+
+.btn-recipe-fav:hover { color: #f59e0b; transform: scale(1.2); }
+.btn-recipe-fav.active { color: #f59e0b; }
+
+/* ===== PORTION RESCALER (#123) ===== */
+.recipe-persons-ctrl {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 3px 6px;
+}
+
+.btn-persons-adj {
+    background: var(--bg-secondary, #1e2a3a);
+    border: 1px solid var(--border-color, #2a3a50);
+    color: var(--text-primary);
+    border-radius: 50%;
+    width: 22px;
+    height: 22px;
+    font-size: 1rem;
+    line-height: 1;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    transition: background 0.15s;
+}
+
+.btn-persons-adj:hover { background: var(--accent, #6366f1); color: #fff; }
+
+/* ===== MACRONUTRIENT PANEL (#118) ===== */
+.macro-bars {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin: 12px 0 8px;
+}
+
+.macro-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.macro-label {
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    min-width: 70px;
+    flex-shrink: 0;
+}
+
+.macro-bar-wrap {
+    flex: 1;
+    height: 8px;
+    background: var(--bg-secondary, #1e2a3a);
+    border-radius: 4px;
+    overflow: hidden;
+}
+
+.macro-bar-fill {
+    height: 100%;
+    width: 0%;
+    border-radius: 4px;
+    transition: width 0.6s ease;
+}
+
+.macro-val {
+    font-size: 0.72rem;
+    color: var(--text-primary);
+    text-align: right;
+    min-width: 80px;
+    flex-shrink: 0;
+}
+
+.macro-val small {
+    color: var(--text-muted);
+}
+
 /* ===== SCREENSAVER ===== */
 .screensaver-overlay {
     position: fixed;

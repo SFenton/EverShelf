@@ -4411,8 +4411,14 @@ function _renderMonthlyStatsSection(data) {
     const badges = [];
     if (data.items_added > 0)
         badges.push(`<span class="aw-badge"><span class="aw-badge-icon">📦</span><span class="aw-badge-body"><b>${data.items_added}</b><small>${t('stats_monthly.added')}</small></span></span>`);
-    if (data.items_wasted > 0)
-        badges.push(`<span class="aw-badge aw-badge-wasted"><span class="aw-badge-icon">🗑️</span><span class="aw-badge-body"><b>${data.items_wasted}</b><small>${t('stats_monthly.wasted')}</small></span></span>`);
+    if (data.items_wasted > 0) {
+        let wastedBadgeText = `<b>${data.items_wasted}</b><small>${t('stats_monthly.wasted')}</small>`;
+        if (data.wasted_value_eur > 0) {
+            const sym = getSettings().price_currency === 'USD' ? '$' : (getSettings().price_currency === 'GBP' ? '£' : '€');
+            wastedBadgeText = `<b>${data.items_wasted}</b><small>${t('stats_monthly.wasted')} · ${sym}${data.wasted_value_eur.toFixed(2)}</small>`;
+        }
+        badges.push(`<span class="aw-badge aw-badge-wasted"><span class="aw-badge-icon">🗑️</span><span class="aw-badge-body">${wastedBadgeText}</span></span>`);
+    }
     if (data.top_products?.length > 0)
         badges.push(`<span class="aw-badge aw-badge-better"><span class="aw-badge-icon">⭐</span><span class="aw-badge-body"><b>${escapeHtml(data.top_products[0].name)}</b><small>${t('stats_monthly.top_used')}</small></span></span>`);
 
@@ -4449,11 +4455,59 @@ function _renderMonthlyStatsSection(data) {
     section.style.display = (_insightPhase === 'monthly') ? 'block' : 'none';
 }
 
+// ===== MACROS SECTION (#118) =====
+/**
+ * Render the macronutrient breakdown panel into #macros-section.
+ */
+function _renderMacrosSection(data) {
+    const section = document.getElementById('macros-section');
+    if (!section) return;
+    if (!data || !data.success || data.total_items === 0) {
+        section.innerHTML = '';
+        section.style.display = 'none';
+        return;
+    }
+
+    const { totals, ratios, total_items } = data;
+    const macros = [
+        { key: 'carbohydrates', label: t('nutrition.macros_carbs'),    color: '#a78bfa', value: totals.carbohydrates, unit: 'g', pct: ratios.carbohydrates },
+        { key: 'fat',           label: t('nutrition.macros_fat'),      color: '#fbbf24', value: totals.fat,           unit: 'g', pct: ratios.fat },
+        { key: 'proteins',      label: t('nutrition.macros_proteins'), color: '#4ade80', value: totals.proteins,      unit: 'g', pct: ratios.proteins },
+        { key: 'fiber',         label: t('nutrition.macros_fiber'),    color: '#34d399', value: totals.fiber,         unit: 'g', pct: null },
+    ];
+
+    const bars = macros.map(m => {
+        const barPct = m.pct !== null ? m.pct : Math.min(100, Math.round((m.value / Math.max(totals.carbohydrates + totals.fat + totals.proteins, 1)) * 100));
+        return `<div class="macro-row">
+            <span class="macro-label">${m.label}</span>
+            <div class="macro-bar-wrap">
+                <div class="macro-bar-fill" style="background:${m.color}" data-target="${barPct}"></div>
+            </div>
+            <span class="macro-val">${m.value.toLocaleString(_currentLang === 'de' ? 'de-DE' : 'it-IT')}${m.unit}${m.pct !== null ? ` <small>(${m.pct}%)</small>` : ''}</span>
+        </div>`;
+    }).join('');
+
+    section.innerHTML = `
+    <div class="nutr-card">
+        <div class="aw-header">
+            <div class="aw-title-row">
+                <span class="aw-live-dot aw-live-on"></span>
+                <h3 class="aw-title">${t('nutrition.macros_title')}</h3>
+            </div>
+            <span class="aw-grade" style="background:#0ea5e9;font-size:.75rem;padding:4px 10px">${totals.energy_kcal.toLocaleString()} kcal</span>
+        </div>
+        <div class="macro-bars">${bars}</div>
+        <div class="aw-source">${t('nutrition.macros_source').replace('{n}', total_items)}</div>
+    </div>`;
+
+    section.style.display = (_insightPhase === 'macros') ? 'block' : 'none';
+}
+
 /**
  * Start the waste ↔ nutrition ↔ monthly stats alternation on the dashboard.
  */
-let _insightPhase = null; // 'waste' | 'nutrition' | 'monthly'
-const _INSIGHT_PHASES = ['waste', 'nutrition', 'monthly'];
+let _insightPhase = null; // 'waste' | 'nutrition' | 'monthly' | 'macros'
+const _INSIGHT_PHASES = ['waste', 'nutrition', 'monthly', 'macros'];
 
 function _startInsightAlternation() {
     clearInterval(_insightFlipTimer);
@@ -4472,6 +4526,7 @@ function _applyInsightPhase() {
     const wasteEl   = document.getElementById('waste-chart-section');
     const nutrEl    = document.getElementById('nutrition-section');
     const monthlyEl = document.getElementById('monthly-stats-section');
+    const macrosEl  = document.getElementById('macros-section');
     if (!wasteEl || !nutrEl) return;
 
     // Map of which panels actually have rendered content
@@ -4479,6 +4534,7 @@ function _applyInsightPhase() {
         'waste':     wasteEl.innerHTML.trim()    !== '',
         'nutrition': nutrEl.innerHTML.trim()     !== '',
         'monthly':   !!monthlyEl && monthlyEl.innerHTML.trim() !== '',
+        'macros':    !!macrosEl  && macrosEl.innerHTML.trim()  !== '',
     };
 
     // If the intended phase has no content, advance to the next one that does
@@ -4491,14 +4547,16 @@ function _applyInsightPhase() {
     const showWaste   = phase === 'waste';
     const showNutr    = phase === 'nutrition';
     const showMonthly = phase === 'monthly';
+    const showMacros  = phase === 'macros';
 
-    // Fade-swap all three panels
-    const els = [wasteEl, nutrEl, ...(monthlyEl ? [monthlyEl] : [])];
+    // Fade-swap all four panels
+    const els = [wasteEl, nutrEl, ...(monthlyEl ? [monthlyEl] : []), ...(macrosEl ? [macrosEl] : [])];
     els.forEach(el => { el.style.opacity = '0'; el.style.transition = 'opacity .6s'; });
     setTimeout(() => {
         wasteEl.style.display   = showWaste   ? 'block' : 'none';
         nutrEl.style.display    = showNutr    ? 'block' : 'none';
         if (monthlyEl) monthlyEl.style.display = showMonthly ? 'block' : 'none';
+        if (macrosEl)  macrosEl.style.display  = showMacros  ? 'block' : 'none';
         requestAnimationFrame(() => {
             els.forEach(el => { el.style.opacity = '1'; });
             if (showNutr) {
@@ -4508,6 +4566,12 @@ function _applyInsightPhase() {
             }
             if (showMonthly && monthlyEl) {
                 monthlyEl.querySelectorAll('.ms-cat-bar').forEach(bar => {
+                    bar.style.transition = 'width 0.6s ease';
+                    bar.style.width = (bar.dataset.target || 0) + '%';
+                });
+            }
+            if (showMacros && macrosEl) {
+                macrosEl.querySelectorAll('.macro-bar-fill').forEach(bar => {
                     bar.style.transition = 'width 0.6s ease';
                     bar.style.width = (bar.dataset.target || 0) + '%';
                 });
@@ -4629,10 +4693,11 @@ async function loadDashboard() {
         loadBannerAlerts();
 
         // Anti-waste section + Nutrition section + Monthly stats: load in parallel
-        const [, invForNutr, monthlyData] = await Promise.all([
+        const [, invForNutr, monthlyData, macroData] = await Promise.all([
             _awLoadFacts(),
             api('inventory_list').then(d => d.inventory || []).catch(() => []),
             api('monthly_stats').catch(() => null),
+            api('macro_stats').catch(() => null),
         ]);
         _renderAntiWasteSection(
             statsData.used_30d      || 0, statsData.wasted_30d      || 0,
@@ -4647,6 +4712,9 @@ async function loadDashboard() {
 
         // Monthly stats panel
         _renderMonthlyStatsSection(monthlyData);
+
+        // Macronutrient panel (#118)
+        _renderMacrosSection(macroData);
 
         _startInsightAlternation();
 
@@ -12829,10 +12897,12 @@ async function loadRecipeArchive() {
             const tags = (r.tags || []).slice(0, 3).join(', ');
             // Find this entry's index in the flat archive array
             const archiveIdx = archive.indexOf(entry);
-            html += `<div class="recipe-archive-card" onclick="viewArchivedRecipe(${archiveIdx})">`;
+            const favBadge = entry.is_favorite ? `<span class="recipe-fav-badge" title="${t('recipes.favorite')}">★</span>` : '';
+            html += `<div class="recipe-archive-card${entry.is_favorite ? ' recipe-archive-card-fav' : ''}" onclick="viewArchivedRecipe(${archiveIdx})">`;
             html += `<div class="recipe-archive-card-header">`;
             html += `<span class="recipe-archive-meal">${mealIcon}</span>`;
             html += `<span class="recipe-archive-title">${escapeHtml(r.title)}</span>`;
+            html += favBadge;
             html += `</div>`;
             html += `<div class="recipe-archive-card-meta">`;
             if (r.prep_time) html += `<span>🔪 ${r.prep_time}</span>`;
@@ -12851,7 +12921,7 @@ async function loadRecipeArchive() {
 function viewArchivedRecipe(idx) {
     const entry = _recipeArchiveEntries[idx];
     if (!entry) return;
-    _cachedRecipe = { meal: _normalizeMealId(entry.meal), recipe: entry.recipe };
+    _cachedRecipe = { meal: _normalizeMealId(entry.meal), recipe: entry.recipe, id: entry.id, is_favorite: !!entry.is_favorite };
     renderRecipe(entry.recipe);
     document.getElementById('recipe-overlay').style.display = 'flex';
     document.getElementById('recipe-ask').style.display = 'none';
@@ -13333,6 +13403,55 @@ function _extractToolsFromSteps(steps) {
     return found;
 }
 
+// ===== RECIPE FAVORITES & PORTION RESCALER =====
+let _recipeBasePersons = 1;
+let _recipeCurrentPersons = 1;
+
+/**
+ * Toggle favorite status for the currently displayed archived recipe (#124).
+ */
+async function toggleRecipeFavorite(btn) {
+    if (!_cachedRecipe || !_cachedRecipe.id) return;
+    const res = await api('recipes_toggle_favorite', {}, 'POST', { id: _cachedRecipe.id });
+    if (!res.success) return;
+    _cachedRecipe.is_favorite = res.is_favorite;
+    btn.classList.toggle('active', res.is_favorite);
+    btn.textContent = res.is_favorite ? '★' : '☆';
+    btn.title = res.is_favorite ? t('recipes.unfavorite') : t('recipes.favorite');
+    // Invalidate archive cache so the star shows on next open
+    _recipeArchiveCache = null;
+}
+
+/**
+ * Scale recipe ingredient quantities (#123).
+ * Delta: +1 or -1. Min 1, max 20 persons.
+ */
+function adjustRecipePersons(delta) {
+    const newPersons = Math.max(1, Math.min(20, _recipeCurrentPersons + delta));
+    if (newPersons === _recipeCurrentPersons) return;
+    _recipeCurrentPersons = newPersons;
+    const display = document.getElementById('recipe-persons-display');
+    if (display) display.textContent = `👥 ${newPersons} ${t('recipes.persons_short')}`;
+
+    const ratio = _recipeBasePersons > 0 ? (newPersons / _recipeBasePersons) : 1;
+    document.querySelectorAll('#recipe-content .recipe-ingredient').forEach(li => {
+        const baseQty   = parseFloat(li.dataset.baseQty || '0');
+        const baseStr   = li.dataset.baseQtyStr || '';
+        const qtySpan   = li.querySelector('.recipe-ing-qty');
+        if (!qtySpan) return;
+
+        if (baseQty > 0) {
+            // Extract unit suffix from baseStr: e.g. "200 g" → "g", "2 uova" → "uova"
+            const m = baseStr.match(/^(\d+(?:[.,]\d+)?)\s*(.*)/);
+            const unitSuffix = m ? m[2].trim() : '';
+            const scaled = baseQty * ratio;
+            // Round sensibly: integers for whole counts, 1 decimal for fractional
+            const rounded = scaled < 10 ? (Math.round(scaled * 10) / 10) : Math.round(scaled);
+            qtySpan.textContent = unitSuffix ? `${rounded} ${unitSuffix}` : String(rounded);
+        }
+    });
+}
+
 function renderRecipe(r) {
     // Reset regen choice panel (hide choice, show button)
     const regenChoice = document.getElementById('recipe-regen-choice');
@@ -13340,15 +13459,29 @@ function renderRecipe(r) {
     if (regenChoice) regenChoice.style.display = 'none';
     if (regenBtn) regenBtn.style.display = '';
 
+    // Store base persons for the rescaler (#123)
+    _recipeBasePersons = r.persons || 1;
+    _recipeCurrentPersons = _recipeBasePersons;
+
+    const isFav = !!(_cachedRecipe && _cachedRecipe.is_favorite);
+
     let html = `<h2>${r.title}</h2>`;
 
-    // Meta tags
+    // Meta tags + star (#124) + persons rescaler (#123)
     html += '<div class="recipe-meta">';
     if (r.meal) html += `<span class="recipe-tag">${_mealLabel(r.meal)}</span>`;
-    html += `<span class="recipe-tag">👥 ${r.persons} ${t('recipes.persons_short')}</span>`;
+    html += `<span class="recipe-tag recipe-persons-ctrl">
+        <button class="btn-persons-adj" onclick="adjustRecipePersons(-1)">−</button>
+        <span id="recipe-persons-display">👥 ${r.persons} ${t('recipes.persons_short')}</span>
+        <button class="btn-persons-adj" onclick="adjustRecipePersons(+1)">+</button>
+    </span>`;
     if (r.prep_time) html += `<span class="recipe-tag">🔪 ${r.prep_time}</span>`;
     if (r.cook_time) html += `<span class="recipe-tag">🔥 ${r.cook_time}</span>`;
     if (r.tags) r.tags.forEach(t => { html += `<span class="recipe-tag">${t}</span>`; });
+    // Favorite star button (#124) — visible only for archived recipes (have an id)
+    if (_cachedRecipe && _cachedRecipe.id) {
+        html += `<button class="btn-recipe-fav${isFav ? ' active' : ''}" onclick="toggleRecipeFavorite(this)" title="${isFav ? t('recipes.unfavorite') : t('recipes.favorite')}">${isFav ? '★' : '☆'}</button>`;
+    }
     html += '</div>';
 
     // Expiry note
@@ -13371,8 +13504,8 @@ function renderRecipe(r) {
             const qtyNum = Math.round((ing.qty_number || 0) * 10) / 10;
             const loc = (ing.location || 'dispensa').replace(/'/g, "\\'");
             const alreadyUsed = ing.used === true;
-            html += `<li class="recipe-ingredient${alreadyUsed ? ' recipe-ing-used' : ''}" id="recipe-ing-${idx}">`;
-            html += `<span class="recipe-ing-text"><strong class="recipe-ing-name" onclick="openIngredientDetail(${ing.product_id}, '${loc}')" title="${t('action.edit') || 'Modifica'}">${ing.name}</strong>${ing.brand ? ' <em>(' + ing.brand + ')</em>' : ''}: ${ing.qty} ✅`;
+            html += `<li class="recipe-ingredient${alreadyUsed ? ' recipe-ing-used' : ''}" id="recipe-ing-${idx}" data-base-qty="${ing.qty_number || 0}" data-base-qty-str="${(ing.qty || '').replace(/"/g, '&quot;')}">`;
+            html += `<span class="recipe-ing-text"><strong class="recipe-ing-name" onclick="openIngredientDetail(${ing.product_id}, '${loc}')" title="${t('action.edit') || 'Modifica'}">${ing.name}</strong>${ing.brand ? ' <em>(' + ing.brand + ')</em>' : ''}: <span class="recipe-ing-qty">${ing.qty}</span> ✅`;
             // Detail line: location + expiry
             let details = [];
             const ingredientLocLabels = Object.fromEntries(Object.entries(LOCATIONS).map(([k,v]) => [k, `${v.icon} ${v.label}`]));
@@ -13396,7 +13529,7 @@ function renderRecipe(r) {
             html += `</li>`;
         } else {
             const pantryIcon = ing.from_pantry ? ' ✅' : ' 🛒';
-            html += `<li class="recipe-ingredient"><span class="recipe-ing-text"><strong>${ing.name}</strong>: ${ing.qty}${pantryIcon}</span></li>`;
+            html += `<li class="recipe-ingredient" data-base-qty="${ing.qty_number || 0}" data-base-qty-str="${(ing.qty || '').replace(/"/g, '&quot;')}"><span class="recipe-ing-text"><strong>${ing.name}</strong>: <span class="recipe-ing-qty">${ing.qty}</span>${pantryIcon}</span></li>`;
         }
     });
     html += '</ul>';

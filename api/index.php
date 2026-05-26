@@ -922,6 +922,12 @@ try {
         case 'recipes_delete':
             recipesDelete($db);
             break;
+        case 'recipes_toggle_favorite':
+            recipeToggleFavorite($db);
+            break;
+        case 'macro_stats':
+            getMacroStats($db);
+            break;
         case 'chat_list':
             chatList($db);
             break;
@@ -2140,7 +2146,7 @@ function stockForName(PDO $db): void {
 }
 
 function _offFetchProduct(string $barcode): ?array {
-    $fields = 'product_name,product_name_it,generic_name,generic_name_it,brands,categories_tags,categories_hierarchy,categories,image_front_small_url,image_url,quantity,nutriscore_grade,ingredients_text_it,ingredients_text,allergens_tags,conservation_conditions_it,conservation_conditions,origins_it,origins,manufacturing_places,nova_group,ecoscore_grade,labels,stores';
+    $fields = 'product_name,product_name_it,generic_name,generic_name_it,brands,categories_tags,categories_hierarchy,categories,image_front_small_url,image_url,quantity,nutriscore_grade,ingredients_text_it,ingredients_text,allergens_tags,conservation_conditions_it,conservation_conditions,origins_it,origins,manufacturing_places,nova_group,ecoscore_grade,labels,stores,nutriments';
 
     // Try candidate barcodes: given barcode + EAN-13 (UPC-A → prepend 0)
     $candidates = [$barcode];
@@ -2200,6 +2206,22 @@ function _offFetchProduct(string $barcode): ?array {
                 $allergens = implode(', ', array_map(fn($a) => str_replace('en:', '', $a), $p['allergens_tags']));
             }
 
+            // Extract macronutrients per 100g (from OFF 'nutriments' field)
+            $nutriments = null;
+            if (!empty($p['nutriments']) && is_array($p['nutriments'])) {
+                $nm = $p['nutriments'];
+                $nutriments = [
+                    'energy_kcal_100g' => isset($nm['energy-kcal_100g']) ? round((float)$nm['energy-kcal_100g'], 1) : (isset($nm['energy_100g']) ? round((float)$nm['energy_100g'] / 4.184, 1) : null),
+                    'proteins_100g'    => isset($nm['proteins_100g'])    ? round((float)$nm['proteins_100g'], 1)    : null,
+                    'carbohydrates_100g' => isset($nm['carbohydrates_100g']) ? round((float)$nm['carbohydrates_100g'], 1) : null,
+                    'fat_100g'         => isset($nm['fat_100g'])         ? round((float)$nm['fat_100g'], 1)         : null,
+                    'fiber_100g'       => isset($nm['fiber_100g'])       ? round((float)$nm['fiber_100g'], 1)       : null,
+                    'salt_100g'        => isset($nm['salt_100g'])        ? round((float)$nm['salt_100g'], 1)        : null,
+                ];
+                // Only keep if at least one macro is present
+                if (!array_filter(array_values($nutriments))) $nutriments = null;
+            }
+
             return [
                 'name'          => $name,
                 'brand'         => $p['brands'] ?? '',
@@ -2215,6 +2237,7 @@ function _offFetchProduct(string $barcode): ?array {
                 'ecoscore'      => $p['ecoscore_grade'] ?? '',
                 'labels'        => $p['labels'] ?? '',
                 'stores'        => $p['stores'] ?? '',
+                'nutriments'    => $nutriments,
             ];
         }
     }
@@ -2380,28 +2403,31 @@ function saveProduct(PDO $db): void {
         $stmt = $db->prepare("
             UPDATE products SET name=?, brand=?, category=?, image_url=?, unit=?,
             default_quantity=?, notes=?, barcode=?, package_unit=?, shopping_name=?,
+            nutriments_json=?,
             updated_at=CURRENT_TIMESTAMP WHERE id=?
         ");
+        $nutriJson = isset($input['nutriments']) ? json_encode($input['nutriments']) : null;
         $stmt->execute([
             $input['name'], $input['brand'] ?? '', $input['category'] ?? '',
             $input['image_url'] ?? '', $input['unit'] ?? 'pz',
             $input['default_quantity'] ?? 1, $input['notes'] ?? '',
             $input['barcode'] ?? null, $input['package_unit'] ?? '',
-            $shoppingName, $input['id']
+            $shoppingName, $nutriJson, $input['id']
         ]);
         echo json_encode(['success' => true, 'id' => $input['id']]);
     } else {
         // Insert new
         $stmt = $db->prepare("
-            INSERT INTO products (barcode, name, brand, category, image_url, unit, default_quantity, notes, package_unit, shopping_name)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO products (barcode, name, brand, category, image_url, unit, default_quantity, notes, package_unit, shopping_name, nutriments_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ");
         $barcode = !empty($input['barcode']) ? $input['barcode'] : null;
+        $nutriJson = isset($input['nutriments']) ? json_encode($input['nutriments']) : null;
         $stmt->execute([
             $barcode, $input['name'], $input['brand'] ?? '',
             $input['category'] ?? '', $input['image_url'] ?? '',
             $input['unit'] ?? 'pz', $input['default_quantity'] ?? 1,
-            $input['notes'] ?? '', $input['package_unit'] ?? '', $shoppingName
+            $input['notes'] ?? '', $input['package_unit'] ?? '', $shoppingName, $nutriJson
         ]);
         echo json_encode(['success' => true, 'id' => $db->lastInsertId()]);
     }
@@ -3739,6 +3765,31 @@ function getMonthlyStats(PDO $db): void {
         LIMIT 3
     ")->fetchAll(PDO::FETCH_ASSOC);
 
+    // Estimated € value of wasted items this month (#117)
+    $wastedValueEur = 0.0;
+    if ($thisWaste > 0 && file_exists(PRICE_CACHE_PATH)) {
+        $priceCache = json_decode(file_get_contents(PRICE_CACHE_PATH), true) ?: [];
+        $country = env('PRICE_COUNTRY', 'Italia');
+        $wastedProds = $db->query("
+            SELECT p.name, SUM(t.quantity) AS total_qty, p.unit
+            FROM transactions t
+            JOIN products p ON t.product_id = p.id
+            WHERE t.type = 'waste' AND t.undone = 0
+              AND t.created_at >= '{$thisMonthStart}'
+            GROUP BY t.product_id
+        ")->fetchAll(PDO::FETCH_ASSOC);
+        foreach ($wastedProds as $wp) {
+            $key = _priceKey($wp['name'], $country);
+            if (isset($priceCache[$key]['unit_price']) && $priceCache[$key]['unit_price'] > 0) {
+                $unitPrice = (float)$priceCache[$key]['unit_price'];
+                $qty = (float)$wp['total_qty'];
+                // For weight/volume units treat qty as single-use events (transactions counted per action)
+                $wastedValueEur += $unitPrice * $qty;
+            }
+        }
+        $wastedValueEur = round($wastedValueEur, 2);
+    }
+
     echo json_encode([
         'success'             => true,
         'month'               => date('Y-m'),
@@ -3746,11 +3797,110 @@ function getMonthlyStats(PDO $db): void {
         'items_consumed_prev' => $prevOut,
         'items_added'         => $thisIn,
         'items_wasted'        => $thisWaste,
+        'wasted_value_eur'    => $wastedValueEur,
         'top_categories'      => $topCats,
         'top_products'        => array_map(fn($r) => [
             'name'  => $r['name'],
             'count' => (int)$r['cnt'],
         ], $topProds),
+    ]);
+}
+
+// ===== MACRO STATS (#118) =====
+/**
+ * Aggregate macronutrients from current inventory.
+ * For products with barcode-fetched nutriments_json, uses real data.
+ * For products without, uses per-category static estimates (per 100g).
+ */
+function getMacroStats(PDO $db): void {
+    EverLog::debug('getMacroStats');
+
+    // Static per-category estimates (per 100g, rough averages)
+    $catDefaults = [
+        'frutta'     => ['energy_kcal_100g' => 52,  'proteins_100g' => 0.7, 'carbohydrates_100g' => 12.0, 'fat_100g' => 0.3, 'fiber_100g' => 2.0],
+        'verdura'    => ['energy_kcal_100g' => 30,  'proteins_100g' => 2.0, 'carbohydrates_100g' => 5.0,  'fat_100g' => 0.2, 'fiber_100g' => 2.5],
+        'carne'      => ['energy_kcal_100g' => 200, 'proteins_100g' => 20.0,'carbohydrates_100g' => 0.0,  'fat_100g' => 13.0,'fiber_100g' => 0.0],
+        'pesce'      => ['energy_kcal_100g' => 130, 'proteins_100g' => 20.0,'carbohydrates_100g' => 0.0,  'fat_100g' => 5.0, 'fiber_100g' => 0.0],
+        'latticini'  => ['energy_kcal_100g' => 150, 'proteins_100g' => 8.0, 'carbohydrates_100g' => 5.0,  'fat_100g' => 8.0, 'fiber_100g' => 0.0],
+        'pasta'      => ['energy_kcal_100g' => 350, 'proteins_100g' => 12.0,'carbohydrates_100g' => 70.0, 'fat_100g' => 2.0, 'fiber_100g' => 3.0],
+        'pane'       => ['energy_kcal_100g' => 265, 'proteins_100g' => 9.0, 'carbohydrates_100g' => 50.0, 'fat_100g' => 3.0, 'fiber_100g' => 2.5],
+        'cereali'    => ['energy_kcal_100g' => 370, 'proteins_100g' => 10.0,'carbohydrates_100g' => 70.0, 'fat_100g' => 4.0, 'fiber_100g' => 6.0],
+        'bevande'    => ['energy_kcal_100g' => 40,  'proteins_100g' => 0.2, 'carbohydrates_100g' => 10.0, 'fat_100g' => 0.0, 'fiber_100g' => 0.0],
+        'condimenti' => ['energy_kcal_100g' => 150, 'proteins_100g' => 1.0, 'carbohydrates_100g' => 10.0, 'fat_100g' => 10.0,'fiber_100g' => 0.5],
+        'conserve'   => ['energy_kcal_100g' => 80,  'proteins_100g' => 4.0, 'carbohydrates_100g' => 10.0, 'fat_100g' => 2.0, 'fiber_100g' => 2.0],
+        'surgelati'  => ['energy_kcal_100g' => 100, 'proteins_100g' => 8.0, 'carbohydrates_100g' => 10.0, 'fat_100g' => 3.0, 'fiber_100g' => 2.0],
+        'snack'      => ['energy_kcal_100g' => 480, 'proteins_100g' => 6.0, 'carbohydrates_100g' => 55.0, 'fat_100g' => 28.0,'fiber_100g' => 2.0],
+        'altro'      => ['energy_kcal_100g' => 150, 'proteins_100g' => 4.0, 'carbohydrates_100g' => 20.0, 'fat_100g' => 5.0, 'fiber_100g' => 1.5],
+    ];
+
+    $rows = $db->query("
+        SELECT p.name, p.category, p.unit, p.default_quantity, p.nutriments_json, i.quantity
+        FROM inventory i
+        JOIN products p ON i.product_id = p.id
+        WHERE i.quantity > 0
+    ")->fetchAll(PDO::FETCH_ASSOC);
+
+    $totals = ['energy_kcal' => 0.0, 'proteins' => 0.0, 'carbohydrates' => 0.0, 'fat' => 0.0, 'fiber' => 0.0];
+    $itemsWithData = 0;
+    $totalItems    = count($rows);
+
+    foreach ($rows as $row) {
+        $nm = null;
+        if (!empty($row['nutriments_json'])) {
+            $nm = json_decode($row['nutriments_json'], true);
+        }
+
+        // Estimate grams in inventory for this row
+        $unit   = $row['unit'] ?: 'pz';
+        $qty    = (float)$row['quantity'];
+        $defQty = (float)($row['default_quantity'] ?: 0);
+        $grams  = 100; // default: assume 100g per item if no unit info
+
+        if ($unit === 'g')    $grams = $qty;
+        elseif ($unit === 'kg')   $grams = $qty * 1000;
+        elseif ($unit === 'ml')   $grams = $qty; // approx 1g/ml
+        elseif ($unit === 'l')    $grams = $qty * 1000;
+        elseif (in_array($unit, ['pz','conf']) && $defQty >= 20) $grams = $qty * $defQty;
+        elseif (in_array($unit, ['pz','conf']) && $defQty > 0)   $grams = $qty * $defQty;
+
+        if ($grams <= 0) $grams = 100;
+
+        // Use real nutriments if available, else fallback to category default
+        if ($nm && isset($nm['proteins_100g'])) {
+            $macro = $nm;
+        } else {
+            $cat = mb_strtolower(trim(_normalizeCat($row['category'] ?? 'altro')));
+            $macro = $catDefaults[$cat] ?? $catDefaults['altro'];
+        }
+
+        $factor = $grams / 100.0;
+        $totals['energy_kcal']    += ($macro['energy_kcal_100g']    ?? 0) * $factor;
+        $totals['proteins']       += ($macro['proteins_100g']       ?? 0) * $factor;
+        $totals['carbohydrates']  += ($macro['carbohydrates_100g']  ?? 0) * $factor;
+        $totals['fat']            += ($macro['fat_100g']            ?? 0) * $factor;
+        $totals['fiber']          += ($macro['fiber_100g']          ?? 0) * $factor;
+        if ($nm && isset($nm['proteins_100g'])) $itemsWithData++;
+    }
+
+    // Round
+    foreach ($totals as $k => $v) $totals[$k] = round($v);
+
+    // Macro ratio percentages (of kcal from P/C/F)
+    $pKcal   = $totals['proteins'] * 4;
+    $cKcal   = $totals['carbohydrates'] * 4;
+    $fKcal   = $totals['fat'] * 9;
+    $sumKcal = max($pKcal + $cKcal + $fKcal, 1);
+
+    echo json_encode([
+        'success'         => true,
+        'total_items'     => $totalItems,
+        'items_with_data' => $itemsWithData,
+        'totals'          => $totals,
+        'ratios'          => [
+            'proteins'      => round($pKcal / $sumKcal * 100),
+            'carbohydrates' => round($cKcal / $sumKcal * 100),
+            'fat'           => round($fKcal / $sumKcal * 100),
+        ],
     ]);
 }
 
@@ -9279,19 +9429,30 @@ function appSettingsSave(PDO $db): void {
 
 function recipesList(PDO $db): void {
     $limit = min(intval($_GET['limit'] ?? 60), 200);
-    $rows = $db->query("SELECT id, date, meal, recipe_json, created_at FROM recipes ORDER BY date DESC, created_at DESC LIMIT {$limit}")->fetchAll();
+    $rows = $db->query("SELECT id, date, meal, recipe_json, created_at, is_favorite FROM recipes ORDER BY is_favorite DESC, date DESC, created_at DESC LIMIT {$limit}")->fetchAll();
     EverLog::debug('recipesList');
     $recipes = [];
     foreach ($rows as $row) {
         $recipes[] = [
-            'id' => $row['id'],
-            'date' => $row['date'],
-            'meal' => $row['meal'],
-            'recipe' => json_decode($row['recipe_json'], true),
-            'savedAt' => strtotime($row['created_at']) * 1000
+            'id'          => $row['id'],
+            'date'        => $row['date'],
+            'meal'        => $row['meal'],
+            'recipe'      => json_decode($row['recipe_json'], true),
+            'savedAt'     => strtotime($row['created_at']) * 1000,
+            'is_favorite' => (bool)$row['is_favorite'],
         ];
     }
     echo json_encode(['success' => true, 'recipes' => $recipes]);
+}
+
+function recipeToggleFavorite(PDO $db): void {
+    EverLog::info('recipeToggleFavorite');
+    $input = json_decode(file_get_contents('php://input'), true);
+    $id = intval($input['id'] ?? 0);
+    if ($id <= 0) { echo json_encode(['error' => 'Invalid id']); return; }
+    $db->prepare("UPDATE recipes SET is_favorite = 1 - is_favorite WHERE id = ?")->execute([$id]);
+    $fav = (int)$db->query("SELECT is_favorite FROM recipes WHERE id = {$id}")->fetchColumn();
+    echo json_encode(['success' => true, 'is_favorite' => (bool)$fav]);
 }
 
 function recipesSave(PDO $db): void {

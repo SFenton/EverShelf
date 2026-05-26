@@ -379,7 +379,10 @@
         "scale_wait_stable": "Attendez 10s de poids stable pour le remplissage automatique…",
         "ingredient_scaled_toast": "📦 Ingrédient déduit du garde-manger !",
         "finished_added_bring_toast": "🛒 Produit terminé → ajouté à Bring !",
-        "load_error": "Erreur de chargement"
+        "load_error": "Erreur de chargement",
+        "favorite": "Ajouter aux favoris",
+        "unfavorite": "Retirer des favoris",
+        "adjust_persons": "Personnes"
     },
     "shopping": {
         "title": "🛒 Liste de courses",
@@ -1195,7 +1198,13 @@
         "source": "Basé sur {n} produits dans votre garde-manger · EverShelf",
         "products_count": "produits",
         "today_title": "🥗 Votre garde-manger aujourd'hui",
-        "products_n": "{n} produits"
+        "products_n": "{n} produits",
+        "macros_title": "Macronutriments estimés",
+        "macros_proteins": "Protéines",
+        "macros_carbs": "Glucides",
+        "macros_fat": "Lipides",
+        "macros_fiber": "Fibres",
+        "macros_source": "Estimation basée sur {n} produits en stock"
     },
     "facts": {
         "greeting_morning": "Bonjour",

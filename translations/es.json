@@ -379,7 +379,10 @@
         "scale_wait_stable": "Espera 10s de peso estable para el relleno automático…",
         "ingredient_scaled_toast": "📦 ¡Ingrediente deducido de la despensa!",
         "finished_added_bring_toast": "🛒 Producto terminado → ¡añadido a Bring!",
-        "load_error": "Error de carga"
+        "load_error": "Error de carga",
+        "favorite": "Añadir a favoritos",
+        "unfavorite": "Quitar de favoritos",
+        "adjust_persons": "Personas"
     },
     "shopping": {
         "title": "🛒 Lista de la compra",
@@ -1195,7 +1198,13 @@
         "source": "Basado en {n} productos en tu despensa · EverShelf",
         "products_count": "productos",
         "today_title": "🥗 Tu despensa hoy",
-        "products_n": "{n} productos"
+        "products_n": "{n} productos",
+        "macros_title": "Macronutrientes estimados",
+        "macros_proteins": "Proteínas",
+        "macros_carbs": "Carbohidratos",
+        "macros_fat": "Grasas",
+        "macros_fiber": "Fibra",
+        "macros_source": "Estimación basada en {n} productos en despensa"
     },
     "facts": {
         "greeting_morning": "Buenos días",

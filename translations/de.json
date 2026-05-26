@@ -384,7 +384,10 @@
         "scale_wait_stable": "10s stabiles Gewicht für Auto-Ausfüllen abwarten…",
         "ingredient_scaled_toast": "📦 Zutat vom Vorrat abgezogen!",
         "finished_added_bring_toast": "🛒 Produkt aufgebraucht → zu Bring! hinzugefügt!",
-        "load_error": "Fehler beim Laden"
+        "load_error": "Fehler beim Laden",
+        "favorite": "Zu Favoriten hinzufügen",
+        "unfavorite": "Aus Favoriten entfernen",
+        "adjust_persons": "Personen"
     },
     "shopping": {
         "title": "🛒 Einkaufsliste",
@@ -1247,7 +1250,13 @@
         "source": "Basierend auf {n} Produkten in deiner Vorratskammer · EverShelf",
         "products_count": "Produkte",
         "today_title": "🥗 Deine Vorratskammer heute",
-        "products_n": "{n} Produkte"
+        "products_n": "{n} Produkte",
+        "macros_title": "Geschätzte Makronährstoffe",
+        "macros_proteins": "Proteine",
+        "macros_carbs": "Kohlenhydrate",
+        "macros_fat": "Fett",
+        "macros_fiber": "Ballaststoffe",
+        "macros_source": "Schätzung basierend auf {n} Vorratsprodukten"
     },
     "facts": {
         "greeting_morning": "Guten Morgen",

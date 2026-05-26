@@ -384,7 +384,10 @@
         "scale_wait_stable": "Wait 10s of stable weight for auto-fill…",
         "ingredient_scaled_toast": "📦 Ingredient deducted from pantry!",
         "finished_added_bring_toast": "🛒 Finished product → added to Bring!",
-        "load_error": "Loading error"
+        "load_error": "Loading error",
+        "favorite": "Add to favourites",
+        "unfavorite": "Remove from favourites",
+        "adjust_persons": "Persons"
     },
     "shopping": {
         "title": "🛒 Shopping List",
@@ -1247,7 +1250,13 @@
         "source": "Based on {n} products in your pantry · EverShelf",
         "products_count": "products",
         "today_title": "🥗 Your pantry today",
-        "products_n": "{n} products"
+        "products_n": "{n} products",
+        "macros_title": "Estimated Macronutrients",
+        "macros_proteins": "Proteins",
+        "macros_carbs": "Carbohydrates",
+        "macros_fat": "Fat",
+        "macros_fiber": "Fibre",
+        "macros_source": "Estimate based on {n} pantry products"
     },
     "facts": {
         "greeting_morning": "Good morning",

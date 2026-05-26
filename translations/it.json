@@ -384,7 +384,10 @@
         "scale_wait_stable": "Attendi 10s di stabilità per la compilazione automatica…",
         "ingredient_scaled_toast": "📦 Ingrediente scalato dalla dispensa!",
         "finished_added_bring_toast": "🛒 Prodotto finito → aggiunto a Bring!",
-        "load_error": "Errore nel caricamento"
+        "load_error": "Errore nel caricamento",
+        "favorite": "Aggiungi ai preferiti",
+        "unfavorite": "Rimuovi dai preferiti",
+        "adjust_persons": "Persone"
     },
     "shopping": {
         "title": "🛒 Lista della Spesa",
@@ -1258,7 +1261,13 @@
         "source": "Basato su {n} prodotti in dispensa · EverShelf",
         "products_count": "prodotti",
         "today_title": "🥗 La tua dispensa oggi",
-        "products_n": "{n} prodotti"
+        "products_n": "{n} prodotti",
+        "macros_title": "Macronutrienti stimati",
+        "macros_proteins": "Proteine",
+        "macros_carbs": "Carboidrati",
+        "macros_fat": "Grassi",
+        "macros_fiber": "Fibre",
+        "macros_source": "Stima basata su {n} prodotti in dispensa"
     },
     "facts": {
         "greeting_morning": "Buongiorno",
