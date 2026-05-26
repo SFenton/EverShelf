@@ -14180,8 +14180,26 @@ async function testTTS() {
             s.tts_rate  = parseFloat(document.getElementById('setting-tts-rate')?.value)  || 1;
             s.tts_pitch = parseFloat(document.getElementById('setting-tts-pitch')?.value) || 1;
             saveSettingsToStorage(s);
+            if (statusEl) { statusEl.style.display = 'block'; statusEl.className = 'settings-status'; statusEl.textContent = '⏳ Invio al motore TTS Android...'; }
+            // Register callbacks: Android will call these after speak completes/fails
+            let _ttsTestTimer = null;
+            window._kioskTtsDone = (uid) => {
+                clearTimeout(_ttsTestTimer);
+                window._kioskTtsDone = null; window._kioskTtsError = null;
+                if (statusEl) { statusEl.className = 'settings-status success'; statusEl.textContent = '✅ Voce riprodotta correttamente.'; }
+            };
+            window._kioskTtsError = (uid, code) => {
+                clearTimeout(_ttsTestTimer);
+                window._kioskTtsDone = null; window._kioskTtsError = null;
+                const msg = code == -1 ? 'sintesi non riuscita' : code == -2 ? 'lingua non supportata' : code == -3 ? 'servizio non disponibile' : ('codice ' + code);
+                if (statusEl) { statusEl.className = 'settings-status error'; statusEl.textContent = '❌ Errore TTS Android (' + msg + ') — installa o aggiorna Google Text-to-Speech dal Play Store.'; }
+            };
+            // Timeout: if Android doesn't callback within 4s, warn about media volume
+            _ttsTestTimer = setTimeout(() => {
+                window._kioskTtsDone = null; window._kioskTtsError = null;
+                if (statusEl) { statusEl.className = 'settings-status error'; statusEl.textContent = '⚠️ Nessun feedback ricevuto. Controlla: 1) volume media del dispositivo non sia 0; 2) Google Text-to-Speech installato e aggiornato; 3) pacchetto vocale italiano scaricato.'; }
+            }, 4000);
             _speakBrowser('Test vocale EverShelf. La sintesi vocale funziona correttamente.');
-            if (statusEl) { statusEl.style.display = 'block'; statusEl.className = 'settings-status success'; statusEl.textContent = '✅ Riproduzione in corso — controlla l\'audio del dispositivo.'; }
             return;
         }
         if (!window.speechSynthesis) {

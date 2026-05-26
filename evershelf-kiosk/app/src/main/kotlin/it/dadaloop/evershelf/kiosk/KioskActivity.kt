@@ -18,7 +18,9 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.provider.Settings
+import android.media.AudioManager
 import android.speech.tts.TextToSpeech
+import android.speech.tts.UtteranceProgressListener
 import android.view.View
 import android.view.WindowInsets
 import android.view.WindowInsetsController
@@ -144,6 +146,25 @@ class KioskActivity : AppCompatActivity() {
                 if (res == TextToSpeech.LANG_MISSING_DATA || res == TextToSpeech.LANG_NOT_SUPPORTED) {
                     tts?.language = Locale.getDefault()
                 }
+                tts?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
+                    override fun onStart(utteranceId: String?) {}
+                    override fun onDone(utteranceId: String?) {
+                        runOnUiThread {
+                            webView.evaluateJavascript("if(window._kioskTtsDone)window._kioskTtsDone('$utteranceId')", null)
+                        }
+                    }
+                    @Deprecated("Deprecated in API 21")
+                    override fun onError(utteranceId: String?) {
+                        runOnUiThread {
+                            webView.evaluateJavascript("if(window._kioskTtsError)window._kioskTtsError('$utteranceId','error')", null)
+                        }
+                    }
+                    override fun onError(utteranceId: String?, errorCode: Int) {
+                        runOnUiThread {
+                            webView.evaluateJavascript("if(window._kioskTtsError)window._kioskTtsError('$utteranceId',$errorCode)", null)
+                        }
+                    }
+                })
                 ttsReady = true
             }
         }
@@ -466,7 +487,10 @@ class KioskActivity : AppCompatActivity() {
                 if (!ttsReady) return
                 engine.setSpeechRate(rate.coerceIn(0.1f, 4f))
                 engine.setPitch(pitch.coerceIn(0.1f, 4f))
-                engine.speak(text, android.speech.tts.TextToSpeech.QUEUE_FLUSH, null, "kiosk_tts")
+                val params = Bundle().apply {
+                    putInt(TextToSpeech.Engine.KEY_PARAM_STREAM, AudioManager.STREAM_MUSIC)
+                }
+                engine.speak(text, TextToSpeech.QUEUE_FLUSH, params, "kiosk_tts")
             }
             @JavascriptInterface
             fun stopSpeech() { tts?.stop() }
