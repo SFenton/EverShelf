@@ -3886,7 +3886,7 @@ function showPage(pageId, param = null) {
             }
             loadInventory();
             break;
-        case 'scan': initScanner(); clearQuickNameResults(); updateSpesaBanner(); updateScanRecents(); switchScanTab('barcode');
+        case 'scan': _aiFallbackExhausted = false; initScanner(); clearQuickNameResults(); updateSpesaBanner(); updateScanRecents(); switchScanTab('barcode');
             // Pre-warm the embedding model the first time user visits scan page
             if (typeof window._getCategoryPipeline === 'function' && !window._categoryPipelineReady) {
                 window._getCategoryPipeline(); // fire-and-forget
@@ -6951,7 +6951,9 @@ function stopScanner() {
     _scanZoomLevel = 2; // always 2x on next start
     _torchActive = false;
     clearTimeout(_aiFallbackTimer); _aiFallbackTimer = null;
-    _aiFallbackExhausted = false; // reset so a new scanner session can try again
+    // NOTE: _aiFallbackExhausted is intentionally NOT reset here.
+    // It is only reset in showPage('scan') so that internal stop/restart
+    // cycles (e.g. initScanner calling stopScanner) don't re-arm the AI timer.
     if (scannerStream) {
         scannerStream.getTracks().forEach(t => t.stop());
         scannerStream = null;
