@@ -604,7 +604,7 @@ function checkRateLimit(string $action): void {
     }
 
     // Determine limit based on action
-    $aiActions = ['gemini_readExpiry', 'gemini_chat', 'gemini_identify', 'gemini_suggest_shopping', 'chat_to_recipe', 'recipe_from_ingredient', 'gemini_number_ocr'];
+    $aiActions = ['gemini_readExpiry', 'gemini_chat', 'gemini_identify', 'gemini_suggest_shopping', 'chat_to_recipe', 'recipe_from_ingredient', 'gemini_number_ocr', 'gemini_barcode_visual'];
     $loginActions = [];
     $recipeActions = ['generate_recipe', 'generate_recipe_stream'];
     $errorActions = ['report_error', 'check_update'];
@@ -1107,6 +1107,10 @@ try {
 
         case 'gemini_number_ocr':
             geminiNumberOCR();
+            break;
+
+        case 'gemini_barcode_visual':
+            geminiBarcodeVisual();
             break;
 
         case 'get_shopping_price':
@@ -4353,6 +4357,7 @@ function getServerSettings(): void {
         'shopping_forecast'           => env('SHOPPING_FORECAST', 'true') === 'true',
         'shopping_auto_add_threshold' => (int)env('SHOPPING_AUTO_ADD_THRESHOLD', '0'),
         'dark_mode'                   => env('DARK_MODE', 'auto'),
+        'barcode_ai_fallback'         => env('BARCODE_AI_FALLBACK', 'false') === 'true',
         // Home Assistant Integration
         'ha_enabled'                  => env('HA_ENABLED', 'false') === 'true',
         'ha_url'                      => env('HA_URL', ''),
@@ -4455,6 +4460,7 @@ function saveSettings(): void {
         'shopping_enabled'           => 'SHOPPING_ENABLED',
         'shopping_smart_suggestions' => 'SHOPPING_SMART_SUGGESTIONS',
         'shopping_forecast'          => 'SHOPPING_FORECAST',
+        'barcode_ai_fallback' => 'BARCODE_AI_FALLBACK',
         // Home Assistant
         'ha_enabled'    => 'HA_ENABLED',
     ];
@@ -10492,6 +10498,101 @@ function geminiNumberOCR(): void {
     } else {
         echo json_encode(['success' => false, 'error' => 'not_found']);
     }
+}
+
+// =============================================================================
+// ===== GEMINI AI: BARCODE VISUAL FALLBACK ====================================
+// =============================================================================
+/**
+ * POST /api/?action=gemini_barcode_visual
+ * Body: { image: base64-jpeg, lang: 'it'|'en'|'de'|... }
+ * Returns: { found, source, product } or { found: false, error }
+ * Uses Gemini vision to visually identify a product from a camera frame
+ * when the barcode scanner fails to read the barcode after 5 seconds.
+ */
+function geminiBarcodeVisual(): void {
+    EverLog::info('geminiBarcodeVisual');
+    $apiKey = env('GEMINI_API_KEY');
+    if (empty($apiKey)) {
+        echo json_encode(['found' => false, 'error' => 'no_api_key']);
+        return;
+    }
+
+    $input = json_decode(file_get_contents('php://input'), true) ?? [];
+    $imageBase64 = $input['image'] ?? '';
+    $lang = $input['lang'] ?? 'it';
+    if (empty($imageBase64)) {
+        echo json_encode(['found' => false, 'error' => 'no_image']);
+        return;
+    }
+
+    $langNote = match($lang) {
+        'de'    => 'Use the German product name if known.',
+        'fr'    => 'Use the French product name if known.',
+        'es'    => 'Use the Spanish product name if known.',
+        default => 'Use the Italian product name if known.',
+    };
+
+    $payload = [
+        'contents' => [[
+            'parts' => [
+                ['text' => "Identify the product shown in this image. {$langNote}\n" .
+                           "Respond with ONLY valid JSON (no markdown, no backticks):\n" .
+                           "{\"name\":\"...\",\"brand\":\"...\",\"category\":\"...\"}\n" .
+                           "- name: the product name (as specific as possible, not just the brand)\n" .
+                           "- brand: the brand/manufacturer, or empty string if not visible\n" .
+                           "- category: one of: latticini, pasta, bevande, snack, carne, pesce, " .
+                           "frutta, verdura, surgelati, condimenti, conserve, cereali, pane, " .
+                           "igiene, pulizia, altro\n" .
+                           "If you cannot identify the product at all, respond with: {\"unknown\":true}"],
+                ['inline_data' => ['mime_type' => 'image/jpeg', 'data' => $imageBase64]],
+            ],
+        ]],
+        'generationConfig' => [
+            'temperature'      => 0,
+            'maxOutputTokens'  => 200,
+            'responseMimeType' => 'application/json',
+            'thinkingConfig'   => ['thinkingBudget' => 0],
+        ],
+    ];
+
+    $result = callGeminiWithFallback($apiKey, $payload, 15, 'barcode_visual');
+    if ($result['http_code'] !== 200) {
+        echo json_encode(['found' => false, 'error' => 'gemini_error_' . $result['http_code']]);
+        return;
+    }
+
+    $text = trim($result['data']['candidates'][0]['content']['parts'][0]['text'] ?? '');
+    // Strip accidental markdown fences
+    $text = preg_replace('/^```json\s*/i', '', $text);
+    $text = preg_replace('/\s*```$/i', '', trim($text));
+
+    $data = json_decode($text, true);
+    if (!$data || !empty($data['unknown']) || empty($data['name'])) {
+        echo json_encode(['found' => false]);
+        return;
+    }
+
+    echo json_encode([
+        'found'   => true,
+        'source'  => 'gemini_visual',
+        'product' => [
+            'name'          => $data['name']     ?? '',
+            'brand'         => $data['brand']    ?? '',
+            'category'      => $data['category'] ?? '',
+            'image_url'     => '',
+            'quantity_info' => '',
+            'nutriscore'    => '',
+            'ingredients'   => '',
+            'allergens'     => '',
+            'conservation'  => '',
+            'origin'        => '',
+            'nova_group'    => '',
+            'ecoscore'      => '',
+            'labels'        => '',
+            'stores'        => '',
+        ],
+    ], JSON_UNESCAPED_UNICODE);
 }
 
 // =============================================================================

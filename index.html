@@ -1183,6 +1183,16 @@
                         <p class="settings-hint mt-2" data-i18n="settings.camera.devices_hint">Se hai più fotocamere, puoi selezionarne una specifica dall'elenco sopra dopo aver concesso i permessi.</p>
                         <button class="btn btn-small btn-secondary mt-2" onclick="loadCameraDevices()" data-i18n="settings.camera.detect_btn">🔄 Rileva fotocamere</button>
                     </div>
+                    <div class="form-group" style="margin-top:14px">
+                        <label class="toggle-row">
+                            <span data-i18n="settings.camera.ai_fallback_label">Identificazione visiva AI (fallback 5s)</span>
+                            <span class="toggle-switch">
+                                <input type="checkbox" id="setting-barcode-ai-fallback">
+                                <span class="toggle-slider"></span>
+                            </span>
+                        </label>
+                        <p class="settings-hint mt-2" data-i18n="settings.camera.ai_fallback_hint">Se il codice a barre non viene letto entro 5 secondi, un fotogramma viene inviato automaticamente all'AI per identificare visivamente il prodotto. Richiede Gemini configurato.</p>
+                    </div>
                 </div>
             </div>
             <!-- Security Tab -->

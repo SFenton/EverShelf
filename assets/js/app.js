@@ -1943,6 +1943,7 @@ let quaggaRunning = false;
 let aiStream = null;
 let _scanZoomLevel = 2; // always 2x
 let _torchActive = false;
+let _aiFallbackTimer = null;
 
 // Apply fixed 2x zoom (hardware if available, CSS fallback)
 async function _applyFixedZoom() {
@@ -2108,6 +2109,85 @@ async function _tryGeminiNumberOCR() {
     } finally {
         _numOcrRunning = false;
         if (btn) { btn.disabled = false; btn.textContent = t('scan.num_ocr_btn'); }
+    }
+}
+
+// ===== AI VISUAL PRODUCT IDENTIFICATION (auto-fallback after 5s) =====
+let _aiBarcodeVisualRunning = false;
+async function _tryGeminiVisualBarcode() {
+    if (_aiBarcodeVisualRunning || !_requireGemini()) return;
+    const video = document.getElementById('scanner-video');
+    if (!video || !video.videoWidth) return;
+
+    _aiBarcodeVisualRunning = true;
+    stopScanner(); // stop scanner loop while AI processes
+    _setScanStatus(t('scan.ai_fallback_searching'), 'retry', 'Gemini Vision');
+    showLoading(true);
+
+    try {
+        const canvas = document.createElement('canvas');
+        canvas.width  = video.videoWidth;
+        canvas.height = video.videoHeight;
+        canvas.getContext('2d').drawImage(video, 0, 0);
+        const imageBase64 = canvas.toDataURL('image/jpeg', 0.88).split(',')[1];
+
+        const result = await api('gemini_barcode_visual', {}, 'POST', {
+            image: imageBase64,
+            lang: _currentLang || 'it',
+        });
+
+        if (result.found && result.product) {
+            const p = result.product;
+            scanLog(`AI visual: found "${p.name}" (${p.brand})`);
+            showToast(t('scan.ai_fallback_found'), 'success');
+            // Build a synthetic product (no barcode) and show the inventory form
+            const saveResult = await api('product_save', {}, 'POST', {
+                barcode: '',
+                name:    p.name || t('product.not_recognized'),
+                brand:   p.brand || '',
+                category: p.category || '',
+                image_url: '',
+                unit: 'pz',
+                default_quantity: 1,
+                package_unit: '',
+                notes: '',
+            });
+            if (saveResult.id) {
+                currentProduct = {
+                    id: saveResult.id,
+                    barcode: '',
+                    name: p.name || t('product.not_recognized'),
+                    brand: p.brand || '',
+                    category: p.category || '',
+                    image_url: '',
+                    unit: 'pz',
+                    default_quantity: 1,
+                    package_unit: '',
+                    _confCount: 0,
+                    weight_info: '',
+                };
+                addToScanRecents(currentProduct);
+                showLoading(false);
+                setTimeout(() => showProductAction(), 300);
+            } else {
+                showLoading(false);
+                showToast(t('error.connection'), 'error');
+            }
+        } else {
+            scanLog('AI visual: product not identified');
+            showLoading(false);
+            showToast(t('scan.ai_fallback_not_found'), 'warning');
+            _setScanStatus(t('scan.status_ready'), '', '');
+            // Restart scanner so user can try again
+            setTimeout(() => initScanner(), 300);
+        }
+    } catch (e) {
+        scanLog(`AI visual error: ${e.message}`);
+        showLoading(false);
+        showToast(t('error.connection'), 'error');
+        setTimeout(() => initScanner(), 300);
+    } finally {
+        _aiBarcodeVisualRunning = false;
     }
 }
 
@@ -2296,6 +2376,7 @@ function _applySyncedSettings(serverSettings) {
         'shopping_enabled','shopping_mode','shopping_smart_suggestions',
         'shopping_forecast','shopping_auto_add_threshold',
         'dark_mode',
+        'barcode_ai_fallback',
         // Home Assistant
         'ha_enabled','ha_url','ha_tts_entity','ha_webhook_id','ha_webhook_events',
         'ha_notify_service','ha_expiry_days'];
@@ -2887,6 +2968,8 @@ async function loadSettingsUI() {
     const cameraSelect = document.getElementById('setting-camera-facing');
     if (cameraSelect) cameraSelect.value = s.camera_facing || 'environment';
     loadCameraDevices();
+    const baifEl = document.getElementById('setting-barcode-ai-fallback');
+    if (baifEl) baifEl.checked = s.barcode_ai_fallback === true;
     renderAppliances(s.appliances || []);
     const mealPlanEnabled = s.meal_plan_enabled !== false;
     const mpEnabledEl = document.getElementById('setting-meal-plan-enabled');
@@ -3465,6 +3548,8 @@ async function saveSettings() {
     s.dietary = document.getElementById('setting-dietary').value.trim();
     // Camera
     s.camera_facing = document.getElementById('setting-camera-facing').value;
+    const baifSave = document.getElementById('setting-barcode-ai-fallback');
+    if (baifSave) s.barcode_ai_fallback = baifSave.checked;
     // Screensaver
     const ssEl = document.getElementById('setting-screensaver-enabled');
     if (ssEl) s.screensaver_enabled = ssEl.checked;
@@ -3608,6 +3693,7 @@ async function saveSettings() {
             shopping_forecast:           s.shopping_forecast !== false,
             shopping_auto_add_threshold: s.shopping_auto_add_threshold || 0,
             dark_mode:                   s.dark_mode || 'auto',
+            barcode_ai_fallback:          !!s.barcode_ai_fallback,
             // Home Assistant
             ha_enabled:         !!s.ha_enabled,
             ha_url:             s.ha_url || '',
@@ -6527,6 +6613,17 @@ async function initScanner() {
                 }
             }, 4000);
         }
+
+        // After 5s without a scan, auto-trigger AI visual identification (if enabled)
+        if (_geminiAvailable && getSettings().barcode_ai_fallback) {
+            clearTimeout(_aiFallbackTimer);
+            _aiFallbackTimer = setTimeout(() => {
+                if (scannerStream) { // still scanning — no barcode found yet
+                    scanLog('5s elapsed without barcode — triggering AI visual fallback');
+                    _tryGeminiVisualBarcode();
+                }
+            }, 5000);
+        }
         
     } catch (err) {
         scanLog(`CAMERA ERROR: ${err.name}: ${err.message}`);
@@ -6850,6 +6947,7 @@ function stopScanner() {
     quaggaRunning = false;
     _scanZoomLevel = 2; // always 2x on next start
     _torchActive = false;
+    clearTimeout(_aiFallbackTimer); _aiFallbackTimer = null;
     if (scannerStream) {
         scannerStream.getTracks().forEach(t => t.stop());
         scannerStream = null;
@@ -6871,6 +6969,7 @@ function stopScanner() {
 }
 
 async function onBarcodeDetected(barcode) {
+    clearTimeout(_aiFallbackTimer); _aiFallbackTimer = null;
     showLoading(true);
     
     // Vibrate if available
