@@ -4155,6 +4155,24 @@ function getConsumptionPredictions(PDO $db): void {
         $expectedQty = max(0, $baselineQty - ($dailyRate * $daysSinceRestock));
         $actualQty   = floatval($item['quantity']);
 
+        // Aggregate total stock for this product across ALL inventory rows.
+        // A product may be split into multiple rows (e.g. one opened pack + one
+        // sealed pack at a different location). The opened row alone may look
+        // depleted while the total is healthy — do not flag in that case.
+        $totalQtyStmt = $db->prepare("
+            SELECT COALESCE(SUM(quantity), 0)
+            FROM inventory
+            WHERE product_id = ? AND quantity > 0
+        ");
+        $totalQtyStmt->execute([$pid]);
+        $totalQtyAllRows = floatval($totalQtyStmt->fetchColumn() ?: 0);
+        // If the aggregate total is above the expected remaining, the "depletion"
+        // is just stock spread across rows — suppress the anomaly.
+        if ($totalQtyAllRows >= $expectedQty) continue;
+        // Use the aggregate total as the visible actual qty so the banner shows
+        // the real combined stock, not just the single opened row.
+        $actualQty = $totalQtyAllRows;
+
         // Need at least some post-restock usage observations before warning.
         if ($txSinceRestock < 2) continue;
 
