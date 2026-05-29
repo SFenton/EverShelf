@@ -9932,8 +9932,40 @@ function checkUpdate(): void {
 }
 
 /**
+ * Return path to the local fingerprint deduplication cache.
+ * Falls back to /tmp when data/ is not writable (e.g. fresh install with wrong perms).
+ */
+function _getFpCachePath(): string {
+    $primary = __DIR__ . '/../data/reported_issue_fps.json';
+    return is_writable(dirname($primary)) ? $primary : (sys_get_temp_dir() . '/evershelf_fps.json');
+}
+
+/** Load & prune (> 30 days) the local FP cache. */
+function _loadFpCache(): array {
+    $path = _getFpCachePath();
+    if (!file_exists($path)) return [];
+    $data = @json_decode(@file_get_contents($path), true) ?: [];
+    $cutoff = time() - 30 * 86400;
+    return array_filter($data, fn($v) => ($v['ts'] ?? 0) > $cutoff);
+}
+
+/** Persist the local FP cache. */
+function _saveFpCache(array $cache): void {
+    @file_put_contents(_getFpCachePath(), json_encode($cache), LOCK_EX);
+}
+
+/**
  * Create a GitHub issue, or add a comment to an existing open issue with the
  * same fingerprint.  Uses the REST API v3 directly (no library needed).
+ *
+ * Deduplication strategy (two-layer):
+ *  1. Local file cache (data/reported_issue_fps.json or /tmp fallback) — checked
+ *     first to avoid the GitHub Search API indexing delay that caused duplicate
+ *     issues to be created in rapid succession.
+ *  2. GitHub Search API — used only on first occurrence (cache miss) as backup.
+ *
+ * Comment throttle: at most one recurrence comment per 30 minutes per fingerprint,
+ * to avoid flooding an issue when an error fires on every request.
  */
 function _createOrCommentGithubIssue(
     string $token, string $repo,
@@ -9944,13 +9976,27 @@ function _createOrCommentGithubIssue(
     $fp = _errorFingerprint($source, $type, $message);
     EverLog::debug('_createOrCommentGithubIssue', ['fp' => $fp, 'type' => $type]);
 
-    // ── 1. Search for an existing open issue with this fingerprint ─────────
-    $searchQuery = urlencode("repo:$repo is:issue is:open label:auto-report \"fp:$fp\" in:body");
-    $searchResult = _githubRequest($token, 'GET', "https://api.github.com/search/issues?q=$searchQuery&per_page=1");
-
+    // ── 1. Check local cache (fast, avoids Search API indexing lag) ────────
+    $fpCache = _loadFpCache();
     $existingIssueNumber = null;
-    if (isset($searchResult['body']['items']) && count($searchResult['body']['items']) > 0) {
-        $existingIssueNumber = $searchResult['body']['items'][0]['number'] ?? null;
+    if (isset($fpCache[$fp])) {
+        $existingIssueNumber = $fpCache[$fp]['issue'];
+        // Comment throttle: skip if we already commented within the last 30 min
+        $lastComment = $fpCache[$fp]['last_comment'] ?? 0;
+        if (time() - $lastComment < 1800) {
+            EverLog::debug('_createOrCommentGithubIssue: throttled', ['fp' => $fp]);
+            return;
+        }
+    } else {
+        // ── 2. Fall back to GitHub Search (handles first run / cache cleared) ─
+        $searchQuery = urlencode("repo:$repo is:issue is:open label:auto-report \"fp:$fp\" in:body");
+        $searchResult = _githubRequest($token, 'GET', "https://api.github.com/search/issues?q=$searchQuery&per_page=1");
+        if (!empty($searchResult['body']['items'][0]['number'])) {
+            $existingIssueNumber = (int)$searchResult['body']['items'][0]['number'];
+            // Populate local cache with what we found
+            $fpCache[$fp] = ['issue' => $existingIssueNumber, 'ts' => time(), 'last_comment' => 0];
+            _saveFpCache($fpCache);
+        }
     }
 
     // ── Build the common details block ─────────────────────────────────────
@@ -9965,7 +10011,7 @@ function _createOrCommentGithubIssue(
     $verMd   = $version ? "\n**Version:** `$version`" : '';
 
     if ($existingIssueNumber) {
-        // ── 2a. Post a comment to the existing issue ──────────────────────
+        // ── 3a. Post a comment to the existing issue ──────────────────────
         $body = "### 🔁 Recurrence — $ts\n"
             . "**Source:** `$source` | **Type:** `$type`\n"
             . $urlMd . $uaMd . $verMd . "\n"
@@ -9975,8 +10021,11 @@ function _createOrCommentGithubIssue(
             "https://api.github.com/repos/$repo/issues/$existingIssueNumber/comments",
             ['body' => $body]
         );
+        // Update throttle timestamp
+        $fpCache[$fp]['last_comment'] = time();
+        _saveFpCache($fpCache);
     } else {
-        // ── 2b. Create a new issue ────────────────────────────────────────
+        // ── 3b. Create a new issue ────────────────────────────────────────
         // Determine labels from source
         $labelMap = [
             'pwa'   => 'js-error',
@@ -10004,7 +10053,7 @@ function _createOrCommentGithubIssue(
             . "<!-- auto-report fp:$fp -->\n"
             . "_This issue was created automatically by EverShelf's error reporter. fp:`{$fp}`_";
 
-        _githubRequest($token, 'POST',
+        $newIssueRes = _githubRequest($token, 'POST',
             "https://api.github.com/repos/$repo/issues",
             [
                 'title'  => $title,
@@ -10012,6 +10061,12 @@ function _createOrCommentGithubIssue(
                 'labels' => ['auto-report', $typeLabel],
             ]
         );
+        // Save to local cache immediately to prevent duplicates on rapid recurrences
+        $newNum = $newIssueRes['body']['number'] ?? null;
+        if ($newNum) {
+            $fpCache[$fp] = ['issue' => (int)$newNum, 'ts' => time(), 'last_comment' => time()];
+            _saveFpCache($fpCache);
+        }
     }
 }
 
