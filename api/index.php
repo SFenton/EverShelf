@@ -8868,7 +8868,9 @@ function smartShopping(PDO $db): void {
         $expiryDate = $inv ? $inv['nearest_expiry'] : null;
         $daysToExpiry = $expiryDate ? (strtotime($expiryDate) - $now) / 86400 : 999;
         $isExpired = $daysToExpiry < 0;
-        $isExpiringSoon = !$isExpired && $daysToExpiry <= 3;
+        // 7-day warning window: enough to plan the next shopping trip.
+        // The tighter 3-day threshold was often too late for staple products.
+        $isExpiringSoon = !$isExpired && $daysToExpiry <= 7;
 
         // Fresh (non-expired) quantity — used for suppression when only part of stock is expired
         $freshQty = $inv ? (float)($inv['fresh_qty'] ?? $qty) : 0;
@@ -9001,31 +9003,48 @@ function smartShopping(PDO $db): void {
             }
         }
 
-        // Expiring soon or expired (needs replacement) — valid regardless of frequency
+        // Expiring soon or expired (needs replacement)
         if ($isExpired && $qty > 0) {
             // Check if the product's shopping_name FAMILY has adequate FRESH stock
             // from other (non-expired) products. If so, no need to buy more.
             $sNameKey = strtolower(trim($p['shopping_name'] ?? ''));
             $familyFreshQty = $sNameKey !== '' ? ($freshStockByShoppingName[$sNameKey] ?? 0) : 0;
-            // Subtract this product's own qty (it is expired, so fresh_qty=0 for it anyway)
             $refQtyLocal = $refQty > 0 ? $refQty : 1;
             $familyFreshPct = min(200, ($familyFreshQty / $refQtyLocal) * 100);
 
             if (($justRestocked && $freshPctLeft >= 50) || $familyFreshPct >= 50) {
                 // Fresh stock from this product or same-family products is adequate.
                 // The expired batch will show in the dashboard expiry banner — don't add to shopping list.
-            } else {
+            } elseif ($isRegular || $buyCount >= 2) {
+                // Only suggest restocking if this is a product the user buys regularly.
+                // If it expired without ever being a staple, the expiry banner is enough.
                 $urgency = 'critical';
                 $reasons[] = 'Scaduto!';
                 $score += 90;
             }
-        } elseif ($isExpiringSoon && $qty > 0 && $pctLeft < 50) {
-            // Only flag "expiring soon" if stock is also low (<50%). If you have plenty of
-            // stock (e.g. just bought fresh produce that naturally expires in 3 days), the
-            // shopping list is not the right place — the expiry banner handles it.
-            if ($urgency === 'none') $urgency = 'medium';
-            $reasons[] = 'Scade tra ' . max(0, round($daysToExpiry)) . 'gg';
-            $score += 40;
+            // else: one-off product expired unused → expiry banner handles it, no shopping noise
+        } elseif ($isExpiringSoon && $qty > 0) {
+            // Flag if:
+            // (a) regular consumer + stock low (<50%) → needs restock soon
+            // (b) regular consumer + will expire before finishing it
+            //     (daysLeft based on consumption rate > days to expiry)
+            // (c) non-regular + within 3 days + low stock → minimal safety net
+            $willExpireBeforeUsed = $dailyRate > 0 && $daysToExpiry < $daysLeft;
+            if ($isRegular && ($pctLeft < 50 || $willExpireBeforeUsed)) {
+                if ($urgency === 'none') $urgency = 'medium';
+                if ($willExpireBeforeUsed && $pctLeft >= 50) {
+                    // Has stock but won't finish it in time → buy fresh and use this one now
+                    $reasons[] = 'Scade in ' . max(1, round($daysToExpiry)) . 'gg — ricompra';
+                } else {
+                    $reasons[] = 'Scade in ' . max(1, round($daysToExpiry)) . 'gg';
+                }
+                $score += 40;
+            } elseif (!$isRegular && $daysToExpiry <= 3 && $pctLeft < 50) {
+                // Non-regular product: only flag when very close and running low
+                if ($urgency === 'none') $urgency = 'low';
+                $reasons[] = 'Scade in ' . max(1, round($daysToExpiry)) . 'gg';
+                $score += 20;
+            }
         }
 
         // Frequently used but stock getting low (predictive) — scale urgency by imminence
