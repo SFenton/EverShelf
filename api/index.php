@@ -8813,6 +8813,29 @@ function smartShopping(PDO $db): void {
             $dailyRate = $effectiveDays < 999 && $totalUsed > 0 ? $totalUsed / $effectiveDays : 0;
         }
 
+        // --- Buy-cycle proxy (for products tracked without individual 'out' events) ---
+        // Products like salt, spices, cleaning products are never logged per-use.
+        // When the user buys them again it implicitly means the previous pack ran out.
+        // If we have ≥ 3 buy events and no (or very few) out events, we estimate
+        // the average cycle duration = (lastIn - firstIn) / (buyCount - 1) and
+        // project how many days of stock are likely left in the current cycle.
+        //   estimatedDaysLeft = avgCycleDays − daysSinceLastBuy
+        // This dailyRate proxy is ONLY used when the regular out-based rate is 0.
+        $buyCycleDays = null;   // avg days per buy cycle
+        $buyCycleDaysLeft = null; // estimated days remaining in current cycle
+        if ($dailyRate == 0 && $buyCount >= 3 && $firstIn && $lastIn && $lastIn > $firstIn) {
+            $buyCycleDays = ($lastIn - $firstIn) / 86400 / ($buyCount - 1);
+            if ($buyCycleDays >= 7) { // ignore implausible < 1-week cycles
+                $daysSinceLastBuyFloat = ($now - $lastIn) / 86400;
+                $buyCycleDaysLeft = max(0, $buyCycleDays - $daysSinceLastBuyFloat);
+                // Derive a synthetic dailyRate so existing daysLeft / pctLeft logic works naturally
+                // 1 restock event ≈ consuming 1 "average package" over avgCycleDays
+                if ($qty > 0 && $buyCycleDays > 0) {
+                    $dailyRate = $qty / max(1, $buyCycleDaysLeft > 0 ? $buyCycleDaysLeft : $buyCycleDays);
+                }
+            }
+        }
+
         // Days of stock remaining
         $daysLeft = ($dailyRate > 0 && $qty > 0) ? $qty / $dailyRate : ($qty > 0 ? 999 : 0);
 
@@ -8853,7 +8876,9 @@ function smartShopping(PDO $db): void {
         // Is this a frequently used product? (≥ 1.5 uses/month)
         $isFrequent = $usesPerMonth >= 1.5;
         // Is it a regular product? (≥ 0.5 uses/month = at least once every 2 months)
-        $isRegular = $usesPerMonth >= 0.5;
+        // Also treat buy-cycle products (≥3 buys, no out events) as regular — they are
+        // by definition products the user buys periodically.
+        $isRegular = $usesPerMonth >= 0.5 || ($buyCycleDays !== null && $buyCount >= 3);
         // Is it recently relevant? (used/bought in last 60 days)
         $isRecent = $daysSinceLastUse <= 60;
 
@@ -8983,11 +9008,24 @@ function smartShopping(PDO $db): void {
             $daysLeftDisplay = (int)round($daysLeft);
             $reasons[] = 'Finisce tra ~' . $daysLeftDisplay . 'gg';
             if ($daysLeftDisplay <= 3) {
-                // Running out within 3 days for a frequent product → high urgency
                 $urgency = 'high';
                 $score += 70;
             } elseif ($daysLeftDisplay <= 7) {
-                // Running out within a week → medium
+                $urgency = 'medium';
+                $score += 45;
+            } else {
+                $urgency = 'low';
+                $score += 25;
+            }
+        }
+        // Buy-cycle prediction for products not tracked per-use (e.g. salt, spices):
+        // if daily rate was derived from buy cycles and we have < 21 days left → flag.
+        if ($urgency === 'none' && $buyCycleDays !== null && $dailyRate > 0
+            && $daysLeft <= 21 && $isRegular && !$justRestocked) {
+            $daysLeftDisplay = (int)round($daysLeft);
+            $cycleDisplay = (int)round($buyCycleDays);
+            $reasons[] = 'Finisce tra ~' . $daysLeftDisplay . 'gg (ciclo medio ' . $cycleDisplay . 'gg)';
+            if ($daysLeftDisplay <= 7) {
                 $urgency = 'medium';
                 $score += 45;
             } else {
