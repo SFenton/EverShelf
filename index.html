@@ -64,7 +64,7 @@
         <div id="preloader-warnings" class="preloader-warnings" style="display:none"></div>
         <div id="preloader-error-msg" class="preloader-error-msg" style="display:none"></div>
         <button id="preloader-retry-btn" class="preloader-retry-btn" style="display:none" onclick="_startupRetry()">🔄 <span data-i18n="startup.retry">Riprova</span></button>
-        <span class="app-preloader-version" id="preloader-version">v1.7.25</span>
+        <span class="app-preloader-version" id="preloader-version">v1.7.35</span>
     </div>
 </div>
 
@@ -77,7 +77,7 @@
         <!-- Title — left-aligned; grows to fill space -->
         <div class="header-title-wrap">
             <h1 class="header-title" onclick="showPage('dashboard')">
-                <img src="assets/img/logo/logo_icon.png" alt="" class="header-logo-icon" aria-hidden="true" /><span data-i18n="nav.title">EverShelf</span><span class="header-version">v1.7.25</span>
+                <img src="assets/img/logo/logo_icon.png" alt="" class="header-logo-icon" aria-hidden="true" /><span data-i18n="nav.title">EverShelf</span><span class="header-version">v1.7.35</span>
             </h1>
             <!-- Update badge — shown alongside title, never replaces it -->
             <span class="header-update-badge" id="header-update-badge" style="display:none"></span>
@@ -194,7 +194,7 @@
     <!-- ===== INVENTORY LIST ===== -->
     <section class="page" id="page-inventory">
         <div class="page-header">
-            <button class="back-btn" onclick="showPage('dashboard')" data-i18n="btn.back">← Indietro</button>
+            <button class="back-btn" onclick="goBack()" data-i18n="btn.back">← Indietro</button>
             <h2 id="inventory-title" data-i18n="inventory.title">Dispensa</h2>
             <button class="page-header-action-btn" onclick="_showExportModal()" title="Export" data-i18n-title="export.btn_title">📤</button>
         </div>
@@ -225,7 +225,7 @@
     <!-- ===== SCAN PAGE ===== -->
     <section class="page" id="page-scan">
         <div class="page-header">
-            <button class="back-btn" onclick="stopScanner(); showPage('dashboard')" data-i18n="btn.back">← Indietro</button>
+            <button class="back-btn" onclick="goBack()" data-i18n="btn.back">← Indietro</button>
             <h2 data-i18n="scan.title">Scansiona</h2>
             <button class="scan-spesa-chip" id="scan-spesa-btn" onclick="startSpesaMode()" data-i18n="scan.spesa_btn">🛒 Spesa</button>
         </div>
@@ -256,6 +256,14 @@
                     <span id="scan-status-method" class="scan-status-method"></span>
                     <span id="scan-status-msg" class="scan-status-msg" data-i18n="scan.status_ready"></span>
                 </div>
+                <!-- AI processing overlay (shown when Gemini Vision is analyzing) -->
+                <div class="scan-ai-overlay" id="scan-ai-overlay" style="display:none">
+                    <div class="scan-ai-overlay-inner">
+                        <div class="loading-spinner"></div>
+                        <span class="scan-ai-overlay-label">Gemini Vision</span>
+                        <span class="scan-ai-overlay-msg" id="scan-ai-overlay-msg"></span>
+                    </div>
+                </div>
                 <!-- Success flash overlay -->
                 <div class="scan-confirm-overlay" id="scan-confirm-overlay" style="display:none">
                     <div class="scan-confirm-check">✓</div>
@@ -273,6 +281,9 @@
 
             <!-- Scan errors -->
             <div class="scan-result" id="scan-result" style="display:none"></div>
+
+            <!-- AI retry button (shown after visual identification fails) -->
+            <button class="btn btn-accent scan-ai-retry-btn" id="scan-ai-retry-btn" style="display:none" onclick="_retryAiScan()" data-i18n="scan.ai_retry_btn">🤖 Riprova con AI</button>
 
             <!-- Recent scans -->
             <div class="scan-recents" id="scan-recents" style="display:none">
@@ -333,7 +344,7 @@
     <!-- ===== PRODUCT ACTION (IN/OUT after scan) ===== -->
     <section class="page" id="page-action">
         <div class="page-header">
-            <button class="back-btn" id="action-back-btn" onclick="showPage('scan')" data-i18n="btn.back">← Indietro</button>
+            <button class="back-btn" id="action-back-btn" onclick="goBack()" data-i18n="btn.back">← Indietro</button>
             <h2 data-i18n="action.title">Cosa vuoi fare?</h2>
         </div>
         <!-- Banner: shopping list scan context -->
@@ -356,7 +367,7 @@
     <!-- ===== ADD TO INVENTORY FORM ===== -->
     <section class="page" id="page-add">
         <div class="page-header">
-            <button class="back-btn" onclick="showPage('action')" data-i18n="btn.back">← Indietro</button>
+            <button class="back-btn" onclick="goBack()" data-i18n="btn.back">← Indietro</button>
             <h2 data-i18n="add.title">Aggiungi alla Dispensa</h2>
         </div>
         <div class="product-preview-small" id="add-product-preview"></div>
@@ -419,7 +430,7 @@
     <!-- ===== USE FROM INVENTORY FORM ===== -->
     <section class="page" id="page-use">
         <div class="page-header">
-            <button class="back-btn" onclick="showPage('action')" data-i18n="btn.back">← Indietro</button>
+            <button class="back-btn" onclick="goBack()" data-i18n="btn.back">← Indietro</button>
             <h2 data-i18n="use.title">Usa / Consuma</h2>
         </div>
         <div class="product-preview-small" id="use-product-preview"></div>
@@ -475,7 +486,7 @@
     <!-- ===== MANUAL / EDIT PRODUCT FORM ===== -->
     <section class="page" id="page-product-form">
         <div class="page-header">
-            <button class="back-btn" onclick="showPage('scan')" data-i18n="btn.back">← Indietro</button>
+            <button class="back-btn" onclick="goBack()" data-i18n="btn.back">← Indietro</button>
             <h2 id="product-form-title">Nuovo Prodotto</h2>
         </div>
         <form class="form" onsubmit="submitProduct(event)">
@@ -663,7 +674,7 @@
     <!-- ===== ALL PRODUCTS PAGE ===== -->
     <section class="page" id="page-products">
         <div class="page-header">
-            <button class="back-btn" onclick="showPage('dashboard')" data-i18n="btn.back">← Indietro</button>
+            <button class="back-btn" onclick="goBack()" data-i18n="btn.back">← Indietro</button>
             <h2 data-i18n="products.title">📦 Tutti i Prodotti</h2>
         </div>
         <div class="search-bar">
@@ -675,7 +686,7 @@
     <!-- ===== RECIPE PAGE ===== -->
     <section class="page" id="page-recipe">
         <div class="page-header">
-            <button class="back-btn" onclick="showPage('dashboard')" data-i18n="btn.back">← Indietro</button>
+            <button class="back-btn" onclick="goBack()" data-i18n="btn.back">← Indietro</button>
             <h2 data-i18n="recipes.title">🍳 Ricette</h2>
         </div>
         <div class="recipe-page-container">
@@ -689,7 +700,7 @@
     <!-- ===== SHOPPING LIST (BRING!) PAGE ===== -->
     <section class="page" id="page-shopping">
         <div class="page-header">
-            <button class="back-btn" onclick="showPage('dashboard')" data-i18n="btn.back">← Indietro</button>
+            <button class="back-btn" onclick="goBack()" data-i18n="btn.back">← Indietro</button>
             <h2 data-i18n="shopping.title">🛒 Lista della Spesa</h2>
         </div>
         <div class="shopping-container">
@@ -797,7 +808,7 @@
     <!-- ===== AI IDENTIFICATION PAGE ===== -->
     <section class="page" id="page-ai">
         <div class="page-header">
-            <button class="back-btn" onclick="stopScanner(); showPage('scan')" data-i18n="btn.back">← Indietro</button>
+            <button class="back-btn" onclick="goBack()" data-i18n="btn.back">← Indietro</button>
             <h2 data-i18n="ai.title">🤖 Identificazione AI</h2>
         </div>
         <div class="ai-container">
@@ -835,7 +846,7 @@
     <!-- ===== SETTINGS PAGE ===== -->
     <section class="page" id="page-settings">
         <div class="page-header">
-            <button class="back-btn" onclick="showPage('dashboard')" data-i18n="btn.back">← Indietro</button>
+            <button class="back-btn" onclick="goBack()" data-i18n="btn.back">← Indietro</button>
             <h2 data-i18n="settings.title">⚙️ Configurazione</h2>
         </div>
         <div class="settings-tabs">

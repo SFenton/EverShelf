@@ -2085,13 +2085,15 @@ function _showScanConfirm(name) {
 
 // ===== AI NUMBER OCR (Gemini reads printed barcode digits) =====
 let _numOcrRunning = false;
-async function _tryGeminiNumberOCR() {
+async function _tryGeminiNumberOCR(options = {}) {
+    const { chainToVisual = false } = options;
     if (_numOcrRunning || !_requireGemini()) return;
     const video = document.getElementById('scanner-video');
     if (!video || !video.videoWidth) { showToast(t('error.camera'), 'error'); return; }
     _numOcrRunning = true;
     const btn = document.getElementById('scan-num-ocr-btn');
     if (btn) { btn.disabled = true; btn.textContent = t('scan.num_ocr_searching'); }
+    _setScanStatus(t('scan.status_ocr_searching'), 'retry', t('scan.method_ai_ocr'));
     try {
         const canvas = document.createElement('canvas');
         canvas.width = video.videoWidth;
@@ -2100,12 +2102,28 @@ async function _tryGeminiNumberOCR() {
         const imageBase64 = canvas.toDataURL('image/jpeg', 0.88).split(',')[1];
         const result = await api('gemini_number_ocr', {}, 'POST', { image: imageBase64 });
         if (result.barcode) {
+            scanLog(`AI OCR: found barcode ${result.barcode}`);
             showToast(t('scan.num_ocr_found').replace('{code}', result.barcode), 'success');
             onBarcodeDetected(result.barcode);
         } else {
-            showToast(t('scan.num_ocr_not_found'), 'warning');
+            scanLog('AI OCR: barcode digits not found');
+            if (chainToVisual && scannerStream && !_aiFallbackExhausted) {
+                scanLog('AI OCR failed — switching to visual product identification');
+                _setScanStatus(t('scan.status_ai_visual_searching'), 'retry', t('scan.method_ai_vision'));
+                await _tryGeminiVisualBarcode();
+            } else {
+                showToast(t('scan.num_ocr_not_found'), 'warning');
+                _setScanStatus(t('scan.status_scanning'), '', '');
+            }
         }
     } catch(e) {
+        scanLog(`AI OCR error: ${e.message}`);
+        if (chainToVisual && scannerStream && !_aiFallbackExhausted) {
+            _setScanStatus(t('scan.status_ai_visual_searching'), 'retry', t('scan.method_ai_vision'));
+            await _tryGeminiVisualBarcode();
+        } else {
+            _setScanStatus(t('scan.status_scanning'), '', '');
+        }
         showToast(t('error.connection'), 'error');
     } finally {
         _numOcrRunning = false;
@@ -2115,23 +2133,175 @@ async function _tryGeminiNumberOCR() {
 
 // ===== AI VISUAL PRODUCT IDENTIFICATION (auto-fallback after 5s) =====
 let _aiBarcodeVisualRunning = false;
+let _aiDetectedProductDraft = null;
+let _aiInventoryCandidates = [];
+
+function _showScanAiOverlay(msg) {
+    const el = document.getElementById('scan-ai-overlay');
+    const msgEl = document.getElementById('scan-ai-overlay-msg');
+    if (el) el.style.display = 'flex';
+    if (msgEl) msgEl.textContent = msg || '';
+}
+function _hideScanAiOverlay() {
+    const el = document.getElementById('scan-ai-overlay');
+    if (el) el.style.display = 'none';
+}
+function _showAiRetryButton() {
+    const btn = document.getElementById('scan-ai-retry-btn');
+    if (btn) btn.style.display = '';
+}
+function _clearAiMatchPanel() {
+    const result = document.getElementById('scan-result');
+    if (!result) return;
+    result.style.display = 'none';
+    result.innerHTML = '';
+    _aiDetectedProductDraft = null;
+    _aiInventoryCandidates = [];
+}
+function _renderAiCandidateRow(item, idx) {
+    const catIcon = CATEGORY_ICONS[mapToLocalCategory(item.category, item.name)] || '📦';
+    const qty = (item.total_qty !== null && item.total_qty !== undefined)
+        ? `${parseFloat(item.total_qty)} ${item.unit || ''}`.trim()
+        : '';
+    return `
+        <button class="scan-ai-candidate-item" type="button" onclick="_selectAiInventoryCandidate(${idx})">
+            <span class="scan-ai-candidate-icon">${catIcon}</span>
+            <span class="scan-ai-candidate-info">
+                <span class="scan-ai-candidate-name">${escapeHtml(item.name || '')}</span>
+                <span class="scan-ai-candidate-meta">${escapeHtml((item.brand || '') + (qty ? ' · ' + qty : ''))}</span>
+            </span>
+            <span class="scan-ai-candidate-cta">${t('scan.ai_match_use_btn')}</span>
+        </button>
+    `;
+}
+function _showAiMatchChoices(aiProduct, candidates) {
+    const result = document.getElementById('scan-result');
+    if (!result) return;
+    const aiName = aiProduct?.name || t('product.not_recognized');
+    const aiBrand = aiProduct?.brand || '';
+    const catIcon = CATEGORY_ICONS[mapToLocalCategory(aiProduct?.category || '', aiName)] || '📦';
+    const itemsHtml = (candidates || []).slice(0, 3).map((it, i) => _renderAiCandidateRow(it, i)).join('');
+
+    result.innerHTML = `
+        <div class="scan-ai-match-box">
+            <div class="scan-ai-match-head">
+                <div class="scan-ai-match-title">${t('scan.ai_match_title')}</div>
+                <div class="scan-ai-match-subtitle">${t('scan.ai_match_subtitle')}</div>
+            </div>
+
+            ${itemsHtml ? `
+                <div class="scan-ai-match-list-wrap">
+                    <div class="scan-ai-match-list-title">${t('scan.ai_match_existing')}</div>
+                    <div class="scan-ai-match-list">${itemsHtml}</div>
+                </div>
+            ` : `
+                <div class="scan-ai-match-empty">${t('scan.ai_match_none')}</div>
+            `}
+
+            <button class="btn btn-primary scan-ai-add-btn" type="button" onclick="_confirmAiDetectedProduct()">
+                ${t('scan.ai_match_add_btn').replace('{name}', escapeHtml(aiName))}
+            </button>
+            <div class="scan-ai-detected-label">${t('scan.ai_detected_label')}</div>
+            <div class="scan-ai-detected-pill">${catIcon} ${escapeHtml(aiName)}${aiBrand ? ' · ' + escapeHtml(aiBrand) : ''}</div>
+        </div>
+    `;
+    result.style.display = 'block';
+}
+async function _confirmAiDetectedProduct() {
+    const p = _aiDetectedProductDraft;
+    if (!p) return;
+    showLoading(true);
+    try {
+        const saveResult = await api('product_save', {}, 'POST', {
+            barcode: '',
+            name: p.name || t('product.not_recognized'),
+            brand: p.brand || '',
+            category: p.category || '',
+            image_url: '',
+            unit: 'pz',
+            default_quantity: 1,
+            package_unit: '',
+            notes: '',
+        });
+        if (saveResult.id) {
+            currentProduct = {
+                id: saveResult.id,
+                barcode: '',
+                name: p.name || t('product.not_recognized'),
+                brand: p.brand || '',
+                category: p.category || '',
+                image_url: '',
+                unit: 'pz',
+                default_quantity: 1,
+                package_unit: '',
+                _confCount: 0,
+                weight_info: '',
+            };
+            addToScanRecents(currentProduct);
+            _clearAiMatchPanel();
+            showLoading(false);
+            setTimeout(() => showProductAction(), 250);
+        } else {
+            showLoading(false);
+            showToast(t('error.connection'), 'error');
+        }
+    } catch (_) {
+        showLoading(false);
+        showToast(t('error.connection'), 'error');
+    }
+}
+function _selectAiInventoryCandidate(idx) {
+    const p = _aiInventoryCandidates[idx];
+    if (!p) return;
+    currentProduct = {
+        id: p.id,
+        barcode: p.barcode || '',
+        name: p.name || '',
+        brand: p.brand || '',
+        category: p.category || '',
+        image_url: p.image_url || '',
+        unit: p.unit || 'pz',
+        default_quantity: p.default_quantity || 1,
+        package_unit: p.package_unit || '',
+        _confCount: 0,
+        weight_info: '',
+    };
+    if (p.notes) {
+        const pesoMatch = p.notes.match(/Peso:\s*([^·]+)/);
+        if (pesoMatch) currentProduct.weight_info = pesoMatch[1].trim();
+    }
+    addToScanRecents(currentProduct);
+    _clearAiMatchPanel();
+    setTimeout(() => showProductAction(), 250);
+}
+async function _retryAiScan() {
+    const btn = document.getElementById('scan-ai-retry-btn');
+    if (btn) btn.style.display = 'none';
+    _aiFallbackExhausted = false;
+    _clearAiMatchPanel();
+    await _tryGeminiNumberOCR({ chainToVisual: true });
+}
+
 async function _tryGeminiVisualBarcode() {
     if (_aiBarcodeVisualRunning || !_requireGemini()) return;
     const video = document.getElementById('scanner-video');
     if (!video || !video.videoWidth) return;
 
+    // ★ Capture the frame BEFORE stopping the stream — after stopScanner() the
+    //   video element is blanked and drawImage would send a black image to Gemini.
+    const canvas = document.createElement('canvas');
+    canvas.width  = video.videoWidth;
+    canvas.height = video.videoHeight;
+    canvas.getContext('2d').drawImage(video, 0, 0);
+    const imageBase64 = canvas.toDataURL('image/jpeg', 0.88).split(',')[1];
+    if (!imageBase64) { scanLog('AI visual: failed to capture frame'); return; }
+
     _aiBarcodeVisualRunning = true;
-    stopScanner(); // stop scanner loop while AI processes
-    _setScanStatus(t('scan.ai_fallback_searching'), 'retry', 'Gemini Vision');
-    showLoading(true);
+    stopScanner(); // stop scanner loop while AI processes (stream already captured above)
+    _setScanStatus(t('scan.status_ai_visual_searching'), 'retry', t('scan.method_ai_vision'));
+    _showScanAiOverlay(t('scan.ai_overlay_msg'));
 
     try {
-        const canvas = document.createElement('canvas');
-        canvas.width  = video.videoWidth;
-        canvas.height = video.videoHeight;
-        canvas.getContext('2d').drawImage(video, 0, 0);
-        const imageBase64 = canvas.toDataURL('image/jpeg', 0.88).split(',')[1];
-
         const result = await api('gemini_barcode_visual', {}, 'POST', {
             image: imageBase64,
             lang: _currentLang || 'it',
@@ -2140,54 +2310,40 @@ async function _tryGeminiVisualBarcode() {
         if (result.found && result.product) {
             const p = result.product;
             scanLog(`AI visual: found "${p.name}" (${p.brand})`);
+            _hideScanAiOverlay();
             showToast(t('scan.ai_fallback_found'), 'success');
-            // Build a synthetic product (no barcode) and show the inventory form
-            const saveResult = await api('product_save', {}, 'POST', {
-                barcode: '',
-                name:    p.name || t('product.not_recognized'),
-                brand:   p.brand || '',
+            _aiDetectedProductDraft = {
+                name: p.name || t('product.not_recognized'),
+                brand: p.brand || '',
                 category: p.category || '',
-                image_url: '',
-                unit: 'pz',
-                default_quantity: 1,
-                package_unit: '',
-                notes: '',
-            });
-            if (saveResult.id) {
-                currentProduct = {
-                    id: saveResult.id,
-                    barcode: '',
-                    name: p.name || t('product.not_recognized'),
-                    brand: p.brand || '',
-                    category: p.category || '',
-                    image_url: '',
-                    unit: 'pz',
-                    default_quantity: 1,
-                    package_unit: '',
-                    _confCount: 0,
-                    weight_info: '',
-                };
-                addToScanRecents(currentProduct);
-                showLoading(false);
-                setTimeout(() => showProductAction(), 300);
-            } else {
-                showLoading(false);
-                showToast(t('error.connection'), 'error');
+            };
+            let candidates = [];
+            try {
+                const invRes = await api('inventory_search', {
+                    q: _aiDetectedProductDraft.name,
+                    limit: 3,
+                });
+                candidates = (invRes.items || []).slice(0, 3);
+            } catch (_) {
+                candidates = [];
             }
+            _aiInventoryCandidates = candidates;
+            _showAiMatchChoices(_aiDetectedProductDraft, candidates);
         } else {
             scanLog('AI visual: product not identified — exhausted for this session');
             _aiFallbackExhausted = true;
-            showLoading(false);
+            _hideScanAiOverlay();
             _setScanStatus(t('scan.ai_fallback_exhausted'), 'retry', '');
-            // Restart the scanner so the user can keep trying with the barcode reader,
-            // but the 5s AI timer will NOT fire again (_aiFallbackExhausted=true).
+            _showAiRetryButton();
+            // Restart barcode scanner — AI timer won't fire again (_aiFallbackExhausted=true).
             setTimeout(() => initScanner(), 300);
         }
     } catch (e) {
         scanLog(`AI visual error: ${e.message}`);
         _aiFallbackExhausted = true;
-        showLoading(false);
+        _hideScanAiOverlay();
         _setScanStatus(t('scan.ai_fallback_exhausted'), 'retry', '');
+        _showAiRetryButton();
         setTimeout(() => initScanner(), 300);
     } finally {
         _aiBarcodeVisualRunning = false;
@@ -3837,6 +3993,18 @@ async function api(action, params = {}, method = 'GET', body = null, extraHeader
 // Track current page for auto-refresh
 let _currentPageId = 'dashboard';
 let _currentPageParam = null;
+let _pageHistory = [{ pageId: 'dashboard', param: null }];
+
+function goBack(fallbackPage = 'dashboard') {
+    if (_pageHistory.length > 1) {
+        // Drop current page and navigate to the previous entry without re-adding history.
+        _pageHistory.pop();
+        const prev = _pageHistory[_pageHistory.length - 1] || { pageId: fallbackPage, param: null };
+        showPage(prev.pageId, prev.param, { skipHistory: true });
+        return;
+    }
+    showPage(fallbackPage, null, { skipHistory: true });
+}
 
 // Refresh current page data without full navigation
 function refreshCurrentPage() {
@@ -3854,7 +4022,17 @@ function refreshCurrentPage() {
     }
 }
 
-function showPage(pageId, param = null) {
+function showPage(pageId, param = null, options = {}) {
+    const skipHistory = !!options.skipHistory;
+    if (!skipHistory) {
+        const last = _pageHistory[_pageHistory.length - 1];
+        const sameAsLast = !!last && last.pageId === pageId && (last.param ?? null) === (param ?? null);
+        if (!sameAsLast) {
+            _pageHistory.push({ pageId, param });
+            if (_pageHistory.length > 80) _pageHistory.shift();
+        }
+    }
+
     _currentPageId = pageId;
     _currentPageParam = param;
     // Hide all pages
@@ -3886,7 +4064,7 @@ function showPage(pageId, param = null) {
             }
             loadInventory();
             break;
-        case 'scan': _aiFallbackExhausted = false; initScanner(); clearQuickNameResults(); updateSpesaBanner(); updateScanRecents(); switchScanTab('barcode');
+        case 'scan': _aiFallbackExhausted = false; _hideScanAiOverlay(); { const _rb = document.getElementById('scan-ai-retry-btn'); if (_rb) _rb.style.display = 'none'; } initScanner(); clearQuickNameResults(); updateSpesaBanner(); updateScanRecents(); switchScanTab('barcode');
             // Pre-warm the embedding model the first time user visits scan page
             if (typeof window._getCategoryPipeline === 'function' && !window._categoryPipelineReady) {
                 window._getCategoryPipeline(); // fire-and-forget
@@ -5031,10 +5209,11 @@ async function loadBannerAlerts() {
     if (!banner) { _bannerLoading = false; console.warn('[Banner] #alert-banner not found'); return; }
 
     try {
-        const [invData, predData, anomalyData, finishedData, statsData] = await Promise.all([
+        const [invData, predData, anomalyData, dupLossData, finishedData, statsData] = await Promise.all([
             api('inventory_list'),
             api('consumption_predictions').catch(err => { console.warn('[Banner] predictions fetch failed:', err); return { predictions: [] }; }),
             api('inventory_anomalies').catch(err => { console.warn('[Banner] anomalies fetch failed:', err); return { anomalies: [] }; }),
+            api('inventory_duplicate_loss_checks').catch(err => { console.warn('[Banner] duplicate loss checks fetch failed:', err); return { checks: [] }; }),
             api('inventory_finished_items').catch(err => { console.warn('[Banner] finished_items fetch failed:', err); return { finished: [] }; }),
             api('stats').catch(() => ({ opened: [] })),
         ]);
@@ -5158,14 +5337,21 @@ async function loadBannerAlerts() {
             _bannerQueue.push({ type: 'anomaly', data: an });
         });
 
-        // 6. Finished products: inventory hit 0, waiting for user confirmation
+        // 6. Potentially lost products due to rapid duplicate "out" events
+        const dupChecks = dupLossData.checks || [];
+        dupChecks.forEach(ch => {
+            if (confirmed['dup_' + ch.dismiss_key]) return;
+            _bannerQueue.push({ type: 'dup_loss_check', data: ch });
+        });
+
+        // 7. Finished products: inventory hit 0, waiting for user confirmation
         const finished = finishedData.finished || [];
         finished.forEach(fin => {
             if (confirmed['fin_' + fin.product_id]) return;
             _bannerQueue.push({ type: 'finished', data: fin });
         });
 
-        // 7. Products with no expiry date set (and not permanently dismissed)
+        // 8. Products with no expiry date set (and not permanently dismissed)
         // Warn for ALL food/drink items — only skip igiene/pulizia (non-food).
         // Items are capped at 8 per load (opened packages first) to avoid banner overflow.
         const noExpiryDismissed = _getNoExpiryDismissed();
@@ -5246,6 +5432,8 @@ function _bannerPriority(entry) {
             // Phantom (inflated qty) = 250, Missing = 260 (slightly higher, means data is clearly wrong)
             return entry.data.direction === 'missing' ? 260 : 250;
         }
+        case 'dup_loss_check':
+            return 700; // high-priority check: likely double-consume loss
         case 'finished':
             return 600; // product ran out — confirm before removing from DB
         case 'no_expiry':
@@ -5447,6 +5635,30 @@ function renderBannerItem() {
         }
         actionsEl.innerHTML = btns;
 
+    } else if (entry.type === 'dup_loss_check') {
+        const ch = entry.data;
+        banner.className = 'alert-banner banner-dup-loss';
+        iconEl.textContent = '🧪';
+
+        const locInfo = LOCATIONS[ch.location] || { icon: '📦', label: ch.location || '—' };
+        const locText = `${locInfo.icon} ${locInfo.label}`;
+        const qtyPair = `${ch.q1} + ${ch.q2}`;
+
+        titleEl.textContent = t('dashboard.banner_dup_loss_title').replace('{name}', ch.name);
+        detailEl.textContent = t('dashboard.banner_dup_loss_detail')
+            .replace('{location}', locText)
+            .replace('{seconds}', Math.round(ch.dt_sec || 0))
+            .replace('{qty_pair}', qtyPair);
+
+        let btns = '';
+        if (ch.inventory_id && ch.inventory_id > 0) {
+            btns += `<button class="btn-banner btn-banner-edit" onclick="editReviewItem(${ch.inventory_id}, ${ch.product_id})">${t('dashboard.banner_dup_loss_action_fix')}</button>`;
+        } else {
+            btns += `<button class="btn-banner btn-banner-edit" onclick="openDuplicateLossCheck(${ch.product_id})">${t('dashboard.banner_dup_loss_action_open')}</button>`;
+        }
+        btns += `<button class="btn-banner btn-banner-ok" onclick="dismissDuplicateLossCheck()">${t('dashboard.banner_dup_loss_action_done')}</button>`;
+        actionsEl.innerHTML = btns;
+
     } else if (entry.type === 'no_expiry') {
         const item = entry.data;
         banner.className = 'alert-banner banner-no-expiry';
@@ -5582,6 +5794,32 @@ function dismissBannerAnomaly() {
     api('dismiss_anomaly', {}, 'POST', { dismiss_key: key }).catch(() => {});
     showToast('Anomalia ignorata', 'info');
     dismissBannerItem();
+}
+
+function dismissDuplicateLossCheck() {
+    const entry = _bannerQueue[_bannerIndex];
+    if (!entry || entry.type !== 'dup_loss_check') return;
+    const key = entry.data.dismiss_key;
+    setReviewConfirmed('dup_' + key);
+    showToast(t('dashboard.banner_dup_loss_toast_done'), 'success');
+    dismissBannerItem();
+}
+
+async function openDuplicateLossCheck(productId) {
+    showLoading(true);
+    try {
+        const data = await api('product_get', { id: productId });
+        if (data.product) {
+            currentProduct = data.product;
+            showProductAction();
+        } else {
+            showToast(t('error.not_found'), 'error');
+        }
+    } catch (e) {
+        showToast(t('error.connection'), 'error');
+    } finally {
+        showLoading(false);
+    }
 }
 
 function weighBannerItem() {
@@ -6585,6 +6823,7 @@ async function initScanner() {
     
     try {
         stopScanner();
+        _clearAiMatchPanel();
         
         const stream = await navigator.mediaDevices.getUserMedia(constraints);
         const track = stream.getVideoTracks()[0];
@@ -6624,8 +6863,8 @@ async function initScanner() {
             clearTimeout(_aiFallbackTimer);
             _aiFallbackTimer = setTimeout(() => {
                 if (scannerStream && !_aiFallbackExhausted) { // still scanning — no barcode found yet
-                    scanLog('5s elapsed without barcode — triggering AI visual fallback');
-                    _tryGeminiVisualBarcode();
+                    scanLog('5s elapsed without barcode — triggering AI OCR fallback');
+                    _tryGeminiNumberOCR({ chainToVisual: true });
                 }
             }, 5000);
         }
@@ -6739,6 +6978,13 @@ async function startNativeScanner(videoEl) {
                 // For other formats (code_128, code_39) require 2 to avoid false reads.
                 const highConfidence = ['ean_13','ean_8','upc_a','upc_e'].includes(format);
                 if (highConfidence || detectCount >= 2 || detectionHistory[code].count >= 2) {
+                    if (highConfidence && !validateEANChecksum(code)) {
+                        _invalidBarcodeCount++;
+                        scanLog(`Invalid EAN checksum (native): ${code} (retry #${_invalidBarcodeCount})`);
+                        _setScanStatus(t('scan.status_invalid').replace('{code}', code), 'invalid', 'Native');
+                        lastDetected = ''; detectCount = 0;
+                        return;
+                    }
                     scanning = false;
                     quaggaRunning = false;
                     updateFeedback(null);
@@ -6967,6 +7213,7 @@ function stopScanner() {
     if (tb) tb.classList.remove('torch-on');
     // Hide live code
     _hideScanLiveCode();
+    _clearAiMatchPanel();
     // Also stop AI camera
     if (aiStream) {
         aiStream.getTracks().forEach(t => t.stop());
@@ -7133,7 +7380,7 @@ function autoSubmitEAN(inputEl, force = false) {
         if (!raw) { showToast(t('error.barcode_empty'), 'error'); inputEl.focus(); return; }
         if (!/^\d{4,14}$/.test(raw)) { showToast(t('error.barcode_format'), 'error'); inputEl.focus(); return; }
         if (isComplete && !isValid) {
-            showToast('⚠️ Checksum EAN errato — verifica le cifre', 'warning');
+            showToast(t('error.barcode_checksum'), 'error'); inputEl.focus(); return;
         }
         stopScanner();
         onBarcodeDetected(raw);
@@ -7888,7 +8135,7 @@ function showProductAction() {
     
     // Update back button: go back to shopping if came from shopping list scan
     const backBtn = document.getElementById('action-back-btn');
-    if (backBtn) backBtn.onclick = _spesaScanTarget ? () => { _spesaScanTarget = null; showPage('shopping'); } : () => showPage('scan');
+    if (backBtn) backBtn.onclick = () => goBack();
 
     // Show "shopping target" banner if we came from the shopping list
     const banner = document.getElementById('shopping-scan-target-banner');
@@ -7902,7 +8149,7 @@ function showProductAction() {
             </div>
             <div class="shopping-scan-target-actions">
                 <button class="btn btn-success stb-btn" onclick="confirmShoppingItemFound()">✅ ${t('shopping.scan_target_found')}</button>
-                <button class="btn btn-secondary stb-btn" onclick="_spesaScanTarget=null; document.getElementById('shopping-scan-target-banner').style.display='none'; document.getElementById('action-back-btn').onclick=()=>showPage('scan')">✕ ${t('btn.cancel')}</button>
+                <button class="btn btn-secondary stb-btn" onclick="_spesaScanTarget=null; document.getElementById('shopping-scan-target-banner').style.display='none'; document.getElementById('action-back-btn').onclick=()=>goBack()">✕ ${t('btn.cancel')}</button>
             </div>
         `;
     } else if (banner) {
@@ -13666,7 +13913,7 @@ async function toggleRecipeFavorite(btn) {
  * Scale recipe ingredient quantities (#123).
  * Delta: +1 or -1. Min 1, max 20 persons.
  */
-function adjustRecipePersons(delta) {
+function scaleRecipePersons(delta) {
     const newPersons = Math.max(1, Math.min(20, _recipeCurrentPersons + delta));
     if (newPersons === _recipeCurrentPersons) return;
     _recipeCurrentPersons = newPersons;
@@ -13711,9 +13958,9 @@ function renderRecipe(r) {
     html += '<div class="recipe-meta">';
     if (r.meal) html += `<span class="recipe-tag">${_mealLabel(r.meal)}</span>`;
     html += `<span class="recipe-tag recipe-persons-ctrl">
-        <button class="btn-persons-adj" onclick="adjustRecipePersons(-1)">−</button>
+        <button class="btn-persons-adj" onclick="scaleRecipePersons(-1)">−</button>
         <span id="recipe-persons-display">👥 ${r.persons} ${t('recipes.persons_short')}</span>
-        <button class="btn-persons-adj" onclick="adjustRecipePersons(+1)">+</button>
+        <button class="btn-persons-adj" onclick="scaleRecipePersons(+1)">+</button>
     </span>`;
     if (r.prep_time) html += `<span class="recipe-tag">🔪 ${r.prep_time}</span>`;
     if (r.cook_time) html += `<span class="recipe-tag">🔥 ${r.cook_time}</span>`;
