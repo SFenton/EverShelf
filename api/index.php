@@ -5839,9 +5839,208 @@ function recipeApplyStockHintsToRecipe(PDO $db, array &$recipe): void {
     foreach ($recipe['ingredients'] as &$ing) {
         if (empty($ing['from_pantry']) || empty($ing['product_id'])) continue;
         $totalStock = recipeGetProductTotalStock($db, (int)$ing['product_id']);
-        if ($totalStock <= 0) continue;
+        if ($totalStock <= 0) {
+            recipeClearPantryIngredient($ing);
+            continue;
+        }
         $ing['inventory_qty_total'] = $totalStock;
         recipeFinalizeIngQty($ing, $totalStock);
+    }
+    unset($ing);
+}
+
+const RECIPE_PANTRY_MIN_MATCH_SCORE = 80;
+
+function recipeNormalizeName(string $name): string {
+    $n = mb_strtolower(trim($name), 'UTF-8');
+    return preg_replace('/\s+/u', ' ', $n) ?? $n;
+}
+
+/** Always-available staples — never link to a pantry product row. */
+function recipeIsFreeStaple(string $name): bool {
+    $n = recipeNormalizeName($name);
+    return (bool)preg_match('/^(acqua|sale|pepe|peper|olio(\s|$|e)|extraverg|evoo)\b/u', $n);
+}
+
+/** Strict name match — no generic alias expansion (formaggio ≠ grana). */
+function recipeScorePantryMatch(string $ingName, string $productName): int {
+    $a = recipeNormalizeName($ingName);
+    $b = recipeNormalizeName($productName);
+    if ($a === '' || $b === '') return 0;
+    if ($a === $b) return 100;
+    if (mb_strpos($a, $b) !== false) {
+        return mb_strlen($b) >= 4 ? 92 : 0;
+    }
+    if (mb_strpos($b, $a) !== false) {
+        return mb_strlen($a) >= 4 ? 88 : 0;
+    }
+    $aw = preg_split('/[\s,.\-\/]+/u', $a, -1, PREG_SPLIT_NO_EMPTY);
+    $bw = preg_split('/[\s,.\-\/]+/u', $b, -1, PREG_SPLIT_NO_EMPTY);
+    if (!empty($aw[0]) && !empty($bw[0]) && mb_strlen($aw[0]) >= 4 && $aw[0] === $bw[0]) {
+        return 80;
+    }
+    return 0;
+}
+
+function recipePickBestInventoryRow(array $rows): array {
+    usort($rows, static function (array $a, array $b): int {
+        $aOpen = !empty($a['opened_at'])
+            || ((float)($a['quantity'] ?? 0) > 0 && (float)($a['quantity'] ?? 0) < 1 && ($a['unit'] ?? '') === 'conf');
+        $bOpen = !empty($b['opened_at'])
+            || ((float)($b['quantity'] ?? 0) > 0 && (float)($b['quantity'] ?? 0) < 1 && ($b['unit'] ?? '') === 'conf');
+        if ($aOpen !== $bOpen) return $bOpen <=> $aOpen;
+        $da = (float)($a['days_left'] ?? 999);
+        $db = (float)($b['days_left'] ?? 999);
+        if ($da !== $db) return $da <=> $db;
+        return (float)($b['quantity'] ?? 0) <=> (float)($a['quantity'] ?? 0);
+    });
+    return $rows[0];
+}
+
+function recipeClearPantryIngredient(array &$ing): void {
+    $ing['from_pantry'] = false;
+    foreach ([
+        'product_id', 'location', 'inventory_unit', 'inventory_qty', 'inventory_qty_total',
+        'default_quantity', 'package_unit', 'available_qty', 'vacuum_sealed', 'brand', 'expiry_date',
+        'stock_have', 'stock_remain', 'stock_unit', 'package_base', 'use_all_suggested', 'used',
+    ] as $k) {
+        unset($ing[$k]);
+    }
+}
+
+function recipeApplyPantryQtyFields(array &$ing, array $bestMatch): void {
+    $qtyNum = (float)($ing['qty_number'] ?? 0);
+    $invUnit = $bestMatch['unit'] ?? 'pz';
+    $invQty = (float)$bestMatch['quantity'];
+    if ($qtyNum <= 0) return;
+
+    $recipeQty = $ing['qty'] ?? '';
+    $recipeUnit = '';
+    $recipeVal = 0;
+    if (preg_match('/(\d+[.,]?\d*)\s*(g|gr|gramm|kg|ml|l|litri|cl|pz|pezz|conf)/i', $recipeQty, $qm)) {
+        $recipeVal = (float)str_replace(',', '.', $qm[1]);
+        $ru = strtolower($qm[2]);
+        if (strpos($ru, 'g') === 0) $recipeUnit = 'g';
+        elseif ($ru === 'kg') { $recipeUnit = 'g'; $recipeVal *= 1000; }
+        elseif ($ru === 'ml') $recipeUnit = 'ml';
+        elseif ($ru === 'cl') { $recipeUnit = 'ml'; $recipeVal *= 10; }
+        elseif ($ru === 'l' || strpos($ru, 'litr') === 0) { $recipeUnit = 'ml'; $recipeVal *= 1000; }
+        elseif (strpos($ru, 'pz') === 0 || strpos($ru, 'pezz') === 0) $recipeUnit = 'pz';
+        elseif (strpos($ru, 'conf') === 0) $recipeUnit = 'conf';
+    }
+
+    $confAlreadyInSubUnit = false;
+    if ($recipeUnit && $recipeUnit !== $invUnit) {
+        if ($recipeUnit === 'g' && $invUnit === 'kg') {
+            $qtyNum = $recipeVal / 1000;
+        } elseif ($recipeUnit === 'g' && $invUnit === 'g') {
+            $qtyNum = $recipeVal;
+        } elseif ($recipeUnit === 'ml' && $invUnit === 'l') {
+            $qtyNum = $recipeVal / 1000;
+        } elseif ($recipeUnit === 'ml' && $invUnit === 'ml') {
+            $qtyNum = $recipeVal;
+        } elseif ($invUnit === 'conf') {
+            $defQty = (float)($bestMatch['default_quantity'] ?? 0);
+            $pkgUnitLC = strtolower($bestMatch['package_unit'] ?? '');
+            if ($defQty > 0 && ($pkgUnitLC === 'g' || $pkgUnitLC === 'ml') && ($recipeUnit === 'g' || $recipeUnit === 'ml')) {
+                $qtyNum = $recipeVal;
+                $ing['qty'] = round($qtyNum) . ' ' . $pkgUnitLC;
+                $confAlreadyInSubUnit = true;
+            } else {
+                $qtyNum = $defQty > 0 ? max(0.25, round(($recipeVal / $defQty) * 4) / 4) : 1;
+            }
+        } elseif ($invUnit === 'pz') {
+            $defQty = (float)($bestMatch['default_quantity'] ?? 0);
+            if ($defQty > 0) {
+                $qtyNum = max(0.25, round(($recipeVal / $defQty) * 4) / 4);
+            } else {
+                $origQtyNum = (float)($ing['qty_number'] ?? 0);
+                $qtyNum = ($origQtyNum >= 1 && $origQtyNum <= $invQty && $origQtyNum <= 100)
+                    ? $origQtyNum : max(1, round($recipeVal / 100));
+            }
+        }
+    } elseif ($invUnit === 'pz' && !$recipeUnit) {
+        if ($qtyNum > $invQty || $qtyNum > 100) {
+            $qtyNum = max(1, round($qtyNum / 100));
+        }
+    }
+
+    if (!$confAlreadyInSubUnit && $invUnit === 'conf' && $qtyNum > 0) {
+        $defQty = (float)($bestMatch['default_quantity'] ?? 0);
+        $pkgUnitLC = strtolower($bestMatch['package_unit'] ?? '');
+        if ($defQty > 0 && ($pkgUnitLC === 'g' || $pkgUnitLC === 'ml')) {
+            if ($recipeVal > 0 && $recipeUnit === $pkgUnitLC) {
+                $qtyNum = $recipeVal;
+                $ing['qty'] = round($qtyNum) . ' ' . $pkgUnitLC;
+            } elseif ($qtyNum <= $invQty) {
+                $qtyNum = round($qtyNum * $defQty);
+                $ing['qty'] = $qtyNum . ' ' . $pkgUnitLC;
+            }
+        }
+    }
+    if ($qtyNum > $invQty) $qtyNum = $invQty;
+    if ($recipeVal > 0 && $recipeUnit === $invUnit && $qtyNum < $recipeVal * 0.01) {
+        $qtyNum = $recipeVal;
+    }
+    $ing['qty_number'] = round($qtyNum, 3);
+}
+
+/** Link recipe ingredients ONLY to real in-stock pantry products (strict name match). */
+function recipeEnrichIngredientsFromPantry(PDO $db, array &$ingredients, array $items): void {
+    if (empty($ingredients) || empty($items)) return;
+
+    $catalog = [];
+    foreach ($items as $item) {
+        if ((float)($item['quantity'] ?? 0) <= 0) continue;
+        $pid = (int)$item['product_id'];
+        if (!isset($catalog[$pid])) {
+            $catalog[$pid] = ['name' => $item['name'], 'rows' => []];
+        }
+        $catalog[$pid]['rows'][] = $item;
+    }
+
+    foreach ($ingredients as &$ing) {
+        $ingName = trim($ing['name'] ?? '');
+        if ($ingName === '' || recipeIsFreeStaple($ingName)) {
+            recipeClearPantryIngredient($ing);
+            continue;
+        }
+
+        $bestPid = null;
+        $bestScore = 0;
+        foreach ($catalog as $pid => $meta) {
+            $score = recipeScorePantryMatch($ingName, $meta['name']);
+            if ($score > $bestScore) {
+                $bestScore = $score;
+                $bestPid = $pid;
+            }
+        }
+
+        if ($bestScore < RECIPE_PANTRY_MIN_MATCH_SCORE || !$bestPid) {
+            recipeClearPantryIngredient($ing);
+            continue;
+        }
+
+        $totalStock = recipeGetProductTotalStock($db, $bestPid);
+        if ($totalStock <= 0) {
+            recipeClearPantryIngredient($ing);
+            continue;
+        }
+
+        $bestMatch = recipePickBestInventoryRow($catalog[$bestPid]['rows']);
+        $ing['from_pantry'] = true;
+        $ing['name'] = $catalog[$bestPid]['name'];
+        $ing['product_id'] = $bestPid;
+        $ing['location'] = $bestMatch['location'];
+        $ing['inventory_unit'] = $bestMatch['unit'];
+        $ing['inventory_qty'] = (float)$bestMatch['quantity'];
+        $ing['default_quantity'] = (float)($bestMatch['default_quantity'] ?? 0);
+        $ing['package_unit'] = $bestMatch['package_unit'] ?? '';
+        $ing['available_qty'] = $bestMatch['quantity'] . ' ' . $bestMatch['unit'];
+        $ing['vacuum_sealed'] = !empty($bestMatch['vacuum_sealed']) ? 1 : 0;
+        if (!empty($bestMatch['brand'])) $ing['brand'] = $bestMatch['brand'];
+        if (!empty($bestMatch['expiry_date'])) $ing['expiry_date'] = $bestMatch['expiry_date'];
+        recipeApplyPantryQtyFields($ing, $bestMatch);
     }
     unset($ing);
 }
@@ -5960,17 +6159,10 @@ function generateRecipe(PDO $db): void {
         4 => 'ALTRI CON SCADENZA',
         6 => 'DISPENSA',
     ];
-    // Limit groups to keep prompt compact:
-    //  1-3 (urgent+opened): all items; 4 (has expiry): max 40; 6 (pantry): max 20
+    // Include all in-stock items in the prompt (no truncation — AI must not invent products).
     foreach ($priorityHeaders as $g => $header) {
         if (empty($priorityGroups[$g])) continue;
-        $groupItems = $priorityGroups[$g];
-        if ($g === 4 && count($groupItems) > 40) {
-            $groupItems = array_slice($groupItems, 0, 40);
-        } elseif ($g === 6 && count($groupItems) > 20) {
-            $groupItems = array_slice($groupItems, 0, 20);
-        }
-        $ingredientSections[] = "[$header]\n" . implode("\n", $groupItems);
+        $ingredientSections[] = "[$header]\n" . implode("\n", $priorityGroups[$g]);
     }
     $ingredientsText = implode("\n", $ingredientSections);
 
@@ -6221,6 +6413,8 @@ REGOLE:
 10. NON confondere forme diverse dello stesso ingrediente di base: 'Pomodori'/'Pomodoro Piccadilly' (freschi, pz/g) ≠ 'Passata di pomodoro'/'Polpa di pomodoro'/'Sugo al pomodoro' (elaborato, conf/g); 'Latte fresco' ≠ 'Latte UHT' ≠ 'Panna'; 'Farina 00' ≠ 'Farina integrale'. Se la ricetta richiede un tipo di ingrediente che NON è disponibile nella forma giusta in lista, NON sostituirlo con una forma diversa: scegli una ricetta che usa gli ingredienti esattamente nella forma disponibile.
 11. `nutrition`: object with estimated macro values PER SERVING for the finished dish: {"kcal":450,"protein_g":25,"carbs_g":40,"fat_g":15}. All values are integers. Estimate realistically based on the ingredients and quantities used.
 12. `storage`: object describing how to store leftovers: {"where":"frigo","days":3,"tips":"…"}. `where` = one of: frigo / freezer / dispensa / temperatura ambiente (in target language). `days` = integer max days safe to keep. `tips` = one concise sentence in target language. If the dish is best eaten immediately, set days=0 and tips accordingly.
+13. VIETATO inventare ingredienti: ogni ingrediente con from_pantry:true DEVE avere "name" IDENTICO (copia-incolla) a un prodotto nella lista DISPENSA. Se un ingrediente NON è in lista, imposta from_pantry:false (verrà mostrato come da comprare 🛒).
+14. Acqua, sale, pepe e olio sono sempre disponibili ma NON vanno nell'array ingredients (citili solo nei passi se serve).
 
 DISPENSA:
 $ingredientsText
@@ -6264,237 +6458,11 @@ PROMPT;
     $recipe = json_decode($text, true);
 
     if ($recipe && !empty($recipe['title'])) {
-        // Enrich from_pantry ingredients with product_id and location for "use" feature
         if (!empty($recipe['ingredients'])) {
-            // Build a category map for better fuzzy matching
-            $itemsLookup = [];
-            foreach ($items as $item) {
-                $itemsLookup[] = [
-                    'item' => $item,
-                    'lower' => mb_strtolower(trim($item['name']), 'UTF-8'),
-                    'words' => preg_split('/[\s,.\-\/]+/', mb_strtolower(trim($item['name']), 'UTF-8')),
-                    'cat'   => mb_strtolower($item['category'] ?? '', 'UTF-8'),
-                ];
-            }
-
-            // Common Italian food name aliases for better matching
-            $aliases = [
-                'uovo' => ['uova','uovo','egg'],
-                'uova' => ['uovo','uova','egg'],
-                'latte' => ['latte','milk'],
-                'formaggio' => ['formaggio','cheese','philadelphia','mozzarella','parmigiano','grana','pecorino','ricotta','mascarpone','stracchino','gorgonzola'],
-                'pasta' => ['pasta','spaghetti','penne','fusilli','rigatoni','farfalle','tagliatelle','linguine','bucatini','orecchiette','paccheri','maccheroni'],
-                'pomodoro' => ['pomodoro','pomodori','tomato','passata','pelati','polpa'],
-                'cipolla' => ['cipolla','cipolle','onion'],
-                'aglio' => ['aglio','garlic'],
-                'burro' => ['burro','butter'],
-                'panna' => ['panna','cream','crema'],
-                'zucchero' => ['zucchero','sugar'],
-                'farina' => ['farina','flour'],
-                'olio' => ['olio','oil'],
-                'patata' => ['patata','patate','potato'],
-                'carota' => ['carota','carote','carrot'],
-                'sedano' => ['sedano','celery'],
-                'prezzemolo' => ['prezzemolo','parsley'],
-                'basilico' => ['basilico','basil'],
-            ];
-
-            foreach ($recipe['ingredients'] as &$ing) {
-                if (!empty($ing['from_pantry'])) {
-                    $ingNameLower = mb_strtolower(trim($ing['name']), 'UTF-8');
-                    $ingWords = preg_split('/[\s,.\-\/]+/', $ingNameLower);
-                    $bestMatch = null;
-                    $bestScore = 0;
-                    
-                    foreach ($itemsLookup as $entry) {
-                        $itemNameLower = $entry['lower'];
-                        $itemWords = $entry['words'];
-                        $score = 0;
-                        
-                        // Exact match
-                        if ($ingNameLower === $itemNameLower) {
-                            $score = 100;
-                        }
-                        // Ingredient name contained in product name
-                        elseif (mb_strpos($itemNameLower, $ingNameLower) !== false) {
-                            $score = 80;
-                        }
-                        // Product name contained in ingredient name
-                        elseif (mb_strpos($ingNameLower, $itemNameLower) !== false) {
-                            $score = 70;
-                        }
-                        else {
-                            // Word-level matching with alias expansion
-                            $expandedIngWords = $ingWords;
-                            foreach ($ingWords as $w) {
-                                foreach ($aliases as $key => $group) {
-                                    if (in_array($w, $group) || mb_strpos($w, $key) === 0 || mb_strpos($key, $w) === 0) {
-                                        $expandedIngWords = array_merge($expandedIngWords, $group);
-                                    }
-                                }
-                            }
-                            $expandedIngWords = array_unique($expandedIngWords);
-
-                            $common = 0;
-                            foreach ($expandedIngWords as $ew) {
-                                foreach ($itemWords as $iw) {
-                                    // Partial stem match (min 4 chars shared prefix)
-                                    $minLen = min(mb_strlen($ew), mb_strlen($iw));
-                                    if ($minLen >= 3) {
-                                        $prefixLen = 0;
-                                        for ($c = 0; $c < $minLen; $c++) {
-                                            if (mb_substr($ew, $c, 1) === mb_substr($iw, $c, 1)) $prefixLen++;
-                                            else break;
-                                        }
-                                        if ($prefixLen >= min(4, $minLen)) { $common++; break; }
-                                    }
-                                    if ($ew === $iw) { $common++; break; }
-                                }
-                            }
-                            if ($common > 0) {
-                                $score = ($common / max(count($ingWords), 1)) * 65;
-                                // Bonus: if the main/first ingredient word matches
-                                if (count($ingWords) > 0 && $common > 0) {
-                                    foreach ($itemWords as $iw) {
-                                        if (mb_strpos($iw, $ingWords[0]) === 0 || mb_strpos($ingWords[0], $iw) === 0) {
-                                            $score += 10;
-                                            break;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        
-                        if ($score > $bestScore) {
-                            $bestScore = $score;
-                            $bestMatch = $entry['item'];
-                        }
-                    }
-                    
-                    // Only match if score is reasonable (> 30)
-                    if ($bestMatch && $bestScore > 30) {
-                        $ing['product_id'] = (int)$bestMatch['product_id'];
-                        $ing['location'] = $bestMatch['location'];
-                        $ing['inventory_unit'] = $bestMatch['unit'];
-                        $ing['inventory_qty'] = (float)$bestMatch['quantity'];
-                        $ing['default_quantity'] = (float)($bestMatch['default_quantity'] ?? 0);
-                        $ing['package_unit'] = $bestMatch['package_unit'] ?? '';
-                        $ing['available_qty'] = $bestMatch['quantity'] . ' ' . $bestMatch['unit'];
-                        $ing['vacuum_sealed'] = !empty($bestMatch['vacuum_sealed']) ? 1 : 0;
-                        if (!empty($bestMatch['brand'])) {
-                            $ing['brand'] = $bestMatch['brand'];
-                        }
-                        if (!empty($bestMatch['expiry_date'])) {
-                            $ing['expiry_date'] = $bestMatch['expiry_date'];
-                        }
-                        
-                        // === FIX qty_number: validate and convert units ===
-                        $qtyNum = (float)($ing['qty_number'] ?? 0);
-                        $invUnit = $bestMatch['unit'] ?? 'pz';
-                        $invQty = (float)$bestMatch['quantity'];
-                        
-                        if ($qtyNum > 0) {
-                            // Parse the recipe qty string to detect what unit Gemini intended
-                            $recipeQty = $ing['qty'] ?? '';
-                            $recipeUnit = '';
-                            $recipeVal = 0;
-                            if (preg_match('/(\d+[.,]?\d*)\s*(g|gr|gramm|kg|ml|l|litri|cl|pz|pezz|conf)/i', $recipeQty, $qm)) {
-                                $recipeVal = (float)str_replace(',', '.', $qm[1]);
-                                $ru = strtolower($qm[2]);
-                                if (strpos($ru, 'g') === 0) $recipeUnit = 'g';
-                                elseif ($ru === 'kg') { $recipeUnit = 'g'; $recipeVal *= 1000; }
-                                elseif ($ru === 'ml') $recipeUnit = 'ml';
-                                elseif ($ru === 'cl') { $recipeUnit = 'ml'; $recipeVal *= 10; }
-                                elseif ($ru === 'l' || strpos($ru, 'litr') === 0) { $recipeUnit = 'ml'; $recipeVal *= 1000; }
-                                elseif (strpos($ru, 'pz') === 0 || strpos($ru, 'pezz') === 0) $recipeUnit = 'pz';
-                                elseif (strpos($ru, 'conf') === 0) $recipeUnit = 'conf';
-                            }
-                            
-                            // Convert qty_number to inventory unit if mismatch detected
-                            $confAlreadyInSubUnit = false;
-                            if ($recipeUnit && $recipeUnit !== $invUnit) {
-                                // Weight conversions (both should be 'g' now, but handle legacy 'kg')
-                                if ($recipeUnit === 'g' && $invUnit === 'kg') {
-                                    $qtyNum = $recipeVal / 1000;
-                                } elseif ($recipeUnit === 'g' && $invUnit === 'g') {
-                                    $qtyNum = $recipeVal;
-                                // Volume conversions (both should be 'ml' now, but handle legacy 'l')
-                                } elseif ($recipeUnit === 'ml' && $invUnit === 'l') {
-                                    $qtyNum = $recipeVal / 1000;
-                                } elseif ($recipeUnit === 'ml' && $invUnit === 'ml') {
-                                    $qtyNum = $recipeVal;
-                                // g/ml → conf with weight/volume pkg_unit: keep in sub-units so JS modal works
-                                } elseif ($invUnit === 'conf') {
-                                    $defQty = (float)($bestMatch['default_quantity'] ?? 0);
-                                    $pkgUnitLC = strtolower($bestMatch['package_unit'] ?? '');
-                                    if ($defQty > 0 && ($pkgUnitLC === 'g' || $pkgUnitLC === 'ml')
-                                        && ($recipeUnit === 'g' || $recipeUnit === 'ml')) {
-                                        // Keep qty_number in sub-units; JS handles g↔conf conversion
-                                        $qtyNum = $recipeVal;
-                                        $ing['qty'] = round($qtyNum) . ' ' . $pkgUnitLC;
-                                        $confAlreadyInSubUnit = true;
-                                    } else {
-                                        // conf without weight pkg_unit: fractional conf
-                                        $qtyNum = $defQty > 0 ? max(0.25, round(($recipeVal / $defQty) * 4) / 4) : 1;
-                                    }
-                                // g/ml → pz (approximate to nearest piece)
-                                } elseif ($invUnit === 'pz') {
-                                    $defQty = (float)($bestMatch['default_quantity'] ?? 0);
-                                    if ($defQty > 0) {
-                                        $qtyNum = max(0.25, round(($recipeVal / $defQty) * 4) / 4);
-                                    } else {
-                                        $origQtyNum = (float)($ing['qty_number'] ?? 0);
-                                        if ($origQtyNum >= 1 && $origQtyNum <= $invQty && $origQtyNum <= 100) {
-                                            $qtyNum = $origQtyNum;
-                                        } else {
-                                            $qtyNum = 1;
-                                        }
-                                    }
-                                }
-                            } elseif ($invUnit === 'pz' && !$recipeUnit) {
-                                // AI returned qty_number without a parseable unit string.
-                                // If qty_number looks like grams (>> available pz count), clamp to 1.
-                                if ($qtyNum > $invQty || $qtyNum > 100) {
-                                    $qtyNum = max(1, round($qtyNum / 100));
-                                }
-                            }
-                            
-                            // Conf+weight post-normalisation: if qty_number wasn't already set to
-                            // sub-units above, and it looks like a fractional conf value (≤ available
-                            // conf count), convert to grams so the JS modal shows correct grams.
-                            if (!$confAlreadyInSubUnit && $invUnit === 'conf' && $qtyNum > 0) {
-                                $defQty = (float)($bestMatch['default_quantity'] ?? 0);
-                                $pkgUnitLC = strtolower($bestMatch['package_unit'] ?? '');
-                                if ($defQty > 0 && ($pkgUnitLC === 'g' || $pkgUnitLC === 'ml')) {
-                                    if ($recipeVal > 0 && $recipeUnit === $pkgUnitLC) {
-                                        $qtyNum = $recipeVal;
-                                        $ing['qty'] = round($qtyNum) . ' ' . $pkgUnitLC;
-                                    } elseif ($qtyNum <= $invQty) {
-                                        $qtyNum = round($qtyNum * $defQty);
-                                        $ing['qty'] = $qtyNum . ' ' . $pkgUnitLC;
-                                    }
-                                }
-                            }
-                            // Sanity check: qty_number should not exceed available
-                            if ($qtyNum > $invQty) {
-                                $qtyNum = $invQty; // cap to available
-                            }
-                            
-                            // Sanity check: if qty_number is absurdly small relative to recipe
-                            // e.g. recipe says 100g but qty_number is 0.1 and unit is g → likely meant 100
-                            if ($recipeVal > 0 && $recipeUnit === $invUnit && $qtyNum < $recipeVal * 0.01) {
-                                $qtyNum = $recipeVal; // Gemini probably confused the units
-                            }
-                            
-                            $ing['qty_number'] = round($qtyNum, 3);
-                        }
-                    }
-                }
-            }
-            unset($ing);
+            recipeEnrichIngredientsFromPantry($db, $recipe['ingredients'], $items);
             recipeApplyStockHintsToRecipe($db, $recipe);
         }
-        
+
         EverLog::info('recipe generated', ['title' => $recipe['title'] ?? '?', 'meal' => $mealType, 'persons' => $persons, 'ingredients' => count($recipe['ingredients'] ?? [])]);
         echo json_encode(['success' => true, 'recipe' => $recipe]);
     } else {
@@ -6589,7 +6557,7 @@ PROMPT;
 
     // Enrich ingredients with product_id/location — same fuzzy-match as generateRecipe
     if (!empty($recipe['ingredients'])) {
-        _enrichChatIngredients($recipe['ingredients'], $items);
+        _enrichChatIngredients($recipe['ingredients'], $items, $db);
     }
     recipeApplyStockHintsToRecipe($db, $recipe);
 
@@ -6704,7 +6672,7 @@ PROMPT;
     }
 
     if (!empty($recipe['ingredients'])) {
-        _enrichChatIngredients($recipe['ingredients'], $items);
+        _enrichChatIngredients($recipe['ingredients'], $items, $db);
     }
     recipeApplyStockHintsToRecipe($db, $recipe);
 
@@ -6713,173 +6681,8 @@ PROMPT;
 }
 
 
-function _enrichChatIngredients(array &$ingredients, array $items): void {
-    if (empty($ingredients) || empty($items)) return;
-
-    // Build lookup
-    $itemsLookup = [];
-    foreach ($items as $item) {
-        $itemsLookup[] = [
-            'item' => $item,
-            'lower' => mb_strtolower(trim($item['name']), 'UTF-8'),
-            'words' => preg_split('/[\s,.\-\/]+/', mb_strtolower(trim($item['name']), 'UTF-8')),
-        ];
-    }
-
-    $aliases = [
-        'uovo' => ['uova','uovo','egg'],
-        'uova' => ['uovo','uova','egg'],
-        'latte' => ['latte','milk'],
-        'formaggio' => ['formaggio','cheese','philadelphia','mozzarella','parmigiano','grana','pecorino','ricotta','mascarpone','stracchino','gorgonzola'],
-        'pasta' => ['pasta','spaghetti','penne','fusilli','rigatoni','farfalle','tagliatelle','linguine','bucatini','orecchiette','paccheri','maccheroni'],
-        'pomodoro' => ['pomodoro','pomodori','tomato','passata','pelati','polpa'],
-        'cipolla' => ['cipolla','cipolle','onion'],
-        'aglio' => ['aglio','garlic'],
-        'burro' => ['burro','butter'],
-        'panna' => ['panna','cream','crema'],
-        'zucchero' => ['zucchero','sugar'],
-        'farina' => ['farina','flour'],
-        'olio' => ['olio','oil'],
-        'patata' => ['patata','patate','potato'],
-        'carota' => ['carota','carote','carrot'],
-        'sedano' => ['sedano','celery'],
-        'prezzemolo' => ['prezzemolo','parsley'],
-        'basilico' => ['basilico','basil'],
-    ];
-
-    foreach ($ingredients as &$ing) {
-        // Try to match ALL ingredients — from_pantry was set to true for all by chatExtractRecipe
-        // If no match is found, product_id stays unset → shown as 🛒 in frontend
-
-        $ingNameLower = mb_strtolower(trim($ing['name']), 'UTF-8');
-        $ingWords = preg_split('/[\s,.\-\/]+/', $ingNameLower);
-        $bestMatch = null;
-        $bestScore = 0;
-
-        foreach ($itemsLookup as $entry) {
-            $itemNameLower = $entry['lower'];
-            $itemWords = $entry['words'];
-            $score = 0;
-
-            if ($ingNameLower === $itemNameLower) {
-                $score = 100;
-            } elseif (mb_strpos($itemNameLower, $ingNameLower) !== false) {
-                $score = 80;
-            } elseif (mb_strpos($ingNameLower, $itemNameLower) !== false) {
-                $score = 70;
-            } else {
-                $expandedIngWords = $ingWords;
-                foreach ($ingWords as $w) {
-                    foreach ($aliases as $key => $group) {
-                        if (in_array($w, $group) || mb_strpos($w, $key) === 0 || mb_strpos($key, $w) === 0) {
-                            $expandedIngWords = array_merge($expandedIngWords, $group);
-                        }
-                    }
-                }
-                $expandedIngWords = array_unique($expandedIngWords);
-                $common = 0;
-                foreach ($expandedIngWords as $ew) {
-                    foreach ($itemWords as $iw) {
-                        $minLen = min(mb_strlen($ew), mb_strlen($iw));
-                        if ($minLen >= 3) {
-                            $prefixLen = 0;
-                            for ($c = 0; $c < $minLen; $c++) {
-                                if (mb_substr($ew, $c, 1) === mb_substr($iw, $c, 1)) $prefixLen++;
-                                else break;
-                            }
-                            if ($prefixLen >= min(4, $minLen)) { $common++; break; }
-                        }
-                        if ($ew === $iw) { $common++; break; }
-                    }
-                }
-                if ($common > 0) {
-                    $score = ($common / max(count($ingWords), 1)) * 65;
-                    if (count($ingWords) > 0) {
-                        foreach ($itemWords as $iw) {
-                            if (mb_strpos($iw, $ingWords[0]) === 0 || mb_strpos($ingWords[0], $iw) === 0) {
-                                $score += 10; break;
-                            }
-                        }
-                    }
-                }
-            }
-
-            if ($score > $bestScore) {
-                $bestScore = $score;
-                $bestMatch = $entry['item'];
-            }
-        }
-
-        if ($bestMatch && $bestScore > 30) {
-            $ing['product_id'] = (int)$bestMatch['product_id'];
-            $ing['location'] = $bestMatch['location'];
-            $ing['inventory_unit'] = $bestMatch['unit'];
-            $ing['inventory_qty'] = (float)$bestMatch['quantity'];
-            $ing['default_quantity'] = (float)($bestMatch['default_quantity'] ?? 0);
-            $ing['package_unit'] = $bestMatch['package_unit'] ?? '';
-            $ing['available_qty'] = $bestMatch['quantity'] . ' ' . $bestMatch['unit'];
-            $ing['vacuum_sealed'] = !empty($bestMatch['vacuum_sealed']) ? 1 : 0;
-            if (!empty($bestMatch['brand'])) $ing['brand'] = $bestMatch['brand'];
-            if (!empty($bestMatch['expiry_date'])) $ing['expiry_date'] = $bestMatch['expiry_date'];
-
-            // Validate and convert qty_number to inventory unit
-            $qtyNum = (float)($ing['qty_number'] ?? 0);
-            $invUnit = $bestMatch['unit'] ?? 'pz';
-            $invQty = (float)$bestMatch['quantity'];
-
-            if ($qtyNum > 0) {
-                $recipeQty = $ing['qty'] ?? '';
-                $recipeUnit = '';
-                $recipeVal = 0;
-                if (preg_match('/(\d+[.,]?\d*)\s*(g|gr|gramm|kg|ml|l|litri|cl|pz|pezz|conf)/i', $recipeQty, $qm)) {
-                    $recipeVal = (float)str_replace(',', '.', $qm[1]);
-                    $ru = strtolower($qm[2]);
-                    if (strpos($ru, 'g') === 0) $recipeUnit = 'g';
-                    elseif ($ru === 'kg') { $recipeUnit = 'g'; $recipeVal *= 1000; }
-                    elseif ($ru === 'ml') $recipeUnit = 'ml';
-                    elseif ($ru === 'cl') { $recipeUnit = 'ml'; $recipeVal *= 10; }
-                    elseif ($ru === 'l' || strpos($ru, 'litr') === 0) { $recipeUnit = 'ml'; $recipeVal *= 1000; }
-                    elseif (strpos($ru, 'pz') === 0 || strpos($ru, 'pezz') === 0) $recipeUnit = 'pz';
-                    elseif (strpos($ru, 'conf') === 0) $recipeUnit = 'conf';
-                }
-                $confAlreadyInSubUnit = false;
-                if ($recipeUnit && $recipeUnit !== $invUnit) {
-                    if ($recipeUnit === 'g' && $invUnit === 'g') $qtyNum = $recipeVal;
-                    elseif ($recipeUnit === 'g' && $invUnit === 'kg') $qtyNum = $recipeVal / 1000;
-                    elseif ($recipeUnit === 'ml' && $invUnit === 'ml') $qtyNum = $recipeVal;
-                    elseif ($recipeUnit === 'ml' && $invUnit === 'l') $qtyNum = $recipeVal / 1000;
-                    elseif ($invUnit === 'conf') {
-                        $defQty = (float)($bestMatch['default_quantity'] ?? 0);
-                        $pkgUnitLC = strtolower($bestMatch['package_unit'] ?? '');
-                        if ($defQty > 0 && ($pkgUnitLC === 'g' || $pkgUnitLC === 'ml') && ($recipeUnit === 'g' || $recipeUnit === 'ml')) {
-                            $qtyNum = $recipeVal; $ing['qty'] = round($qtyNum) . ' ' . $pkgUnitLC; $confAlreadyInSubUnit = true;
-                        } else { $qtyNum = $defQty > 0 ? max(0.25, round(($recipeVal / $defQty) * 4) / 4) : 1; }
-                    } elseif ($invUnit === 'pz') {
-                        $defQty = (float)($bestMatch['default_quantity'] ?? 0);
-                        $qtyNum = $defQty > 0 ? max(0.25, round(($recipeVal / $defQty) * 4) / 4) : max(1, round($recipeVal / 100));
-                    }
-                }
-                // Conf+weight: normalise fractional conf to sub-units
-                if (!$confAlreadyInSubUnit && $invUnit === 'conf' && $qtyNum > 0) {
-                    $defQty = (float)($bestMatch['default_quantity'] ?? 0);
-                    $pkgUnitLC = strtolower($bestMatch['package_unit'] ?? '');
-                    if ($defQty > 0 && ($pkgUnitLC === 'g' || $pkgUnitLC === 'ml')) {
-                        if ($recipeVal > 0 && $recipeUnit === $pkgUnitLC) {
-                            $qtyNum = $recipeVal;
-                            $ing['qty'] = round($qtyNum) . ' ' . $pkgUnitLC;
-                        } elseif ($qtyNum <= $invQty) {
-                            $qtyNum = round($qtyNum * $defQty);
-                            $ing['qty'] = $qtyNum . ' ' . $pkgUnitLC;
-                        }
-                    }
-                }
-                if ($qtyNum > $invQty) $qtyNum = $invQty;
-                if ($recipeVal > 0 && $recipeUnit === $invUnit && $qtyNum < $recipeVal * 0.01) $qtyNum = $recipeVal;
-                $ing['qty_number'] = round($qtyNum, 3);
-            }
-        }
-    }
-    unset($ing);
+function _enrichChatIngredients(array &$ingredients, array $items, PDO $db): void {
+    recipeEnrichIngredientsFromPantry($db, $ingredients, $items);
 }
 
 // ===== RECIPE GENERATION — STREAMING AGENT =====
@@ -6974,21 +6777,13 @@ function generateRecipeStream(PDO $db): void {
         $priorityGroups[$group][] = $line;
     }
 
-    // Limiti ingredienti per gruppo: con piano pasto attivo passa TUTTO (l'AI deve combinare liberamente)
-    // Senza piano pasto: limiti moderati per ridurre token (ora safe grazie a thinkingBudget:0)
-    $hasMealPlan = !empty($mealPlanType);
+    // Send the full in-stock list — AI must not invent products outside this list.
     $ingredientSections = [];
     $priorityHeaders    = [1=>'SCADUTI — usa subito',2=>'SCADENZA ≤3gg — priorità alta',3=>'SCADENZA ≤7gg / APERTI — usa presto',4=>'ALTRI CON SCADENZA',6=>'DISPENSA'];
     $totalIngredientsSent = 0;
     foreach ($priorityHeaders as $g => $header) {
         if (empty($priorityGroups[$g])) continue;
         $gi = $priorityGroups[$g];
-        if (!$hasMealPlan) {
-            // Senza piano: limiti moderati
-            if ($g === 4 && count($gi) > 25) $gi = array_slice($gi, 0, 25);
-            if ($g === 6 && count($gi) > 15) $gi = array_slice($gi, 0, 15);
-        }
-        // Con piano pasto attivo: nessun limite — tutti gli ingredienti disponibili
         $ingredientSections[] = "[$header]\n" . implode("\n", $gi);
         $totalIngredientsSent += count($gi);
     }
@@ -7187,6 +6982,8 @@ REGOLE:
 11. NON confondere forme diverse dello stesso ingrediente di base: 'Pomodori'/'Pomodoro Piccadilly' (freschi, pz/g) ≠ 'Passata di pomodoro'/'Polpa di pomodoro'/'Sugo al pomodoro' (elaborato, conf/g); 'Latte fresco' ≠ 'Latte UHT' ≠ 'Panna'; 'Farina 00' ≠ 'Farina integrale'. Se la ricetta richiede un tipo di ingrediente che NON è disponibile nella forma giusta in lista, NON sostituirlo con una forma diversa: scegli una ricetta che usa gli ingredienti esattamente nella forma disponibile.
 12. `nutrition`: object with estimated macro values PER SERVING for the finished dish: {"kcal":450,"protein_g":25,"carbs_g":40,"fat_g":15}. All values are integers. Estimate realistically based on the ingredients and quantities used.
 13. `storage`: object describing how to store leftovers: {"where":"frigo","days":3,"tips":"…"}. `where` = one of: frigo / freezer / dispensa / temperatura ambiente (in target language). `days` = integer max days safe to keep. `tips` = one concise sentence in target language. If the dish is best eaten immediately, set days=0 and tips accordingly.
+14. VIETATO inventare ingredienti: ogni ingrediente con from_pantry:true DEVE avere "name" IDENTICO (copia-incolla) a un prodotto nella lista DISPENSA. Se un ingrediente NON è in lista, imposta from_pantry:false (verrà mostrato come da comprare 🛒).
+15. Acqua, sale, pepe e olio sono sempre disponibili ma NON vanno nell'array ingredients (citili solo nei passi se serve).
 
 DISPENSA:
 $ingredientsText
@@ -7321,134 +7118,7 @@ PROMPT;
         }, $recipe['steps']));
     }
     if (!empty($recipe['ingredients'])) {
-        $itemsLookup = [];
-        foreach ($items as $item) {
-            $itemsLookup[] = [
-                'item'  => $item,
-                'lower' => mb_strtolower(trim($item['name']), 'UTF-8'),
-                'words' => preg_split('/[\s,.\-\/]+/', mb_strtolower(trim($item['name']), 'UTF-8')),
-                'cat'   => mb_strtolower($item['category'] ?? '', 'UTF-8'),
-            ];
-        }
-        $aliases = ['uovo'=>['uova','uovo','egg'],'uova'=>['uovo','uova','egg'],'latte'=>['latte','milk'],'formaggio'=>['formaggio','cheese','philadelphia','mozzarella','parmigiano','grana','pecorino','ricotta','mascarpone','stracchino','gorgonzola'],'pasta'=>['pasta','spaghetti','penne','fusilli','rigatoni','farfalle','tagliatelle','linguine','bucatini','orecchiette','paccheri','maccheroni'],'pomodoro'=>['pomodoro','pomodori','tomato','passata','pelati','polpa'],'cipolla'=>['cipolla','cipolle','onion'],'aglio'=>['aglio','garlic'],'burro'=>['burro','butter'],'panna'=>['panna','cream','crema'],'zucchero'=>['zucchero','sugar'],'farina'=>['farina','flour'],'olio'=>['olio','oil'],'patata'=>['patata','patate','potato'],'carota'=>['carota','carote','carrot'],'sedano'=>['sedano','celery'],'prezzemolo'=>['prezzemolo','parsley'],'basilico'=>['basilico','basil']];
-
-        foreach ($recipe['ingredients'] as &$ing) {
-            if (empty($ing['from_pantry'])) continue;
-            $ingNameLower = mb_strtolower(trim($ing['name']), 'UTF-8');
-            $ingWords     = preg_split('/[\s,.\-\/]+/', $ingNameLower);
-            $bestMatch    = null;
-            $bestScore    = 0;
-            foreach ($itemsLookup as $entry) {
-                $itemNameLower = $entry['lower'];
-                $itemWords     = $entry['words'];
-                $score         = 0;
-                if ($ingNameLower === $itemNameLower) {
-                    $score = 100;
-                } elseif (mb_strpos($itemNameLower, $ingNameLower) !== false) {
-                    $score = 80;
-                } elseif (mb_strpos($ingNameLower, $itemNameLower) !== false) {
-                    $score = 70;
-                } else {
-                    $expandedIngWords = $ingWords;
-                    foreach ($ingWords as $w) {
-                        foreach ($aliases as $key => $group) {
-                            if (in_array($w, $group) || mb_strpos($w, $key) === 0 || mb_strpos($key, $w) === 0)
-                                $expandedIngWords = array_merge($expandedIngWords, $group);
-                        }
-                    }
-                    $expandedIngWords = array_unique($expandedIngWords);
-                    $common = 0;
-                    foreach ($expandedIngWords as $ew) {
-                        foreach ($itemWords as $iw) {
-                            $minLen = min(mb_strlen($ew), mb_strlen($iw));
-                            if ($minLen >= 3) {
-                                $prefixLen = 0;
-                                for ($c = 0; $c < $minLen; $c++) {
-                                    if (mb_substr($ew, $c, 1) === mb_substr($iw, $c, 1)) $prefixLen++; else break;
-                                }
-                                if ($prefixLen >= min(4, $minLen)) { $common++; break; }
-                            }
-                            if ($ew === $iw) { $common++; break; }
-                        }
-                    }
-                    if ($common > 0) {
-                        $score = ($common / max(count($ingWords), 1)) * 65;
-                        if (count($ingWords) > 0) {
-                            foreach ($itemWords as $iw) {
-                                if (mb_strpos($iw, $ingWords[0]) === 0 || mb_strpos($ingWords[0], $iw) === 0) { $score += 10; break; }
-                            }
-                        }
-                    }
-                }
-                if ($score > $bestScore) { $bestScore = $score; $bestMatch = $entry['item']; }
-            }
-            if ($bestMatch && $bestScore > 30) {
-                $ing['product_id']       = (int)$bestMatch['product_id'];
-                $ing['location']         = $bestMatch['location'];
-                $ing['inventory_unit']   = $bestMatch['unit'];
-                $ing['inventory_qty']    = (float)$bestMatch['quantity'];
-                $ing['default_quantity'] = (float)($bestMatch['default_quantity'] ?? 0);
-                $ing['package_unit']     = $bestMatch['package_unit'] ?? '';
-                $ing['available_qty']    = $bestMatch['quantity'] . ' ' . $bestMatch['unit'];
-                $ing['vacuum_sealed']    = !empty($bestMatch['vacuum_sealed']) ? 1 : 0;
-                if (!empty($bestMatch['brand']))       $ing['brand']       = $bestMatch['brand'];
-                if (!empty($bestMatch['expiry_date'])) $ing['expiry_date'] = $bestMatch['expiry_date'];
-                $qtyNum  = (float)($ing['qty_number'] ?? 0);
-                $invUnit = $bestMatch['unit'] ?? 'pz';
-                $invQty  = (float)$bestMatch['quantity'];
-                if ($qtyNum > 0) {
-                    $recipeQty  = $ing['qty'] ?? '';
-                    $recipeUnit = ''; $recipeVal = 0;
-                    if (preg_match('/(\d+[.,]?\d*)\s*(g|gr|gramm|kg|ml|l|litri|cl|pz|pezz|conf)/i', $recipeQty, $qm)) {
-                        $recipeVal = (float)str_replace(',', '.', $qm[1]);
-                        $ru = strtolower($qm[2]);
-                        if (strpos($ru, 'g') === 0)                       $recipeUnit = 'g';
-                        elseif ($ru === 'kg')                              { $recipeUnit = 'g';  $recipeVal *= 1000; }
-                        elseif ($ru === 'ml')                              $recipeUnit = 'ml';
-                        elseif ($ru === 'cl')                              { $recipeUnit = 'ml'; $recipeVal *= 10; }
-                        elseif ($ru === 'l' || strpos($ru, 'litr') === 0) { $recipeUnit = 'ml'; $recipeVal *= 1000; }
-                        elseif (strpos($ru, 'pz') === 0 || strpos($ru, 'pezz') === 0) $recipeUnit = 'pz';
-                        elseif (strpos($ru, 'conf') === 0)                $recipeUnit = 'conf';
-                    }
-                    $confAlreadyInSubUnit = false;
-                    if ($recipeUnit && $recipeUnit !== $invUnit) {
-                        if ($recipeUnit === 'g'  && $invUnit === 'kg')  $qtyNum = $recipeVal / 1000;
-                        elseif ($recipeUnit === 'g'  && $invUnit === 'g')   $qtyNum = $recipeVal;
-                        elseif ($recipeUnit === 'ml' && $invUnit === 'l')   $qtyNum = $recipeVal / 1000;
-                        elseif ($recipeUnit === 'ml' && $invUnit === 'ml')  $qtyNum = $recipeVal;
-                        elseif ($invUnit === 'conf') {
-                            $defQty = (float)($bestMatch['default_quantity'] ?? 0);
-                            $pkgUnitLC = strtolower($bestMatch['package_unit'] ?? '');
-                            if ($defQty > 0 && ($pkgUnitLC === 'g' || $pkgUnitLC === 'ml') && ($recipeUnit === 'g' || $recipeUnit === 'ml')) {
-                                $qtyNum = $recipeVal; $ing['qty'] = round($qtyNum) . ' ' . $pkgUnitLC; $confAlreadyInSubUnit = true;
-                            } else { $qtyNum = $defQty > 0 ? max(0.25, round(($recipeVal / $defQty) * 4) / 4) : 1; }
-                        } elseif ($invUnit === 'pz') {
-                            $defQty = (float)($bestMatch['default_quantity'] ?? 0);
-                            if ($defQty > 0) { $qtyNum = $recipeVal / $defQty; $qtyNum = max(0.25, round($qtyNum * 4) / 4); }
-                            else $qtyNum = max(1, round($recipeVal / 100));
-                        }
-                    }
-                    // Conf+weight: normalise fractional conf to sub-units
-                    if (!$confAlreadyInSubUnit && $invUnit === 'conf' && $qtyNum > 0) {
-                        $defQty = (float)($bestMatch['default_quantity'] ?? 0);
-                        $pkgUnitLC = strtolower($bestMatch['package_unit'] ?? '');
-                        if ($defQty > 0 && ($pkgUnitLC === 'g' || $pkgUnitLC === 'ml')) {
-                            if ($recipeVal > 0 && $recipeUnit === $pkgUnitLC) {
-                                $qtyNum = $recipeVal;
-                                $ing['qty'] = round($qtyNum) . ' ' . $pkgUnitLC;
-                            } elseif ($qtyNum <= $invQty) {
-                                $qtyNum = round($qtyNum * $defQty);
-                                $ing['qty'] = $qtyNum . ' ' . $pkgUnitLC;
-                            }
-                        }
-                    }
-                    if ($qtyNum > $invQty) $qtyNum = $invQty;
-                    if ($recipeVal > 0 && $recipeUnit === $invUnit && $qtyNum < $recipeVal * 0.01) $qtyNum = $recipeVal;
-                    $ing['qty_number'] = round($qtyNum, 3);
-                }
-            }
-        }
-        unset($ing);
+        recipeEnrichIngredientsFromPantry($db, $recipe['ingredients'], $items);
         recipeApplyStockHintsToRecipe($db, $recipe);
     }
 

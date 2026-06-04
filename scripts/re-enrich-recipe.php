@@ -28,6 +28,17 @@ if (!is_array($recipe)) {
     exit(1);
 }
 
+$stmt = $db->query("
+    SELECT p.id AS product_id, p.name, p.brand, p.category, i.quantity, p.unit, p.default_quantity, p.package_unit, i.location, i.expiry_date, i.opened_at,
+           CASE WHEN i.expiry_date IS NOT NULL THEN julianday(i.expiry_date) - julianday('now') ELSE 999 END AS days_left
+    FROM inventory i
+    JOIN products p ON p.id = i.product_id
+    WHERE i.quantity > 0
+    ORDER BY days_left ASC, p.name ASC
+");
+$items = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+recipeEnrichIngredientsFromPantry($db, $recipe['ingredients'], $items);
 recipeApplyStockHintsToRecipe($db, $recipe);
 
 $upd = $db->prepare('UPDATE recipes SET recipe_json = ? WHERE id = ?');
@@ -35,7 +46,10 @@ $upd->execute([json_encode($recipe, JSON_UNESCAPED_UNICODE), $id]);
 
 echo "Updated recipe {$id}: " . ($recipe['title'] ?? '?') . "\n";
 foreach ($recipe['ingredients'] ?? [] as $ing) {
-    if (empty($ing['from_pantry'])) continue;
+    if (empty($ing['from_pantry'])) {
+        echo sprintf("  🛒 %s — %s (da comprare)\n", $ing['name'] ?? '?', $ing['qty'] ?? '?');
+        continue;
+    }
     $useAll = !empty($ing['use_all_suggested']) ? ' [USE ALL]' : '';
     echo sprintf(
         "  %s: %s | hai %.1f %s | restano %.1f %s%s\n",

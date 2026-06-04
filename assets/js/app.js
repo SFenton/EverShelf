@@ -13840,7 +13840,13 @@ async function enrichRecipeIngredientsStock(recipe) {
             if (!ing.from_pantry || !ing.product_id) continue;
             const rows = inv.filter(i => i.product_id == ing.product_id);
             const activeRows = rows.filter(i => parseFloat(i.quantity) > 0);
-            if (!activeRows.length) continue;
+            if (!activeRows.length) {
+                ing.from_pantry = false;
+                delete ing.product_id;
+                delete ing.stock_have;
+                delete ing.stock_remain;
+                continue;
+            }
             const totalStock = activeRows.reduce((s, i) => s + parseFloat(i.quantity), 0);
             ing.inventory_qty_total = totalStock;
             const opened = activeRows.find(_isOpenedInventoryItem);
@@ -14388,9 +14394,9 @@ async function renderRecipe(r) {
     html += `<h3>${t('recipes.ingredients_title')}</h3><ul class="recipe-ingredients">`;
     (r.ingredients || []).forEach((ing, idx) => {
         if (ing.from_pantry && ing.product_id) {
-            const qtyNum = Math.round((ing.qty_number || 0) * 10) / 10;
             const loc = (ing.location || 'dispensa').replace(/'/g, "\\'");
             const alreadyUsed = ing.used === true;
+            const qtyNum = Math.round((ing.qty_number || 0) * 10) / 10;
             html += `<li class="recipe-ingredient${alreadyUsed ? ' recipe-ing-used' : ''}" id="recipe-ing-${idx}" data-ing-idx="${idx}" data-base-qty="${ing.qty_number || 0}" data-base-qty-str="${escapeHtml(ing.qty || '')}">`;
             html += `<span class="recipe-ing-text"><strong class="recipe-ing-name" onclick="openIngredientDetail(${ing.product_id}, '${loc}')" title="${escapeHtml(t('btn.edit'))}">${escapeHtml(ing.name)}</strong>${ing.brand ? ' <em>(' + escapeHtml(ing.brand) + ')</em>' : ''}: <span class="recipe-ing-qty">${escapeHtml(ing.qty)}</span>${ing.use_all_suggested ? ' ♻️' : ''} ✅`;
             // Detail line: location + expiry
