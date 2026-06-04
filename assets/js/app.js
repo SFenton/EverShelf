@@ -5980,7 +5980,11 @@ async function confirmBannerFinished() {
     if (!entry || entry.type !== 'finished') return;
     const productId = entry.data.product_id;
     try {
-        await api('inventory_confirm_finished', {}, 'POST', { product_id: productId });
+        const res = await api('inventory_confirm_finished', {}, 'POST', { product_id: productId });
+        if (res.bring?.added || res.bring?.updated) {
+            showToast(t('toast.finished_to_bring'), 'info');
+            loadShoppingList();
+        }
     } catch(e) {}
     showToast(t('toast.product_finished_confirmed'), 'success');
     dismissBannerItem();
@@ -9868,14 +9872,18 @@ function _findSimilarItem(name, list) {
  */
 function _matchBringToSmart(bringName, smartItems) {
     const bLower = bringName.toLowerCase();
-    const exact = smartItems.find(sd => sd.name.toLowerCase() === bLower);
+    const exact = smartItems.find(sd =>
+        sd.name.toLowerCase() === bLower ||
+        (sd.shopping_name || '').toLowerCase() === bLower
+    );
     if (exact) return exact;
     const bTokens = _nameTokens(bringName);
     if (bTokens.length === 0) return null;
     const bFirst = bTokens[0];
-    // Rule 2: first token match
     const firstMatch = smartItems.find(sd => {
-        const sdTokens = _nameTokens(sd.name);
+        const groupName = (sd.shopping_name || sd.name).toLowerCase();
+        if (groupName === bLower) return true;
+        const sdTokens = _nameTokens(sd.shopping_name || sd.name);
         return sdTokens.length > 0 && sdTokens[0] === bFirst;
     });
     if (firstMatch) return firstMatch;
@@ -11443,37 +11451,14 @@ async function syncShoppingPriceTotal(forceRefresh = false) {
  * Tries to parse quantity/unit from the Bring! specification field.
  */
 function _buildPricePayload() {
-    return shoppingItems.map((item) => {
-        // Look up the matching smart shopping item to get reliable qty/unit data.
-        // Bring! spec strings can be stale or free-text — don't trust them for calculations.
-        const nameLower = item.name.toLowerCase();
-        const smart = (smartShoppingItems || []).find(s =>
-            s.name.toLowerCase() === nameLower ||
-            (s.shopping_name || '').toLowerCase() === nameLower
-        );
-
-        let quantity       = smart?.suggested_qty  || 1;
-        let unit           = smart?.suggested_unit || smart?.unit || 'pz';
-        let default_quantity = smart?.default_qty  || 0;
-        let package_unit   = smart?.package_unit   || '';
-
-        // If no smart match, fall back to parsing the Bring! spec (last resort)
-        if (!smart) {
-            const spec = item.specification || '';
-            const qtyMatch = spec.match(/(\d+(?:[.,]\d+)?)\s*(g|kg|ml|l|pz|conf|lt|liter|litre)\b/i);
-            if (qtyMatch) {
-                quantity = parseFloat(qtyMatch[1].replace(',', '.'));
-                unit = qtyMatch[2].toLowerCase();
-            } else {
-                // Manually-added item with no spec: assume 1 confezione
-                // (most grocery items are bought as a single pack)
-                quantity = 1;
-                unit = 'conf';
-            }
-        }
-
-        return { name: item.name, quantity, unit, default_quantity, package_unit };
-    });
+    // One retail unit per list item — stable weekly total (server uses the same rule).
+    return shoppingItems.map((item) => ({
+        name: item.name,
+        quantity: 1,
+        unit: 'conf',
+        default_quantity: 0,
+        package_unit: '',
+    }));
 }
 
 /**
@@ -11618,10 +11603,7 @@ async function fetchAllPrices(forceRefresh = false) {
         const data = await api('get_all_shopping_prices', {}, 'POST', {
             items: itemsPayload,
             country, currency, lang,
-            // force_refresh=true only busts the 5-min total cache on the server;
-            // it never re-fetches AI prices (3-month per-item cache stays intact)
-            force_total: forceRefresh,
-            force_refresh: false,
+            force_refresh: forceRefresh,
         });
 
         if (data && data.success) {
@@ -12565,6 +12547,27 @@ async function renderShoppingItems() {
             const bgStyle = urgency && URGENCY_BG[urgency] ? ` style="background:${URGENCY_BG[urgency]}"` : '';
             const localTags = getShoppingTags(item.name);
 
+            const shoppingName = smartData?.shopping_name || item.name;
+            const isGenericGroup = smartData && shoppingName.toLowerCase() === item.name.toLowerCase()
+                && (smartData.name !== shoppingName || (smartData.variants || []).length > 0);
+            const displayName = isGenericGroup ? shoppingName : item.name;
+            let specificLineHtml = '';
+            if (isGenericGroup) {
+                const specText = _specDisplayText(item.specification);
+                let specifics = [];
+                if (specText) {
+                    specifics.push(specText);
+                } else {
+                    specifics.push(smartData.name + (smartData.brand ? ` (${smartData.brand})` : ''));
+                    for (const v of (smartData.variants || [])) {
+                        specifics.push(v.name + (v.brand ? ` (${v.brand})` : ''));
+                    }
+                }
+                if (specifics.length) {
+                    specificLineHtml = `<div class="shopping-item-specific">${escapeHtml(specifics.join(' · '))}</div>`;
+                }
+            }
+
             // Urgency badge
             let urgencyBadge = '';
             if (urgency && urgencyMap[urgency]) {
@@ -12597,10 +12600,11 @@ async function renderShoppingItems() {
                     <div class="shopping-item-top">
                         <div class="shopping-item-info">
                             <div class="shopping-item-name-row">
-                                <span class="shopping-item-name">${escapeHtml(item.name)}</span>
+                                <span class="shopping-item-name">${escapeHtml(displayName)}</span>
                                 <span class="shopping-item-scan-hint">📷</span>
                             </div>
-                            ${_specDisplayText(item.specification) ? `<div class="shopping-item-spec">${escapeHtml(_specDisplayText(item.specification))}</div>` : ''}
+                            ${specificLineHtml}
+                            ${(!isGenericGroup && _specDisplayText(item.specification)) ? `<div class="shopping-item-spec">${escapeHtml(_specDisplayText(item.specification))}</div>` : ''}
                             ${(urgencyBadge || freqBadge || localTagHtml) ? `<div class="shopping-item-badges">${urgencyBadge}${freqBadge}${localTagHtml}</div>` : ''}
                         </div>
                         ${priceEnabled ? `<div class="shopping-item-price-col" id="price-badge-${idx}"><span class="price-col-loading">…</span></div>` : ''}
@@ -16887,7 +16891,7 @@ function activateScreensaver() {
     updateScreensaverClock();
     _screensaverClockInterval = setInterval(updateScreensaverClock, 1000);
     updateScreensaverShopping();
-    syncShoppingPriceTotal(false);
+    syncShoppingPriceTotal(false).then(() => updateScreensaverShopping());
     // Load data and start fact/nutrition rotation
     loadScreensaverData().then(() => {
         _startScreensaverRotation();

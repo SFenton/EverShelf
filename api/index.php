@@ -1570,66 +1570,49 @@ function haInventorySensor(PDO $db): void {
             $daysToNextExpiry = (int)$diff->format('%r%a');
         }
 
-        // Shopping total from server-side total cache (max 24 hours old).
-        // The cache is populated by the JS frontend or by the ha_refresh_prices action.
-        // 24h TTL is sufficient: the total changes slowly and HA polls frequently.
+        // Shopping total from canonical weekly cache (same source as UI and screensaver).
         $priceEnabled  = env('PRICE_ENABLED', 'false') === 'true';
         $priceCurrency = env('PRICE_CURRENCY', 'EUR');
         $shoppingTotal = null;
         if ($priceEnabled) {
-            $totalCachePath = __DIR__ . '/../data/shopping_total_cache.json';
-            if (file_exists($totalCachePath)) {
-                $tc = json_decode(file_get_contents($totalCachePath), true) ?? [];
-                $best = null; $bestTs = 0;
-                foreach ($tc as $entry) {
-                    if (isset($entry['ts']) && $entry['ts'] > $bestTs) {
-                        $bestTs = $entry['ts'];
-                        $best   = $entry;
+            $country = env('PRICE_COUNTRY', 'Italia');
+            $shopNames = [];
+            if (isShoppingBringMode()) {
+                $auth = bringAuth();
+                if ($auth) {
+                    $listData = bringRequest('GET', "https://api.getbring.com/rest/v2/bringlists/{$auth['bringListUUID']}");
+                    foreach ($listData['purchase'] ?? [] as $item) {
+                        $shopNames[] = bringToItalian($item['name'] ?? '');
                     }
                 }
-                if ($best && (time() - $bestTs) < 86400) {
-                    $shoppingTotal = round((float)($best['result']['total'] ?? 0), 2);
+            } else {
+                $shopRows = $db->query("
+                    SELECT sl.name, COALESCE(p.shopping_name, sl.name) AS sname
+                    FROM shopping_list sl
+                    LEFT JOIN products p ON lower(p.name) = lower(sl.name)
+                ")->fetchAll(PDO::FETCH_ASSOC);
+                $seenNames = [];
+                foreach ($shopRows as $r) {
+                    $sname = $r['sname'] ?? $r['name'];
+                    if (isset($seenNames[$sname])) continue;
+                    $seenNames[$sname] = true;
+                    $shopNames[] = $sname;
                 }
             }
-            // If cache is absent or older than 24h, compute inline from the existing
-            // per-item price cache (no AI calls — fast, uses already-stored prices).
-            if ($shoppingTotal === null) {
-                $country  = env('PRICE_COUNTRY', 'Italia');
-                $priceCache = _loadPriceCache();
-                if (!empty($priceCache)) {
-                    $shopRows = $db->query("
-                        SELECT sl.name, COALESCE(p.shopping_name, sl.name) AS sname
-                        FROM shopping_list sl
-                        LEFT JOIN products p ON lower(p.name) = lower(sl.name)
-                    ")->fetchAll(PDO::FETCH_ASSOC);
-                    $inlineTotal = 0.0;
-                    $inlinePriced = 0;
-                    $seenNames = [];
-                    foreach ($shopRows as $r) {
-                        $sname = $r['sname'] ?? $r['name'];
-                        if (isset($seenNames[$sname])) continue; // deduplicate
-                        $seenNames[$sname] = true;
-                        $pk  = _priceKey($sname, $country);
-                        $pk0 = md5(mb_strtolower(trim($sname)) . '|' . mb_strtolower(trim($country)));
-                        $e   = $priceCache[$pk] ?? $priceCache[$pk0] ?? null;
-                        if ($e !== null) {
-                            $est = _calcEstimatedTotal(
-                                $e['price_per_unit'], $e['unit_label'] ?? '',
-                                1, 'pz', 0, ''
-                            );
-                            $inlineTotal += $est ?? 0;
-                            $inlinePriced++;
-                        }
-                    }
-                    if ($inlinePriced > 0) {
-                        $shoppingTotal = round($inlineTotal, 2);
-                        // Persist so next call is instant
-                        $tc2   = file_exists($totalCachePath) ? (json_decode(file_get_contents($totalCachePath), true) ?? []) : [];
-                        $ckey2 = 'ha_inline_' . date('Ymd_His');
-                        $tc2[$ckey2] = ['ts' => time(), 'result' => ['total' => $shoppingTotal, 'priced_items' => $inlinePriced]];
-                        if (count($tc2) >= 10) $tc2 = array_slice($tc2, -9, null, true);
-                        file_put_contents($totalCachePath, json_encode($tc2, JSON_UNESCAPED_UNICODE));
-                    }
+            if (!empty($shopNames)) {
+                $listHash = _shoppingListHash($shopNames, $country, $priceCurrency);
+                $cached = _loadCanonicalShoppingTotal($listHash);
+                if ($cached !== null) {
+                    $shoppingTotal = round((float)($cached['total'] ?? 0), 2);
+                } else {
+                    $computed = _computeAllShoppingPrices(
+                        array_map(static fn($n) => ['name' => $n], $shopNames),
+                        $country,
+                        $priceCurrency,
+                        'it',
+                        false
+                    );
+                    $shoppingTotal = round((float)($computed['total'] ?? 0), 2);
                 }
             }
         }
@@ -1810,15 +1793,15 @@ function haRefreshPrices(PDO $db): void {
     try {
         $country  = env('PRICE_COUNTRY', 'Italia');
         $currency = env('PRICE_CURRENCY', 'EUR');
+        $lang     = 'it';
 
-        // Get shopping list
-        $shoppingItems = [];
+        $clientItems = [];
         if (isShoppingBringMode()) {
             $auth = bringAuth();
             if ($auth) {
                 $listData = bringRequest('GET', "https://api.getbring.com/rest/v2/bringlists/{$auth['bringListUUID']}");
                 foreach ($listData['purchase'] ?? [] as $item) {
-                    $shoppingItems[] = ['name' => $item['name'], 'quantity' => 1, 'unit' => 'pz', 'default_quantity' => 0, 'package_unit' => ''];
+                    $clientItems[] = ['name' => bringToItalian($item['name'] ?? '')];
                 }
             }
         } else {
@@ -1827,45 +1810,24 @@ function haRefreshPrices(PDO $db): void {
                 FROM shopping_list sl
                 LEFT JOIN products p ON lower(p.name) = lower(sl.name)
             ")->fetchAll(PDO::FETCH_ASSOC);
-            $seenSnamesHa = [];
+            $seen = [];
             foreach ($rows as $r) {
                 $sname = $r['sname'] ?? $r['name'];
-                if (isset($seenSnamesHa[$sname])) continue;
-                $seenSnamesHa[$sname] = true;
-                $shoppingItems[] = ['name' => $sname, 'quantity' => 1, 'unit' => 'pz', 'default_quantity' => 0, 'package_unit' => ''];
+                if (isset($seen[$sname])) continue;
+                $seen[$sname] = true;
+                $clientItems[] = ['name' => $sname];
             }
         }
 
-        $priceCache = _loadPriceCache();
-        $total = 0.0;
-        $priced = 0;
-        $missing = [];
-
-        foreach ($shoppingItems as $item) {
-            $key  = _priceKey($item['name'], $country);
-            $key0 = md5(mb_strtolower(trim($item['name'])) . '|' . mb_strtolower(trim($country)));
-            $entry = $priceCache[$key] ?? $priceCache[$key0] ?? null;
-            if ($entry !== null) {
-                $est = _calcEstimatedTotal($entry['price_per_unit'], $entry['unit_label'] ?? '', $item['quantity'], $item['unit'], $item['default_quantity'], $item['package_unit']);
-                $total += $est ?? 0;
-                $priced++;
-            } else {
-                $missing[] = $item['name'];
-            }
-        }
-
-        $total = round($total, 2);
-
-        // Persist to total cache
-        $totalCachePath = __DIR__ . '/../data/shopping_total_cache.json';
-        $result = ['success' => true, 'total' => $total, 'total_label' => _formatPrice($total, $currency), 'priced_items' => $priced, 'missing_items' => count($missing)];
-        $tc = file_exists($totalCachePath) ? (json_decode(file_get_contents($totalCachePath), true) ?? []) : [];
-        $key = 'ha_refresh_' . date('Ymd');
-        $tc[$key] = ['ts' => time(), 'result' => $result];
-        if (count($tc) >= 10) $tc = array_slice($tc, -9, null, true);
-        file_put_contents($totalCachePath, json_encode($tc, JSON_UNESCAPED_UNICODE));
-
-        echo json_encode($result, JSON_UNESCAPED_UNICODE);
+        $result = _computeAllShoppingPrices($clientItems, $country, $currency, $lang, false);
+        $priced = count(array_filter($result['prices'] ?? [], static fn($e) => !empty($e['price_per_unit'])));
+        echo json_encode([
+            'success'       => true,
+            'total'         => $result['total'] ?? 0,
+            'total_label'   => $result['total_label'] ?? _formatPrice(0, $currency),
+            'priced_items'  => $priced,
+            'missing_items' => max(0, count($clientItems) - $priced),
+        ], JSON_UNESCAPED_UNICODE);
     } catch (Throwable $e) {
         http_response_code(500);
         echo json_encode(['error' => $e->getMessage()]);
@@ -3134,83 +3096,10 @@ function useFromInventory(PDO $db): void {
         $stmt = $db->prepare("SELECT SUM(quantity) as total FROM inventory WHERE product_id = ? AND quantity > 0");
         $stmt->execute([$productId]);
         $totalLeft = (float)($stmt->fetchColumn() ?: 0);
-        
+
         if ($totalLeft <= 0) {
-            // Get product name, brand and shopping_name for Bring!
-            $stmt = $db->prepare("SELECT name, brand, shopping_name FROM products WHERE id = ?");
-            $stmt->execute([$productId]);
-            $product = $stmt->fetch();
-            
-            if ($product) {
-                // Before adding to Bring!, check if the shopping_name family already
-                // has adequate stock from OTHER products (e.g. "Sale marino iodato" depleted
-                // but "Sale alimentare" has 1kg → no need to add to shopping list).
-                $sNameKey = strtolower(trim($product['shopping_name'] ?? ''));
-                $familyCoverage = 0;
-                if ($sNameKey !== '') {
-                    $covStmt = $db->prepare("
-                        SELECT SUM(i.quantity)
-                        FROM inventory i
-                        JOIN products p ON i.product_id = p.id
-                        WHERE LOWER(TRIM(p.shopping_name)) = ? AND i.product_id != ? AND i.quantity > 0
-                    ");
-                    $covStmt->execute([$sNameKey, $productId]);
-                    $familyCoverage = (float)($covStmt->fetchColumn() ?: 0);
-                }
-                if ($familyCoverage > 0) {
-                    // Family has stock — no need to restock, suppress Bring! add.
-                    // Set addedToBring=true so the JS fallback is also suppressed.
-                    $addedToBring = true;
-                } else {
-                try {
-                    $auth = bringAuth();
-                    if ($auth) {
-                        $listUUID = $auth['bringListUUID'];
-                        // Use the generic shopping name for Bring! (e.g. "Latte", "Affettato")
-                        $genericName = $product['shopping_name'] ?: computeShoppingName($product['name'], '', $product['brand']);
-                        $bringName   = italianToBring($genericName);
-                        
-                        // Check if already on the Bring! list
-                        $alreadyOnList = false;
-                        $listData = bringRequest('GET', "https://api.getbring.com/rest/v2/bringlists/{$listUUID}");
-                        if ($listData && isset($listData['purchase'])) {
-                            foreach ($listData['purchase'] as $existingItem) {
-                                if (strcasecmp($existingItem['name'] ?? '', $bringName) === 0) {
-                                    $alreadyOnList = true;
-                                    break;
-                                }
-                            }
-                        }
-                        
-                        if ($alreadyOnList) {
-                            // Already on the list, skip adding
-                            $addedToBring = false;
-                        } else {
-                        // Specification: specific product name (and brand) so the user knows which variant
-                        // Add 🛒 marker so the cron cleanup can auto-remove if no longer needed.
-                        $spec = $genericName !== $product['name']
-                            ? $product['name'] . ($product['brand'] ? ' · ' . $product['brand'] : '') . ' · 🛒 Esaurito'
-                            : ($product['brand'] ?: $product['name']) . ' · 🛒 Esaurito';
-                        $body = http_build_query([
-                            'uuid' => $listUUID,
-                            'purchase' => $bringName,
-                            'specification' => $spec,
-                        ]);
-                        $result = bringRequest('PUT', "https://api.getbring.com/rest/v2/bringlists/{$listUUID}", $body);
-                        $addedToBring = ($result !== null);
-                        
-                        // Log Bring! addition
-                        if ($addedToBring) {
-                            $logStmt = $db->prepare("INSERT INTO transactions (product_id, type, quantity, location, notes) VALUES (?, 'bring', 0, '', 'Auto-aggiunto a Bring!')");
-                            $logStmt->execute([$productId]);
-                        }
-                        } // end else (not already on list)
-                    }
-                } catch (Exception $e) {
-                    // Silently fail — don't block inventory operation
-                }
-                } // end else (family not covered)
-            }
+            $bringResult = bringAddDepletedProduct($db, $productId);
+            $addedToBring = !empty($bringResult['added']) || !empty($bringResult['updated']);
         }
     }
     
@@ -3611,7 +3500,9 @@ function confirmFinished(PDO $db): void {
     }
 
     $db->prepare("DELETE FROM inventory WHERE product_id = ? AND quantity <= 0")->execute([$productId]);
-    echo json_encode(['success' => true]);
+
+    $bring = bringAddDepletedProduct($db, $productId);
+    echo json_encode(['success' => true, 'bring' => $bring], JSON_UNESCAPED_UNICODE);
 }
 
 /**
@@ -4762,6 +4653,7 @@ function getServerSettings(): void {
         'price_country' => env('PRICE_COUNTRY', 'Italia'),
         'price_currency' => env('PRICE_CURRENCY', 'EUR'),
         'price_update_months' => (int)env('PRICE_UPDATE_MONTHS', '3'),
+        'price_update_weeks' => (int)env('PRICE_UPDATE_WEEKS', '1'),
         'recipe_retention_days' => (int)env('RECIPE_RETENTION_DAYS', '7'),
         'transaction_retention_days' => (int)env('TRANSACTION_RETENTION_DAYS', '90'),
         'vacuum_expiry_extension_days' => (int)env('VACUUM_EXPIRY_EXTENSION_DAYS', '30'),
@@ -8624,6 +8516,116 @@ function bringGetList(): void {
     }
 }
 
+/**
+ * Add or update a depleted product on Bring! under its generic shopping_name.
+ * If the generic item is already on the list, appends the specific variant to the specification.
+ */
+function bringAddDepletedProduct(PDO $db, int $productId): array {
+    $out = ['added' => false, 'updated' => false, 'skipped' => false, 'generic_name' => ''];
+
+    $stmt = $db->prepare("SELECT name, brand, shopping_name FROM products WHERE id = ?");
+    $stmt->execute([$productId]);
+    $product = $stmt->fetch(PDO::FETCH_ASSOC);
+    if (!$product) {
+        $out['skipped'] = true;
+        return $out;
+    }
+
+    $sNameKey = strtolower(trim($product['shopping_name'] ?? ''));
+    if ($sNameKey !== '') {
+        $covStmt = $db->prepare("
+            SELECT SUM(i.quantity)
+            FROM inventory i
+            JOIN products p ON i.product_id = p.id
+            WHERE LOWER(TRIM(p.shopping_name)) = ? AND i.product_id != ? AND i.quantity > 0
+        ");
+        $covStmt->execute([$sNameKey, $productId]);
+        if ((float)($covStmt->fetchColumn() ?: 0) > 0) {
+            $out['skipped'] = true;
+            return $out;
+        }
+    }
+
+    $auth = bringAuth();
+    if (!$auth) {
+        $out['skipped'] = true;
+        return $out;
+    }
+    $listUUID = $auth['bringListUUID'] ?? '';
+    if ($listUUID === '') {
+        $out['skipped'] = true;
+        return $out;
+    }
+
+    $genericName = $product['shopping_name'] ?: computeShoppingName($product['name'], '', $product['brand'] ?? '');
+    $out['generic_name'] = $genericName;
+    $bringName = italianToBring($genericName);
+    $bringKey  = strtolower($bringName);
+
+    $specificLine = $genericName !== $product['name']
+        ? $product['name'] . (!empty($product['brand']) ? ' · ' . $product['brand'] : '')
+        : (!empty($product['brand']) ? $product['brand'] : $product['name']);
+    $finishedMarker = '🛒 Esaurito';
+
+    $listData = bringRequest('GET', "https://api.getbring.com/rest/v2/bringlists/{$listUUID}");
+    $existingSpec = '';
+    $alreadyOnList = false;
+    if ($listData && isset($listData['purchase'])) {
+        foreach ($listData['purchase'] as $existingItem) {
+            if (strcasecmp($existingItem['name'] ?? '', $bringName) === 0) {
+                $alreadyOnList = true;
+                $existingSpec = $existingItem['specification'] ?? '';
+                break;
+            }
+        }
+    }
+
+    if ($alreadyOnList) {
+        $newSpec = $existingSpec;
+        if ($specificLine !== '' && mb_stripos($existingSpec, $specificLine) === false) {
+            $base = trim(preg_replace('/\s*·\s*🛒\s*Esaurito\s*$/u', '', $existingSpec) ?? $existingSpec);
+            $newSpec = $base !== ''
+                ? $base . ' · ' . $specificLine . ' · ' . $finishedMarker
+                : $specificLine . ' · ' . $finishedMarker;
+        } elseif ($existingSpec === '' || mb_stripos($existingSpec, $finishedMarker) === false) {
+            $newSpec = trim($existingSpec) !== ''
+                ? trim($existingSpec) . ' · ' . $finishedMarker
+                : $specificLine . ' · ' . $finishedMarker;
+        }
+        if ($newSpec === $existingSpec) {
+            $out['skipped'] = true;
+            return $out;
+        }
+        $body = http_build_query([
+            'uuid' => $listUUID,
+            'purchase' => $bringName,
+            'specification' => $newSpec,
+        ]);
+        if (bringRequest('PUT', "https://api.getbring.com/rest/v2/bringlists/{$listUUID}", $body) !== null) {
+            $out['updated'] = true;
+            @unlink(__DIR__ . '/../data/smart_shopping_cache.json');
+        }
+        return $out;
+    }
+
+    $spec = $genericName !== $product['name']
+        ? $specificLine . ' · ' . $finishedMarker
+        : $specificLine . ' · ' . $finishedMarker;
+    $body = http_build_query([
+        'uuid' => $listUUID,
+        'purchase' => $bringName,
+        'specification' => $spec,
+    ]);
+    if (bringRequest('PUT', "https://api.getbring.com/rest/v2/bringlists/{$listUUID}", $body) !== null) {
+        $out['added'] = true;
+        $logStmt = $db->prepare("INSERT INTO transactions (product_id, type, quantity, location, notes) VALUES (?, 'bring', 0, '', 'Auto-aggiunto a Bring!')");
+        $logStmt->execute([$productId]);
+        @unlink(__DIR__ . '/../data/smart_shopping_cache.json');
+        _fireHaWebhook('shopping_add', ['item' => $genericName, 'specification' => $spec]);
+    }
+    return $out;
+}
+
 function bringAddItems(): void {
     $auth = bringAuth();
     if (!$auth) {
@@ -10936,6 +10938,179 @@ function _priceKey(string $name, string $country): string {
     return md5(mb_strtolower(trim($name)) . '|' . mb_strtolower(trim($country)) . '|v3');
 }
 
+/** Max age for cached unit prices and canonical shopping total (default: 1 week). */
+function _shoppingPriceMaxAgeSeconds(): int {
+    $weeks = (int)env('PRICE_UPDATE_WEEKS', '1');
+    if ($weeks > 0) return $weeks * 7 * 86400;
+    $months = (int)env('PRICE_UPDATE_MONTHS', '3');
+    return max(7 * 86400, $months * 30 * 86400);
+}
+
+function _shoppingListHash(array $names, string $country, string $currency): string {
+    $sorted = array_values(array_unique(array_map(
+        static fn($n) => mb_strtolower(trim((string)$n)),
+        array_filter($names, static fn($n) => trim((string)$n) !== '')
+    )));
+    sort($sorted);
+    return md5(json_encode($sorted, JSON_UNESCAPED_UNICODE) . '|' . mb_strtolower(trim($country)) . '|' . mb_strtolower(trim($currency)));
+}
+
+function _loadCanonicalShoppingTotal(string $listHash): ?array {
+    $path = __DIR__ . '/../data/shopping_total_cache.json';
+    if (!file_exists($path)) return null;
+    $tc = json_decode(file_get_contents($path), true) ?? [];
+    $entry = $tc['_canonical'] ?? null;
+    if (!$entry || ($entry['list_hash'] ?? '') !== $listHash) return null;
+    if (time() - (int)($entry['ts'] ?? 0) >= _shoppingPriceMaxAgeSeconds()) return null;
+    $result = $entry['result'] ?? null;
+    return is_array($result) ? $result : null;
+}
+
+function _saveCanonicalShoppingTotal(string $listHash, array $result): void {
+    $path = __DIR__ . '/../data/shopping_total_cache.json';
+    $tc = file_exists($path) ? (json_decode(file_get_contents($path), true) ?? []) : [];
+    $tc['_canonical'] = ['ts' => time(), 'list_hash' => $listHash, 'result' => $result];
+    file_put_contents($path, json_encode($tc, JSON_UNESCAPED_UNICODE));
+}
+
+/**
+ * Stable shopping-list items for price totals: one retail unit per list entry.
+ * Avoids day-to-day swings from smart-shopping suggested quantities.
+ */
+function _shoppingListPriceItems(array $clientItems): array {
+    $items = [];
+    foreach ($clientItems as $ci) {
+        $name = trim($ci['name'] ?? '');
+        if ($name === '') continue;
+        $items[] = [
+            'name'             => $name,
+            'quantity'         => 1,
+            'unit'             => 'conf',
+            'default_quantity' => 0,
+            'package_unit'     => '',
+        ];
+    }
+    return $items;
+}
+
+/**
+ * Compute shopping list prices + canonical total (shared by UI, HA and screensaver).
+ */
+function _computeAllShoppingPrices(array $clientItems, string $country, string $currency, string $lang, bool $forceRefresh): array {
+    $items = _shoppingListPriceItems($clientItems);
+    if (empty($items)) {
+        return [
+            'success' => true,
+            'prices' => [],
+            'total' => 0,
+            'total_label' => _formatPrice(0, $currency),
+            'from_total_cache' => false,
+        ];
+    }
+
+    $names = array_column($items, 'name');
+    $listHash = _shoppingListHash($names, $country, $currency);
+
+    if (!$forceRefresh) {
+        $cached = _loadCanonicalShoppingTotal($listHash);
+        if ($cached !== null) {
+            $cached['from_total_cache'] = true;
+            return $cached;
+        }
+    }
+
+    $priceCache = _loadPriceCache();
+    $now = time();
+    $maxAge = _shoppingPriceMaxAgeSeconds();
+    $prices = [];
+    $total = 0.0;
+    $missing = [];
+
+    foreach ($items as $item) {
+        $name = $item['name'];
+        $key = _priceKey($name, $country);
+        $key0 = md5(mb_strtolower(trim($name)) . '|' . mb_strtolower(trim($country)));
+        $entry = $priceCache[$key] ?? $priceCache[$key0] ?? null;
+        if ($entry !== null && !$forceRefresh) {
+            $est = _calcEstimatedTotal($entry['price_per_unit'], $entry['unit_label'] ?? '', $item['quantity'], $item['unit'], $item['default_quantity'], $item['package_unit']);
+            $prices[$name] = array_merge($entry, [
+                'estimated_total'       => $est,
+                'estimated_total_label' => $est !== null ? _formatPrice($est, $currency) : null,
+                'from_cache'            => true,
+                '_resolved_qty'         => $item['quantity'],
+                '_resolved_unit'        => $item['unit'],
+            ]);
+            $total += $est ?? 0;
+            continue;
+        }
+        if ($entry !== null && $forceRefresh && ($now - (int)($entry['cached_at'] ?? 0)) < $maxAge) {
+            $est = _calcEstimatedTotal($entry['price_per_unit'], $entry['unit_label'] ?? '', $item['quantity'], $item['unit'], $item['default_quantity'], $item['package_unit']);
+            $prices[$name] = array_merge($entry, [
+                'estimated_total'       => $est,
+                'estimated_total_label' => $est !== null ? _formatPrice($est, $currency) : null,
+                'from_cache'            => true,
+                '_resolved_qty'         => $item['quantity'],
+                '_resolved_unit'        => $item['unit'],
+            ]);
+            $total += $est ?? 0;
+            continue;
+        }
+        if ($entry === null || $forceRefresh) {
+            $missing[] = $item;
+        }
+    }
+
+    if (!empty($missing)) {
+        $missingNames = array_column($missing, 'name');
+        $batchPrices = _fetchPricesBatchFromAI($missingNames, $country, $currency, $lang);
+        $missingByName = [];
+        foreach ($missing as $item) $missingByName[$item['name']] = $item;
+
+        foreach ($missingNames as $name) {
+            $item = $missingByName[$name];
+            $key = _priceKey($name, $country);
+            $priceData = $batchPrices[$name] ?? null;
+            if ($priceData && isset($priceData['price_per_unit'])) {
+                $entry = [
+                    'name'           => $name,
+                    'price_per_unit' => (float)$priceData['price_per_unit'],
+                    'unit_label'     => $priceData['unit_label'] ?? 'pz',
+                    'currency'       => $currency,
+                    'source_note'    => $priceData['source_note'] ?? '',
+                    'country'        => $country,
+                    'cached_at'      => $now,
+                ];
+                $priceCache[$key] = $entry;
+                $est = _calcEstimatedTotal($entry['price_per_unit'], $entry['unit_label'], $item['quantity'], $item['unit'], $item['default_quantity'], $item['package_unit']);
+                $prices[$name] = array_merge($entry, [
+                    'estimated_total'       => $est,
+                    'estimated_total_label' => $est !== null ? _formatPrice($est, $currency) : null,
+                    'from_cache'            => false,
+                    '_resolved_qty'         => $item['quantity'],
+                    '_resolved_unit'        => $item['unit'],
+                ]);
+                $total += $est ?? 0;
+            } else {
+                $prices[$name] = ['name' => $name, 'error' => 'not_found', 'estimated_total' => null];
+            }
+        }
+        _savePriceCache($priceCache);
+    }
+
+    $total = round($total, 2);
+    $result = [
+        'success'          => true,
+        'prices'           => $prices,
+        'total'            => $total,
+        'total_label'      => _formatPrice($total, $currency),
+        'from_total_cache' => false,
+        'priced_at'        => $now,
+        'valid_until'      => $now + $maxAge,
+    ];
+    _saveCanonicalShoppingTotal($listHash, $result);
+    return $result;
+}
+
 /**
  * Ask Gemini for the estimated retail price per unit (kg, l, pz as appropriate)
  * for a product in a given country/currency. Returns an array:
@@ -11082,7 +11257,7 @@ function getShoppingPrice(PDO $db): void {
     $currency= trim($input['currency']         ?? env('PRICE_CURRENCY', 'EUR'));
     $lang    = trim($input['lang']             ?? 'it');
     $forceRefresh = !empty($input['force_refresh']);
-    $updateMonths = (int)env('PRICE_UPDATE_MONTHS', '3');
+    $maxAge = _shoppingPriceMaxAgeSeconds();
 
     if (empty($name)) {
         echo json_encode(['success' => false, 'error' => 'missing name']);
@@ -11098,7 +11273,6 @@ function getShoppingPrice(PDO $db): void {
     $cache = _loadPriceCache();
     $key   = _priceKey($name, $country);
     $now   = time();
-    $maxAge = $updateMonths * 30 * 86400;
 
     // Use cache if fresh
     if (!$forceRefresh && isset($cache[$key])) {
@@ -11148,7 +11322,6 @@ function getShoppingPrice(PDO $db): void {
  */
 function getAllShoppingPrices(PDO $db): void {
     EverLog::info('getAllShoppingPrices');
-    // This endpoint may call the AI for many items at once — extend timeout.
     set_time_limit(120);
 
     $input    = json_decode(file_get_contents('php://input'), true) ?? [];
@@ -11156,182 +11329,9 @@ function getAllShoppingPrices(PDO $db): void {
     $country  = trim($input['country']  ?? env('PRICE_COUNTRY', 'Italia'));
     $currency = trim($input['currency'] ?? env('PRICE_CURRENCY', 'EUR'));
     $lang     = trim($input['lang']     ?? 'it');
-    $forceRefresh = !empty($input['force_refresh']); // re-fetch AI prices (expensive, rarely used)
-    $forceTotal   = !empty($input['force_total']);   // bust only the 5-min total cache (fast)
-    $updateMonths = (int)env('PRICE_UPDATE_MONTHS', '3');
+    $forceRefresh = !empty($input['force_refresh']);
 
-    if (empty($clientItems)) {
-        echo json_encode(['success' => true, 'prices' => [], 'total' => 0, 'total_label' => _formatPrice(0, $currency)]);
-        return;
-    }
-
-    // ── Resolve qty/unit from server-side smart cache (source of truth) ──────
-    $smartItems = [];
-    $smartCacheFile = __DIR__ . '/../data/smart_shopping_cache.json';
-    if (file_exists($smartCacheFile)) {
-        $raw = file_get_contents($smartCacheFile);
-        if ($raw) {
-            $sc = json_decode($raw, true);
-            if ($sc && isset($sc['items'])) $smartItems = $sc['items'];
-        }
-    }
-    // Build lookup: lowercase name/shopping_name → smart item
-    $smartByName = [];
-    foreach ($smartItems as $si) {
-        $smartByName[mb_strtolower($si['name'] ?? '')] = $si;
-        if (!empty($si['shopping_name'])) {
-            $smartByName[mb_strtolower($si['shopping_name'])] = $si;
-        }
-    }
-
-    // Build canonical items array using server-side qty/unit
-    $items = [];
-    foreach ($clientItems as $ci) {
-        $name = trim($ci['name'] ?? '');
-        if ($name === '') continue;
-
-        // 1) Exact match by name or shopping_name
-        $si = $smartByName[mb_strtolower($name)] ?? null;
-
-        // 2) Prefix-word fallback: "Salame" → "Salame Paesano", "Penne" → "Penne rigate"
-        //    Match when the Bring! name is a word-prefix of a smart key (case-insensitive).
-        if ($si === null) {
-            $nameLower = mb_strtolower($name);
-            foreach ($smartByName as $smartKey => $candidate) {
-                // smartKey starts with the Bring! name (exact word boundary)
-                if (str_starts_with($smartKey, $nameLower)
-                    && (strlen($smartKey) === strlen($nameLower) || $smartKey[strlen($nameLower)] === ' ')) {
-                    $si = $candidate;
-                    break;
-                }
-            }
-        }
-
-        $items[] = [
-            'name'             => $name,
-            'quantity'         => (float)(($si['suggested_qty']  ?? $si['buy_qty'] ?? null) ?? ($ci['quantity'] ?? 1)),
-            'unit'             => trim(($si['suggested_unit'] ?? $si['unit'] ?? null) ?? ($ci['unit'] ?? 'conf')),
-            'default_quantity' => (float)(($si['default_qty'] ?? null) ?? ($ci['default_quantity'] ?? 0)),
-            'package_unit'     => trim(($si['package_unit'] ?? null) ?? ($ci['package_unit'] ?? '')),
-        ];
-    }
-
-    // ── 5-minute server-side total cache ──────────────────────────────────────
-    // Key = hash of item names + resolved qty/unit + country (not force_refresh)
-    $totalCachePath = __DIR__ . '/../data/shopping_total_cache.json';
-    $totalCacheKey  = md5(json_encode(array_map(
-        fn($i) => [$i['name'], $i['quantity'], $i['unit']],
-        $items
-    )) . $country . $currency);
-
-    if (!$forceRefresh && !$forceTotal && file_exists($totalCachePath)) {
-        $tc = json_decode(file_get_contents($totalCachePath), true) ?? [];
-        if (isset($tc[$totalCacheKey]) && (time() - ($tc[$totalCacheKey]['ts'] ?? 0)) < 300) {
-            $cached = $tc[$totalCacheKey]['result'];
-            $cached['from_total_cache'] = true;
-            echo json_encode($cached, JSON_UNESCAPED_UNICODE);
-            return;
-        }
-    }
-
-    // ── Price computation ─────────────────────────────────────────────────────
-    $priceCache = _loadPriceCache();
-    $now        = time();
-    $maxAge     = $updateMonths * 30 * 86400;
-    $prices     = [];
-    $total      = 0.0;
-    $missing    = [];
-
-    // First pass: serve from cache
-    foreach ($items as $item) {
-        $name    = $item['name'];
-        $qty     = $item['quantity'];
-        $unit    = $item['unit'];
-        $defQty  = $item['default_quantity'];
-        $pkgUnit = $item['package_unit'];
-
-        $key = _priceKey($name, $country);
-        if (!$forceRefresh && isset($priceCache[$key])) {
-            $age = $now - ($priceCache[$key]['cached_at'] ?? 0);
-            if ($age < $maxAge) {
-                $entry = $priceCache[$key];
-                $est = _calcEstimatedTotal($entry['price_per_unit'], $entry['unit_label'] ?? '', $qty, $unit, $defQty, $pkgUnit);
-                $prices[$name] = array_merge($entry, [
-                    'estimated_total'       => $est,
-                    'estimated_total_label' => $est !== null ? _formatPrice($est, $currency) : null,
-                    'from_cache'            => true,
-                    '_resolved_qty'         => $qty,
-                    '_resolved_unit'        => $unit,
-                ]);
-                $total += $est ?? 0;
-                continue;
-            }
-        }
-        $missing[] = $item;
-    }
-
-    // Second pass: fetch ALL missing items in ONE batch Gemini call
-    if (!empty($missing)) {
-        $missingNames = array_column($missing, 'name');
-        $batchPrices  = _fetchPricesBatchFromAI($missingNames, $country, $currency, $lang);
-
-        // Build a lookup from item name → item params
-        $missingByName = [];
-        foreach ($missing as $item) $missingByName[$item['name']] = $item;
-
-        foreach ($missingNames as $name) {
-            $item    = $missingByName[$name];
-            $qty     = $item['quantity'];
-            $unit    = $item['unit'];
-            $defQty  = $item['default_quantity'];
-            $pkgUnit = $item['package_unit'];
-            $key     = _priceKey($name, $country);
-
-            $priceData = $batchPrices[$name] ?? null;
-            if ($priceData && isset($priceData['price_per_unit'])) {
-                $entry = [
-                    'name'           => $name,
-                    'price_per_unit' => (float)$priceData['price_per_unit'],
-                    'unit_label'     => $priceData['unit_label'] ?? 'pz',
-                    'currency'       => $currency,
-                    'source_note'    => $priceData['source_note'] ?? '',
-                    'country'        => $country,
-                    'cached_at'      => $now,
-                ];
-                $priceCache[$key] = $entry;
-                $est = _calcEstimatedTotal($entry['price_per_unit'], $entry['unit_label'], $qty, $unit, $defQty, $pkgUnit);
-                $prices[$name] = array_merge($entry, [
-                    'estimated_total'       => $est,
-                    'estimated_total_label' => $est !== null ? _formatPrice($est, $currency) : null,
-                    'from_cache'            => false,
-                    '_resolved_qty'         => $qty,
-                    '_resolved_unit'        => $unit,
-                ]);
-                $total += $est ?? 0;
-            } else {
-                $prices[$name] = ['name' => $name, 'error' => 'not_found', 'estimated_total' => null];
-            }
-        }
-    }
-
-    _savePriceCache($priceCache);
-
-    $total  = round($total, 2);
-    $result = [
-        'success'          => true,
-        'prices'           => $prices,
-        'total'            => $total,
-        'total_label'      => _formatPrice($total, $currency),
-        'from_total_cache' => false,
-    ];
-
-    // Persist to total cache
-    $tc = file_exists($totalCachePath) ? (json_decode(file_get_contents($totalCachePath), true) ?? []) : [];
-    // Keep cache small: max 10 keys (different list configurations)
-    if (count($tc) >= 10) $tc = array_slice($tc, -9, null, true);
-    $tc[$totalCacheKey] = ['ts' => $now, 'result' => $result];
-    file_put_contents($totalCachePath, json_encode($tc, JSON_UNESCAPED_UNICODE));
-
+    $result = _computeAllShoppingPrices($clientItems, $country, $currency, $lang, $forceRefresh);
     echo json_encode($result, JSON_UNESCAPED_UNICODE);
 }
 
