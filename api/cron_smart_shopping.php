@@ -44,9 +44,10 @@ try {
     $itemCount = count($decoded['items'] ?? []);
     echo '[' . date('Y-m-d H:i:s') . '] OK — ' . $itemCount . " items cached\n";
 
-    // ── Bring! server-side cleanup ────────────────────────────────────────
-    // After computing smart shopping, automatically remove stale Bring! items
-    // and add/update critical ones. This runs fully server-side every cron cycle.
+    // ── Bring! server-side sync ───────────────────────────────────────────
+    // After computing smart shopping, remove stale Bring! items and push every
+    // product that needs restocking (esauriti, quasi finiti, previsione).
+    // Runs fully server-side every cron cycle (~5 min).
     try {
         $cleanupResult = bringCleanupObsolete($db);
         if (isset($cleanupResult['skipped'])) {
@@ -57,12 +58,32 @@ try {
                 . ($cleanupResult['errors'] ? ', errors: ' . $cleanupResult['errors'] : '') . "\n";
         }
 
+        $dedupeResult = bringDedupeGenerics($db);
+        if (isset($dedupeResult['skipped'])) {
+            echo '[' . date('Y-m-d H:i:s') . '] Bring! dedupe skipped: ' . $dedupeResult['skipped'] . "\n";
+        } else {
+            echo '[' . date('Y-m-d H:i:s') . '] Bring! dedupe — removed: ' . ($dedupeResult['removed'] ?? 0)
+                . ', merged specs: ' . ($dedupeResult['merged'] ?? 0) . "\n";
+        }
+
+        $specsResult = bringSyncSpecs($db);
+        if (isset($specsResult['skipped'])) {
+            echo '[' . date('Y-m-d H:i:s') . '] Bring! specs skipped: ' . $specsResult['skipped'] . "\n";
+        } else {
+            echo '[' . date('Y-m-d H:i:s') . '] Bring! specs — updated: ' . ($specsResult['updated'] ?? 0) . "\n";
+        }
+
         $addResult = bringAutoAddCritical($db);
         if (isset($addResult['skipped'])) {
             echo '[' . date('Y-m-d H:i:s') . '] Bring! auto-add skipped: ' . $addResult['skipped'] . "\n";
         } else {
             echo '[' . date('Y-m-d H:i:s') . '] Bring! auto-add — added: ' . ($addResult['added'] ?? 0)
                 . ', updated specs: ' . ($addResult['updated'] ?? 0) . "\n";
+        }
+
+        $dedupeFinal = bringDedupeGenerics($db);
+        if (!isset($dedupeFinal['skipped']) && (($dedupeFinal['removed'] ?? 0) > 0)) {
+            echo '[' . date('Y-m-d H:i:s') . '] Bring! dedupe (final) — removed: ' . ($dedupeFinal['removed'] ?? 0) . "\n";
         }
     } catch (Throwable $be) {
         echo '[' . date('Y-m-d H:i:s') . '] Bring! sync warning: ' . $be->getMessage() . "\n";

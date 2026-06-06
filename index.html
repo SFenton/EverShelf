@@ -11,11 +11,21 @@
     <title>EverShelf</title>
     <link rel="manifest" href="manifest.json">
     <link rel="icon" type="image/png" href="assets/img/logo/logo_icon.png">
-    <link rel="stylesheet" href="assets/css/style.css?v=20260603a">
+    <link rel="stylesheet" href="assets/css/style.css?v=20260606g">
     <!-- Core modules (auth, DOM helpers) -->
     <script src="assets/js/core/dom.js?v=20260603a"></script>
     <script src="assets/js/core/auth.js?v=20260603b"></script>
-    <!-- QuaggaJS — local vendor with CDN fallback -->
+    <!-- ZBar WASM — fast barcode engine (primary fallback when native API missing/slow) -->
+    <script src="assets/vendor/zbar/index.js?v=20260606a"></script>
+    <script>
+    if (window.zbarWasm && zbarWasm.setModuleArgs) {
+        zbarWasm.setModuleArgs({
+            locateFile: (file) => 'assets/vendor/zbar/' + file
+        });
+    }
+    </script>
+    <script src="assets/vendor/zbar/polyfill.js?v=20260606a"></script>
+    <!-- QuaggaJS — legacy last-resort only -->
     <script src="assets/vendor/quagga/quagga.min.js?v=20260603a"></script>
     <script>if(typeof Quagga==='undefined'){document.write('<script src="https://cdn.jsdelivr.net/npm/@ericblade/quagga2@1.8.4/dist/quagga.min.js"><\\/script>');}</script>
     <!-- @xenova/transformers: ES-module bootstrap that exposes a lazy category-classifier as window._categoryPipelinePromise -->
@@ -31,13 +41,25 @@
                 try {
                     const localBase = 'assets/vendor/transformers/';
                     const cdnBase = 'https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.2/dist/';
+                    const modelProbe = localBase + 'Xenova/all-MiniLM-L6-v2/tokenizer.json';
                     let pipeline, env;
                     try {
                         ({ pipeline, env } = await import(localBase + 'transformers.min.js'));
                     } catch (_) {
                         ({ pipeline, env } = await import(cdnBase + 'transformers.min.js'));
                     }
-                    env.localModelPath = localBase;
+                    // Use bundled model files when present; otherwise HuggingFace CDN (no 404 spam)
+                    let localModels = false;
+                    try {
+                        const r = await fetch(modelProbe, { method: 'HEAD' });
+                        localModels = r.ok;
+                    } catch (_) {}
+                    if (localModels) {
+                        env.localModelPath = localBase;
+                        env.allowLocalModels = true;
+                    } else {
+                        env.allowLocalModels = false;
+                    }
                     env.allowRemoteModels = true;
                     env.useBrowserCache   = true;
                     const pipe = await pipeline(
@@ -268,7 +290,7 @@
                 <div class="scan-ai-overlay" id="scan-ai-overlay" style="display:none">
                     <div class="scan-ai-overlay-inner">
                         <div class="loading-spinner"></div>
-                        <span class="scan-ai-overlay-label">Gemini Vision</span>
+                        <span class="scan-ai-overlay-label" data-i18n="scan.ai_overlay_label">Gemini Vision</span>
                         <span class="scan-ai-overlay-msg" id="scan-ai-overlay-msg"></span>
                     </div>
                 </div>
@@ -290,8 +312,8 @@
             <!-- Scan errors -->
             <div class="scan-result" id="scan-result" style="display:none"></div>
 
-            <!-- AI retry button (shown after visual identification fails) -->
-            <button class="btn btn-accent scan-ai-retry-btn" id="scan-ai-retry-btn" style="display:none" onclick="_retryAiScan()" data-i18n="scan.ai_retry_btn">🤖 Riprova con AI</button>
+            <!-- Manual AI identification (only when user taps — never automatic) -->
+            <button class="btn btn-accent scan-ai-manual-btn" id="scan-ai-manual-btn" type="button" style="display:none" onclick="_triggerManualAiScan()" data-i18n="scan.ai_manual_btn">🤖 Identifica con AI</button>
 
             <!-- Recent scans -->
             <div class="scan-recents" id="scan-recents" style="display:none">
@@ -1203,14 +1225,7 @@
                         <button class="btn btn-small btn-secondary mt-2" onclick="loadCameraDevices()" data-i18n="settings.camera.detect_btn">🔄 Rileva fotocamere</button>
                     </div>
                     <div class="form-group" style="margin-top:14px">
-                        <label class="toggle-row">
-                            <span data-i18n="settings.camera.ai_fallback_label">Identificazione visiva AI (fallback 5s)</span>
-                            <span class="toggle-switch">
-                                <input type="checkbox" id="setting-barcode-ai-fallback">
-                                <span class="toggle-slider"></span>
-                            </span>
-                        </label>
-                        <p class="settings-hint mt-2" data-i18n="settings.camera.ai_fallback_hint">Se il codice a barre non viene letto entro 5 secondi, un fotogramma viene inviato automaticamente all'AI per identificare visivamente il prodotto. Richiede Gemini configurato.</p>
+                        <p class="settings-hint" data-i18n="settings.camera.ai_manual_hint">Se il barcode non si legge, usa il pulsante «Identifica con AI» sotto la fotocamera. Richiede Gemini configurato.</p>
                     </div>
                 </div>
             </div>
@@ -1860,7 +1875,7 @@
                 <p class="recipe-regen-choice-title" data-i18n="recipes.regen_choice_title">Cosa vuoi fare con questa ricetta?</p>
                 <button class="btn btn-large btn-warning full-width" onclick="doRegenerateReplace()" data-i18n="recipes.regen_replace">🔄 Genera un'altra (scarta questa)</button>
                 <button class="btn btn-large btn-success full-width mt-2" onclick="doRegenerateSave()" data-i18n="recipes.regen_save_new">💾 Salva nell'archivio e genera nuova</button>
-                <button class="btn btn-large btn-ghost full-width mt-2" onclick="cancelRegenChoice()" data-i18n="action.cancel">Annulla</button>
+                <button class="btn btn-large btn-ghost full-width mt-2" onclick="cancelRegenChoice()" data-i18n="confirm.cancel">Annulla</button>
             </div>
             <button class="btn btn-large btn-primary full-width mt-2" onclick="closeRecipeDialog()" data-i18n="recipes.close_btn">
                 ✅ Chiudi
@@ -1970,6 +1985,6 @@
     </div>
 </div>
 
-<script src="assets/js/app.js?v=20260604f"></script>
+<script src="assets/js/app.js?v=20260606g"></script>
 </body>
 </html>

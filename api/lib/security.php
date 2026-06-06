@@ -156,7 +156,7 @@ function evershelfDemoReadOnlyActions(): array {
     return [
         'ping', 'check_update', 'health_check', 'get_settings', 'gemini_usage',
         'search_barcode', 'lookup_barcode', 'stock_for_name',
-        'product_get', 'products_list', 'products_search', 'inventory_search',
+        'product_get', 'products_list', 'products_search', 'inventory_search', 'ai_product_suggest',
         'inventory_list', 'inventory_summary', 'inventory_finished_items',
         'transactions_list', 'stats', 'monthly_stats', 'macro_stats',
         'consumption_predictions', 'inventory_anomalies', 'inventory_duplicate_loss_checks',

@@ -11,6 +11,11 @@
 // ── Core bootstrap (env, security, database, logger) ─────────────────────────
 require_once __DIR__ . '/bootstrap.php';
 
+const RECIPE_PANTRY_MIN_MATCH_SCORE = 80;
+const RECENTLY_EXHAUSTED_DAYS = 30;
+/** How long to suppress auto-re-add after user bought an item (ms, synced with client blocklist). */
+const BRING_PURCHASED_BLOCK_MS = 72 * 60 * 60 * 1000;
+
 // ── Global PHP error/exception reporters ─────────────────────────────────────
 // These are registered immediately so any crash anywhere in this file is caught.
 // The handler function _phpErrorReport() is defined later; PHP resolves function
@@ -728,6 +733,9 @@ try {
         case 'inventory_search':
             searchInventoryProducts($db);
             break;
+        case 'ai_product_suggest':
+            aiProductSuggest($db);
+            break;
 
         // ===== INVENTORY =====
         case 'inventory_list':
@@ -735,6 +743,9 @@ try {
             break;
         case 'inventory_add':
             addToInventory($db);
+            break;
+        case 'family_sibling_suggest':
+            familySiblingSuggest($db);
             break;
         case 'inventory_use':
             useFromInventory($db);
@@ -830,7 +841,7 @@ try {
             bringGetList();
             break;
         case 'bring_add':
-            bringAddItems();
+            bringAddItems($db);
             break;
         case 'bring_remove':
             bringRemoveItem();
@@ -840,6 +851,9 @@ try {
             break;
         case 'bring_migrate_names':
             bringMigrateNames($db);
+            break;
+        case 'bring_sync':
+            bringSyncFull($db, true);
             break;
         case 'bring_suggest':
             bringSuggestItems($db);
@@ -2085,26 +2099,40 @@ function getExpiryHistory($db): void {
         return;
     }
 
-    // Compute average shelf life (expiry_date - added_at) for this product
-    // Only use entries where expiry_date is clearly in the future relative to added_at
+    // Average shelf life from the last 3 insertions (expiry_date − added_at).
+    // Requires at least 3 valid samples before returning a prediction.
+    $minSamples = 3;
     $stmt = $db->prepare("
-        SELECT ROUND(AVG(CAST(JULIANDAY(expiry_date) - JULIANDAY(added_at) AS REAL))) AS avg_days,
-               COUNT(*) AS count
-        FROM inventory
-        WHERE product_id = ?
-          AND expiry_date IS NOT NULL
-          AND expiry_date > date(added_at)
-          AND added_at >= date('now', '-730 days')
+        SELECT ROUND(AVG(shelf_days)) AS avg_days, COUNT(*) AS count
+        FROM (
+            SELECT CAST(JULIANDAY(expiry_date) - JULIANDAY(added_at) AS REAL) AS shelf_days
+            FROM inventory
+            WHERE product_id = ?
+              AND expiry_date IS NOT NULL
+              AND expiry_date > date(added_at)
+              AND added_at >= date('now', '-730 days')
+            ORDER BY added_at DESC
+            LIMIT {$minSamples}
+        ) recent
     ");
     $stmt->execute([$productId]);
     $row = $stmt->fetch(PDO::FETCH_ASSOC);
+    $count = (int)($row['count'] ?? 0);
 
-    if (!$row || !$row['count'] || $row['avg_days'] === null) {
-        echo json_encode(['avg_days' => null, 'count' => 0]);
+    if ($count < $minSamples || $row['avg_days'] === null) {
+        echo json_encode([
+            'avg_days' => null,
+            'count' => $count,
+            'min_samples' => $minSamples,
+        ]);
         return;
     }
 
-    echo json_encode(['avg_days' => (int)$row['avg_days'], 'count' => (int)$row['count']]);
+    echo json_encode([
+        'avg_days' => (int)$row['avg_days'],
+        'count' => $count,
+        'min_samples' => $minSamples,
+    ]);
 }
 
 function clientLog(): void {
@@ -2614,6 +2642,130 @@ function searchInventoryProducts(PDO $db): void {
     echo json_encode(['items' => $stmt->fetchAll()]);
 }
 
+/**
+ * AI identification helper: in-stock, finished (zero qty), and catalog matches by name.
+ */
+function aiProductSuggest(PDO $db): void {
+    $input = json_decode(file_get_contents('php://input'), true) ?? [];
+    $q = trim((string)($input['q'] ?? ''));
+    $limit = (int)($input['limit'] ?? 5);
+    if ($limit < 1) {
+        $limit = 1;
+    }
+    if ($limit > 8) {
+        $limit = 8;
+    }
+
+    if ($q === '' || mb_strlen($q) < 2) {
+        echo json_encode(['success' => true, 'in_stock' => [], 'finished' => [], 'catalog' => []]);
+        return;
+    }
+
+    $like = "%{$q}%";
+    $prefix = mb_strtolower($q) . '%';
+    $exact = mb_strtolower($q);
+    $orderCase = "
+        CASE
+            WHEN lower(p.name) = ? THEN 0
+            WHEN lower(p.name) LIKE ? THEN 1
+            ELSE 2
+        END";
+
+    $inStockStmt = $db->prepare("
+        SELECT
+            p.id, p.name, p.brand, p.category, p.barcode, p.image_url, p.unit,
+            p.default_quantity, p.package_unit, p.notes,
+            SUM(i.quantity) AS total_qty,
+            GROUP_CONCAT(DISTINCT i.location) AS locations
+        FROM inventory i
+        JOIN products p ON p.id = i.product_id
+        WHERE i.quantity > 0
+          AND (p.name LIKE ? OR p.brand LIKE ?)
+        GROUP BY p.id
+        ORDER BY {$orderCase}, total_qty DESC, p.name ASC
+        LIMIT {$limit}
+    ");
+    $inStockStmt->execute([$like, $like, $exact, $prefix]);
+    $inStock = $inStockStmt->fetchAll(PDO::FETCH_ASSOC);
+    $inStockIds = array_map(fn($r) => (int)$r['id'], $inStock);
+
+    $finishedStmt = $db->prepare("
+        SELECT
+            p.id, p.name, p.brand, p.category, p.barcode, p.image_url, p.unit,
+            p.default_quantity, p.package_unit, p.notes,
+            COALESCE(SUM(CASE WHEN t.type = 'in'  AND t.undone = 0 THEN t.quantity ELSE 0 END), 0) AS total_in,
+            COALESCE(SUM(CASE WHEN t.type IN ('out','waste') AND t.undone = 0 THEN t.quantity ELSE 0 END), 0) AS total_out,
+            COALESCE((SELECT SUM(i2.quantity) FROM inventory i2 WHERE i2.product_id = p.id), 0) AS stock_qty,
+            (SELECT i4.location FROM inventory i4 WHERE i4.product_id = p.id ORDER BY i4.updated_at DESC LIMIT 1) AS location,
+            (SELECT i4.updated_at FROM inventory i4 WHERE i4.product_id = p.id ORDER BY i4.updated_at DESC LIMIT 1) AS updated_at
+        FROM products p
+        LEFT JOIN transactions t ON t.product_id = p.id
+        WHERE (p.name LIKE ? OR p.brand LIKE ?)
+        GROUP BY p.id
+        HAVING stock_qty <= 0.001 AND total_in > 0
+        ORDER BY {$orderCase}, (total_in - total_out) DESC, p.name ASC
+        LIMIT {$limit}
+    ");
+    $finishedStmt->execute([$like, $like, $exact, $prefix]);
+    $finishedRows = $finishedStmt->fetchAll(PDO::FETCH_ASSOC);
+    $finished = [];
+    foreach ($finishedRows as $r) {
+        $pid = (int)$r['id'];
+        if (in_array($pid, $inStockIds, true)) {
+            continue;
+        }
+        $expected = round((float)$r['total_in'] - (float)$r['total_out'], 3);
+        $finished[] = [
+            'id' => $pid,
+            'name' => $r['name'],
+            'brand' => $r['brand'] ?? '',
+            'category' => $r['category'] ?? '',
+            'barcode' => $r['barcode'] ?? '',
+            'image_url' => $r['image_url'] ?? '',
+            'unit' => $r['unit'] ?? 'pz',
+            'default_quantity' => $r['default_quantity'] ?? 1,
+            'package_unit' => $r['package_unit'] ?? '',
+            'notes' => $r['notes'] ?? '',
+            'location' => $r['location'] ?: 'dispensa',
+            'updated_at' => $r['updated_at'] ?? null,
+            'expected_qty' => $expected,
+            'ghost' => $expected > productQtyThreshold((string)($r['unit'] ?? 'pz')),
+        ];
+    }
+    $finishedIds = array_map(fn($r) => (int)$r['id'], $finished);
+
+    $excludeIds = array_unique(array_merge($inStockIds, $finishedIds));
+    $excludePlaceholders = $excludeIds ? implode(',', array_fill(0, count($excludeIds), '?')) : '';
+    $catalogSql = "
+        SELECT p.id, p.name, p.brand, p.category, p.barcode, p.image_url, p.unit,
+               p.default_quantity, p.package_unit, p.notes
+        FROM products p
+        WHERE (p.name LIKE ? OR p.brand LIKE ?)
+          AND NOT EXISTS (
+              SELECT 1 FROM inventory i WHERE i.product_id = p.id AND i.quantity > 0.001
+          )";
+    if ($excludePlaceholders) {
+        $catalogSql .= " AND p.id NOT IN ({$excludePlaceholders})";
+    }
+    $catalogSql .= " ORDER BY {$orderCase}, p.name ASC LIMIT {$limit}";
+    $catalogStmt = $db->prepare($catalogSql);
+    $catalogParams = [$like, $like];
+    if ($excludeIds) {
+        $catalogParams = array_merge($catalogParams, $excludeIds);
+    }
+    $catalogParams[] = $exact;
+    $catalogParams[] = $prefix;
+    $catalogStmt->execute($catalogParams);
+    $catalog = $catalogStmt->fetchAll(PDO::FETCH_ASSOC);
+
+    echo json_encode([
+        'success' => true,
+        'in_stock' => $inStock,
+        'finished' => $finished,
+        'catalog' => $catalog,
+    ], JSON_UNESCAPED_UNICODE);
+}
+
 // ===== INVENTORY FUNCTIONS =====
 
 function listInventory(PDO $db): void {
@@ -2818,7 +2970,7 @@ function addToInventory(PDO $db): void {
         'removed_from_bring' => $removedFromBring,
     ]);
     EverLog::info('inventory_add ok', ['product_id' => $productId, 'qty' => $quantity, 'location' => $location, 'removed_from_bring' => $removedFromBring]);
-    // Inventory changed — force smart-shopping recompute on next request
+    bringClearPurchasedForProduct($db, $productId);
     invalidateSmartShoppingCache();
 }
 
@@ -3102,6 +3254,12 @@ function useFromInventory(PDO $db): void {
             $addedToBring = !empty($bringResult['added']) || !empty($bringResult['updated']);
         }
     }
+
+    try {
+        bringSyncProductFromCache($db, $productId);
+    } catch (Throwable $e) {
+        EverLog::warn('bringSyncProductFromCache after deduct: ' . $e->getMessage());
+    }
     
     // Calculate total remaining across ALL locations (this product only)
     $stmt = $db->prepare("SELECT SUM(quantity) as total FROM inventory WHERE product_id = ? AND quantity > 0");
@@ -3225,9 +3383,9 @@ function updateInventory(PDO $db): void {
         throw $e;
     }
 
-    // Real-time Bring! sync: done after commit so DB lock is not held during HTTP call
+    // Real-time shopping sync: done after commit so DB lock is not held during HTTP call
     if (isset($input['quantity']) && $prevRow && abs((float)$input['quantity'] - (float)$prevRow['quantity']) > 0.001) {
-        try { bringQuickSyncProduct($db, (int)$prevRow['product_id']); } catch (Throwable $e) {}
+        try { bringSyncProductFromCache($db, (int)$prevRow['product_id']); } catch (Throwable $e) {}
         // HA: stock update event
         $prodRow = $db->prepare("SELECT name FROM products WHERE id = ?")->execute([(int)$prevRow['product_id']]) ? $db->query("SELECT name FROM products WHERE id = " . (int)$prevRow['product_id'])->fetchColumn() : '';
         _fireHaWebhook('stock_update', [
@@ -5741,8 +5899,6 @@ function recipeApplyStockHintsToRecipe(PDO $db, array &$recipe): void {
     unset($ing);
 }
 
-const RECIPE_PANTRY_MIN_MATCH_SCORE = 80;
-
 function recipeNormalizeName(string $name): string {
     $n = mb_strtolower(trim($name), 'UTF-8');
     return preg_replace('/\s+/u', ' ', $n) ?? $n;
@@ -7508,6 +7664,17 @@ PROMPT;
     return $text;
 }
 
+/** True when a product truly belongs to its assigned shopping_name family (excludes mis-tags like "Tè al limone" → Limone). */
+function productMatchesShoppingFamily(string $productName, string $shoppingName): bool {
+    $sn = mb_strtolower(trim($shoppingName));
+    if ($sn === '') return false;
+    $computed = mb_strtolower(computeShoppingName($productName));
+    $snComputed = mb_strtolower(computeShoppingName($shoppingName));
+    if ($computed === $sn || $computed === $snComputed) return true;
+    $nameLower = mb_strtolower(trim($productName));
+    return $nameLower === $sn || str_starts_with($nameLower, $sn . ' ');
+}
+
 function computeShoppingName(string $name, string $category = '', string $brand = ''): string {
     $lower = mb_strtolower(trim($name));
     $stop = ['di','del','della','dei','degli','delle','da','in','con','per','su',
@@ -7532,7 +7699,26 @@ function computeShoppingName(string $name, string $category = '', string $brand 
         'panna da cucina'       => 'Panna da cucina',
         'panna cucina'          => 'Panna da cucina',
         'panna chef'            => 'Panna da cucina',
+        // Tea (must not collapse to "Limone" via token)
+        'tè al limone'          => 'Tè al limone',
+        'te al limone'          => 'Tè al limone',
+        'the al limone'         => 'Tè al limone',
         'panna acida'           => 'Panna acida',
+        // Tomato preparations (MUST come before generic "pomodoro/pomodori")
+        'passata di pomodoro'   => 'Passata',
+        'passata pomodoro'      => 'Passata',
+        'polpa di pomodoro'     => 'Polpa di pomodoro',
+        'polpa pomodoro'        => 'Polpa di pomodoro',
+        'sugo al pomodoro'      => 'Sugo',
+        'sugo di pomodoro'      => 'Sugo',
+        'salsa di pomodoro'     => 'Sugo',
+        'pomodori pelati'       => 'Pelati',
+        'pomodoro pelato'       => 'Pelati',
+        'datterini pelati'      => 'Pelati',
+        'pelati'                => 'Pelati',
+        // Frozen / prep vegetables
+        'misto soffritto'       => 'Misto soffritto',
+        'misto per soffritto'   => 'Misto soffritto',
         // Plant-based milks (MUST come before generic "latte")
         'latte condensato'      => 'Latte condensato',
         'latte evaporato'       => 'Latte condensato',
@@ -7695,7 +7881,8 @@ function computeShoppingName(string $name, string $category = '', string $brand 
         'zucchina'      => 'Zucchine',
         'zucchine'      => 'Zucchine',
         'spinaci'       => 'Spinaci',
-        'lattuga'       => 'Insalata',
+        'lattuga gentile'       => 'Insalata',
+        'lattuga'               => 'Insalata',
         'melone'        => 'Melone',
         'finocchio'     => 'Finocchio',
         // Condiments & pantry
@@ -7851,6 +8038,19 @@ function bringQuickSyncProduct(PDO $db, int $productId): void {
             if (strcasecmp($item['name'] ?? '', $bringName) === 0) { $onBring = true; break; }
         }
 
+        $smartItems = loadSmartShoppingCacheItems();
+        $si = findSmartItemForProduct($smartItems, $productId);
+        $needsRestock = $si !== null && smartItemShouldSyncToBring($si);
+
+        if ($needsRestock) {
+            $onBringMap = [];
+            foreach ($listData['purchase'] as $bi) {
+                $onBringMap[strtolower($bi['name'] ?? '')] = true;
+            }
+            bringUpsertSmartItem($db, $si, $listUUID, $listData, $onBringMap);
+            return;
+        }
+
         if ($totalQty <= 0 && !$onBring) {
             $spec = $genericName !== $prod['name']
                 ? $prod['name'] . ($prod['brand'] ? ' · ' . $prod['brand'] : '') . ' · 🛒 Esaurito'
@@ -7858,13 +8058,21 @@ function bringQuickSyncProduct(PDO $db, int $productId): void {
             bringRequest('PUT', "https://api.getbring.com/rest/v2/bringlists/{$listUUID}",
                 http_build_query(['uuid' => $listUUID, 'purchase' => $bringName, 'specification' => $spec]));
             EverLog::info('bringQuickSync: added to Bring!', ['product_id' => $productId, 'name' => $bringName]);
-        } elseif ($totalQty > 0 && $onBring) {
+        } elseif ($totalQty > 0 && $onBring
+            && !familyHasRecentlyDepletedSiblings($db, $productId, $genericName)) {
             bringRequest('PUT', "https://api.getbring.com/rest/v2/bringlists/{$listUUID}",
                 http_build_query(['uuid' => $listUUID, 'remove' => $bringName]));
             EverLog::info('bringQuickSync: removed from Bring!', ['product_id' => $productId, 'name' => $bringName]);
         }
     } else {
         // Internal mode
+        $smartItems = loadSmartShoppingCacheItems();
+        $si = findSmartItemForProduct($smartItems, $productId);
+        if ($si !== null && smartItemShouldSyncToBring($si)) {
+            shoppingSyncProductFromCache($db, $productId);
+            return;
+        }
+
         $threshold = (int)env('SHOPPING_AUTO_ADD_THRESHOLD', '0');
         $stmtCheck = $db->prepare("SELECT id FROM shopping_list WHERE lower(name) = lower(?)");
         $stmtCheck->execute([$genericName]);
@@ -8260,6 +8468,670 @@ function backupToGDrive(?PDO $db = null): array {
     ];
 }
 
+/** Format suggested qty for Bring! spec (uses suggested_unit, never inventory unit). */
+function formatSmartSuggestQty(array $si): ?string {
+    $qty = (float)($si['suggested_qty'] ?? 0);
+    if ($qty <= 0) return null;
+    $unit = $si['suggested_unit'] ?? $si['unit'] ?? 'pz';
+    $approx = !empty($si['suggested_approx']);
+    $prefix = $approx ? 'Almeno: ' : 'Compra: ';
+    if ($unit === 'g' && $qty >= 1000) {
+        $kg = $qty / 1000;
+        $kgStr = ($kg == floor($kg)) ? (string)(int)$kg : rtrim(rtrim(number_format($kg, 1, '.', ''), '0'), '.');
+        return $prefix . $kgStr . ' kg';
+    }
+    if ($unit === 'ml' && $qty >= 1000) {
+        $l = $qty / 1000;
+        $lStr = ($l == floor($l)) ? (string)(int)$l : rtrim(rtrim(number_format($l, 1, '.', ''), '0'), '.');
+        return $prefix . $lStr . ' l';
+    }
+    if ($unit === 'conf') return $prefix . (int)$qty . ' conf';
+    if ($unit === 'pz') return $prefix . (int)$qty . ' pz';
+    return $prefix . round($qty) . ' ' . $unit;
+}
+
+/** Build full Bring! specification from a smart-shopping row. */
+function buildSmartBringSpec(array $si): string {
+    $generic = $si['shopping_name'] ?: $si['name'];
+    $parts = [];
+    if (!empty($si['name']) && $si['name'] !== $generic) {
+        $parts[] = $si['name'] . (!empty($si['brand']) ? ' · ' . $si['brand'] : '');
+    }
+    $urg = match ($si['urgency'] ?? '') {
+        'critical' => '⚡ Urgente',
+        'high'     => '🟠 Presto',
+        'medium'   => '🟡 A breve',
+        'low'      => '🔵 Previsione',
+        default    => '',
+    };
+    if ($urg !== '') $parts[] = $urg;
+    $qtyLabel = formatSmartSuggestQty($si);
+    if ($qtyLabel !== null) $parts[] = '🛒 ' . $qtyLabel;
+    return implode(' · ', $parts);
+}
+
+/** True when a smart-shopping row should be kept on Bring!/internal list. */
+function smartItemShouldSyncToBring(array $si): bool {
+    return in_array($si['urgency'] ?? 'none', ['critical', 'high', 'medium', 'low'], true);
+}
+
+// ===== BRING PURCHASED BLOCKLIST (server-side, synced with app_settings.bring_blocklist) =====
+
+function bringBlocklistTokens(string $name): array {
+    $stop = ['di','del','della','dei','degli','delle','da','in','con','per','a','e','il','lo','la','i','gli','le','un','uno','una','al','alle','agli','allo'];
+    $clean = mb_strtolower(trim(preg_replace('/[^\p{L}\s]/u', ' ', $name) ?? $name));
+    $tokens = preg_split('/\s+/', $clean, -1, PREG_SPLIT_NO_EMPTY);
+    return array_values(array_filter($tokens, fn($t) => mb_strlen($t) > 2 && !in_array($t, $stop, true)));
+}
+
+function bringNamesShareToken(string $a, string $b): bool {
+    $ta = bringBlocklistTokens($a);
+    $tb = bringBlocklistTokens($b);
+    if (empty($ta) || empty($tb)) {
+        return false;
+    }
+    return ($ta[0] ?? '') === ($tb[0] ?? '');
+}
+
+function bringGetBlocklist(PDO $db): array {
+    $stmt = $db->prepare("SELECT value FROM app_settings WHERE key = 'bring_blocklist'");
+    $stmt->execute();
+    $raw = $stmt->fetchColumn();
+    if (!$raw) {
+        return [];
+    }
+    $data = json_decode((string)$raw, true);
+    return is_array($data) ? $data : [];
+}
+
+function bringSaveBlocklist(PDO $db, array $map): void {
+    $stmt = $db->prepare("INSERT INTO app_settings (key, value, updated_at) VALUES ('bring_blocklist', ?, datetime('now'))
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at");
+    $stmt->execute([json_encode($map, JSON_UNESCAPED_UNICODE)]);
+}
+
+function bringPruneBlocklist(PDO $db): array {
+    $map = bringGetBlocklist($db);
+    $now = (int)(microtime(true) * 1000);
+    $changed = false;
+    foreach ($map as $key => $ts) {
+        if ($now - (int)$ts > BRING_PURCHASED_BLOCK_MS) {
+            unset($map[$key]);
+            $changed = true;
+        }
+    }
+    if ($changed) {
+        bringSaveBlocklist($db, $map);
+    }
+    return $map;
+}
+
+function bringMarkPurchased(PDO $db, array $names): void {
+    $names = array_values(array_filter(array_map(static fn($n) => trim((string)$n), $names)));
+    if (empty($names)) {
+        return;
+    }
+    $map = bringPruneBlocklist($db);
+    $now = (int)(microtime(true) * 1000);
+    foreach ($names as $name) {
+        $map[mb_strtolower($name)] = $now;
+        $italian = bringToItalian($name);
+        if ($italian !== '' && $italian !== $name) {
+            $map[mb_strtolower($italian)] = $now;
+        }
+        $bringKey = italianToBring($name);
+        if ($bringKey !== '' && $bringKey !== $name) {
+            $map[mb_strtolower($bringKey)] = $now;
+        }
+    }
+    bringSaveBlocklist($db, $map);
+}
+
+function bringClearPurchasedForProduct(PDO $db, int $productId): void {
+    $stmt = $db->prepare("SELECT name, shopping_name FROM products WHERE id = ?");
+    $stmt->execute([$productId]);
+    $prod = $stmt->fetch(PDO::FETCH_ASSOC);
+    if (!$prod) {
+        return;
+    }
+    $keys = array_filter([
+        mb_strtolower(trim($prod['name'] ?? '')),
+        mb_strtolower(trim($prod['shopping_name'] ?? '')),
+        mb_strtolower(italianToBring($prod['shopping_name'] ?: $prod['name'])),
+    ]);
+    if (empty($keys)) {
+        return;
+    }
+    $map = bringGetBlocklist($db);
+    $changed = false;
+    foreach (array_keys($map) as $blockedKey) {
+        foreach ($keys as $key) {
+            if ($key === '' || $blockedKey === $key || bringNamesShareToken($blockedKey, $key)) {
+                unset($map[$blockedKey]);
+                $changed = true;
+                break;
+            }
+        }
+    }
+    if ($changed) {
+        bringSaveBlocklist($db, $map);
+    }
+}
+
+function bringIsPurchasedBlocked(PDO $db, string $name, ?string $shoppingName = null): bool {
+    $map = bringPruneBlocklist($db);
+    if (empty($map)) {
+        return false;
+    }
+    $now = (int)(microtime(true) * 1000);
+    $candidates = array_values(array_unique(array_filter([
+        mb_strtolower(trim($name)),
+        $shoppingName ? mb_strtolower(trim($shoppingName)) : '',
+        mb_strtolower(italianToBring($shoppingName ?: $name)),
+        mb_strtolower(bringToItalian($name)),
+    ])));
+
+    foreach ($map as $key => $ts) {
+        if ($now - (int)$ts > BRING_PURCHASED_BLOCK_MS) {
+            continue;
+        }
+        $keyLower = mb_strtolower((string)$key);
+        foreach ($candidates as $candidate) {
+            if ($candidate === '') {
+                continue;
+            }
+            if ($keyLower === $candidate || bringNamesShareToken($keyLower, $candidate)) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+/** Mark Bring! "recently purchased" items so cron/client do not re-add them. */
+function bringSyncPurchasedFromBringList(PDO $db, array $recently): void {
+    if (empty($recently)) {
+        return;
+    }
+    $names = [];
+    foreach ($recently as $item) {
+        if (!empty($item['name'])) {
+            $names[] = $item['name'];
+        }
+        if (!empty($item['rawName'])) {
+            $names[] = $item['rawName'];
+        }
+    }
+    bringMarkPurchased($db, $names);
+}
+
+/** Find grouped smart-shopping row for a product id (representative or variant). */
+function findSmartItemForProduct(array $items, int $productId): ?array {
+    foreach ($items as $si) {
+        if ((int)($si['product_id'] ?? 0) === $productId) {
+            return $si;
+        }
+        foreach ($si['variants'] ?? [] as $variant) {
+            if ((int)($variant['product_id'] ?? 0) === $productId) {
+                return $si;
+            }
+        }
+    }
+    return null;
+}
+
+function loadSmartShoppingCacheItems(): array {
+    $cacheFile = __DIR__ . '/../data/smart_shopping_cache.json';
+    if (!file_exists($cacheFile)) {
+        return [];
+    }
+    $data = json_decode(file_get_contents($cacheFile), true);
+    return ($data && !empty($data['success'])) ? ($data['items'] ?? []) : [];
+}
+
+/**
+ * Upsert one smart-shopping row onto Bring! (add or merge specification).
+ * Mutates $bringData / $onBring when provided (batch cron path).
+ */
+function bringUpsertSmartItem(PDO $db, array $si, string $listUUID, array &$bringData, array &$onBring): array {
+    $out = ['added' => false, 'updated' => false, 'skipped' => false];
+
+    $genericName = $si['shopping_name'] ?: $si['name'];
+    if (bringIsPurchasedBlocked($db, (string)($si['name'] ?? ''), $genericName)) {
+        $out['skipped'] = true;
+        return $out;
+    }
+    $target      = bringResolveListTarget($db, $genericName, $bringData['purchase'] ?? []);
+    $bringName   = $target['purchase'];
+    $existing    = $target['existing'] ?? null;
+    $bringKey    = strtolower($bringName);
+    $spec        = buildSmartBringSpec($si);
+
+    if (isset($onBring[$bringKey]) || $existing !== null) {
+        $existingSpec = $existing !== null ? ($existing['specification'] ?? '') : '';
+        if ($existingSpec === '') {
+            foreach ($bringData['purchase'] ?? [] as $bi) {
+                if (strcasecmp($bi['name'] ?? '', $bringName) === 0) {
+                    $existingSpec = $bi['specification'] ?? '';
+                    $bringName    = $bi['name'];
+                    break;
+                }
+            }
+        }
+
+        $productHint  = $si['name'] ?? '';
+        $shoppingHint = $genericName;
+        $alreadyNoted = ($productHint !== '' && mb_stripos($existingSpec, $productHint) !== false)
+            || ($shoppingHint !== '' && mb_stripos($existingSpec, $shoppingHint) !== false);
+        if ($alreadyNoted) {
+            $out['skipped'] = true;
+            return $out;
+        }
+
+        if ($existing === null && isset($onBring[$bringKey]) && $existingSpec !== '') {
+            $label = ($shoppingHint !== $productHint && $shoppingHint !== '') ? $shoppingHint : $productHint;
+            $newSpec = $existingSpec . ' · ' . $label;
+            $qtyLabel = formatSmartSuggestQty($si);
+            if ($qtyLabel !== null) {
+                $newSpec .= ' · 🛒 ' . $qtyLabel;
+            }
+        } elseif ($existing !== null && $productHint !== '' && $existingSpec !== '') {
+            $variant = $productHint . (!empty($si['brand']) ? ' · ' . $si['brand'] : '');
+            $newSpec = $existingSpec . ' · ' . $variant;
+            $qtyLabel = formatSmartSuggestQty($si);
+            if ($qtyLabel !== null) {
+                $newSpec .= ' · 🛒 ' . $qtyLabel;
+            }
+        } else {
+            $newSpec = $spec;
+        }
+
+        $newSpec = dedupeBringSpec($newSpec);
+        if ($existingSpec !== $newSpec && $newSpec !== '') {
+            $body = http_build_query(['uuid' => $listUUID, 'purchase' => $bringName, 'specification' => $newSpec]);
+            if (bringRequest('PUT', "https://api.getbring.com/rest/v2/bringlists/{$listUUID}", $body) !== null) {
+                $out['updated'] = true;
+            }
+        } else {
+            $out['skipped'] = true;
+        }
+        return $out;
+    }
+
+    $body = http_build_query(['uuid' => $listUUID, 'purchase' => $bringName, 'specification' => $spec]);
+    if (bringRequest('PUT', "https://api.getbring.com/rest/v2/bringlists/{$listUUID}", $body) !== null) {
+        $out['added'] = true;
+        $onBring[$bringKey] = true;
+        $bringData['purchase'][] = ['name' => $bringName, 'specification' => $spec];
+    }
+    return $out;
+}
+
+/**
+ * Real-time sync after stock change: use smart-shopping cache to add/update/remove on Bring!.
+ */
+function bringSyncProductFromCache(PDO $db, int $productId): void {
+    if (!isShoppingBringMode()) {
+        shoppingSyncProductFromCache($db, $productId);
+        return;
+    }
+
+    $auth = bringAuth();
+    if (!$auth || empty($auth['bringListUUID'])) {
+        return;
+    }
+    $listUUID = $auth['bringListUUID'];
+
+    $stmt = $db->prepare("SELECT SUM(quantity) FROM inventory WHERE product_id = ? AND quantity > 0");
+    $stmt->execute([$productId]);
+    $totalQty = (float)($stmt->fetchColumn() ?: 0);
+
+    if ($totalQty <= 0) {
+        bringAddDepletedProduct($db, $productId);
+        return;
+    }
+
+    $smartItems = loadSmartShoppingCacheItems();
+    $si = findSmartItemForProduct($smartItems, $productId);
+    if ($si === null || !smartItemShouldSyncToBring($si)) {
+        bringQuickSyncProduct($db, $productId);
+        return;
+    }
+
+    $bringData = bringRequest('GET', "https://api.getbring.com/rest/v2/bringlists/{$listUUID}");
+    if (!$bringData || !isset($bringData['purchase'])) {
+        return;
+    }
+    $onBring = [];
+    foreach ($bringData['purchase'] as $bi) {
+        $onBring[strtolower($bi['name'] ?? '')] = true;
+    }
+    bringUpsertSmartItem($db, $si, $listUUID, $bringData, $onBring);
+}
+
+/** Internal shopping-list mirror of bringSyncProductFromCache. */
+function shoppingSyncProductFromCache(PDO $db, int $productId): void {
+    $smartItems = loadSmartShoppingCacheItems();
+    $si = findSmartItemForProduct($smartItems, $productId);
+    if ($si === null || !smartItemShouldSyncToBring($si)) {
+        bringQuickSyncProduct($db, $productId);
+        return;
+    }
+
+    $genericName = $si['shopping_name'] ?: $si['name'];
+    $specParts = [];
+    if (!empty($si['name']) && $si['name'] !== $genericName) {
+        $specParts[] = $si['name'] . (!empty($si['brand']) ? ' · ' . $si['brand'] : '');
+    }
+    $qtyLabel = formatSmartSuggestQty($si);
+    if ($qtyLabel !== null) {
+        $specParts[] = '🛒 ' . $qtyLabel;
+    }
+    $spec = implode(' · ', $specParts);
+
+    $stmt = $db->prepare("SELECT id, specification FROM shopping_list WHERE lower(name) = lower(?)");
+    $stmt->execute([$genericName]);
+    $existing = $stmt->fetch(PDO::FETCH_ASSOC);
+    if ($existing) {
+        if ($spec !== '' && $existing['specification'] !== $spec) {
+            $db->prepare("UPDATE shopping_list SET specification = ?, raw_name = ? WHERE id = ?")
+               ->execute([$spec, $si['name'] ?? $genericName, (int)$existing['id']]);
+        }
+    } else {
+        $db->prepare("INSERT OR IGNORE INTO shopping_list (name, raw_name, specification) VALUES (?, ?, ?)")
+           ->execute([$genericName, $si['name'] ?? $genericName, $spec]);
+    }
+}
+
+/** Remove repeated segments from a Bring! specification string. */
+function dedupeBringSpec(string $spec): string {
+    $parts = preg_split('/\s*·\s*/u', $spec, -1, PREG_SPLIT_NO_EMPTY);
+    $seen  = [];
+    $out   = [];
+    foreach ($parts as $part) {
+        $key = mb_strtolower(trim($part));
+        if ($key === '' || isset($seen[$key])) continue;
+        $seen[$key] = true;
+        $out[] = trim($part);
+    }
+    return implode(' · ', $out);
+}
+
+/** Resolve the generic shopping group key for a product/list name (uses DB shopping_name when known). */
+function resolveBringGenericKey(PDO $db, string $itName): string {
+    static $lookup = null;
+    if ($lookup === null) {
+        $lookup = [];
+        foreach ($db->query("SELECT name, shopping_name FROM products WHERE shopping_name IS NOT NULL AND shopping_name != ''") as $row) {
+            $lookup[mb_strtolower(trim($row['name']))] = trim($row['shopping_name']);
+        }
+    }
+    $key = mb_strtolower(trim($itName));
+    $sn  = $lookup[$key] ?? null;
+    return mb_strtolower(computeShoppingName($sn ?: $itName));
+}
+
+/**
+ * Resolve the canonical Bring! purchase key for a name.
+ * Always prefers an existing generic item on the list over creating a product-specific entry.
+ */
+function bringResolveListTarget(PDO $db, string $name, array $purchase): array {
+    $stmt = $db->prepare("SELECT name, brand, shopping_name FROM products WHERE lower(name) = lower(?) LIMIT 1");
+    $stmt->execute([$name]);
+    $prod = $stmt->fetch(PDO::FETCH_ASSOC);
+
+    $genericName = !empty($prod['shopping_name'])
+        ? $prod['shopping_name']
+        : computeShoppingName($name, '', $prod['brand'] ?? '');
+
+    $existing = bringGenericAlreadyOnList($purchase, $genericName, $db);
+    if ($existing !== null) {
+        return [
+            'purchase' => $existing['name'],
+            'generic'  => $genericName,
+            'product'  => $prod['name'] ?? $name,
+            'covered'  => true,
+            'existing' => $existing,
+        ];
+    }
+
+    return [
+        'purchase' => italianToBring($genericName),
+        'generic'  => $genericName,
+        'product'  => $prod['name'] ?? $name,
+        'covered'  => false,
+    ];
+}
+
+/** True if a Bring! list item already covers this generic shopping group. */
+function bringGenericAlreadyOnList(array $purchase, string $genericName, ?PDO $db = null): ?array {
+    $targetGen = $db instanceof PDO
+        ? resolveBringGenericKey($db, $genericName)
+        : mb_strtolower(computeShoppingName($genericName));
+    foreach ($purchase as $bi) {
+        $itName = bringToItalian($bi['name'] ?? '');
+        $itemGen = $db instanceof PDO
+            ? resolveBringGenericKey($db, $itName)
+            : mb_strtolower(computeShoppingName($itName));
+        if ($itemGen === $targetGen) {
+            return $bi;
+        }
+    }
+    return null;
+}
+
+/**
+ * Merge duplicate Bring! items that map to the same generic (Pasta+Spaghetti, Succo variants).
+ */
+function bringDedupeGenerics(PDO $db): array {
+    EverLog::debug('bringDedupeGenerics');
+    $auth = bringAuth();
+    if (!$auth) return ['skipped' => 'no_bring_auth'];
+    $listUUID = $auth['bringListUUID'];
+    if (empty($listUUID)) return ['skipped' => 'no_list_uuid'];
+
+    $bringData = bringRequest('GET', "https://api.getbring.com/rest/v2/bringlists/{$listUUID}");
+    if (!$bringData || !isset($bringData['purchase'])) return ['skipped' => 'bring_fetch_failed'];
+
+    $byGeneric = [];
+    foreach ($bringData['purchase'] as $item) {
+        $itName = bringToItalian($item['name'] ?? '');
+        $genKey = resolveBringGenericKey($db, $itName);
+        $byGeneric[$genKey][] = ['item' => $item, 'itName' => $itName];
+    }
+
+    $removed = 0;
+    $merged  = 0;
+    $errors  = 0;
+
+    foreach ($byGeneric as $genKey => $group) {
+        if (count($group) < 2) continue;
+
+        usort($group, function ($a, $b) use ($genKey) {
+            $aIt = mb_strtolower($a['itName']);
+            $bIt = mb_strtolower($b['itName']);
+            // Prefer canonical generic label (e.g. "Pane" over "Pan Bauletto...")
+            $canonical = mb_strtolower(computeShoppingName($genKey));
+            if ($aIt === $canonical || $aIt === $genKey) return -1;
+            if ($bIt === $canonical || $bIt === $genKey) return 1;
+            return mb_strlen($aIt) <=> mb_strlen($bIt);
+        });
+
+        $keep     = $group[0];
+        $keepSpec = dedupeBringSpec($keep['item']['specification'] ?? '');
+        $keepKey  = $keep['item']['name'] ?? '';
+
+        for ($i = 1; $i < count($group); $i++) {
+            $dup     = $group[$i];
+            $dupSpec = trim($dup['item']['specification'] ?? '');
+            $dupIt   = $dup['itName'];
+            $dupKey  = $dup['item']['name'] ?? '';
+
+            if ($dupSpec !== '' && mb_stripos($keepSpec, $dupIt) === false) {
+                $keepSpec = dedupeBringSpec($keepSpec !== '' ? $keepSpec . ' · ' . $dupSpec : $dupSpec);
+            } elseif ($dupIt !== '' && mb_stripos($keepSpec, $dupIt) === false
+                && mb_strtolower($dupIt) !== mb_strtolower($keep['itName'])) {
+                $keepSpec = dedupeBringSpec($keepSpec !== '' ? $keepSpec . ' · ' . $dupIt : $dupIt);
+            }
+
+            $body   = http_build_query(['uuid' => $listUUID, 'remove' => $dupKey]);
+            $result = bringRequest('PUT', "https://api.getbring.com/rest/v2/bringlists/{$listUUID}", $body);
+            if ($result === null) {
+                $catalogKey = italianToBring($dupIt);
+                if ($catalogKey !== $dupKey) {
+                    $body   = http_build_query(['uuid' => $listUUID, 'remove' => $catalogKey]);
+                    $result = bringRequest('PUT', "https://api.getbring.com/rest/v2/bringlists/{$listUUID}", $body);
+                }
+            }
+            if ($result !== null) $removed++;
+            else $errors++;
+            usleep(200_000);
+        }
+
+        if ($keepSpec !== ($keep['item']['specification'] ?? '')) {
+            $body = http_build_query([
+                'uuid'          => $listUUID,
+                'purchase'      => $keepKey,
+                'specification' => $keepSpec,
+            ]);
+            if (bringRequest('PUT', "https://api.getbring.com/rest/v2/bringlists/{$listUUID}", $body) !== null) {
+                $merged++;
+            } else {
+                $errors++;
+            }
+        }
+    }
+
+    return ['removed' => $removed, 'merged' => $merged, 'errors' => $errors];
+}
+
+/** Fix Bring! specs for smart-shopping matches (wrong units, stale urgency). */
+function bringSyncSpecs(PDO $db): array {
+    EverLog::debug('bringSyncSpecs');
+    $smartItems = _loadSmartShoppingItems();
+    if (empty($smartItems)) return ['skipped' => 'no_cache'];
+
+    $auth = bringAuth();
+    if (!$auth) return ['skipped' => 'no_bring_auth'];
+    $listUUID = $auth['bringListUUID'];
+    if (empty($listUUID)) return ['skipped' => 'no_list_uuid'];
+
+    $bringData = bringRequest('GET', "https://api.getbring.com/rest/v2/bringlists/{$listUUID}");
+    if (!$bringData || !isset($bringData['purchase'])) return ['skipped' => 'bring_fetch_failed'];
+
+    $appMarkers = ['⚡', '🟠', '🛒'];
+    $updated = 0;
+    $errors  = 0;
+
+    foreach ($bringData['purchase'] as $item) {
+        $itName      = bringToItalian($item['name'] ?? '');
+        $si          = _matchSmartShoppingItem($itName, $smartItems);
+        if ($si === null) continue;
+
+        $currentSpec = $item['specification'] ?? '';
+        $hasMarker   = false;
+        foreach ($appMarkers as $m) {
+            if (mb_strpos($currentSpec, $m) !== false) { $hasMarker = true; break; }
+        }
+
+        $wrongUnit = false;
+        if (preg_match('/(\d+)\s*conf/u', $currentSpec, $m)
+            && !empty($si['suggested_unit']) && $si['suggested_unit'] !== 'conf'
+            && (int)$m[1] === (int)($si['suggested_qty'] ?? 0)) {
+            $wrongUnit = true;
+        }
+
+        if (!$hasMarker && !$wrongUnit && !in_array($si['urgency'], ['critical', 'high'], true)) {
+            continue;
+        }
+
+        $newSpec = buildSmartBringSpec($si);
+        if ($newSpec === '' || strcasecmp(trim($currentSpec), trim($newSpec)) === 0) continue;
+
+        $newSpec = dedupeBringSpec($newSpec);
+
+        $body = http_build_query([
+            'uuid'          => $listUUID,
+            'purchase'      => $item['name'],
+            'specification' => $newSpec,
+        ]);
+        if (bringRequest('PUT', "https://api.getbring.com/rest/v2/bringlists/{$listUUID}", $body) !== null) {
+            $updated++;
+        } else {
+            $errors++;
+        }
+        usleep(200_000);
+    }
+
+    return ['updated' => $updated, 'errors' => $errors];
+}
+
+/**
+ * Full Bring! sync: refresh smart cache, migrate names, dedupe, fix specs,
+ * remove obsolete app-added items, add missing critical/high.
+ */
+function bringSyncFull(PDO $db, bool $refreshSmart = false): void {
+    EverLog::info('bringSyncFull');
+    $summary = ['success' => true];
+
+    if ($refreshSmart) {
+        ob_start();
+        smartShopping($db);
+        $json = ob_get_clean();
+        $decoded = json_decode($json, true);
+        if ($decoded && !empty($decoded['success'])) {
+            $decoded['cached_at'] = date('c');
+            $decoded['cached_ts'] = time();
+            file_put_contents(
+                __DIR__ . '/../data/smart_shopping_cache.json',
+                json_encode($decoded, JSON_UNESCAPED_UNICODE)
+            );
+            $summary['smart_items'] = count($decoded['items'] ?? []);
+        }
+    }
+
+    $auth = bringAuth();
+    if (!$auth) {
+        echo json_encode(['success' => false, 'error' => 'Bring! credentials not configured']);
+        return;
+    }
+    $listUUID = $auth['bringListUUID'];
+    if (empty($listUUID)) {
+        echo json_encode(['success' => false, 'error' => 'No Bring! list UUID']);
+        return;
+    }
+
+    $bringData = bringRequest('GET', "https://api.getbring.com/rest/v2/bringlists/{$listUUID}");
+    if (!$bringData || !isset($bringData['purchase'])) {
+        echo json_encode(['success' => false, 'error' => 'Cannot fetch Bring! list']);
+        return;
+    }
+
+    $summary['migrate'] = bringMigrateNamesInternal($db, $bringData['purchase'], $listUUID);
+    $summary['dedupe']  = bringDedupeGenerics($db);
+    $summary['specs']   = bringSyncSpecs($db);
+    $summary['cleanup'] = bringCleanupObsolete($db);
+    $summary['auto_add'] = bringAutoAddCritical($db);
+    $summary['dedupe_final'] = bringDedupeGenerics($db);
+
+    // Re-write cache if something invalidated it during sync (e.g. concurrent API writes)
+    $cacheFile = __DIR__ . '/../data/smart_shopping_cache.json';
+    if (!file_exists($cacheFile)) {
+        ob_start();
+        smartShopping($db);
+        $reJson = ob_get_clean();
+        $reDecoded = json_decode($reJson, true);
+        if ($reDecoded && !empty($reDecoded['success'])) {
+            $reDecoded['cached_at'] = date('c');
+            $reDecoded['cached_ts'] = time();
+            file_put_contents($cacheFile, json_encode($reDecoded, JSON_UNESCAPED_UNICODE));
+            $summary['cache_restored'] = count($reDecoded['items'] ?? []);
+        }
+    }
+
+    echo json_encode($summary, JSON_UNESCAPED_UNICODE);
+}
+
 /**
  * Server-side Bring! cleanup: remove items from Bring! that the app auto-added
  * but are no longer flagged by smart shopping (stock is now adequate).
@@ -8307,8 +9179,8 @@ function bringCleanupObsolete(PDO $db): array {
         }
     }
 
-    // App-added marker: the app always writes ⚡ 🟠 or 🛒 in the specification
-    $appMarkers = ['⚡', '🟠', '🛒'];
+    // App-added marker: urgency + quantity hints written by EverShelf
+    $appMarkers = ['⚡', '🟠', '🟡', '🔵', '🛒'];
 
     $toRemove = [];
     foreach ($bringData['purchase'] as $bringItem) {
@@ -8323,6 +9195,9 @@ function bringCleanupObsolete(PDO $db): array {
         }
         if (!$isAppAdded) continue;
 
+        // Keep entries that explicitly mark a recently finished variant
+        if (mb_strpos($spec, '🛒 Esaurito') !== false) continue;
+
         // Match against smart items: exact shopping_name first, then first-token fallback.
         // Exact match prevents e.g. 'Panna' → 'Panna da cucina' via shared token 'panna'.
         $nameToks = $ntFn($name);
@@ -8333,13 +9208,8 @@ function bringCleanupObsolete(PDO $db): array {
             $smartSi  = $firstTok ? ($smartByTok[$firstTok] ?? null) : null;
         }
 
-        if ($smartSi !== null) {
-            // Still in smart_shopping with critical or high urgency → keep
-            if (in_array($smartSi['urgency'], ['critical', 'high'], true)) continue;
-            // Medium with low stock → keep
-            if ($smartSi['urgency'] === 'medium' && (float)($smartSi['pct_left'] ?? 100) < 60) continue;
-            // qty=0 → keep (genuinely out of stock)
-            if ((float)($smartSi['current_qty'] ?? 0) <= 0) continue;
+        if ($smartSi !== null && smartItemShouldSyncToBring($smartSi)) {
+            continue;
         }
         // Not in smart (or low-urgency with stock) → schedule for removal
 
@@ -8373,8 +9243,8 @@ function bringCleanupObsolete(PDO $db): array {
 }
 
 /**
- * Server-side Bring! auto-add: push critical/high smart_shopping items to Bring!
- * that are not already on the list. Called by the cron alongside cleanup.
+ * Server-side Bring! auto-add: sync all smart_shopping items that need restocking
+ * (esauriti, quasi finiti, in scadenza, previsione) to Bring!. Runs every cron cycle.
  */
 function bringAutoAddCritical(PDO $db): array {
     EverLog::debug('bringAutoAddCritical');
@@ -8391,7 +9261,15 @@ function bringAutoAddCritical(PDO $db): array {
     $bringData = bringRequest('GET', "https://api.getbring.com/rest/v2/bringlists/{$listUUID}");
     if (!$bringData || !isset($bringData['purchase'])) return ['skipped' => 'bring_fetch_failed'];
 
-    // Build set of already-present items (by Bring! key)
+    $recentlyMapped = [];
+    foreach ($bringData['recently'] ?? [] as $ri) {
+        $recentlyMapped[] = [
+            'name' => bringToItalian($ri['name'] ?? ''),
+            'rawName' => $ri['name'] ?? '',
+        ];
+    }
+    bringSyncPurchasedFromBringList($db, $recentlyMapped);
+
     $onBring = [];
     foreach ($bringData['purchase'] as $bi) {
         $onBring[strtolower($bi['name'] ?? '')] = true;
@@ -8400,39 +9278,10 @@ function bringAutoAddCritical(PDO $db): array {
     $added = 0;
     $updated = 0;
     foreach ($smartItems as $si) {
-        if (!in_array($si['urgency'], ['critical', 'high'], true)) continue;
-
-        $genericName = $si['shopping_name'] ?: $si['name'];
-        $bringName   = italianToBring($genericName);
-        $bringKey    = strtolower($bringName);
-
-        // Build urgency spec
-        $urgencyLabel = $si['urgency'] === 'critical' ? '⚡ Urgente' : '🟠 Presto';
-        $spec = $urgencyLabel;
-        if (!empty($si['name']) && $si['name'] !== $genericName) {
-            $spec = $si['name'] . ($si['brand'] ? ' · ' . $si['brand'] : '') . ' — ' . $urgencyLabel;
-        }
-        if (!empty($si['suggested_qty'])) {
-            $spec .= ' · 🛒 ' . ($si['qty_label'] ?? 'Almeno: ' . $si['suggested_qty'] . ' ' . ($si['unit'] ?? 'pz'));
-        }
-
-        if (isset($onBring[$bringKey])) {
-            // Update spec if it changed
-            $existingSpec = '';
-            foreach ($bringData['purchase'] as $bi) {
-                if (strtolower($bi['name'] ?? '') === $bringKey) { $existingSpec = $bi['specification'] ?? ''; break; }
-            }
-            if ($existingSpec !== $spec) {
-                $body = http_build_query(['uuid' => $listUUID, 'purchase' => $bringName, 'specification' => $spec]);
-                bringRequest('PUT', "https://api.getbring.com/rest/v2/bringlists/{$listUUID}", $body);
-                $updated++;
-            }
-            continue;
-        }
-
-        $body = http_build_query(['uuid' => $listUUID, 'purchase' => $bringName, 'specification' => $spec]);
-        $r = bringRequest('PUT', "https://api.getbring.com/rest/v2/bringlists/{$listUUID}", $body);
-        if ($r !== null) $added++;
+        if (!smartItemShouldSyncToBring($si)) continue;
+        $result = bringUpsertSmartItem($db, $si, $listUUID, $bringData, $onBring);
+        if (!empty($result['added'])) $added++;
+        if (!empty($result['updated'])) $updated++;
     }
 
     return ['added' => $added, 'updated' => $updated];
@@ -8488,6 +9337,13 @@ function bringGetList(): void {
         }
     }
     
+    // User checked items off in Bring → block auto-re-add (server + cron respect this)
+    try {
+        bringSyncPurchasedFromBringList(getDB(), $recently);
+    } catch (Throwable $e) {
+        EverLog::warn('bringSyncPurchasedFromBringList: ' . $e->getMessage());
+    }
+
     echo json_encode([
         'success' => true,
         'listUUID' => $listUUID,
@@ -8512,8 +9368,27 @@ function bringGetList(): void {
         global $db;
         if ($db instanceof PDO) {
             bringMigrateNamesInternal($db, $data['purchase'] ?? [], $listUUID);
+            bringDedupeGenerics($db);
         }
     }
+}
+
+/** True when another product in the same shopping_name family is depleted recently. */
+function familyHasRecentlyDepletedSiblings(PDO $db, int $productId, string $shoppingName, int $withinDays = RECENTLY_EXHAUSTED_DAYS): bool {
+    $sNameKey = strtolower(trim($shoppingName));
+    if ($sNameKey === '') return false;
+    $stmt = $db->prepare("
+        SELECT COUNT(*) FROM products p
+        WHERE p.id != ?
+          AND LOWER(TRIM(COALESCE(p.shopping_name, ''))) = ?
+          AND COALESCE((SELECT SUM(i.quantity) FROM inventory i WHERE i.product_id = p.id), 0) <= 0.001
+          AND (
+            SELECT MAX(t.created_at) FROM transactions t
+            WHERE t.product_id = p.id AND t.undone = 0 AND t.type IN ('out','waste')
+          ) >= datetime('now', '-' || ? || ' days')
+    ");
+    $stmt->execute([$productId, $sNameKey, $withinDays]);
+    return (int)$stmt->fetchColumn() > 0;
 }
 
 /**
@@ -8531,21 +9406,6 @@ function bringAddDepletedProduct(PDO $db, int $productId): array {
         return $out;
     }
 
-    $sNameKey = strtolower(trim($product['shopping_name'] ?? ''));
-    if ($sNameKey !== '') {
-        $covStmt = $db->prepare("
-            SELECT SUM(i.quantity)
-            FROM inventory i
-            JOIN products p ON i.product_id = p.id
-            WHERE LOWER(TRIM(p.shopping_name)) = ? AND i.product_id != ? AND i.quantity > 0
-        ");
-        $covStmt->execute([$sNameKey, $productId]);
-        if ((float)($covStmt->fetchColumn() ?: 0) > 0) {
-            $out['skipped'] = true;
-            return $out;
-        }
-    }
-
     $auth = bringAuth();
     if (!$auth) {
         $out['skipped'] = true;
@@ -8559,6 +9419,10 @@ function bringAddDepletedProduct(PDO $db, int $productId): array {
 
     $genericName = $product['shopping_name'] ?: computeShoppingName($product['name'], '', $product['brand'] ?? '');
     $out['generic_name'] = $genericName;
+    if (bringIsPurchasedBlocked($db, $product['name'], $genericName)) {
+        $out['skipped'] = true;
+        return $out;
+    }
     $bringName = italianToBring($genericName);
     $bringKey  = strtolower($bringName);
 
@@ -8618,15 +9482,15 @@ function bringAddDepletedProduct(PDO $db, int $productId): array {
     ]);
     if (bringRequest('PUT', "https://api.getbring.com/rest/v2/bringlists/{$listUUID}", $body) !== null) {
         $out['added'] = true;
-        $logStmt = $db->prepare("INSERT INTO transactions (product_id, type, quantity, location, notes) VALUES (?, 'bring', 0, '', 'Auto-aggiunto a Bring!')");
-        $logStmt->execute([$productId]);
+        EverLog::info('bringAddDepletedProduct: added', ['product_id' => $productId, 'bring' => $bringName]);
         @unlink(__DIR__ . '/../data/smart_shopping_cache.json');
         _fireHaWebhook('shopping_add', ['item' => $genericName, 'specification' => $spec]);
     }
     return $out;
 }
 
-function bringAddItems(): void {
+function bringAddItems(PDO $db): void {
+    EverLog::info('bringAddItems');
     $auth = bringAuth();
     if (!$auth) {
         EverLog::info('bringAddItems');
@@ -8657,49 +9521,56 @@ function bringAddItems(): void {
         }
     }
     
+    $purchase = $listData['purchase'] ?? [];
+
     foreach ($items as $item) {
         $name = $item['name'] ?? '';
         if (empty($name)) continue;
-        
-        // Map Italian name to Bring! catalog key (German) for proper recognition
-        $bringName = italianToBring($name);
-        $bringKey = strtolower($bringName);
-        $spec = $item['specification'] ?? '';
-        $update_spec = $item['update_spec'] ?? false;  // explicit flag to force spec update
-        
-        if (array_key_exists($bringKey, $existingItems)) {
-            // Item already on the list — only update if specification changed and update_spec requested
-            if ($update_spec && $existingItems[$bringKey] !== $spec) {
+
+        $target      = bringResolveListTarget($db, $name, $purchase);
+        $bringName   = $target['purchase'];
+        $bringKey    = strtolower($bringName);
+        $spec        = $item['specification'] ?? '';
+        $update_spec = $item['update_spec'] ?? false;
+
+        if ($target['covered'] || array_key_exists($bringKey, $existingItems)) {
+            $existingSpec = $existingItems[$bringKey] ?? '';
+            if ($update_spec && $spec !== '' && $existingSpec !== $spec) {
                 $body = http_build_query([
-                    'uuid' => $listUUID,
-                    'purchase' => $bringName,
-                    'specification' => $spec,
+                    'uuid'          => $listUUID,
+                    'purchase'      => $bringName,
+                    'specification' => dedupeBringSpec($spec),
                 ]);
                 $result = bringRequest('PUT', "https://api.getbring.com/rest/v2/bringlists/{$listUUID}", $body);
-                if ($result !== null) $updated++;
+                if ($result !== null) {
+                    $updated++;
+                    $existingItems[$bringKey] = $spec;
+                }
             } else {
                 $skipped++;
             }
             continue;
         }
-        
+
         $body = http_build_query([
-            'uuid' => $listUUID,
-            'purchase' => $bringName,
+            'uuid'          => $listUUID,
+            'purchase'      => $bringName,
             'specification' => $spec,
         ]);
-        
+
         $result = bringRequest('PUT', "https://api.getbring.com/rest/v2/bringlists/{$listUUID}", $body);
         if ($result !== null) {
             $added++;
+            $existingItems[$bringKey] = $spec;
         } else {
             $errors[] = $name;
         }
     }
-    
+
     if ($added > 0 || $updated > 0) {
-        // Invalidate cache so next smart_shopping request reflects the updated Bring! list
-        @unlink(__DIR__ . '/../data/smart_shopping_cache.json');
+        if ($added > 0) {
+            @unlink(__DIR__ . '/../data/smart_shopping_cache.json');
+        }
         // Fire HA webhook for each newly added item
         foreach ($items as $item) {
             $iName = $item['name'] ?? '';
@@ -8751,7 +9622,7 @@ function bringRemoveItem(): void {
     }
 
     if ($result !== null) {
-        // Invalidate cache so next smart_shopping request reflects the updated Bring! list
+        bringMarkPurchased(getDB(), array_filter([$name, $rawName, $removeName]));
         @unlink(__DIR__ . '/../data/smart_shopping_cache.json');
     }
     echo json_encode(['success' => $result !== null]);
@@ -8840,10 +9711,21 @@ function bringMigrateNamesInternal(PDO $db, array $purchaseItems, string $listUU
 
         // Check if the correct catalog key is already in the list
         $alreadyAdded = false;
+        $existingItem = null;
         foreach ($purchaseItems as $existing) {
             if (strcasecmp($existing['name'] ?? '', $bringKey) === 0) {
                 $alreadyAdded = true;
+                $existingItem = $existing;
                 break;
+            }
+        }
+        // Also check generic group (e.g. "Pane" already present as "Brot")
+        if (!$alreadyAdded) {
+            $genExisting = bringGenericAlreadyOnList($purchaseItems, $shoppingName, $db);
+            if ($genExisting !== null) {
+                $alreadyAdded = true;
+                $existingItem = $genExisting;
+                $bringKey = $existingItem['name'] ?? $bringKey;
             }
         }
 
@@ -8851,7 +9733,6 @@ function bringMigrateNamesInternal(PDO $db, array $purchaseItems, string $listUU
         bringRequest('PUT', "https://api.getbring.com/rest/v2/bringlists/{$listUUID}",
             http_build_query(['uuid' => $listUUID, 'remove' => $rawName]));
 
-        // Add with the correct German catalog key (unless already present)
         if (!$alreadyAdded) {
             $addBody = http_build_query([
                 'uuid'          => $listUUID,
@@ -8861,7 +9742,15 @@ function bringMigrateNamesInternal(PDO $db, array $purchaseItems, string $listUU
             $result = bringRequest('PUT', "https://api.getbring.com/rest/v2/bringlists/{$listUUID}", $addBody);
             if ($result !== false) { $migrated++; } else { $errors++; }
         } else {
-            $migrated++; // old item removed, correct generic already present
+            // Merge spec into the existing generic item instead of leaving a duplicate
+            $mergedSpec = dedupeBringSpec(($existingItem['specification'] ?? '') . ' · ' . $newSpec);
+            $mergeBody = http_build_query([
+                'uuid'          => $listUUID,
+                'purchase'      => $bringKey,
+                'specification' => $mergedSpec,
+            ]);
+            bringRequest('PUT', "https://api.getbring.com/rest/v2/bringlists/{$listUUID}", $mergeBody);
+            $migrated++;
         }
     }
 
@@ -9081,7 +9970,7 @@ function smartShopping(PDO $db): void {
             $stockByAnyToken[$tok] = ($stockByAnyToken[$tok] ?? 0) + $qty;
         }
         $sName = strtolower(trim($pStock['shopping_name'] ?? ''));
-        if ($sName !== '') {
+        if ($sName !== '' && productMatchesShoppingFamily($pStock['name'], $pStock['shopping_name'])) {
             $stockByShoppingName[$sName] = ($stockByShoppingName[$sName] ?? 0) + $qty;
             $fQty = isset($inventory[$pStock['id']]) ? (float)($inventory[$pStock['id']]['fresh_qty'] ?? $qty) : 0;
             if ($fQty > 0) {
@@ -9222,6 +10111,7 @@ function smartShopping(PDO $db): void {
         $isRegular = $usesPerMonth >= 0.5 || ($buyCycleDays !== null && $buyCount >= 3);
         // Is it recently relevant? (used/bought in last 60 days)
         $isRecent = $daysSinceLastUse <= 60;
+        $recentlyExhausted = $lastOut && ($now - $lastOut) / 86400 <= RECENTLY_EXHAUSTED_DAYS;
 
         // --- Determine urgency ---
         $urgency = 'none'; // none, low, medium, high, critical
@@ -9241,22 +10131,14 @@ function smartShopping(PDO $db): void {
                                 'bianco','rosso','nero','giallo','verde','misto','dolce','light'];
             $pToks = array_diff($nameTokens($p['name']), $coverageGeneric);
             $coveredByEquivalent = false;
-            // Products exhausted within the last 14 days bypass token-based suppression:
-            // if the user just finished a specific product, they likely need to restock it
-            // regardless of whether a vague equivalent token exists in another product.
-            $recentlyExhausted = $lastOut && ($now - $lastOut) / 86400 <= 14;
             if (!$recentlyExhausted) {
                 foreach ($pToks as $tok) {
                     if (($stockByAnyToken[$tok] ?? 0) > 0) { $coveredByEquivalent = true; break; }
                 }
             }
-            // Also check shopping_name coverage: if this depleted product has a generic name
-            // (e.g. "Formaggio") and there's stock of ANY product with the same generic name,
-            // the need is covered. This catches "Bel Paese" → covered by "Formaggio Gouda" in stock,
-            // "Biscotti Pastefrolle" → covered by "Frollini..." (both shopping_name="Biscotti"), etc.
-            // NOTE: recentlyExhausted does NOT bypass this check — same-family stock always suppresses.
-            // recentlyExhausted only bypasses the loose token-based check above.
-            if (!$coveredByEquivalent) {
+            // Same shopping_name family: suppress only when not recently exhausted
+            // (e.g. still show "Yogurt fragola" even if another yogurt flavor is in stock).
+            if (!$coveredByEquivalent && !$recentlyExhausted) {
                 $sName = strtolower(trim($p['shopping_name'] ?? ''));
                 if ($sName !== '' && ($stockByShoppingName[$sName] ?? 0) > 0) {
                     $coveredByEquivalent = true;
@@ -9269,7 +10151,7 @@ function smartShopping(PDO $db): void {
             $reasons[] = 'Esaurito';
             if ($isFrequent && $useCount >= 5) {
                 $urgency = 'critical'; $score += 120;
-                $reasons[] = "Uso frequente ({$useCount}x)";
+                $reasons[] = 'Uso frequente (~' . max(1, (int)round($usesPerMonth)) . '/mese)';
             } elseif ($isFrequent && $useCount >= 2) {
                 $urgency = 'critical'; $score += 100;
             } elseif ($isFrequent) {
@@ -9466,7 +10348,7 @@ function smartShopping(PDO $db): void {
         // Critical-without-family-cover always shows so user knows something needs replacing.
         $sNameFamily = strtolower(trim($p['shopping_name'] ?? ''));
         if ($sNameFamily !== '') {
-            if (!$isExpired && $urgency !== 'critical') {
+            if (!$isExpired && $urgency !== 'critical' && !($qty <= 0 && $recentlyExhausted)) {
                 $familyTotal = $stockByShoppingName[$sNameFamily] ?? 0;
                 $otherFamilyQty = $familyTotal - $qty;
                 if ($otherFamilyQty > 0) {
@@ -9567,8 +10449,10 @@ function smartShopping(PDO $db): void {
             }
         }
 
-        // If stock is still >50% just suggest the minimum sensible purchase (don't over-stock)
-        if ($suggestedQty !== null && $pctLeft > 50) {
+        // If stock is still >50% suggest minimum purchase — but NOT when the user already
+        // put the item on the shopping list, when urgency is high/critical, or when depleted.
+        $needsRestock = $onBring || in_array($urgency, ['critical', 'high'], true) || $qty <= 0;
+        if ($suggestedQty !== null && $pctLeft > 50 && !$needsRestock) {
             if ($suggestedUnit === 'conf') {
                 $suggestedQty    = 1;
                 $suggestedApprox = false;
@@ -9583,6 +10467,65 @@ function smartShopping(PDO $db): void {
                 } else {
                     $suggestedQty = null;
                 }
+            }
+        }
+
+        // On shopping list with consumption data: cover the 14-day gap vs current stock.
+        if ($onBring && $dailyRate > 0 && $qty > 0) {
+            $need14 = $dailyRate * 14;
+            $stockBase = $qty;
+            if ($unit === 'conf' && $defQty > 0 && $pkgUnit !== '') {
+                $pu = strtolower($pkgUnit);
+                if (in_array($pu, ['g', 'kg'])) {
+                    $stockBase = $qty * ($pu === 'kg' ? $defQty * 1000 : $defQty);
+                } elseif (in_array($pu, ['ml', 'l', 'lt'])) {
+                    $stockBase = $qty * (in_array($pu, ['l', 'lt']) ? $defQty * 1000 : $defQty);
+                }
+            }
+            $gap = max(0, $need14 - $stockBase);
+            if ($gap > 0) {
+                if ($unit === 'conf') {
+                    if ($defQty > 0 && in_array(strtolower($pkgUnit), ['g', 'ml'])) {
+                        $pkgs = (int)max(1, min(10, (int)ceil($gap / $defQty)));
+                        $suggestedQty = $pkgs * (int)$defQty;
+                        $suggestedUnit = strtolower($pkgUnit);
+                        $suggestedApprox = true;
+                    } else {
+                        $suggestedQty = (int)max(1, min(10, (int)ceil($gap)));
+                        $suggestedUnit = 'conf';
+                        $suggestedApprox = false;
+                    }
+                } elseif ($unit === 'pz') {
+                    $suggestedQty = (int)max(1, min(10, (int)ceil($gap)));
+                    $suggestedUnit = 'pz';
+                    $suggestedApprox = $suggestedQty > 1;
+                } elseif ($unit === 'g' || $unit === 'ml') {
+                    if ($gap < 500) {
+                        $suggestedQty = (int)max(100, (int)(round($gap / 100) * 100));
+                    } elseif ($gap < 2000) {
+                        $suggestedQty = (int)max(250, (int)(round($gap / 250) * 250));
+                    } else {
+                        $suggestedQty = (int)max(500, (int)(round($gap / 500) * 500));
+                    }
+                    $suggestedUnit = $unit;
+                    $suggestedApprox = true;
+                }
+            }
+        }
+
+        // Frequent staples on the list with no computed qty: sensible minimum (not "1 pz" only).
+        if ($onBring && $suggestedQty === null && $isFrequent) {
+            if ($unit === 'conf') {
+                $suggestedQty = 1;
+                $suggestedUnit = 'conf';
+            } elseif ($unit === 'pz') {
+                $suggestedQty = min(3, max(2, (int)ceil($usesPerMonth / 4)));
+                $suggestedUnit = 'pz';
+                $suggestedApprox = true;
+            } elseif ($defQty > 0) {
+                $suggestedQty = (int)$defQty;
+                $suggestedUnit = $unit;
+                $suggestedApprox = true;
             }
         }
 
@@ -9647,6 +10590,14 @@ function smartShopping(PDO $db): void {
             }
             // on_bring is true if ANY variant in the group is already on Bring!
             if ($item['on_bring']) $grouped[$sn]['on_bring'] = true;
+            // Keep the highest suggested purchase qty across variants
+            $curSq = (float)($grouped[$sn]['suggested_qty'] ?? 0);
+            $newSq = (float)($item['suggested_qty'] ?? 0);
+            if ($newSq > $curSq) {
+                $grouped[$sn]['suggested_qty'] = $item['suggested_qty'];
+                $grouped[$sn]['suggested_unit'] = $item['suggested_unit'];
+                $grouped[$sn]['suggested_approx'] = $item['suggested_approx'];
+            }
         }
     }
     $items = array_values($grouped);
@@ -9859,7 +10810,7 @@ function shoppingGetList(PDO $db): void {
 
 function shoppingAdd(PDO $db): void {
     if (isShoppingBringMode()) {
-        bringAddItems();
+        bringAddItems($db);
         return;
     }
     $input = json_decode(file_get_contents('php://input'), true) ?? [];
@@ -9902,7 +10853,98 @@ function shoppingRemove(PDO $db): void {
         return;
     }
     $db->prepare("DELETE FROM shopping_list WHERE lower(name) = lower(?)")->execute([$name]);
+    bringMarkPurchased($db, [$name]);
     echo json_encode(['success' => true]);
+}
+
+/**
+ * Suggest one in-stock sibling in the same shopping_name family (for spesa-mode hint).
+ */
+function familySiblingSuggest(PDO $db): void {
+    $input = json_decode(file_get_contents('php://input'), true) ?? [];
+    $productId = (int)($input['product_id'] ?? 0);
+    if ($productId <= 0) {
+        http_response_code(400);
+        echo json_encode(['success' => false, 'error' => 'product_id required']);
+        return;
+    }
+
+    $validLocations = ['dispensa', 'frigo', 'freezer', 'altro'];
+    $location = $input['location'] ?? 'dispensa';
+    if (!in_array($location, $validLocations, true)) {
+        $location = 'dispensa';
+    }
+
+    $stmt = $db->prepare("SELECT name, shopping_name, unit, default_quantity, package_unit FROM products WHERE id = ?");
+    $stmt->execute([$productId]);
+    $product = $stmt->fetch(PDO::FETCH_ASSOC);
+    if (!$product) {
+        echo json_encode(['success' => true, 'sibling' => null]);
+        return;
+    }
+
+    $sName = trim($product['shopping_name'] ?? '');
+    if ($sName === '') {
+        echo json_encode(['success' => true, 'sibling' => null]);
+        return;
+    }
+
+    $sibStmt = $db->prepare("
+        SELECT p.id, p.name, p.brand, p.category, p.image_url, p.unit, p.default_quantity, p.package_unit,
+               COALESCE(SUM(i.quantity), 0) AS stock_qty,
+               (SELECT i2.id FROM inventory i2
+                WHERE i2.product_id = p.id AND i2.quantity > 0 AND i2.location = ?
+                ORDER BY i2.updated_at DESC LIMIT 1) AS inventory_id,
+               (SELECT i2.added_at FROM inventory i2
+                WHERE i2.product_id = p.id AND i2.quantity > 0 AND i2.location = ?
+                ORDER BY i2.updated_at DESC LIMIT 1) AS added_at,
+               (SELECT MAX(t.created_at) FROM transactions t
+                WHERE t.product_id = p.id AND t.type = 'in' AND t.undone = 0 AND t.location = ?) AS last_purchase_at
+        FROM products p
+        LEFT JOIN inventory i ON i.product_id = p.id AND i.quantity > 0 AND i.location = ?
+        WHERE p.id != ?
+          AND LOWER(TRIM(COALESCE(p.shopping_name, ''))) = LOWER(?)
+        GROUP BY p.id
+        HAVING stock_qty > 0.001
+        ORDER BY stock_qty DESC, p.name ASC
+        LIMIT 1
+    ");
+    $sibStmt->execute([$location, $location, $location, $location, $productId, $sName]);
+    $sibling = $sibStmt->fetch(PDO::FETCH_ASSOC);
+    if (!$sibling) {
+        echo json_encode(['success' => true, 'sibling' => null]);
+        return;
+    }
+
+    $stockQty = (float)$sibling['stock_qty'];
+    $unit = $sibling['unit'] ?: 'pz';
+    $displayQty = $stockQty;
+    $displayUnit = $unit;
+    $pkgUnit = strtolower($sibling['package_unit'] ?? '');
+    $defQty = (float)($sibling['default_quantity'] ?? 0);
+    if ($unit === 'conf' && $defQty > 0 && in_array($pkgUnit, ['g', 'ml', 'kg', 'l', 'lt'], true)) {
+        $mult = in_array($pkgUnit, ['kg', 'l', 'lt'], true) ? 1000 : 1;
+        $displayQty = round($stockQty * $defQty * $mult, $pkgUnit === 'g' || $pkgUnit === 'ml' ? 0 : 2);
+        $displayUnit = in_array($pkgUnit, ['kg', 'l', 'lt'], true) ? ($pkgUnit === 'kg' ? 'g' : 'ml') : $pkgUnit;
+    }
+
+    echo json_encode([
+        'success' => true,
+        'sibling' => [
+            'product_id' => (int)$sibling['id'],
+            'inventory_id' => (int)($sibling['inventory_id'] ?? 0),
+            'name' => $sibling['name'],
+            'brand' => $sibling['brand'] ?? '',
+            'category' => $sibling['category'] ?? '',
+            'image_url' => $sibling['image_url'] ?? '',
+            'stock_qty' => round($displayQty, 2),
+            'unit' => $displayUnit,
+            'family' => $sName,
+            'location' => $location,
+            'added_at' => $sibling['added_at'] ?? null,
+            'last_purchase_at' => $sibling['last_purchase_at'] ?? null,
+        ],
+    ], JSON_UNESCAPED_UNICODE);
 }
 
 // ===== SHARED APP DATA FUNCTIONS =====
@@ -10955,6 +11997,16 @@ function _shoppingListHash(array $names, string $country, string $currency): str
     return md5(json_encode($sorted, JSON_UNESCAPED_UNICODE) . '|' . mb_strtolower(trim($country)) . '|' . mb_strtolower(trim($currency)));
 }
 
+function _shoppingListPriceHash(array $items, string $country, string $currency): string {
+    $key = array_map(static fn($i) => [
+        mb_strtolower(trim($i['name'] ?? '')),
+        round((float)($i['quantity'] ?? 1), 2),
+        mb_strtolower(trim($i['unit'] ?? 'conf')),
+    ], $items);
+    usort($key, static fn($a, $b) => strcmp($a[0], $b[0]));
+    return md5(json_encode($key, JSON_UNESCAPED_UNICODE) . '|' . mb_strtolower(trim($country)) . '|' . mb_strtolower(trim($currency)));
+}
+
 function _loadCanonicalShoppingTotal(string $listHash): ?array {
     $path = __DIR__ . '/../data/shopping_total_cache.json';
     if (!file_exists($path)) return null;
@@ -10973,22 +12025,89 @@ function _saveCanonicalShoppingTotal(string $listHash, array $result): void {
     file_put_contents($path, json_encode($tc, JSON_UNESCAPED_UNICODE));
 }
 
+function _loadSmartShoppingItems(): array {
+    $cacheFile = __DIR__ . '/../data/smart_shopping_cache.json';
+    if (!file_exists($cacheFile)) return [];
+    $raw = file_get_contents($cacheFile);
+    if (!$raw) return [];
+    $sc = json_decode($raw, true);
+    return (is_array($sc) && isset($sc['items'])) ? $sc['items'] : [];
+}
+
+/** Match a Bring! list name to a smart-shopping row (exact name or shopping_name). */
+function _matchSmartShoppingItem(string $name, array $smartItems): ?array {
+    $nameLower = mb_strtolower(trim($name));
+    if ($nameLower === '') return null;
+    foreach ($smartItems as $si) {
+        if (mb_strtolower($si['name'] ?? '') === $nameLower) return $si;
+        if (mb_strtolower($si['shopping_name'] ?? '') === $nameLower) return $si;
+    }
+    $computed = mb_strtolower(computeShoppingName($name));
+    foreach ($smartItems as $si) {
+        $sn = mb_strtolower($si['shopping_name'] ?? $si['name'] ?? '');
+        if ($sn !== '' && $sn === $computed) return $si;
+    }
+    foreach ($smartItems as $si) {
+        $sn = mb_strtolower($si['shopping_name'] ?? $si['name'] ?? '');
+        if ($sn !== '' && (str_starts_with($sn, $nameLower) || str_starts_with($nameLower, $sn))) {
+            return $si;
+        }
+    }
+    return null;
+}
+
 /**
- * Stable shopping-list items for price totals: one retail unit per list entry.
- * Avoids day-to-day swings from smart-shopping suggested quantities.
+ * Resolve qty/unit/defQty for price estimation from smart-shopping suggestions.
  */
-function _shoppingListPriceItems(array $clientItems): array {
+function _resolveShoppingPriceItem(string $name, array $smartItems): array {
+    $si = _matchSmartShoppingItem($name, $smartItems);
+    if ($si && !empty($si['suggested_qty']) && (float)$si['suggested_qty'] > 0) {
+        return [
+            'name'             => $name,
+            'quantity'         => (float)$si['suggested_qty'],
+            'unit'             => trim($si['suggested_unit'] ?? $si['unit'] ?? 'conf'),
+            'default_quantity' => (float)($si['default_qty'] ?? 0),
+            'package_unit'     => trim($si['package_unit'] ?? ''),
+        ];
+    }
+    if ($si) {
+        $unit = trim($si['unit'] ?? 'conf');
+        $defQty = (float)($si['default_qty'] ?? 0);
+        $pkgUnit = trim($si['package_unit'] ?? '');
+        if ($unit === 'conf' && $defQty > 0 && $pkgUnit !== '') {
+            return [
+                'name'             => $name,
+                'quantity'         => $defQty,
+                'unit'             => strtolower($pkgUnit),
+                'default_quantity' => $defQty,
+                'package_unit'     => $pkgUnit,
+            ];
+        }
+        if ($unit === 'pz') {
+            return [
+                'name'             => $name,
+                'quantity'         => 2,
+                'unit'             => 'pz',
+                'default_quantity' => $defQty,
+                'package_unit'     => $pkgUnit,
+            ];
+        }
+    }
+    return [
+        'name'             => $name,
+        'quantity'         => 1,
+        'unit'             => 'conf',
+        'default_quantity' => 0,
+        'package_unit'     => '',
+    ];
+}
+
+function _shoppingListPriceItems(array $clientItems, array $smartItems = []): array {
     $items = [];
     foreach ($clientItems as $ci) {
         $name = trim($ci['name'] ?? '');
         if ($name === '') continue;
-        $items[] = [
-            'name'             => $name,
-            'quantity'         => 1,
-            'unit'             => 'conf',
-            'default_quantity' => 0,
-            'package_unit'     => '',
-        ];
+        $items[] = _resolveShoppingPriceItem($name, $smartItems);
     }
     return $items;
 }
@@ -10997,7 +12116,8 @@ function _shoppingListPriceItems(array $clientItems): array {
  * Compute shopping list prices + canonical total (shared by UI, HA and screensaver).
  */
 function _computeAllShoppingPrices(array $clientItems, string $country, string $currency, string $lang, bool $forceRefresh): array {
-    $items = _shoppingListPriceItems($clientItems);
+    $smartItems = _loadSmartShoppingItems();
+    $items = _shoppingListPriceItems($clientItems, $smartItems);
     if (empty($items)) {
         return [
             'success' => true,
@@ -11008,8 +12128,7 @@ function _computeAllShoppingPrices(array $clientItems, string $country, string $
         ];
     }
 
-    $names = array_column($items, 'name');
-    $listHash = _shoppingListHash($names, $country, $currency);
+    $listHash = _shoppingListPriceHash($items, $country, $currency);
 
     if (!$forceRefresh) {
         $cached = _loadCanonicalShoppingTotal($listHash);
