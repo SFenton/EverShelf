@@ -1108,7 +1108,7 @@ async function discoverScaleGateway() {
 }
 
 // ===== i18n TRANSLATION SYSTEM =====
-const _I18N_VERSION = '20260604c'; // bump when translations change
+const _I18N_VERSION = '20260606b'; // bump when translations change
 let _i18nStrings = null;   // current language translations (flat)
 let _i18nFallback = null;  // Italian fallback (flat)
 let _i18nLoadedVersion = null;
@@ -1956,8 +1956,16 @@ let quaggaRunning = false;
 let aiStream = null;
 let _scanZoomLevel = 2; // always 2x
 let _torchActive = false;
-let _aiFallbackTimer = null;
-let _aiFallbackExhausted = false; // true after one failed AI visual attempt — reset when scanner is closed
+let _aiVisualGen = 0; // bumped on each new scan session — stale AI responses are ignored
+let _scannerPaused = false; // pause decode loops without stopping the camera stream
+let _scannerGen = 0;
+let _detectorNative = null;
+let _detectorZbar = null;
+let _barcodeEnginesReady = null;
+let _tesseractWorker = null;
+let _tesseractInitPromise = null;
+const _LOCAL_OCR_DELAY_MS = 2500;    // local digit OCR before AI
+const _SCAN_FORMATS = ['ean_13', 'ean_8', 'code_128', 'code_39', 'upc_a', 'upc_e'];
 
 // Apply fixed 2x zoom (hardware if available, CSS fallback)
 async function _applyFixedZoom() {
@@ -2011,8 +2019,9 @@ function switchScanTab(tab) {
         if (btn) btn.classList.toggle('active', active);
         if (content) content.style.display = active ? '' : 'none';
     });
-    // Focus input on tab switch
+    // Spesa: no manual barcode field — never focus that input
     if (tab === 'barcode') {
+        if (_spesaMode) return;
         const el = document.getElementById('manual-barcode-input');
         if (el) setTimeout(() => el.focus(), 80);
     } else if (tab === 'name') {
@@ -2104,6 +2113,7 @@ async function _tryGeminiNumberOCR(options = {}) {
     const video = document.getElementById('scanner-video');
     if (!video || !video.videoWidth) { showToast(t('error.camera'), 'error'); return; }
     _numOcrRunning = true;
+    _updateScanAiButton();
     const btn = document.getElementById('scan-num-ocr-btn');
     if (btn) { btn.disabled = true; btn.textContent = t('scan.num_ocr_searching'); }
     _setScanStatus(t('scan.status_ocr_searching'), 'retry', t('scan.method_ai_ocr'));
@@ -2120,34 +2130,39 @@ async function _tryGeminiNumberOCR(options = {}) {
             onBarcodeDetected(result.barcode);
         } else {
             scanLog('AI OCR: barcode digits not found');
-            if (chainToVisual && scannerStream && !_aiFallbackExhausted) {
+            if (chainToVisual && scannerStream && _scannerAiAllowed()) {
                 scanLog('AI OCR failed — switching to visual product identification');
                 _setScanStatus(t('scan.status_ai_visual_searching'), 'retry', t('scan.method_ai_vision'));
                 await _tryGeminiVisualBarcode();
             } else {
                 showToast(t('scan.num_ocr_not_found'), 'warning');
                 _setScanStatus(t('scan.status_scanning'), '', '');
+                resumeScanner();
             }
         }
     } catch(e) {
         scanLog(`AI OCR error: ${e.message}`);
-        if (chainToVisual && scannerStream && !_aiFallbackExhausted) {
+        if (chainToVisual && scannerStream && _scannerAiAllowed()) {
             _setScanStatus(t('scan.status_ai_visual_searching'), 'retry', t('scan.method_ai_vision'));
             await _tryGeminiVisualBarcode();
         } else {
             _setScanStatus(t('scan.status_scanning'), '', '');
+            resumeScanner();
         }
         showToast(t('error.connection'), 'error');
     } finally {
         _numOcrRunning = false;
+        _updateScanAiButton();
         if (btn) { btn.disabled = false; btn.textContent = t('scan.num_ocr_btn'); }
     }
 }
 
-// ===== AI VISUAL PRODUCT IDENTIFICATION (auto-fallback after 5s) =====
+// ===== AI VISUAL PRODUCT IDENTIFICATION (manual button only) =====
 let _aiBarcodeVisualRunning = false;
 let _aiDetectedProductDraft = null;
 let _aiInventoryCandidates = [];
+let _aiFinishedCandidates = [];
+let _aiCatalogCandidates = [];
 
 function _showScanAiOverlay(msg) {
     const el = document.getElementById('scan-ai-overlay');
@@ -2159,10 +2174,24 @@ function _hideScanAiOverlay() {
     const el = document.getElementById('scan-ai-overlay');
     if (el) el.style.display = 'none';
 }
-function _showAiRetryButton() {
-    const btn = document.getElementById('scan-ai-retry-btn');
-    if (btn) btn.style.display = '';
+
+/** Invalidate in-flight AI responses when starting a new scan session. */
+function _resetAiFallbackForNewScan() {
+    _aiVisualGen++;
+    _hideScanAiOverlay();
+    _updateScanAiButton();
 }
+
+/** Manual AI button — shown only while scanner is active and Gemini is online. */
+function _updateScanAiButton() {
+    const btn = document.getElementById('scan-ai-manual-btn');
+    if (!btn) return;
+    btn.textContent = t('scan.ai_manual_btn');
+    const show = _currentPageId === 'scan' && !!scannerStream && _scannerAiAllowed() && !_aiBarcodeVisualRunning && !_numOcrRunning;
+    btn.style.display = show ? '' : 'none';
+    btn.disabled = !!(_aiBarcodeVisualRunning || _numOcrRunning || _aiDetectedProductDraft);
+}
+
 function _clearAiMatchPanel() {
     const result = document.getElementById('scan-result');
     if (!result) return;
@@ -2170,55 +2199,101 @@ function _clearAiMatchPanel() {
     result.innerHTML = '';
     _aiDetectedProductDraft = null;
     _aiInventoryCandidates = [];
+    _aiFinishedCandidates = [];
+    _aiCatalogCandidates = [];
+    _updateScanAiButton();
 }
-function _renderAiCandidateRow(item, idx) {
+function _renderAiCandidateThumb(item) {
     const catIcon = CATEGORY_ICONS[mapToLocalCategory(item.category, item.name)] || '📦';
-    const qty = (item.total_qty !== null && item.total_qty !== undefined)
-        ? `${parseFloat(item.total_qty)} ${item.unit || ''}`.trim()
-        : '';
+    if (item.image_url) {
+        return `<img src="${escapeHtml(item.image_url)}" alt="" class="scan-ai-candidate-img" onerror="this.outerHTML='<span class=\\'scan-ai-candidate-icon\\'>${catIcon}</span>'">`;
+    }
+    return `<span class="scan-ai-candidate-icon">${catIcon}</span>`;
+}
+function _renderAiCandidateRow(item, idx, kind) {
+    const locInfo = item.locations
+        ? String(item.locations).split(',').map(l => (LOCATIONS[l.trim()] || { label: l.trim() }).label).join(', ')
+        : (LOCATIONS[item.location]?.label || item.location || '');
+    let meta = item.brand || '';
+    if (kind === 'stock' && item.total_qty != null) {
+        meta = [meta, `${parseFloat(item.total_qty)} ${item.unit || ''}`.trim(), locInfo].filter(Boolean).join(' · ');
+    } else if (kind === 'finished') {
+        const locLabel = locInfo ? `${locInfo}` : '';
+        const qtyHint = item.expected_qty ? `${item.expected_qty} ${item.unit || ''}`.trim() : '';
+        meta = [meta, t('scan.ai_match_finished_badge'), locLabel, qtyHint].filter(Boolean).join(' · ');
+    } else {
+        meta = [meta, item.barcode ? `…${String(item.barcode).slice(-4)}` : ''].filter(Boolean).join(' · ');
+    }
     return `
-        <button class="scan-ai-candidate-item" type="button" onclick="_selectAiInventoryCandidate(${idx})">
-            <span class="scan-ai-candidate-icon">${catIcon}</span>
+        <button class="scan-ai-candidate-item" type="button" onclick="_selectAiProductCandidate('${kind}', ${idx})">
+            <span class="scan-ai-candidate-thumb">${_renderAiCandidateThumb(item)}</span>
             <span class="scan-ai-candidate-info">
                 <span class="scan-ai-candidate-name">${escapeHtml(item.name || '')}</span>
-                <span class="scan-ai-candidate-meta">${escapeHtml((item.brand || '') + (qty ? ' · ' + qty : ''))}</span>
+                <span class="scan-ai-candidate-meta">${escapeHtml(meta)}</span>
             </span>
             <span class="scan-ai-candidate-cta">${t('scan.ai_match_use_btn')}</span>
         </button>
     `;
 }
-function _showAiMatchChoices(aiProduct, candidates) {
+function _renderAiCandidateSection(title, items, kind) {
+    if (!items || !items.length) return '';
+    const rows = items.map((it, i) => _renderAiCandidateRow(it, i, kind)).join('');
+    return `
+        <div class="scan-ai-match-list-wrap">
+            <div class="scan-ai-match-list-title">${escapeHtml(title)}</div>
+            <div class="scan-ai-match-list">${rows}</div>
+        </div>
+    `;
+}
+function _showAiMatchChoices(aiProduct) {
     const result = document.getElementById('scan-result');
     if (!result) return;
     const aiName = aiProduct?.name || t('product.not_recognized');
     const aiBrand = aiProduct?.brand || '';
     const catIcon = CATEGORY_ICONS[mapToLocalCategory(aiProduct?.category || '', aiName)] || '📦';
-    const itemsHtml = (candidates || []).slice(0, 3).map((it, i) => _renderAiCandidateRow(it, i)).join('');
+    const inStock = _aiInventoryCandidates || [];
+    const finished = _aiFinishedCandidates || [];
+    const catalog = _aiCatalogCandidates || [];
+    const hasMatches = inStock.length + finished.length + catalog.length > 0;
+    const addLabel = t('scan.ai_match_add_btn').replace('{name}', aiName);
 
     result.innerHTML = `
         <div class="scan-ai-match-box">
-            <div class="scan-ai-match-head">
-                <div class="scan-ai-match-title">${t('scan.ai_match_title')}</div>
-                <div class="scan-ai-match-subtitle">${t('scan.ai_match_subtitle')}</div>
+            <div class="scan-ai-hero">
+                <div class="scan-ai-hero-icon">${catIcon}</div>
+                <div class="scan-ai-hero-text">
+                    <div class="scan-ai-match-title">${t('scan.ai_match_title')}</div>
+                    <div class="scan-ai-hero-name">${escapeHtml(aiName)}</div>
+                    ${aiBrand ? `<div class="scan-ai-hero-brand">${escapeHtml(aiBrand)}</div>` : ''}
+                </div>
             </div>
 
-            ${itemsHtml ? `
-                <div class="scan-ai-match-list-wrap">
-                    <div class="scan-ai-match-list-title">${t('scan.ai_match_existing')}</div>
-                    <div class="scan-ai-match-list">${itemsHtml}</div>
-                </div>
-            ` : `
-                <div class="scan-ai-match-empty">${t('scan.ai_match_none')}</div>
-            `}
-
-            <button class="btn btn-primary scan-ai-add-btn" type="button" onclick="_confirmAiDetectedProduct()">
-                ${t('scan.ai_match_add_btn').replace('{name}', escapeHtml(aiName))}
+            <button class="btn btn-success btn-large scan-ai-add-btn" type="button" onclick="_confirmAiDetectedProduct()">
+                ✅ ${escapeHtml(addLabel)}
             </button>
-            <div class="scan-ai-detected-label">${t('scan.ai_detected_label')}</div>
-            <div class="scan-ai-detected-pill">${catIcon} ${escapeHtml(aiName)}${aiBrand ? ' · ' + escapeHtml(aiBrand) : ''}</div>
+            <p class="scan-ai-action-hint">${escapeHtml(t('scan.ai_match_action_hint'))}</p>
+
+            ${hasMatches ? `<p class="scan-ai-or-divider">${escapeHtml(t('scan.ai_match_or_similar'))}</p>` : `<div class="scan-ai-match-empty">${t('scan.ai_match_none')}</div>`}
+            ${_renderAiCandidateSection(t('scan.ai_match_existing'), inStock, 'stock')}
+            ${_renderAiCandidateSection(t('scan.ai_match_finished'), finished, 'finished')}
+            ${_renderAiCandidateSection(t('scan.ai_match_catalog'), catalog, 'catalog')}
         </div>
     `;
     result.style.display = 'block';
+    setTimeout(() => result.scrollIntoView({ behavior: 'smooth', block: 'center' }), 80);
+}
+async function _fetchAiMatchCandidates(aiProduct) {
+    const q = (aiProduct?.name || '').trim();
+    if (q.length < 2) {
+        return { in_stock: [], finished: [], catalog: [] };
+    }
+    try {
+        const res = await api('ai_product_suggest', {}, 'POST', { q, brand: aiProduct?.brand || '', limit: 5 });
+        if (!res?.success) return { in_stock: [], finished: [], catalog: [] };
+        return res;
+    } catch (_) {
+        return { in_stock: [], finished: [], catalog: [] };
+    }
 }
 async function _confirmAiDetectedProduct() {
     const p = _aiDetectedProductDraft;
@@ -2236,9 +2311,11 @@ async function _confirmAiDetectedProduct() {
             package_unit: '',
             notes: '',
         });
-        if (saveResult.id) {
-            currentProduct = {
-                id: saveResult.id,
+        const newId = saveResult?.id;
+        if (saveResult?.success && newId) {
+            const full = await api('product_get', { id: newId }).catch(() => null);
+            currentProduct = full?.product || {
+                id: newId,
                 barcode: '',
                 name: p.name || t('product.not_recognized'),
                 brand: p.brand || '',
@@ -2250,49 +2327,71 @@ async function _confirmAiDetectedProduct() {
                 _confCount: 0,
                 weight_info: '',
             };
+            if (saveResult.merged) {
+                showToast(t('scan.ai_match_merged_existing'), 'info');
+            }
             addToScanRecents(currentProduct);
             _clearAiMatchPanel();
             showLoading(false);
             setTimeout(() => showProductAction(), 250);
         } else {
             showLoading(false);
-            showToast(t('error.connection'), 'error');
+            const errKey = saveResult?.error;
+            const msg = errKey === 'offline' ? t('error.network')
+                : errKey === 'unauthorized' ? t('error.connection')
+                : (errKey || saveResult?.message || t('error.save'));
+            console.error('[AI add] product_save', saveResult);
+            showToast(msg, 'error');
         }
-    } catch (_) {
+    } catch (err) {
         showLoading(false);
-        showToast(t('error.connection'), 'error');
+        console.error('[AI add]', err);
+        showToast(err?.message || t('error.connection'), 'error');
     }
 }
-function _selectAiInventoryCandidate(idx) {
-    const p = _aiInventoryCandidates[idx];
-    if (!p) return;
-    currentProduct = {
-        id: p.id,
-        barcode: p.barcode || '',
-        name: p.name || '',
-        brand: p.brand || '',
-        category: p.category || '',
-        image_url: p.image_url || '',
-        unit: p.unit || 'pz',
-        default_quantity: p.default_quantity || 1,
-        package_unit: p.package_unit || '',
-        _confCount: 0,
-        weight_info: '',
-    };
-    if (p.notes) {
-        const pesoMatch = p.notes.match(/Peso:\s*([^·]+)/);
-        if (pesoMatch) currentProduct.weight_info = pesoMatch[1].trim();
+async function _selectAiProductCandidate(kind, idx) {
+    const lists = { stock: _aiInventoryCandidates, finished: _aiFinishedCandidates, catalog: _aiCatalogCandidates };
+    const p = (lists[kind] || [])[idx];
+    if (!p?.id) return;
+    showLoading(true);
+    try {
+        const full = await api('product_get', { id: p.id });
+        if (!full?.product) {
+            showLoading(false);
+            showToast(t('error.not_found'), 'error');
+            return;
+        }
+        currentProduct = full.product;
+        if (currentProduct.notes) {
+            const pesoMatch = currentProduct.notes.match(/Peso:\s*([^·]+)/);
+            if (pesoMatch) currentProduct.weight_info = pesoMatch[1].trim();
+        }
+        currentProduct._confCount = 0;
+        addToScanRecents(currentProduct);
+        _clearAiMatchPanel();
+        showLoading(false);
+        if (kind === 'finished') {
+            showToast(t('scan.ai_match_finished_hint'), 'info');
+        }
+        setTimeout(() => showProductAction(), 250);
+    } catch (err) {
+        showLoading(false);
+        console.error('[AI select]', err);
+        showToast(err?.message || t('error.connection'), 'error');
     }
-    addToScanRecents(currentProduct);
-    _clearAiMatchPanel();
-    setTimeout(() => showProductAction(), 250);
 }
-async function _retryAiScan() {
-    const btn = document.getElementById('scan-ai-retry-btn');
-    if (btn) btn.style.display = 'none';
-    _aiFallbackExhausted = false;
+async function _triggerManualAiScan() {
+    if (!_scannerAiAllowed()) {
+        showToast(t('error.no_api_key'), 'error');
+        return;
+    }
+    if (_aiBarcodeVisualRunning || _numOcrRunning) return;
     _clearAiMatchPanel();
-    await _tryGeminiNumberOCR({ chainToVisual: true });
+    if (_spesaMode) {
+        await _tryGeminiVisualBarcode();
+    } else {
+        await _tryGeminiNumberOCR({ chainToVisual: true });
+    }
 }
 
 async function _tryGeminiVisualBarcode() {
@@ -2310,7 +2409,9 @@ async function _tryGeminiVisualBarcode() {
     if (!imageBase64) { scanLog('AI visual: failed to capture frame'); return; }
 
     _aiBarcodeVisualRunning = true;
-    stopScanner(); // stop scanner loop while AI processes (stream already captured above)
+    _updateScanAiButton();
+    const myGen = _aiVisualGen;
+    pauseScanner(); // keep camera stream alive — only pause decode while AI processes
     _setScanStatus(t('scan.status_ai_visual_searching'), 'retry', t('scan.method_ai_vision'));
     _showScanAiOverlay(t('scan.ai_overlay_msg'));
 
@@ -2319,6 +2420,13 @@ async function _tryGeminiVisualBarcode() {
             image: imageBase64,
             lang: _currentLang || 'it',
         });
+
+        if (myGen !== _aiVisualGen) {
+            scanLog('AI visual: stale response ignored');
+            _hideScanAiOverlay();
+            resumeScanner();
+            return;
+        }
 
         if (result.found && result.product) {
             const p = result.product;
@@ -2330,36 +2438,46 @@ async function _tryGeminiVisualBarcode() {
                 brand: p.brand || '',
                 category: p.category || '',
             };
-            let candidates = [];
-            try {
-                const invRes = await api('inventory_search', {
-                    q: _aiDetectedProductDraft.name,
-                    limit: 3,
-                });
-                candidates = (invRes.items || []).slice(0, 3);
-            } catch (_) {
-                candidates = [];
+            const matchRes = await _fetchAiMatchCandidates(_aiDetectedProductDraft);
+            if (myGen !== _aiVisualGen) {
+                scanLog('AI visual: stale match response ignored');
+                _hideScanAiOverlay();
+                resumeScanner();
+                return;
             }
-            _aiInventoryCandidates = candidates;
-            _showAiMatchChoices(_aiDetectedProductDraft, candidates);
+            _aiInventoryCandidates = matchRes.in_stock || [];
+            _aiFinishedCandidates = matchRes.finished || [];
+            _aiCatalogCandidates = matchRes.catalog || [];
+            _showAiMatchChoices(_aiDetectedProductDraft);
+            resumeScanner();
         } else {
-            scanLog('AI visual: product not identified — exhausted for this session');
-            _aiFallbackExhausted = true;
+            if (myGen !== _aiVisualGen) {
+                scanLog('AI visual: stale miss ignored');
+                _hideScanAiOverlay();
+                resumeScanner();
+                return;
+            }
+            scanLog('AI visual: product not identified');
             _hideScanAiOverlay();
-            _setScanStatus(t('scan.ai_fallback_exhausted'), 'retry', '');
-            _showAiRetryButton();
-            // Restart barcode scanner — AI timer won't fire again (_aiFallbackExhausted=true).
-            setTimeout(() => initScanner(), 300);
+            showToast(t('scan.ai_not_recognized'), 'warning');
+            _setScanStatus(t('scan.status_scanning'), '', '');
+            resumeScanner();
         }
     } catch (e) {
+        if (myGen !== _aiVisualGen) {
+            scanLog('AI visual: stale error ignored');
+            _hideScanAiOverlay();
+            resumeScanner();
+            return;
+        }
         scanLog(`AI visual error: ${e.message}`);
-        _aiFallbackExhausted = true;
         _hideScanAiOverlay();
-        _setScanStatus(t('scan.ai_fallback_exhausted'), 'retry', '');
-        _showAiRetryButton();
-        setTimeout(() => initScanner(), 300);
+        showToast(t('scan.ai_not_recognized'), 'warning');
+        _setScanStatus(t('scan.status_scanning'), '', '');
+        resumeScanner();
     } finally {
         _aiBarcodeVisualRunning = false;
+        _updateScanAiButton();
     }
 }
 
@@ -3140,8 +3258,6 @@ async function loadSettingsUI() {
     const cameraSelect = document.getElementById('setting-camera-facing');
     if (cameraSelect) cameraSelect.value = s.camera_facing || 'environment';
     loadCameraDevices();
-    const baifEl = document.getElementById('setting-barcode-ai-fallback');
-    if (baifEl) baifEl.checked = s.barcode_ai_fallback === true;
     renderAppliances(s.appliances || []);
     const mealPlanEnabled = s.meal_plan_enabled !== false;
     const mpEnabledEl = document.getElementById('setting-meal-plan-enabled');
@@ -3724,8 +3840,6 @@ async function saveSettings() {
     s.dietary = document.getElementById('setting-dietary').value.trim();
     // Camera
     s.camera_facing = document.getElementById('setting-camera-facing').value;
-    const baifSave = document.getElementById('setting-barcode-ai-fallback');
-    if (baifSave) s.barcode_ai_fallback = baifSave.checked;
     // Screensaver
     const ssEl = document.getElementById('setting-screensaver-enabled');
     if (ssEl) s.screensaver_enabled = ssEl.checked;
@@ -4010,6 +4124,9 @@ async function api(action, params = {}, method = 'GET', body = null, extraHeader
         }
         _offlineCacheSetSettings(data);
     }
+    if (action === 'products_list' && data && Array.isArray(data.products)) {
+        _offlineProductsSet(data.products);
+    }
     if (data && data.error) {
         remoteLog('API_FAIL', `${action}: ${data.error}`);
     }
@@ -4091,7 +4208,7 @@ function showPage(pageId, param = null, options = {}) {
             }
             loadInventory();
             break;
-        case 'scan': _aiFallbackExhausted = false; _hideScanAiOverlay(); { const _rb = document.getElementById('scan-ai-retry-btn'); if (_rb) _rb.style.display = 'none'; } initScanner(); clearQuickNameResults(); updateSpesaBanner(); updateScanRecents(); switchScanTab('barcode');
+        case 'scan': _dismissFamilySiblingPrompt(); _resetAiFallbackForNewScan(); initScanner(); clearQuickNameResults(); updateSpesaBanner(); updateScanRecents(); _applySpesaScanUI();
             // Pre-warm the embedding model the first time user visits scan page
             if (typeof window._getCategoryPipeline === 'function' && !window._categoryPipelineReady) {
                 window._getCategoryPipeline(); // fire-and-forget
@@ -6883,6 +7000,30 @@ function toggleScanDebug() {
 // ===== BARCODE SCANNER =====
 let _useBarcodeDetector = ('BarcodeDetector' in window);
 
+function _scannerAiAllowed() {
+    return _geminiAvailable && !_offlineMode && navigator.onLine;
+}
+
+function pauseScanner() {
+    _scannerPaused = true;
+    _updateScanAiButton();
+}
+
+function resumeScanner() {
+    if (!scannerStream) {
+        initScanner();
+        return;
+    }
+    _scannerPaused = false;
+    const video = document.getElementById('scanner-video');
+    if (video && video.paused) video.play().catch(() => {});
+    if (!quaggaRunning) {
+        _startBestScanner(video);
+    }
+    _setScanStatus(t('scan.status_scanning'), '', '');
+    _updateScanAiButton();
+}
+
 async function initScanner() {
     const video = document.getElementById('scanner-video');
     const viewport = document.getElementById('scanner-viewport');
@@ -6891,13 +7032,15 @@ async function initScanner() {
     
     const constraints = getCameraConstraints();
     scanLog(`Camera mode: ${getSettings().camera_facing || 'environment'}`);
-    scanLog(`BarcodeDetector: ${_useBarcodeDetector ? 'YES (native)' : 'NO (fallback)'}`);
+    scanLog(`BarcodeDetector: ${_useBarcodeDetector ? 'YES (native)' : 'will use ZBar WASM'}`);
+    scanLog(`ZBar polyfill: ${typeof barcodeDetectorPolyfill !== 'undefined' ? 'YES' : 'NO'}`);
     scanLog(`Gemini available: ${_geminiAvailable}`);
-    scanLog(`AI fallback enabled: ${getSettings().barcode_ai_fallback === true}`);
+    scanLog(`AI manual button: ${_scannerAiAllowed() ? 'YES' : 'NO'}`);
     scanLog(`Constraints: ${JSON.stringify(constraints.video)}`);
     
     try {
         stopScanner();
+        _resetAiFallbackForNewScan();
         _clearAiMatchPanel();
         
         const stream = await navigator.mediaDevices.getUserMedia(constraints);
@@ -6917,32 +7060,11 @@ async function initScanner() {
         _invalidBarcodeCount = 0;
         _setScanStatus(t('scan.status_ready'), '', '');
 
-        if (_useBarcodeDetector) {
-            startNativeScanner(video);
-        } else {
-            startQuaggaScanner(video);
-        }
-
-        // After 4s without a scan, reveal the AI number OCR fallback button
-        if (_geminiAvailable) {
-            setTimeout(() => {
-                if (scannerStream) { // still scanning
-                    const btn = document.getElementById('scan-num-ocr-btn');
-                    if (btn) btn.style.display = '';
-                }
-            }, 4000);
-        }
-
-        // After 5s without a scan, auto-trigger AI visual identification (if enabled)
-        if (_geminiAvailable && getSettings().barcode_ai_fallback && !_aiFallbackExhausted) {
-            clearTimeout(_aiFallbackTimer);
-            _aiFallbackTimer = setTimeout(() => {
-                if (scannerStream && !_aiFallbackExhausted) { // still scanning — no barcode found yet
-                    scanLog('5s elapsed without barcode — triggering AI OCR fallback');
-                    _tryGeminiNumberOCR({ chainToVisual: true });
-                }
-            }, 5000);
-        }
+        await _ensureBarcodeEngines();
+        _scannerPaused = false;
+        _startBestScanner(video);
+        setTimeout(() => _ensureTesseractWorker().catch(() => {}), 1200);
+        _updateScanAiButton();
         
     } catch (err) {
         scanLog(`CAMERA ERROR: ${err.name}: ${err.message}`);
@@ -6981,112 +7103,314 @@ function _setScanStatus(msg, state, method) {
     if (methodEl && method !== undefined) methodEl.textContent = method || '';
 }
 
-// ===== NATIVE BarcodeDetector SCANNER =====
-async function startNativeScanner(videoEl) {
-    if (quaggaRunning) return;
-    
+// ===== BARCODE ENGINE INIT (Native + ZBar WASM) =====
+function _startBestScanner(videoEl) {
+    if (_detectorNative || _detectorZbar) {
+        startUnifiedScanner(videoEl);
+    } else if (typeof Quagga !== 'undefined') {
+        scanLog('Legacy Quagga fallback — no native/ZBar engine');
+        startQuaggaScanner(videoEl);
+    } else {
+        scanLog('No barcode engine available');
+        _setScanStatus(t('error.camera'), 'invalid', '');
+    }
+}
+
+function _ensureBarcodeEngines() {
+    if (_barcodeEnginesReady) return _barcodeEnginesReady;
+    _barcodeEnginesReady = (async () => {
+        _detectorNative = null;
+        _detectorZbar = null;
+        if ('BarcodeDetector' in window) {
+            try {
+                const supported = await BarcodeDetector.getSupportedFormats();
+                const formats = _SCAN_FORMATS.filter(f => supported.includes(f));
+                if (formats.length) {
+                    _detectorNative = new BarcodeDetector({ formats });
+                    _useBarcodeDetector = true;
+                }
+            } catch (e) {
+                scanLog(`Native BarcodeDetector init failed: ${e.message}`);
+            }
+        }
+        if (typeof barcodeDetectorPolyfill !== 'undefined') {
+            try {
+                _detectorZbar = new barcodeDetectorPolyfill.BarcodeDetectorPolyfill({ formats: _SCAN_FORMATS });
+            } catch (e) {
+                scanLog(`ZBar engine init failed: ${e.message}`);
+            }
+        }
+        scanLog(`Engines ready — native: ${!!_detectorNative}, ZBar: ${!!_detectorZbar}`);
+        if (_detectorZbar) {
+            try {
+                const warm = document.createElement('canvas');
+                warm.width = warm.height = 8;
+                await _detectorZbar.detect(warm);
+            } catch (_) {}
+        }
+    })();
+    return _barcodeEnginesReady;
+}
+
+const _EAN_FORMATS = new Set(['ean_13', 'ean_8', 'upc_a', 'upc_e', 'ean_reader', 'ean_8_reader', 'upc_reader', 'upc_e_reader']);
+
+function _isEanFormat(format) {
+    return format && (_EAN_FORMATS.has(format) || String(format).includes('ean') || String(format).includes('upc'));
+}
+
+let _scanLastCode = '';
+let _scanConsecCount = 0;
+
+function _finalizeBarcode(code, method) {
+    _scannerGen++;
+    quaggaRunning = false;
     const scannerLine = document.querySelector('.scanner-line');
-    const detector = new BarcodeDetector({
-        formats: ['ean_13', 'ean_8', 'code_128', 'code_39', 'upc_a', 'upc_e']
+    if (scannerLine) scannerLine.classList.remove('scanning', 'detecting');
+    scanLog(`CONFIRMED: ${code} via ${method}`);
+    _hideScanLiveCode();
+    _setScanStatus(t('scan.status_confirmed'), 'confirmed', method);
+    onBarcodeDetected(code);
+}
+
+function _tryConfirmBarcode(code, format, method) {
+    const digits = String(code || '').replace(/\D/g, '');
+    if (!digits || digits.length < 8) return false;
+
+    const isEan = _isEanFormat(format) || digits.length === 13 || digits.length === 8;
+    if (isEan && (digits.length === 13 || digits.length === 8)) {
+        if (!validateEANChecksum(digits)) {
+            _invalidBarcodeCount++;
+            scanLog(`Invalid EAN checksum (${method}): ${digits}`);
+            _setScanStatus(t('scan.status_invalid').replace('{code}', digits), 'invalid', method);
+            _scanLastCode = '';
+            _scanConsecCount = 0;
+            return false;
+        }
+        _finalizeBarcode(digits, method);
+        return true;
+    }
+
+    if (digits === _scanLastCode) _scanConsecCount++;
+    else { _scanLastCode = digits; _scanConsecCount = 1; }
+    _showScanLiveCode(digits);
+    _setScanStatus(t('scan.status_partial').replace('{code}', digits), 'partial', method);
+    if (_scanConsecCount >= 2) {
+        _finalizeBarcode(digits, method);
+        return true;
+    }
+    return false;
+}
+
+function _extractEanCandidates(text) {
+    const digits = String(text || '').replace(/\D/g, '');
+    const found = [];
+    for (const len of [13, 8]) {
+        if (digits.length < len) continue;
+        for (let i = 0; i <= digits.length - len; i++) {
+            const candidate = digits.slice(i, i + len);
+            if (validateEANChecksum(candidate) && !found.includes(candidate)) found.push(candidate);
+        }
+    }
+    return found;
+}
+
+// Build preprocessed crop frames for ZBar (rotates through variants)
+function _buildScanCropFrame(videoEl, frameCount) {
+    const vw = videoEl.videoWidth;
+    const vh = videoEl.videoHeight;
+    if (!vw || !vh) return null;
+    const canvas = document.getElementById('scanner-canvas');
+    const ctx = canvas.getContext('2d');
+    const variants = [
+        { x: 0, y: 0, w: 1, h: 1, scale: 0.85, enhance: false },
+        { x: 0.075, y: 0.28, w: 0.85, h: 0.44, scale: 1, enhance: true },
+        { x: 0.1, y: 0.18, w: 0.8, h: 0.55, scale: 1, enhance: true },
+        { x: 0.05, y: 0.35, w: 0.9, h: 0.35, scale: 1.2, enhance: true },
+    ];
+    const v = variants[frameCount % variants.length];
+    const sw = Math.round(vw * v.w);
+    const sh = Math.round(vh * v.h);
+    const sx = Math.round(vw * v.x);
+    const sy = Math.round(vh * v.y);
+    canvas.width = Math.round(sw * v.scale);
+    canvas.height = Math.round(sh * v.scale);
+    ctx.drawImage(videoEl, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height);
+    if (v.enhance || _offlineMode || !navigator.onLine || isFrontCamera()) {
+        enhanceCanvasForBarcode(ctx, canvas.width, canvas.height);
+    }
+    return canvas;
+}
+
+function _captureDigitStrip(videoEl) {
+    const vw = videoEl.videoWidth;
+    const vh = videoEl.videoHeight;
+    if (!vw || !vh) return null;
+    const canvas = document.getElementById('scanner-canvas');
+    const ctx = canvas.getContext('2d');
+    const cropW = Math.round(vw * 0.9);
+    const cropH = Math.round(vh * 0.5);
+    const sx = Math.round((vw - cropW) / 2);
+    const sy = Math.round(vh * 0.2);
+    const scale = 2;
+    canvas.width = cropW * scale;
+    canvas.height = cropH * scale;
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(videoEl, sx, sy, cropW, cropH, 0, 0, canvas.width, canvas.height);
+    enhanceCanvasForBarcode(ctx, canvas.width, canvas.height);
+    return canvas;
+}
+
+async function _ensureTesseractWorker() {
+    if (_tesseractWorker) return _tesseractWorker;
+    if (_tesseractInitPromise) return _tesseractInitPromise;
+    _tesseractInitPromise = (async () => {
+        if (typeof Tesseract === 'undefined') {
+            await new Promise((resolve, reject) => {
+                const s = document.createElement('script');
+                s.src = 'assets/vendor/tesseract/tesseract.min.js';
+                s.onload = resolve;
+                s.onerror = () => reject(new Error('Tesseract load failed'));
+                document.head.appendChild(s);
+            });
+        }
+        const base = 'assets/vendor/tesseract';
+        const worker = await Tesseract.createWorker('eng', 1, {
+            workerPath: `${base}/worker.min.js`,
+            corePath: `${base}/tesseract-core.wasm.js`,
+            langPath: `${base}/lang`,
+            gzip: true,
+        });
+        await worker.setParameters({
+            tessedit_char_whitelist: '0123456789',
+            tessedit_pageseg_mode: '7',
+        });
+        _tesseractWorker = worker;
+        scanLog('Local digit OCR engine ready');
+        return worker;
+    })().catch(e => {
+        scanLog(`Local OCR init failed: ${e.message}`);
+        _tesseractInitPromise = null;
+        return null;
     });
-    
-    let scanning = true;
+    return _tesseractInitPromise;
+}
+
+async function _tryLocalEanDigitOcr(videoEl) {
+    if (_scannerPaused || !scannerStream) return false;
+    const worker = await _ensureTesseractWorker();
+    if (!worker) return false;
+    const canvas = _captureDigitStrip(videoEl);
+    if (!canvas) return false;
+    _setScanStatus(t('scan.status_digit_ocr'), 'retry', t('scan.method_local_ocr'));
+    try {
+        const { data } = await worker.recognize(canvas);
+        const candidates = _extractEanCandidates(data && data.text);
+        if (candidates.length) {
+            scanLog(`Local OCR: found ${candidates[0]} (from "${(data.text || '').trim()}")`);
+            showToast(t('scan.local_ocr_found').replace('{code}', candidates[0]), 'success');
+            return _tryConfirmBarcode(candidates[0], 'ean_13', 'OCR');
+        }
+        scanLog(`Local OCR: no valid EAN in "${(data && data.text) || ''}"`);
+    } catch (e) {
+        scanLog(`Local OCR error: ${e.message}`);
+    }
+    return false;
+}
+
+// ===== UNIFIED SCANNER (Native + ZBar + local digit OCR) =====
+function startUnifiedScanner(videoEl) {
+    const gen = ++_scannerGen;
     quaggaRunning = true;
-    let frameCount = 0;
-    let partialCount = 0;
-    let lastDetected = '';
-    let detectCount = 0;
-    let detectionHistory = {};
-    let quaggaParallelStarted = false;
+    _scanLastCode = '';
+    _scanConsecCount = 0;
     const startTime = Date.now();
-    
-    scanLog('Native BarcodeDetector started');
-    
-    function updateFeedback(state) {
+    let frameCount = 0;
+    let digitOcrBusy = false;
+    let lastDigitOcrAt = 0;
+    const scannerLine = document.querySelector('.scanner-line');
+
+    scanLog('Unified scanner started');
+
+    function feedback(state) {
         if (!scannerLine) return;
         scannerLine.classList.remove('scanning', 'detecting');
         if (state) scannerLine.classList.add(state);
     }
-    
-    async function scanFrame() {
-        if (!scanning || !scannerStream) return;
-        frameCount++;
-        
-        if (frameCount === 1) {
-            updateFeedback('scanning');
-            _setScanStatus(t('scan.status_scanning'), '', '');
+
+    async function loop() {
+        if (gen !== _scannerGen || !scannerStream) {
+            quaggaRunning = false;
+            return;
+        }
+        if (_scannerPaused) {
+            requestAnimationFrame(loop);
+            return;
         }
 
-        // After 2s without detection, also start Quagga in parallel as backup
-        if (!quaggaParallelStarted && (Date.now() - startTime) > 2000) {
-            quaggaParallelStarted = true;
-            scanLog('Native: 2s elapsed, spawning fallback scanner in parallel');
-            _setScanStatus(t('scan.status_parallel'), 'retry', '');
-            quaggaRunning = false; // temporarily release so Quagga can start
-            startQuaggaScanner(videoEl, false);
-            quaggaRunning = true; // re-take ownership (Quagga will share)
+        frameCount++;
+        if (frameCount === 1) {
+            feedback('scanning');
+            _setScanStatus(t('scan.status_scanning'), '', _detectorNative ? 'Native+ZBar' : 'ZBar');
         }
-        
-        try {
-            const barcodes = await detector.detect(videoEl);
-            
-            if (barcodes.length > 0) {
-                const code = barcodes[0].rawValue;
-                const format = barcodes[0].format;
-                partialCount++;
-                scanLog(`Native detect #${partialCount} [f${frameCount}]: ${code} (${format})`);
-                updateFeedback('detecting');
-                _showScanLiveCode(code);
-                _setScanStatus(t('scan.status_partial').replace('{code}', code), 'partial');
-                
-                if (!detectionHistory[code]) detectionHistory[code] = { count: 0 };
-                detectionHistory[code].count++;
-                
-                if (code === lastDetected) {
-                    detectCount++;
-                } else {
-                    lastDetected = code;
-                    detectCount = 1;
+
+        // 1) Native BarcodeDetector — every frame (fastest when available)
+        if (_detectorNative) {
+            try {
+                const codes = await _detectorNative.detect(videoEl);
+                if (codes && codes.length > 0) {
+                    feedback('detecting');
+                    if (_tryConfirmBarcode(codes[0].rawValue, codes[0].format, 'Native')) return;
                 }
-                
-                // EAN/UPC have built-in checksum — confirm on first hit for speed.
-                // For other formats (code_128, code_39) require 2 to avoid false reads.
-                const highConfidence = ['ean_13','ean_8','upc_a','upc_e'].includes(format);
-                if (highConfidence || detectCount >= 2 || detectionHistory[code].count >= 2) {
-                    if (highConfidence && !validateEANChecksum(code)) {
-                        _invalidBarcodeCount++;
-                        scanLog(`Invalid EAN checksum (native): ${code} (retry #${_invalidBarcodeCount})`);
-                        _setScanStatus(t('scan.status_invalid').replace('{code}', code), 'invalid', 'Native');
-                        lastDetected = ''; detectCount = 0;
-                        return;
+            } catch (e) {
+                if (frameCount === 1) scanLog(`Native detect error: ${e.message}`);
+            }
+        }
+
+        // 2) ZBar WASM on live video — every frame offline, every 2 online
+        const zbarEvery = (_offlineMode || !navigator.onLine) ? 1 : 2;
+        if (_detectorZbar && frameCount % zbarEvery === 0) {
+            try {
+                const codes = await _detectorZbar.detect(videoEl);
+                if (codes && codes.length > 0) {
+                    feedback('detecting');
+                    if (_tryConfirmBarcode(codes[0].rawValue, codes[0].format, 'ZBar')) return;
+                }
+            } catch (e) {
+                if (frameCount <= 2) scanLog(`ZBar video detect error: ${e.message}`);
+            }
+        }
+
+        // 3) ZBar on enhanced crop variants — every 3 frames
+        if (_detectorZbar && frameCount % 3 === 0) {
+            const crop = _buildScanCropFrame(videoEl, frameCount);
+            if (crop) {
+                try {
+                    const codes = await _detectorZbar.detect(crop);
+                    if (codes && codes.length > 0) {
+                        feedback('detecting');
+                        if (_tryConfirmBarcode(codes[0].rawValue, codes[0].format, 'ZBar+')) return;
                     }
-                    scanning = false;
-                    quaggaRunning = false;
-                    updateFeedback(null);
-                    scanLog(`CONFIRMED: ${code} after ${frameCount} frames (${format})`);
-                    _setScanStatus(t('scan.status_confirmed'), 'confirmed');
-                    onBarcodeDetected(code);
-                    return;
-                }
-            } else {
-                updateFeedback('scanning');
+                } catch (_) {}
             }
-        } catch (e) {
-            scanLog(`Native detect error: ${e.message}`);
         }
-        
-        if (scanning) {
-            if (frameCount % 30 === 0) {
-                scanLog(`Native scanning... f${frameCount}, partials: ${partialCount}`);
-            }
-            requestAnimationFrame(scanFrame);
+
+        // 4) Local digit OCR (numbers under barcode) — after delay, works offline
+        const elapsed = Date.now() - startTime;
+        if (elapsed > _LOCAL_OCR_DELAY_MS && !digitOcrBusy && (Date.now() - lastDigitOcrAt) > 1800) {
+            lastDigitOcrAt = Date.now();
+            digitOcrBusy = true;
+            _tryLocalEanDigitOcr(videoEl).finally(() => { digitOcrBusy = false; });
         }
+
+        feedback('scanning');
+        if (frameCount % 60 === 0) scanLog(`Scanning f${frameCount} (${Math.round(elapsed / 1000)}s)`);
+        requestAnimationFrame(loop);
     }
-    
-    requestAnimationFrame(scanFrame);
+
+    requestAnimationFrame(loop);
 }
 
-// ===== QUAGGA FALLBACK SCANNER =====
+// ===== QUAGGA LEGACY SCANNER (only when native + ZBar unavailable) =====
 function startQuaggaScanner(videoEl, isPrimary = true) {
     if (quaggaRunning) return;
     
@@ -7135,16 +7459,23 @@ function startQuaggaScanner(videoEl, isPrimary = true) {
             ctx.drawImage(videoEl, sx, sy, cropW, cropH, 0, 0, cropW, cropH);
         }
         
-        // Apply enhancement for front cam or low-light
-        if (frontCam) {
+        // Apply enhancement for front cam, offline, or low-light conditions
+        if (frontCam || _offlineMode || !navigator.onLine) {
             enhanceCanvasForBarcode(ctx, canvas.width, canvas.height);
         }
         
         return canvas.toDataURL('image/jpeg', 0.85);
     }
     
+    const offlineBoost = _offlineMode || !navigator.onLine;
+    const frameInterval = offlineBoost ? 40 : 60;
+
     function scanFrame() {
         if (!scanning || !scannerStream) return;
+        if (_scannerPaused) {
+            setTimeout(scanFrame, frameInterval);
+            return;
+        }
         frameCount++;
         scanPass = (scanPass + 1) % 2;
         
@@ -7182,7 +7513,7 @@ function startQuaggaScanner(videoEl, isPrimary = true) {
                     multiple: false
                 },
                 locate: true,
-                locator: { patchSize: 'medium', halfSample: true }
+                locator: { patchSize: offlineBoost ? 'large' : 'medium', halfSample: !offlineBoost }
             }, function(result) {
                 callbackCalled = true;
                 clearTimeout(safetyTimer);
@@ -7216,7 +7547,7 @@ function startQuaggaScanner(videoEl, isPrimary = true) {
                             scanLog(`Invalid EAN checksum: ${code} (retry #${_invalidBarcodeCount})`);
                             _setScanStatus(t('scan.status_invalid').replace('{code}', code), 'invalid', 'Quagga');
                             lastDetected = ''; detectCount = 0; // reset confidence
-                            if (scanning) setTimeout(scanFrame, 60);
+                            if (scanning) setTimeout(scanFrame, frameInterval);
                             return;
                         }
                         scanning = false;
@@ -7237,18 +7568,18 @@ function startQuaggaScanner(videoEl, isPrimary = true) {
                     if (frameCount % 20 === 0) {
                         scanLog(`Scanning... f${frameCount}, partials: ${partialCount}`);
                     }
-                    setTimeout(scanFrame, 60);
+                    setTimeout(scanFrame, frameInterval);
                 }
             });
         } catch (e) {
             callbackCalled = true;
             clearTimeout(safetyTimer);
             scanLog(`Quagga error: ${e.message}`);
-            if (scanning) setTimeout(scanFrame, 500);
+            if (scanning) setTimeout(scanFrame, offlineBoost ? 200 : 500);
         }
     }
     
-    setTimeout(scanFrame, 200);
+    setTimeout(scanFrame, offlineBoost ? 80 : 200);
 }
 
 // Enhance low-quality camera frames for better barcode recognition
@@ -7270,13 +7601,12 @@ function enhanceCanvasForBarcode(ctx, w, h) {
 }
 
 function stopScanner() {
+    _scannerPaused = false;
     quaggaRunning = false;
     _scanZoomLevel = 2; // always 2x on next start
     _torchActive = false;
-    clearTimeout(_aiFallbackTimer); _aiFallbackTimer = null;
-    // NOTE: _aiFallbackExhausted is intentionally NOT reset here.
-    // It is only reset in showPage('scan') so that internal stop/restart
-    // cycles (e.g. initScanner calling stopScanner) don't re-arm the AI timer.
+    const aiBtn = document.getElementById('scan-ai-manual-btn');
+    if (aiBtn) aiBtn.style.display = 'none';
     if (scannerStream) {
         scannerStream.getTracks().forEach(t => t.stop());
         scannerStream = null;
@@ -7299,7 +7629,8 @@ function stopScanner() {
 }
 
 async function onBarcodeDetected(barcode) {
-    clearTimeout(_aiFallbackTimer); _aiFallbackTimer = null;
+    _dismissFamilySiblingPrompt();
+    _resetAiFallbackForNewScan();
     showLoading(true);
     
     // Vibrate if available
@@ -7420,16 +7751,17 @@ async function onBarcodeDetected(barcode) {
             }
         }
         
-        // Not found - ask user to add manually
+        // Not found — keep camera running and let user scan again or add manually
         showLoading(false);
-        stopScanner();
         showToast(t('error.not_found_manual'), 'error');
-        startManualEntry(barcode);
+        _setScanStatus(t('scan.status_scanning'), '', '');
+        resumeScanner();
         
     } catch (err) {
         showLoading(false);
         console.error('Barcode lookup error:', err);
         showToast(t('error.search'), 'error');
+        resumeScanner();
     }
 }
 
@@ -7472,6 +7804,7 @@ async function submitQuickName() {
         return;
     }
     
+    _dismissFamilySiblingPrompt();
     stopScanner();
     showLoading(true);
     
@@ -7987,7 +8320,7 @@ function showProductAction() {
     // Allergens
     let allergensHtml = '';
     if (currentProduct.allergens) {
-        allergensHtml = `<div class="product-allergens">⚠️ <strong>Allergeni:</strong> ${escapeHtml(currentProduct.allergens)}</div>`;
+        allergensHtml = `<div class="product-allergens">⚠️ <strong>${escapeHtml(t('product.allergens_label'))}</strong> ${escapeHtml(currentProduct.allergens)}</div>`;
     }
     
     // Ingredients (collapsible)
@@ -7995,7 +8328,7 @@ function showProductAction() {
     if (currentProduct.ingredients) {
         ingredientsHtml = `
             <details class="product-ingredients">
-                <summary>📋 Ingredienti</summary>
+                <summary>${escapeHtml(t('product.ingredients_summary'))}</summary>
                 <p>${escapeHtml(currentProduct.ingredients)}</p>
             </details>
         `;
@@ -8046,7 +8379,7 @@ function showProductAction() {
     editInfoEl.innerHTML = `
         <div class="edit-unknown-card ${isUnknown ? 'highlight' : ''}">
             <h4>${isUnknown ? '⚠️ ' + t('product.unknown_product') : '✏️ ' + t('product.edit_info')}</h4>
-            ${isUnknown ? '<p class="edit-unknown-hint">Inserisci il nome e le informazioni del prodotto</p>' : ''}
+            ${isUnknown ? `<p class="edit-unknown-hint">${escapeHtml(t('edit.unknown_hint'))}</p>` : ''}
             <div class="edit-unknown-form">
                 <div class="form-group">
                     <label>${t('edit.label_name')}</label>
@@ -8835,14 +9168,16 @@ function showAddForm() {
     
     showPage('add');
     updateScaleReadButtons();
-    // After rendering, fetch history-based expiry prediction
-    if (currentProduct && currentProduct.id) {
-        _fetchExpiryHistoryAndUpdate(currentProduct.id);
-    }
-    // If Gemini is available and product was just created (no history), ask for AI hint
-    if (_geminiAvailable && currentProduct && !currentProduct._aiHintFetched) {
-        _applyAIProductHint();
-    }
+    // History first (≥3 samples → average of last 3); AI only if history is insufficient
+    (async () => {
+        let hasHistory = false;
+        if (currentProduct?.id) {
+            hasHistory = await _fetchExpiryHistoryAndUpdate(currentProduct.id);
+        }
+        if (_geminiAvailable && currentProduct && !currentProduct._aiHintFetched && !hasHistory) {
+            _applyAIProductHint();
+        }
+    })();
 }
 
 function toggleVacuumSealed() {
@@ -8884,22 +9219,31 @@ function recalculateAddExpiry() {
     if (dateEl) dateEl.textContent = formatDate(newDate);
 }
 
+const _EXPIRY_HISTORY_MIN_SAMPLES = 3;
+
 async function _fetchExpiryHistoryAndUpdate(productId) {
+    window._historyExpiryDays = null;
+    window._historyExpiryCount = 0;
     try {
         const res = await fetch(`api/index.php?action=expiry_history&product_id=${encodeURIComponent(productId)}`, {
             headers: { ...(typeof apiAuthHeaders === 'function' ? apiAuthHeaders() : {}) },
         });
         const data = await res.json();
-        if (data.avg_days && data.avg_days > 0 && data.count >= 1) {
+        const minSamples = data.min_samples || _EXPIRY_HISTORY_MIN_SAMPLES;
+        window._historyExpiryCount = data.count || 0;
+        if (data.avg_days && data.avg_days > 0 && (data.count || 0) >= minSamples) {
             window._historyExpiryDays = data.avg_days;
-            window._historyExpiryCount = data.count;
-            // Update the displayed date and label
+            if (_aiProductHintController) {
+                _aiProductHintController.abort();
+                _aiProductHintController = null;
+            }
+            document.getElementById('ai-hint-loading')?.remove();
             const loc = document.getElementById('add-location')?.value || '';
             const isVacuum = document.getElementById('add-vacuum-sealed')?.checked;
             let days = isVacuum ? getVacuumExpiryDays(data.avg_days) : data.avg_days;
             const newDate = addDays(days);
             const newLabel = formatEstimatedExpiry(days);
-            const suffix = ` <span class="history-badge" title="${t('add.history_badge_tip').replace('{n}', data.count)}">${t('product.history_badge')}</span>`;
+            const suffix = ` <span class="history-badge" title="${t('add.history_badge_tip').replace('{n}', String(data.count))}">${t('product.history_badge')}</span>`;
             const expiryInput = document.getElementById('add-expiry');
             const estimateEl = document.querySelector('.expiry-estimate-label');
             const dateEl = document.querySelector('.expiry-estimate-date');
@@ -8907,16 +9251,19 @@ async function _fetchExpiryHistoryAndUpdate(productId) {
             if (estimateEl) estimateEl.innerHTML = `${t('add.estimated_expiry')} <strong>${newLabel}${suffix}</strong>`;
             if (dateEl) dateEl.textContent = formatDate(newDate);
             window._addBaseExpiryDays = data.avg_days;
+            return true;
         }
     } catch (e) {
         // silently fall back to rule-based estimate
     }
+    return false;
 }
 
 // ===== AI PRODUCT HINT: shelf-life + storage suggestion =====
 let _aiProductHintController = null;
 async function _applyAIProductHint() {
     if (!currentProduct) return;
+    if (window._historyExpiryDays && (window._historyExpiryCount || 0) >= _EXPIRY_HISTORY_MIN_SAMPLES) return;
     // Abort any in-flight request for a previous product
     if (_aiProductHintController) _aiProductHintController.abort();
     _aiProductHintController = new AbortController();
@@ -9214,25 +9561,91 @@ function selectLocation(btn, loc) {
     recalculateAddExpiry();
 }
 
+const _RECENT_ADD_DEDUP_MS = 30000;
+let _recentInventoryAdds = [];
+
+function _pruneRecentInventoryAdds() {
+    const cutoff = Date.now() - _RECENT_ADD_DEDUP_MS;
+    _recentInventoryAdds = _recentInventoryAdds.filter(r => r.ts >= cutoff);
+}
+
+function _findRecentInventoryAdd(productId, location) {
+    _pruneRecentInventoryAdds();
+    let best = null;
+    for (const r of _recentInventoryAdds) {
+        if (r.productId === productId && r.location === location && (!best || r.ts > best.ts)) {
+            best = r;
+        }
+    }
+    return best;
+}
+
+function _recordRecentInventoryAdd(entry) {
+    _pruneRecentInventoryAdds();
+    _recentInventoryAdds.push(entry);
+}
+
+function _formatQtyPlain(qty, unit, defaultQty, packageUnit) {
+    return formatQuantity(qty, unit, defaultQty, packageUnit).replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim();
+}
+
+function _formatRecentAddWhen(ts) {
+    const secs = Math.max(1, Math.round((Date.now() - ts) / 1000));
+    if (secs < 5) return t('time.just_now');
+    return t('time.seconds_ago').replace('{n}', String(secs));
+}
+
+function _confirmRecentDuplicateAdd(recent, productName, addQty, unit, defQty, pkgUnit) {
+    const totalStr = _formatQtyPlain(recent.totalQty, recent.unit, recent.defaultQty, recent.packageUnit);
+    const addStr = _formatQtyPlain(addQty, unit, defQty, pkgUnit);
+    const msg = t('add.duplicate_recent_confirm')
+        .replace('{name}', productName)
+        .replace('{when}', _formatRecentAddWhen(recent.ts))
+        .replace('{total}', totalStr)
+        .replace('{qty}', addStr);
+    return confirm(msg);
+}
+
 async function submitAdd(e) {
     e.preventDefault();
-    showLoading(true);
-    
-    try {
-        const selectedUnit = document.getElementById('add-unit').value;
-        const productUnit = currentProduct.unit || 'pz';
-        
-        // Validate conf fields
-        if (selectedUnit === 'conf') {
-            const confSize = parseFloat(document.getElementById('add-conf-size')?.value);
-            if (!confSize || confSize <= 0) {
-                showLoading(false);
-                showToast(t('product.conf_size_required'), 'error');
-                document.getElementById('add-conf-size')?.focus();
-                return;
-            }
+
+    const selectedUnit = document.getElementById('add-unit').value;
+    const productUnit = currentProduct.unit || 'pz';
+
+    if (selectedUnit === 'conf') {
+        const confSize = parseFloat(document.getElementById('add-conf-size')?.value);
+        if (!confSize || confSize <= 0) {
+            showToast(t('product.conf_size_required'), 'error');
+            document.getElementById('add-conf-size')?.focus();
+            return;
         }
-        
+    }
+
+    const location = document.getElementById('add-location').value;
+    const addQty = parseFloat(document.getElementById('add-quantity').value) || 1;
+    const pkgUnit = selectedUnit === 'conf' ? (document.getElementById('add-conf-unit')?.value || null) : null;
+    const pkgSize = selectedUnit === 'conf' ? (parseFloat(document.getElementById('add-conf-size')?.value) || null) : null;
+    const unitForAdd = selectedUnit !== productUnit ? selectedUnit : productUnit;
+
+    const recent = _findRecentInventoryAdd(currentProduct.id, location);
+    if (recent) {
+        const ok = _confirmRecentDuplicateAdd(
+            recent,
+            currentProduct.name,
+            addQty,
+            unitForAdd,
+            pkgSize || currentProduct.default_quantity || recent.defaultQty,
+            pkgUnit || currentProduct.package_unit || recent.packageUnit
+        );
+        if (!ok) {
+            if (_spesaMode) showPage('scan');
+            return;
+        }
+    }
+
+    showLoading(true);
+
+    try {
         const result = await api('inventory_add', {}, 'POST', {
             product_id: currentProduct.id,
             quantity: parseFloat(document.getElementById('add-quantity').value) || 1,
@@ -9246,6 +9659,16 @@ async function submitAdd(e) {
         
         showLoading(false);
         if (result.success) {
+            _recordRecentInventoryAdd({
+                productId: currentProduct.id,
+                location,
+                qty: addQty,
+                unit: result.unit || unitForAdd,
+                defaultQty: result.default_quantity,
+                packageUnit: result.package_unit,
+                totalQty: result.total_qty,
+                ts: Date.now(),
+            });
             // Build quantity info for toast
             let qtyInfo = '';
             if (result.total_qty) {
@@ -9279,7 +9702,7 @@ async function submitAdd(e) {
                     }).catch(() => {});
                 }
             }
-            if (!spesaModeAfterAdd()) showPage('dashboard');
+            if (!(await spesaModeAfterAdd())) showPage('dashboard');
 
             // Submit extra batches (different expiry dates) in the background, silently
             if ((window._addExtraBatches || []).length > 0) {
@@ -11193,7 +11616,12 @@ async function confirmShoppingItemFound() {
 
 /** Build a Bring specification string that encodes urgency + optional brand. */
 function _urgencyToSpec(urgency, brand) {
-    const urgencyLabels = { critical: t('shopping.urgency_spec_critical'), high: t('shopping.urgency_spec_high'), medium: '', low: '' };
+    const urgencyLabels = {
+        critical: t('shopping.urgency_spec_critical'),
+        high:     t('shopping.urgency_spec_high'),
+        medium:   t('shopping.urgency_spec_medium'),
+        low:      t('shopping.urgency_spec_low'),
+    };
     const urgLabel = urgencyLabels[urgency] || '';
     if (urgLabel && brand) return `${urgLabel} · ${brand}`;
     if (urgLabel) return urgLabel;
@@ -11233,7 +11661,7 @@ function _unmarkAutoAddedBring(names) {
 
 // ===== BRING! PURCHASED BLOCKLIST (server-synced) =====
 // When an item disappears from Bring (user bought it), we block auto-re-add for 4h.
-const _BRING_PURCHASED_TTL = 4 * 60 * 60 * 1000; // 4 hours
+const _BRING_PURCHASED_TTL = 72 * 60 * 60 * 1000; // 72 h — match server blocklist
 
 function _getBringPurchasedBlocklist() {
     const map = Object.assign({}, _bringBlocklistCache || {});
@@ -11259,11 +11687,7 @@ function _markBringPurchased(names) {
 }
 
 function _isBringPurchased(name, urgency) {
-    // Critical items: blocked only 30 min (enough to put groceries away).
-    // High: 90 min. Others: full 4 h.
-    const ttl = urgency === 'critical' ? 30 * 60 * 1000
-              : urgency === 'high'     ? 90 * 60 * 1000
-              : _BRING_PURCHASED_TTL;
+    const ttl = _BRING_PURCHASED_TTL;
     const map = _getBringPurchasedBlocklist();
     const now = Date.now();
     return Object.keys(map).some(k => {
@@ -11278,22 +11702,10 @@ async function autoAddCriticalItems() {
     const lastRun = parseInt(localStorage.getItem('_autoAddedCriticalTs') || '0');
     if (Date.now() - lastRun < 5 * 60 * 1000) return;
     localStorage.setItem('_autoAddedCriticalTs', String(Date.now()));
-    // Auto-add rules:
-    // - critical: always
-    // - high: always (PHP already applies strict criteria for high urgency)
-    // - medium: when running out within 7 days (<1 week) for items used ≥3x/month
     const toAdd = smartShoppingItems.filter(i => {
-        const imminentWeek = (i.days_left ?? 999) <= 7 && (i.uses_per_month || 0) >= 3;
         if (i.on_bring) return false;
-        // For imminent items, do not honor local "purchased" blocklist too aggressively.
-        // If they are predicted to finish within a week, keep Bring aligned automatically.
-        // Always honour the purchased blocklist so that items the user just removed from Bring!
-        // (i.e. bought them at the store) are not immediately re-added before they are scanned.
-        if (!imminentWeek && _isBringPurchased(i.name, i.urgency)) return false;
-        if (i.urgency === 'critical') return true;
-        if (i.urgency === 'high') return true;
-        if (i.urgency === 'medium' && (i.days_left ?? 999) <= 7 && (i.uses_per_month || 0) >= 3) return true;
-        return false;
+        if (_isBringPurchased(i.name, i.urgency)) return false;
+        return ['critical', 'high', 'medium', 'low'].includes(i.urgency);
     });
     if (toAdd.length === 0) return;
     const itemsToAdd = toAdd.map(i => ({ name: i.name, specification: _urgencyToSpec(i.urgency, i.brand) }));
@@ -11451,14 +11863,126 @@ async function syncShoppingPriceTotal(forceRefresh = false) {
  * Tries to parse quantity/unit from the Bring! specification field.
  */
 function _buildPricePayload() {
-    // One retail unit per list item — stable weekly total (server uses the same rule).
-    return shoppingItems.map((item) => ({
-        name: item.name,
-        quantity: 1,
-        unit: 'conf',
-        default_quantity: 0,
-        package_unit: '',
-    }));
+    return shoppingItems.map((item) => {
+        const smart = _matchBringToSmart(item.name, smartShoppingItems);
+        if (smart?.suggested_qty > 0) {
+            return {
+                name: item.name,
+                quantity: smart.suggested_qty,
+                unit: smart.suggested_unit || smart.unit || 'conf',
+                default_quantity: smart.default_qty || 0,
+                package_unit: smart.package_unit || '',
+            };
+        }
+        if (smart) {
+            const unit = smart.unit || 'conf';
+            const defQty = parseFloat(smart.default_qty) || 0;
+            const pkgUnit = smart.package_unit || '';
+            if (unit === 'conf' && defQty > 0 && pkgUnit) {
+                return {
+                    name: item.name,
+                    quantity: defQty,
+                    unit: pkgUnit.toLowerCase(),
+                    default_quantity: defQty,
+                    package_unit: pkgUnit,
+                };
+            }
+        }
+        return { name: item.name, quantity: 1, unit: 'conf', default_quantity: 0, package_unit: '' };
+    });
+}
+
+/** Format inventory qty for human-readable pantry hints (conf → grams/ml when known). */
+function _formatInvQtyDisplay(qty, unit, defaultQty = 0, packageUnit = '') {
+    const q = parseFloat(qty) || 0;
+    if (q <= 0) return '';
+    const u = unit || 'pz';
+    const pkg = (packageUnit || '').toLowerCase();
+    const def = parseFloat(defaultQty) || 0;
+    if (u === 'conf' && def > 0 && (pkg === 'g' || pkg === 'ml')) {
+        return `${Math.round(q * def)} ${pkg}`;
+    }
+    if (u === 'conf' && def > 0) {
+        return `${Math.round(q * 10) / 10} conf (${Math.round(q * def)} ${pkg || 'g'})`;
+    }
+    return `${Math.round(q * 10) / 10} ${u}`;
+}
+
+function _shoppingFamilyInventoryRows(item, smartData, invItems) {
+    const shoppingName = (smartData?.shopping_name || item.name || '').toLowerCase();
+    const firstTok = (_nameTokens(item.name)[0] || '').toLowerCase();
+    return invItems.filter(i => {
+        if (parseFloat(i.quantity) <= 0) return false;
+        const iShopping = (i.shopping_name || '').toLowerCase();
+        if (shoppingName && iShopping === shoppingName) {
+            return _productMatchesShoppingFamily(i.name, shoppingName);
+        }
+        const iFirst = (_nameTokens(i.name || '')[0] || '').toLowerCase();
+        return firstTok && iFirst === firstTok;
+    });
+}
+
+/** Exclude mis-tagged products (e.g. passata stored under shopping_name "Pomodori"). */
+function _inferShoppingGeneric(name) {
+    const lower = (name || '').toLowerCase();
+    const phrases = [
+        ['passata di pomodoro', 'passata'], ['passata pomodoro', 'passata'],
+        ['polpa di pomodoro', 'polpa di pomodoro'], ['polpa pomodoro', 'polpa di pomodoro'],
+        ['sugo al pomodoro', 'sugo'], ['sugo di pomodoro', 'sugo'], ['salsa di pomodoro', 'sugo'],
+        ['datterini pelati', 'pelati'], ['pomodori pelati', 'pelati'], ['pomodoro pelato', 'pelati'],
+        ['pelati', 'pelati'], ['passata', 'passata'],
+        ['tè al limone', 'tè al limone'], ['te al limone', 'tè al limone'],
+        ['panna da cucina', 'panna da cucina'],
+        ['pomodorini', 'pomodorini'],
+        ['pomodoro', 'pomodori'], ['pomodori', 'pomodori'],
+    ];
+    for (const [phrase, gen] of phrases) {
+        if (lower.includes(phrase)) return gen;
+    }
+    return (_nameTokens(name)[0] || lower).toLowerCase();
+}
+
+function _productMatchesShoppingFamily(productName, shoppingName) {
+    const sn = (shoppingName || '').toLowerCase().trim();
+    if (!sn) return false;
+    const productGen = _inferShoppingGeneric(productName);
+    const targetGen = _inferShoppingGeneric(shoppingName);
+    if (productGen === targetGen) return true;
+    const nameLower = (productName || '').toLowerCase().trim();
+    return nameLower === sn || nameLower.startsWith(sn + ' ');
+}
+
+/** Shopping labels too vague to show alone (use product name / spec instead). */
+const _VAGUE_SHOPPING_LABELS = new Set(['misto', 'bevande', 'ver', 'verdure', 'conserva', 'surgelati', 'condimenti']);
+
+function _resolveShoppingDisplayName(item, smartData) {
+    const raw = (item.name || '').trim();
+    const rawLower = raw.toLowerCase();
+    if (!_VAGUE_SHOPPING_LABELS.has(rawLower)) return raw;
+    const specText = _specDisplayText(item.specification || '');
+    if (specText) {
+        const head = specText.split(' · ')[0].trim();
+        if (head && head.toLowerCase() !== rawLower) return head;
+    }
+    if (smartData?.name && smartData.name.toLowerCase() !== rawLower) return smartData.name;
+    return raw;
+}
+
+function _dedupeShoppingByGeneric(enriched) {
+    const seen = new Map();
+    const out = [];
+    for (const e of enriched) {
+        const key = (e.smartData?.shopping_name || e.item.name).toLowerCase();
+        if (seen.has(key)) {
+            const prev = seen.get(key);
+            if (!prev.duplicateNames.includes(e.item.name)) prev.duplicateNames.push(e.item.name);
+            continue;
+        }
+        e.duplicateNames = [];
+        seen.set(key, e);
+        out.push(e);
+    }
+    return out;
 }
 
 /**
@@ -12052,11 +12576,12 @@ function renderSmartItem(item) {
             qtyText = t('shopping.out_of_stock');
         }
 
-        // Usage frequency badge
+        // Usage frequency badge — uses per month, not raw transaction count
         let freqBadge = '';
-        if (item.use_count >= 8) freqBadge = `<span class="smart-freq-badge freq-high">${t('shopping.freq_high')}</span>`;
-        else if (item.use_count >= 4) freqBadge = `<span class="smart-freq-badge freq-med">${t('shopping.freq_regular')}</span>`;
-        else if (item.use_count >= 2) freqBadge = `<span class="smart-freq-badge freq-low">${t('shopping.freq_occasional')}</span>`;
+        const usesMonth = Math.round(parseFloat(item.uses_per_month) || 0);
+        if (usesMonth >= 4) freqBadge = `<span class="smart-freq-badge freq-high">📈 ~${usesMonth}/mese</span>`;
+        else if (usesMonth >= 2) freqBadge = `<span class="smart-freq-badge freq-med">📊 ~${usesMonth}/mese</span>`;
+        else if (usesMonth >= 1) freqBadge = `<span class="smart-freq-badge freq-low">📉 ~${usesMonth}/mese</span>`;
 
         // Suggested purchase quantity badge
         let suggestBadge = '';
@@ -12305,11 +12830,8 @@ function _buildSmartSpec(smartMatch) {
         const approx = !!smartMatch.suggested_approx;
         const tKey = approx ? 'shopping.suggest_buy_approx' : 'shopping.suggest_buy';
         qtyPart = t(tKey).replace('{qty} {unit}', qtyFormatted);
-        // Fallback if the key uses separate {qty} and {unit} placeholders
         if (qtyPart.includes('{qty}')) {
-            qtyPart = t(tKey)
-                .replace('{qty}', smartMatch.suggested_qty)
-                .replace('{unit}', smartMatch.suggested_unit || smartMatch.unit);
+            qtyPart = (approx ? '🛒 Almeno: ' : '🛒 Compra: ') + qtyFormatted;
         }
     }
     const parts = [urgPart, qtyPart].filter(Boolean);
@@ -12324,10 +12846,10 @@ async function autoSyncUrgencySpecs() {
         if (!smartMatch) continue;
         const targetSpec    = _buildSmartSpec(smartMatch);
         const currentSpec   = (item.specification || '').trim();
-        // Normalise for comparison: ignore case and leading/trailing whitespace
         if (targetSpec.toLowerCase() === currentSpec.toLowerCase()) continue;
-        toUpdate.push({ name: item.name, specification: targetSpec, update_spec: true });
-        // Optimistically update local item so re-render doesn't flicker
+        // Resolve to generic shopping_name so PHP merges onto the canonical Bring item
+        const apiName = smartMatch.shopping_name || item.name;
+        toUpdate.push({ name: apiName, specification: targetSpec, update_spec: true });
         item.specification = targetSpec;
     }
     if (toUpdate.length === 0) return;
@@ -12424,6 +12946,9 @@ async function loadShoppingList() {
             const removedNames = [...prevNames].filter(n => !newNames.has(n));
             if (removedNames.length) _markBringPurchased(removedNames);
         }
+        if (data.recently?.length) {
+            _markBringPurchased(data.recently.map(i => i.name).filter(Boolean));
+        }
         shoppingItems = newItems;
         // Evict removed items from price cache so stale prices don't reappear
         for (const name of Object.keys(_cachedPrices)) {
@@ -12463,7 +12988,7 @@ function _specDisplayText(spec) {
     if (!spec) return '';
     // Strip known urgency prefixes set by _urgencyToSpec (case-insensitive, then trim separator)
     const lower = spec.toLowerCase();
-    for (const prefix of ['⚡ urgente', '🟠 presto']) {
+    for (const prefix of ['⚡ urgente', '🟠 presto', '🟡 a breve', '🔵 previsione']) {
         if (lower.startsWith(prefix)) {
             return spec.slice(prefix.length).replace(/^\s*[·\-]\s*/, '').trim();
         }
@@ -12480,12 +13005,10 @@ async function renderShoppingItems() {
     const container = document.getElementById('shopping-items');
     const countEl = document.getElementById('shopping-count');
 
-    countEl.textContent = shoppingItems.length;
-    // Update tab count too
-    const tabCount = document.getElementById('tab-count-acquisto');
-    if (tabCount) tabCount.textContent = shoppingItems.length;
-    
     if (shoppingItems.length === 0) {
+        countEl.textContent = 0;
+        const tabCountEmpty = document.getElementById('tab-count-acquisto');
+        if (tabCountEmpty) tabCountEmpty.textContent = 0;
         container.innerHTML = `<div class="empty-state" style="padding:20px"><div class="empty-state-icon">✅</div><p>${t('shopping.empty')}</p></div>`;
         return;
     }
@@ -12501,12 +13024,10 @@ async function renderShoppingItems() {
         low:      { icon: '🟢', label: t('shopping.urgency_low_short'), cls: 'badge-low' },
     };
 
-    // Map each item to its section + urgency (strict first-token matching to avoid false positives)
-    // Also derive urgency from Bring specification if smart matching fails
-    const enriched = shoppingItems.map((item, idx) => {
+    // Map each item to its section + urgency; collapse duplicates under the same generic name.
+    const enrichedRaw = shoppingItems.map((item, idx) => {
         const smartData = _matchBringToSmart(item.name, smartShoppingItems);
         let urgency = smartData?.urgency || null;
-        // Fallback: read urgency from Bring specification (set by our app when adding)
         if (!urgency && item.specification) {
             const spec = item.specification.toLowerCase();
             if (spec.includes('urgente')) urgency = 'critical';
@@ -12515,6 +13036,11 @@ async function renderShoppingItems() {
         const sec = getItemSection(item.name);
         return { item, idx, smartData, urgency, sec };
     });
+    const enriched = _dedupeShoppingByGeneric(enrichedRaw);
+
+    countEl.textContent = enriched.length;
+    const tabCount = document.getElementById('tab-count-acquisto');
+    if (tabCount) tabCount.textContent = enriched.length;
 
     // Group by section key, preserving SHOPPING_SECTIONS order
     const sectionMap = new Map();
@@ -12542,44 +13068,47 @@ async function renderShoppingItems() {
 
         html += `<div class="shopping-section-divider"><span class="sec-icon">${secDef.icon}</span>${secDef.label}</div>`;
 
-        for (const { item, idx, smartData, urgency } of group.items) {
+        for (const { item, idx, smartData, urgency, duplicateNames } of group.items) {
             const catIcon = CATEGORY_ICONS[guessCategoryFromName(item.name)] || '🛒';
             const bgStyle = urgency && URGENCY_BG[urgency] ? ` style="background:${URGENCY_BG[urgency]}"` : '';
             const localTags = getShoppingTags(item.name);
 
             const shoppingName = smartData?.shopping_name || item.name;
             const isGenericGroup = smartData && shoppingName.toLowerCase() === item.name.toLowerCase()
-                && (smartData.name !== shoppingName || (smartData.variants || []).length > 0);
-            const displayName = isGenericGroup ? shoppingName : item.name;
+                && (smartData.name !== shoppingName || (smartData.variants || []).length > 0 || duplicateNames.length > 0);
+            const displayName = _resolveShoppingDisplayName(item, smartData);
+            const showAsGeneric = isGenericGroup && displayName.toLowerCase() === shoppingName.toLowerCase();
             let specificLineHtml = '';
-            if (isGenericGroup) {
+            if (showAsGeneric || duplicateNames.length > 0 || (displayName !== item.name && _specDisplayText(item.specification))) {
                 const specText = _specDisplayText(item.specification);
                 let specifics = [];
-                if (specText) {
-                    specifics.push(specText);
-                } else {
+                if (specText) specifics.push(specText);
+                else if (smartData) {
                     specifics.push(smartData.name + (smartData.brand ? ` (${smartData.brand})` : ''));
                     for (const v of (smartData.variants || [])) {
                         specifics.push(v.name + (v.brand ? ` (${v.brand})` : ''));
                     }
+                }
+                for (const dup of duplicateNames) {
+                    if (!specifics.some(s => s.toLowerCase().includes(dup.toLowerCase()))) specifics.push(dup);
                 }
                 if (specifics.length) {
                     specificLineHtml = `<div class="shopping-item-specific">${escapeHtml(specifics.join(' · '))}</div>`;
                 }
             }
 
-            // Urgency badge
+            // Urgency badge (spec urgency markers are stripped in _specDisplayText)
             let urgencyBadge = '';
             if (urgency && urgencyMap[urgency]) {
                 const u = urgencyMap[urgency];
                 urgencyBadge = `<span class="sinv-badge ${u.cls}">${u.icon} ${u.label}</span>`;
             }
 
-            // Frequency badge
+            // Frequency: uses per month (not raw transaction count)
             let freqBadge = '';
-            if (smartData && smartData.use_count >= 8) freqBadge = `<span class="sinv-badge badge-freq-high">📈 ${smartData.use_count}x</span>`;
-            else if (smartData && smartData.use_count >= 4) freqBadge = `<span class="sinv-badge badge-freq-med">📊 ${smartData.use_count}x</span>`;
-            else if (smartData && smartData.use_count >= 2) freqBadge = `<span class="sinv-badge badge-freq-low">📉 ${smartData.use_count}x</span>`;
+            const usesMonth = smartData ? Math.round(parseFloat(smartData.uses_per_month) || 0) : 0;
+            if (usesMonth >= 4) freqBadge = `<span class="sinv-badge badge-freq-high" title="${t('shopping.freq_high')}">📈 ~${usesMonth}/mese</span>`;
+            else if (usesMonth >= 2) freqBadge = `<span class="sinv-badge badge-freq-med" title="${t('shopping.freq_regular')}">📊 ~${usesMonth}/mese</span>`;
 
             const localTagHtml = localTags.map(t =>
                 `<span class="sinv-badge badge-local-tag" onclick="event.stopPropagation(); toggleShoppingTag(${idx}, '${t}')">${TAG_LABELS[t] || t} ✕</span>`
@@ -12624,23 +13153,23 @@ async function renderShoppingItems() {
     // ── PANTRY HINTS: show "already at home: X" for each shopping item ──────
     // Load inventory once, then decorate all items asynchronously.
     _getShoppingInventoryCache().then(invItems => {
-        for (const { item, idx } of enriched) {
-            const firstTok = (_nameTokens(item.name)[0] || '').toLowerCase();
-            if (!firstTok) continue;
-            const matches = invItems.filter(i => {
-                const iFirst = (_nameTokens(i.name || '')[0] || '').toLowerCase();
-                return iFirst === firstTok && parseFloat(i.quantity) > 0;
-            });
+        for (const { item, idx, smartData, urgency } of enriched) {
+            const matches = _shoppingFamilyInventoryRows(item, smartData, invItems);
             if (matches.length === 0) continue;
-            // Group by unit and sum
-            const byUnit = {};
+            // Don't show "already at home" when the item is flagged urgent — stock is clearly insufficient.
+            if (urgency === 'critical' || urgency === 'high') continue;
+            const parts = [];
+            const byKey = {};
             for (const m of matches) {
-                const u = m.unit || 'pz';
-                byUnit[u] = (byUnit[u] || 0) + parseFloat(m.quantity);
+                const label = _formatInvQtyDisplay(m.quantity, m.unit, m.default_quantity, m.package_unit);
+                if (!label) continue;
+                byKey[label] = (byKey[label] || 0) + 1;
             }
-            const hintText = Object.entries(byUnit)
-                .map(([u, q]) => `${Math.round(q * 10) / 10} ${u}`)
-                .join(', ');
+            for (const [label, n] of Object.entries(byKey)) {
+                parts.push(n > 1 ? `${label} (${n} prodotti)` : label);
+            }
+            if (!parts.length) continue;
+            const hintText = parts.join(', ');
             const itemEl = document.getElementById(`shop-item-${idx}`);
             if (!itemEl) continue;
             const infoEl = itemEl.querySelector('.shopping-item-info');
@@ -16527,6 +17056,7 @@ const _NETWORK_FAIL_THRESHOLD  = 3;
 const _OFFLINE_MODE_DELAY_MS   = 8000; // auto-enter offline mode after 8 s of overlay
 const _OFFLINE_CACHE_KEY       = '_evershelf_inv_cache';
 const _OFFLINE_SETTINGS_KEY    = '_evershelf_settings_cache';
+const _OFFLINE_PRODUCTS_KEY    = '_evershelf_products_cache';
 const _OFFLINE_QUEUE_KEY       = '_evershelf_op_queue';
 
 // ─── Local cache helpers ────────────────────────────────────────────────────
@@ -16541,6 +17071,41 @@ function _offlineCacheGetSettings() {
 }
 function _offlineCacheSetSettings(settings) {
     try { localStorage.setItem(_OFFLINE_SETTINGS_KEY, JSON.stringify(settings)); } catch(e) {}
+}
+function _offlineProductsGet() {
+    try { return JSON.parse(localStorage.getItem(_OFFLINE_PRODUCTS_KEY)) || null; } catch { return null; }
+}
+function _offlineProductsSet(products) {
+    try { localStorage.setItem(_OFFLINE_PRODUCTS_KEY, JSON.stringify(products)); } catch(e) {}
+}
+function _offlineProductFromInventoryItem(item) {
+    if (!item || !item.barcode) return null;
+    return {
+        id: item.product_id,
+        barcode: item.barcode,
+        name: item.name || '',
+        brand: item.brand || '',
+        category: item.category || '',
+        image_url: item.image_url || '',
+        unit: item.unit || 'pz',
+        default_quantity: item.default_quantity ?? 1,
+        package_unit: item.package_unit || '',
+        notes: item.notes || '',
+    };
+}
+function _offlineSearchBarcode(barcode) {
+    const code = String(barcode || '').trim();
+    if (!code) return { found: false, _offline: true };
+    const products = _offlineProductsGet() || [];
+    const fromProducts = products.find(p => String(p.barcode || '') === code);
+    if (fromProducts) return { found: true, product: fromProducts, _offline: true };
+    const inv = _offlineCacheGet() || [];
+    const fromInv = inv.find(i => String(i.barcode || '') === code);
+    if (fromInv) {
+        const product = _offlineProductFromInventoryItem(fromInv);
+        if (product) return { found: true, product, _offline: true };
+    }
+    return { found: false, _offline: true };
 }
 function _offlineQueueGet() {
     try { return JSON.parse(localStorage.getItem(_OFFLINE_QUEUE_KEY)) || []; } catch { return []; }
@@ -16604,10 +17169,17 @@ function _handleOfflineApi(action, params, body) {
         if (cached) return { ...cached, _offline: true };
         return { success: false, _offline: true };
     }
-    if (action === 'get_settings') {
-        const cached = _offlineCacheGetSettings();
-        if (cached) return { ...cached, _offline: true };
-        return { success: false, _offline: true };
+    if (action === 'search_barcode') {
+        return _offlineSearchBarcode(params && params.barcode);
+    }
+    if (action === 'products_search') {
+        const q = String((params && params.q) || '').trim().toLowerCase();
+        if (!q || q.length < 2) return { success: true, products: [], _offline: true };
+        const products = (_offlineProductsGet() || []).filter(p => {
+            const hay = `${p.name || ''} ${p.brand || ''} ${p.barcode || ''}`.toLowerCase();
+            return hay.includes(q);
+        }).slice(0, 20);
+        return { success: true, products, _offline: true };
     }
     // Safe empty responses for read-only endpoints that can't be served from cache
     const EMPTY_READS = {
@@ -17521,18 +18093,153 @@ function updateSpesaBanner() {
     banner.style.display = _spesaMode ? 'flex' : 'none';
     const statEl = banner.querySelector('.spesa-stat');
     if (statEl) statEl.textContent = _spesaBannerStat();
+    _applySpesaScanUI();
+}
+
+/** Spesa mode: keep tabs + normal camera size — only hide manual barcode input. */
+function _applySpesaScanUI() {
+    const page = document.getElementById('page-scan');
+    if (page) page.classList.toggle('spesa-scan-layout', _spesaMode);
+
+    const spesaBtn = document.getElementById('scan-spesa-btn');
+    if (spesaBtn) spesaBtn.style.display = _spesaMode ? 'none' : '';
+
+    const barcodeContent = document.getElementById('scan-tabcontent-barcode');
+    let hint = document.getElementById('spesa-scan-barcode-hint');
+
+    if (_spesaMode) {
+        if (barcodeContent && !hint) {
+            hint = document.createElement('p');
+            hint.id = 'spesa-scan-barcode-hint';
+            hint.className = 'spesa-scan-barcode-hint';
+            hint.setAttribute('data-i18n', 'scan.spesa_camera_hint');
+            hint.textContent = t('scan.spesa_camera_hint');
+            barcodeContent.appendChild(hint);
+        }
+        if (hint) hint.style.display = '';
+        const active = document.activeElement;
+        if (active && active.id === 'manual-barcode-input') active.blur();
+        if (_currentPageId === 'scan') switchScanTab('barcode');
+        return;
+    }
+
+    if (hint) hint.style.display = 'none';
+    if (_currentPageId === 'scan') switchScanTab('barcode');
+    _updateScanAiButton();
 }
 
 // Called after successful add — returns true if spesa mode handled navigation
-function spesaModeAfterAdd() {
+async function spesaModeAfterAdd() {
     if (!_spesaMode) return false;
-    // Track this product in the session
     if (currentProduct) {
-        _spesaSession.push({ name: currentProduct.name, category: currentProduct.category || '' });
+        _spesaSession.push({
+            name: currentProduct.name,
+            category: currentProduct.category || '',
+            product_id: currentProduct.id,
+        });
         updateSpesaBanner();
+        await _spesaRemovePurchasedFromList(currentProduct);
+        const addLoc = document.getElementById('add-location')?.value || 'dispensa';
+        _showFamilySiblingSuggest(currentProduct.id, addLoc);
     }
     showPage('scan');
     return true;
+}
+
+/** Remove matching shopping-list / Bring entry after a spesa-mode purchase. */
+async function _spesaRemovePurchasedFromList(product) {
+    const namesToMark = [product.name];
+    if (product.shopping_name) namesToMark.push(product.shopping_name);
+    if (shoppingListUUID && shoppingItems.length > 0) {
+        const generic = product.shopping_name || product.name;
+        const match = _findSimilarItem(generic, shoppingItems) || _findSimilarItem(product.name, shoppingItems);
+        if (match) {
+            try {
+                const r = await api('shopping_remove', {}, 'POST', {
+                    name: match.name,
+                    rawName: match.rawName || '',
+                    listUUID: shoppingListUUID,
+                });
+                if (r?.success) {
+                    shoppingItems = shoppingItems.filter(i => i !== match);
+                    namesToMark.push(match.name);
+                }
+            } catch (_) { /* best effort */ }
+        }
+    }
+    _markBringPurchased(namesToMark);
+}
+
+let _familySiblingDismissTimer = null;
+
+function _dismissFamilySiblingPrompt() {
+    clearTimeout(_familySiblingDismissTimer);
+    _familySiblingDismissTimer = null;
+    const el = document.getElementById('_family-sibling-prompt');
+    if (el) el.remove();
+}
+
+function _formatFamilySiblingDate(dtStr) {
+    if (!dtStr) return '';
+    const d = new Date(String(dtStr).replace(' ', 'T'));
+    if (isNaN(d.getTime())) return '';
+    const loc = _currentLang === 'de' ? 'de-DE' : _currentLang === 'en' ? 'en-GB' : 'it-IT';
+    return d.toLocaleDateString(loc, { day: '2-digit', month: 'long', year: 'numeric' });
+}
+
+/** Optional hint: same-family product in the same location (non-blocking). */
+function _showFamilySiblingSuggest(productId, location) {
+    _dismissFamilySiblingPrompt();
+    const loc = location || 'dispensa';
+    api('family_sibling_suggest', {}, 'POST', { product_id: productId, location: loc }).then(data => {
+        if (!data?.success || !data.sibling) return;
+        const s = data.sibling;
+        const locKey = s.location || loc;
+        const locInfo = LOCATIONS[locKey] || LOCATIONS.altro;
+        const qtyStr = `${s.stock_qty} ${s.unit}`;
+        const purchaseRaw = s.last_purchase_at || s.added_at;
+        const purchaseDate = _formatFamilySiblingDate(purchaseRaw);
+        const productLine = s.brand ? `${s.name} (${s.brand})` : s.name;
+        const catIcon = CATEGORY_ICONS[mapToLocalCategory(s.category, s.name)] || '📦';
+        const metaParts = [
+            `${locInfo.icon} ${locInfo.label}`,
+            qtyStr,
+            purchaseDate ? purchaseDate : '',
+        ].filter(Boolean);
+        const thumbHtml = s.image_url
+            ? `<img src="${escapeHtml(s.image_url)}" alt="" class="family-sibling-prompt-img" onerror="this.outerHTML='<span class=\\'family-sibling-prompt-icon\\'>${catIcon}</span>'">`
+            : `<span class="family-sibling-prompt-icon">${catIcon}</span>`;
+
+        const bar = document.createElement('div');
+        bar.id = '_family-sibling-prompt';
+        bar.className = 'family-sibling-prompt';
+        bar.innerHTML = `
+            <div class="family-sibling-prompt-body">
+                <div class="family-sibling-prompt-thumb">${thumbHtml}</div>
+                <div class="family-sibling-prompt-info">
+                    <div class="family-sibling-prompt-title">${escapeHtml(t('shopping.family_sibling_title', { location: locInfo.label }))}</div>
+                    <div class="family-sibling-prompt-name">${escapeHtml(productLine)}</div>
+                    <div class="family-sibling-prompt-meta">${escapeHtml(metaParts.join(' · '))}</div>
+                    <div class="family-sibling-prompt-question">${escapeHtml(t('shopping.family_sibling_question'))}</div>
+                </div>
+            </div>
+            <div class="family-sibling-prompt-actions">
+                <button type="button" class="family-sibling-prompt-yes" id="_fam-sib-yes">${escapeHtml(t('shopping.family_sibling_yes'))}</button>
+                <button type="button" class="family-sibling-prompt-no" id="_fam-sib-no">${escapeHtml(t('shopping.family_sibling_no'))}</button>
+            </div>
+        `;
+        document.body.appendChild(bar);
+
+        bar.querySelector('#_fam-sib-yes').addEventListener('click', _dismissFamilySiblingPrompt);
+        bar.querySelector('#_fam-sib-no').addEventListener('click', () => {
+            _dismissFamilySiblingPrompt();
+            if (s.inventory_id) editInventoryItem(s.inventory_id);
+            else if (s.product_id) api('product_get', { id: s.product_id }).then(p => {
+                if (p?.product) { currentProduct = p.product; showPage('add'); }
+            }).catch(() => {});
+        });
+        _familySiblingDismissTimer = setTimeout(_dismissFamilySiblingPrompt, 90000);
+    }).catch(() => {});
 }
 
 function _spesaBannerStat() {
@@ -18192,12 +18899,14 @@ async function _runStartupCheck() {
     try {
         setProgress(100, tl('syncing_local', 'Sincronizzazione dati locali...'), 'ok');
         const authH = typeof apiAuthHeaders === 'function' ? apiAuthHeaders() : {};
-        const [invData, settingsData] = await Promise.all([
+        const [invData, settingsData, productsData] = await Promise.all([
             fetch('api/index.php?action=inventory_list', { headers: authH }).then(r => r.json()).catch(() => null),
             fetch('api/index.php?action=get_settings', { headers: authH }).then(r => r.json()).catch(() => null),
+            fetch('api/index.php?action=products_list', { headers: authH }).then(r => r.json()).catch(() => null),
         ]);
         if (invData && Array.isArray(invData.inventory)) _offlineCacheSet(invData.inventory);
         if (settingsData && settingsData.success !== false) _offlineCacheSetSettings(settingsData);
+        if (productsData && Array.isArray(productsData.products)) _offlineProductsSet(productsData.products);
         setProgress(100, tl('sync_done', 'Dati locali aggiornati'), 'ok');
         await new Promise(r => setTimeout(r, 400));
     } catch(e) {
@@ -18439,6 +19148,10 @@ async function _backgroundBringSync() {
         shoppingListUUID = listUUID;
         shoppingItems = bringItems;
 
+        if (bringData.recently?.length) {
+            _markBringPurchased(bringData.recently.map(i => i.name).filter(Boolean));
+        }
+
         const toAdd    = []; // new items not yet on Bring
         const toUpdate = []; // items on Bring that need spec updated
         const toRemove = []; // items on Bring that are no longer urgent (auto-added, now resolved)
@@ -18456,12 +19169,11 @@ async function _backgroundBringSync() {
             });
 
             if (!bringMatch) {
-                // Not on Bring — add if high/critical and not blocklisted
-                if ((si.urgency === 'critical' || si.urgency === 'high') && !_isBringPurchased(si.name, si.urgency)) {
+                if (['critical', 'high', 'medium', 'low'].includes(si.urgency) && !_isBringPurchased(si.name, si.urgency)) {
                     toAdd.push({ name: si.name, specification: expectedSpec });
                     autoAdded.add(si.name.toLowerCase());
                 }
-            } else {
+            } else if (!_isBringPurchased(si.name, si.urgency)) {
                 // Already on Bring — sync urgency spec unconditionally
                 const currentSpec = (bringMatch.specification || '').toLowerCase();
                 const hasUrgencyMarker = currentSpec.includes('urgente') || currentSpec.includes('presto');

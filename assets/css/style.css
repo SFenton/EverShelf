@@ -666,6 +666,118 @@ body.server-offline .bottom-nav {
     flex-shrink: 0;
 }
 
+/* Family sibling hint (spesa mode) — compact card with thumbnail */
+.family-sibling-prompt {
+    position: fixed;
+    bottom: 80px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 9998;
+    background: linear-gradient(145deg, #1e3a5f 0%, #0f2744 100%);
+    color: #fff;
+    border-radius: 14px;
+    padding: 10px 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    box-shadow: 0 6px 24px rgba(0, 0, 0, 0.45);
+    max-width: min(440px, calc(100vw - 20px));
+    width: calc(100% - 20px);
+    box-sizing: border-box;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    animation: family-sibling-in 0.22s ease-out;
+}
+@keyframes family-sibling-in {
+    from { opacity: 0; transform: translateX(-50%) translateY(10px); }
+    to   { opacity: 1; transform: translateX(-50%) translateY(0); }
+}
+.family-sibling-prompt-body {
+    display: flex;
+    gap: 10px;
+    align-items: flex-start;
+}
+.family-sibling-prompt-thumb {
+    flex-shrink: 0;
+    width: 52px;
+    height: 52px;
+    border-radius: 10px;
+    overflow: hidden;
+    background: rgba(255, 255, 255, 0.1);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+.family-sibling-prompt-img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+}
+.family-sibling-prompt-icon {
+    font-size: 1.6rem;
+    line-height: 1;
+}
+.family-sibling-prompt-info {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+.family-sibling-prompt-title {
+    font-size: 0.72rem;
+    font-weight: 700;
+    line-height: 1.2;
+    margin: 0;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    opacity: 0.8;
+}
+.family-sibling-prompt-name {
+    font-size: 0.95rem;
+    font-weight: 700;
+    line-height: 1.25;
+    margin: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+}
+.family-sibling-prompt-meta {
+    font-size: 0.8rem;
+    line-height: 1.3;
+    margin: 0;
+    opacity: 0.88;
+}
+.family-sibling-prompt-question {
+    font-size: 0.82rem;
+    line-height: 1.25;
+    margin: 2px 0 0;
+    opacity: 0.9;
+}
+.family-sibling-prompt-actions {
+    display: flex;
+    gap: 8px;
+}
+.family-sibling-prompt-actions button {
+    flex: 1;
+    border: none;
+    border-radius: 10px;
+    padding: 9px 10px;
+    font-size: 0.88rem;
+    font-weight: 700;
+    cursor: pointer;
+    min-height: 38px;
+}
+.family-sibling-prompt-yes {
+    background: #22c55e;
+    color: #fff;
+}
+.family-sibling-prompt-no {
+    background: #475569;
+    color: #fff;
+}
+
 @keyframes pulse-scan {
     0%, 100% { box-shadow: 0 2px 8px rgba(0,0,0,0.2); }
     50% { box-shadow: 0 2px 16px rgba(255,255,255,0.4); }
@@ -1845,6 +1957,19 @@ body.server-offline .bottom-nav {
     overflow: hidden;
 }
 
+/* Spesa mode: hide manual barcode field only — tabs and normal viewport stay */
+#page-scan.spesa-scan-layout .barcode-input-row {
+    display: none !important;
+}
+.spesa-scan-barcode-hint {
+    margin: 0;
+    padding: 6px 4px 2px;
+    font-size: 0.85rem;
+    color: var(--text-muted);
+    text-align: center;
+    line-height: 1.35;
+}
+
 .scanner-viewport video {
     width: 100%;
     height: 100%;
@@ -2046,21 +2171,25 @@ body.server-offline .bottom-nav {
     max-width: 220px;
 }
 
-/* — AI retry button (shown below scanner after visual ID fails) — */
-.scan-ai-retry-btn {
+/* — Manual AI button (user-triggered only) — */
+.scan-ai-manual-btn {
     width: 100%;
     margin-top: 10px;
-    font-size: 0.95rem;
-    padding: 12px;
-    border-radius: var(--radius);
+    font-size: 1.05rem;
+    padding: 14px 16px;
+    border-radius: 14px;
     border: 2px solid var(--accent);
-    background: rgba(124,58,237,0.1);
+    background: rgba(124,58,237,0.12);
     color: var(--accent);
-    font-weight: 600;
+    font-weight: 700;
     cursor: pointer;
-    transition: background 0.15s;
+    transition: background 0.15s, opacity 0.15s;
 }
-.scan-ai-retry-btn:active { background: rgba(124,58,237,0.22); }
+.scan-ai-manual-btn:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+}
+.scan-ai-manual-btn:active:not(:disabled) { background: rgba(124,58,237,0.22); }
 
 /* — Viewport overlay controls (torch / zoom / flip) — */
 .scan-viewport-controls {
@@ -2115,17 +2244,59 @@ body.server-offline .bottom-nav {
 .scan-ai-match-box {
     display: flex;
     flex-direction: column;
-    gap: 12px;
+    gap: 14px;
 }
-.scan-ai-match-head {
+.scan-ai-hero {
     display: flex;
-    flex-direction: column;
-    gap: 4px;
+    align-items: center;
+    gap: 14px;
+    padding: 14px;
+    background: linear-gradient(135deg, rgba(124,58,237,0.12), rgba(34,197,94,0.1));
+    border-radius: 14px;
+    border: 1px solid var(--border);
+}
+.scan-ai-hero-icon {
+    font-size: 2.6rem;
+    line-height: 1;
+    flex-shrink: 0;
+}
+.scan-ai-hero-text {
+    min-width: 0;
+    flex: 1;
 }
 .scan-ai-match-title {
-    font-size: 1rem;
+    font-size: 0.82rem;
     font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--text-muted);
+    margin-bottom: 4px;
+}
+.scan-ai-hero-name {
+    font-size: 1.35rem;
+    font-weight: 800;
+    line-height: 1.2;
     color: var(--text);
+    word-break: break-word;
+}
+.scan-ai-hero-brand {
+    font-size: 1rem;
+    color: var(--text-muted);
+    margin-top: 2px;
+}
+.scan-ai-action-hint {
+    margin: -6px 0 0;
+    font-size: 0.92rem;
+    line-height: 1.4;
+    color: var(--text-muted);
+    text-align: center;
+}
+.scan-ai-or-divider {
+    margin: 0;
+    font-size: 0.88rem;
+    font-weight: 700;
+    color: var(--text-muted);
+    text-align: center;
 }
 .scan-ai-match-subtitle {
     font-size: 0.82rem;
@@ -2137,9 +2308,9 @@ body.server-offline .bottom-nav {
     gap: 8px;
 }
 .scan-ai-match-list-title {
-    font-size: 0.78rem;
+    font-size: 0.88rem;
     text-transform: uppercase;
-    letter-spacing: 0.06em;
+    letter-spacing: 0.04em;
     color: var(--text-muted);
     font-weight: 700;
 }
@@ -2160,6 +2331,22 @@ body.server-offline .bottom-nav {
     text-align: left;
 }
 .scan-ai-candidate-item:active { transform: scale(0.99); }
+.scan-ai-candidate-thumb {
+    width: 44px;
+    height: 44px;
+    flex-shrink: 0;
+    border-radius: 10px;
+    overflow: hidden;
+    background: var(--bg-card);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+.scan-ai-candidate-img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+}
 .scan-ai-candidate-icon {
     font-size: 1.3rem;
     flex-shrink: 0;
@@ -2172,26 +2359,27 @@ body.server-offline .bottom-nav {
     flex: 1;
 }
 .scan-ai-candidate-name {
-    font-size: 0.9rem;
-    font-weight: 600;
+    font-size: 1rem;
+    font-weight: 700;
     color: var(--text);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
 }
 .scan-ai-candidate-meta {
-    font-size: 0.76rem;
+    font-size: 0.84rem;
     color: var(--text-muted);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
 }
 .scan-ai-candidate-cta {
-    font-size: 0.74rem;
+    font-size: 0.82rem;
+    font-weight: 700;
     color: var(--accent);
     border: 1px solid var(--accent);
     border-radius: 999px;
-    padding: 3px 8px;
+    padding: 6px 10px;
     flex-shrink: 0;
 }
 .scan-ai-match-empty {
@@ -2204,6 +2392,12 @@ body.server-offline .bottom-nav {
 }
 .scan-ai-add-btn {
     width: 100%;
+    font-size: 1.15rem !important;
+    font-weight: 800 !important;
+    padding: 16px 20px !important;
+    min-height: 54px;
+    border-radius: 14px !important;
+    box-shadow: 0 4px 14px rgba(34, 197, 94, 0.35);
 }
 .scan-ai-detected-label {
     font-size: 0.72rem;
