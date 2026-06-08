@@ -14,8 +14,9 @@ RewriteEngine On
     Require all denied
 </FilesMatch>
 
-# Force HTTPS
+# Force HTTPS (skip when terminated TLS is forwarded — Traefik, Caddy, NPM, …)
 RewriteCond %{HTTPS} !=on
+RewriteCond %{HTTP:X-Forwarded-Proto} !^https$ [NC]
 RewriteRule ^(.*)$ https://%{HTTP_HOST}%{REQUEST_URI} [L,R=301]
 
 # API routing

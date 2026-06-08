@@ -335,6 +335,7 @@ class LoggingPDOStatement {
 // Type hint: use PDO in all functions (LoggingPDO extends PDO).
 // ═══════════════════════════════════════════════════════════════════════════
 class LoggingPDO extends \PDO {
+    #[\ReturnTypeWillChange]
     public function prepare(string $query, array $options = []): LoggingPDOStatement|false {
         $stmt = parent::prepare($query, $options);
         if ($stmt === false) {
