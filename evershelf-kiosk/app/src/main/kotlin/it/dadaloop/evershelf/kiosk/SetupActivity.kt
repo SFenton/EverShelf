@@ -1101,9 +1101,9 @@ class SetupActivity : AppCompatActivity() {
                             val lanIp = getDeviceLanIp() ?: "127.0.0.1"
                             append(",\"scale_enabled\":true,\"scale_gateway_url\":\"ws://$lanIp:8765\"")
                         }
-                        if (geminiKey.isNotEmpty())    append(",\"gemini_api_key\":\"${geminiKey.replace("\"", "\\\"\")}\"")
-                        if (bringEmail.isNotEmpty())   append(",\"bring_email\":\"${bringEmail.replace("\"", "\\\"\")}\"")
-                        if (bringPassword.isNotEmpty()) append(",\"bring_password\":\"${bringPassword.replace("\"", "\\\"\")}\"")
+                        if (geminiKey.isNotEmpty())    append(",\"gemini_api_key\":\"${geminiKey.replace("\"", "\\\"")}\"")
+                        if (bringEmail.isNotEmpty())   append(",\"bring_email\":\"${bringEmail.replace("\"", "\\\"")}\"")
+                        if (bringPassword.isNotEmpty()) append(",\"bring_password\":\"${bringPassword.replace("\"", "\\\"")}\"")
                         append("}")
                     }
                     val conn = (java.net.URL(url).openConnection() as java.net.HttpURLConnection).apply {
