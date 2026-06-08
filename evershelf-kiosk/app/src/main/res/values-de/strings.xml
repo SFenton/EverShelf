@@ -49,7 +49,7 @@
     <string name="install_error_download">Download fehlgeschlagen</string>
     <string name="install_error_download_detail">Verbindung prüfen und erneut versuchen.</string>
     <string name="install_error_install">Installation fehlgeschlagen</string>
-    <string name="install_perm_detail">Aktiviere 'Unbekannte Apps installieren' in den Einstellungen, dann komm zurück.</string>
+    <string name="install_perm_detail">Aktiviere \'Unbekannte Apps installieren\' in den Einstellungen, dann komm zurück.</string>
     <string name="install_btn_retry">↩  Nochmal versuchen</string>
     <string name="btn_back">Zurück</string>
     <string name="btn_launch">🚀  EverShelf starten</string>
@@ -72,15 +72,11 @@
     <string name="setup_zerowaste_toggle_label">Zero-Waste-Tipps</string>
     <string name="setup_zerowaste_toggle_hint">Beim Kochen Tipps zur Wiederverwendung von Resten anzeigen (Schalen, Kochwasser usw.).</string>
     <string name="setup_gemini_title">Google Gemini AI</string>
-    <string name="setup_gemini_desc">EverShelf nutzt Google Gemini AI für Rezeptvorschläge, smarte Einkaufsschätzungen und mehr.
-
-Zum Aktivieren den kostenlosen Gemini API-Schlüssel eingeben.</string>
-    <string name="setup_gemini_how">Kostenlosen Schlüssel unter: aistudio.google.com → "API-Schlüssel erhalten"</string>
+    <string name="setup_gemini_desc">EverShelf nutzt Google Gemini AI für Rezeptvorschläge, smarte Einkaufsschätzungen und mehr.\n\nZum Aktivieren den kostenlosen Gemini API-Schlüssel eingeben.</string>
+    <string name="setup_gemini_how">Kostenlosen Schlüssel unter: aistudio.google.com → \"API-Schlüssel erhalten\"</string>
     <string name="setup_gemini_hint">API-Schlüssel einfügen (beginnt mit AIza…)</string>
     <string name="setup_bring_title">Bring! Einkaufsliste</string>
-    <string name="setup_bring_desc">EverShelf kann die Einkaufsliste mit der Bring!-App synchronisieren.
-
-Bring!-Zugangsdaten eingeben, um die Integration zu aktivieren.</string>
+    <string name="setup_bring_desc">EverShelf kann die Einkaufsliste mit der Bring!-App synchronisieren.\n\nBring!-Zugangsdaten eingeben, um die Integration zu aktivieren.</string>
     <string name="setup_bring_email_hint">Bring!-E-Mail-Adresse</string>
     <string name="setup_bring_pass_hint">Bring!-Passwort</string>
     <string name="setup_done_title">Alles bereit!</string>

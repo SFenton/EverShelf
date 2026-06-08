@@ -49,7 +49,7 @@
     <string name="install_error_download">Descarga fallida</string>
     <string name="install_error_download_detail">Comprueba la conexión e inténtalo de nuevo.</string>
     <string name="install_error_install">Instalación fallida</string>
-    <string name="install_perm_detail">Habilita 'Instalar apps desconocidas' en los ajustes y vuelve aquí.</string>
+    <string name="install_perm_detail">Habilita \'Instalar apps desconocidas\' en los ajustes y vuelve aquí.</string>
     <string name="install_btn_retry">↩  Reintentar</string>
     <string name="btn_back">Atrás</string>
     <string name="btn_launch">🚀  Iniciar EverShelf</string>
@@ -72,15 +72,11 @@
     <string name="setup_zerowaste_toggle_label">Consejos zero-waste</string>
     <string name="setup_zerowaste_toggle_hint">Muestra consejos para reutilizar restos (cáscaras, agua de cocción, etc.) al cocinar.</string>
     <string name="setup_gemini_title">Google Gemini AI</string>
-    <string name="setup_gemini_desc">EverShelf usa Google Gemini AI para sugerencias de recetas, estimaciones inteligentes de la compra y más.
-
-Para activarla, introduce tu clave API de Gemini gratuita.</string>
-    <string name="setup_gemini_how">Obtén tu clave gratuita en: aistudio.google.com → "Obtener clave API"</string>
+    <string name="setup_gemini_desc">EverShelf usa Google Gemini AI para sugerencias de recetas, estimaciones inteligentes de la compra y más.\n\nPara activarla, introduce tu clave API de Gemini gratuita.</string>
+    <string name="setup_gemini_how">Obtén tu clave gratuita en: aistudio.google.com → \"Obtener clave API\"</string>
     <string name="setup_gemini_hint">Pega la clave API aquí (empieza por AIza…)</string>
     <string name="setup_bring_title">Bring! Lista de la compra</string>
-    <string name="setup_bring_desc">EverShelf puede sincronizar tu lista de la compra con la app Bring!.
-
-Introduce tus credenciales de Bring! para activar la integración.</string>
+    <string name="setup_bring_desc">EverShelf puede sincronizar tu lista de la compra con la app Bring!.\n\nIntroduce tus credenciales de Bring! para activar la integración.</string>
     <string name="setup_bring_email_hint">Correo electrónico de Bring!</string>
     <string name="setup_bring_pass_hint">Contraseña de Bring!</string>
     <string name="setup_done_title">¡Todo listo!</string>
