@@ -19,6 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Recipe frozen badge** — Freezer items flagged in pantry lines and recipe UI; prompt rule for cooking from frozen.
 - **Health check `db_writable`** — Startup diagnostic detects non-writable SQLite file (common Docker volume issue).
 - **`scripts/triage-open-issues.php`** — Maintenance helper to comment/close GitHub issues via encrypted token.
+- **Ops CLI scripts** — `audit-finished-shopping.php`, `backfill-finished-shopping.php`, `sync-shopping-bring.php`, `install-transformers-model.sh` (offline Xenova classifier bootstrap).
 
 ### Fixed
 - **SQLite database locked** — `PRAGMA busy_timeout` 10s + `dbWithRetry()` on `inventory_update` under cron/PWA contention.
