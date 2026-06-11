@@ -540,6 +540,11 @@ class SetupActivity : AppCompatActivity() {
         // Cancel auto-discover when leaving server step
         if (step != 3) discoverCancelled.set(true)
 
+        // Auto-discover when entering server step (empty URL only)
+        if (step == 3 && urlEdit.text.toString().trim().isEmpty()) {
+            autoDiscover()
+        }
+
         // Scroll to top
         try { findViewById<ScrollView>(R.id.setupScrollView).scrollTo(0, 0) } catch (_: Exception) {}
     }

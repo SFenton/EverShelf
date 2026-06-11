@@ -643,6 +643,79 @@ class KioskActivity : AppCompatActivity() {
                     webView.evaluateJavascript("$jsCallback($escaped)", null)
                 }
             }
+
+            val currentKiosk = try {
+                packageManager.getPackageInfo(packageName, 0).versionName ?: ""
+            } catch (_: Exception) { "" }
+
+            val installedVc: Long = try {
+                val pi = packageManager.getPackageInfo(packageName, 0)
+                if (Build.VERSION.SDK_INT >= 28) pi.longVersionCode
+                else @Suppress("DEPRECATION") pi.versionCode.toLong()
+            } catch (_: Exception) { -1L }
+
+            fun semverNewer(remote: String, local: String): Boolean {
+                val r = remote.split(".").map { it.filter(Char::isDigit).toIntOrNull() ?: 0 }
+                val l = local.split(".").map  { it.filter(Char::isDigit).toIntOrNull() ?: 0 }
+                for (i in 0 until maxOf(r.size, l.size)) {
+                    val rv = r.getOrElse(i) { 0 }
+                    val lv = l.getOrElse(i) { 0 }
+                    if (rv != lv) return rv > lv
+                }
+                return false
+            }
+
+            fun needsUpdate(remoteVersion: String, remoteVc: Long): Boolean = when {
+                remoteVc > 0 && installedVc >= 0 -> remoteVc > installedVc
+                currentKiosk.isNotEmpty() && remoteVersion.matches(Regex("\\d+\\.\\d+.*")) ->
+                    semverNewer(remoteVersion, currentKiosk)
+                else -> false
+            }
+
+            fun applyUpdate(remoteVersion: String, apkUrl: String) {
+                val result = JSONObject()
+                    .put("has_update", true)
+                    .put("current", currentKiosk)
+                    .put("latest", remoteVersion)
+                    .put("apk_url", apkUrl)
+                notifyJs(result)
+                prefs.edit()
+                    .putString(KEY_PENDING_UPDATE_VERSION, remoteVersion)
+                    .putString(KEY_PENDING_UPDATE_URL, apkUrl)
+                    .apply()
+                runOnUiThread { showNativeUpdateBanner("🔄 Kiosk $currentKiosk → $remoteVersion", apkUrl) }
+            }
+
+            // 1) Prefer LAN/self-hosted update (no GitHub required)
+            val baseUrl = (prefs.getString(KEY_URL, "") ?: "").trim().trimEnd('/')
+            if (baseUrl.isNotEmpty()) {
+                try {
+                    val localApi = "$baseUrl/api/index.php?action=kiosk_update"
+                    val conn = openTrustedConnection(localApi)
+                    conn.connectTimeout = 5000
+                    conn.readTimeout = 5000
+                    if (conn.responseCode == 200) {
+                        val localJson = JSONObject(conn.inputStream.bufferedReader().readText())
+                        conn.disconnect()
+                        if (localJson.optBoolean("success")) {
+                            val remoteVersion = localJson.optString("version", "")
+                            val remoteVc = localJson.optLong("version_code", -1L)
+                            val apkUrl = localJson.optString("apk_url", "")
+                            if (apkUrl.isNotEmpty() && needsUpdate(remoteVersion, remoteVc)) {
+                                applyUpdate(remoteVersion, apkUrl)
+                                return@Thread
+                            }
+                            if (!needsUpdate(remoteVersion, remoteVc)) {
+                                notifyJs(JSONObject().put("has_update", false).put("source", "local"))
+                                prefs.edit().remove(KEY_PENDING_UPDATE_VERSION).remove(KEY_PENDING_UPDATE_URL).apply()
+                                return@Thread
+                            }
+                        }
+                    } else conn.disconnect()
+                } catch (_: Exception) { /* fall through to GitHub */ }
+            }
+
+            // 2) GitHub release fallback (requires internet)
             try {
                 val conn = URL(GITHUB_RELEASES_API).openConnection() as java.net.HttpURLConnection
                 conn.setRequestProperty("Accept", "application/vnd.github+json")
@@ -657,51 +730,16 @@ class KioskActivity : AppCompatActivity() {
                 val body = conn.inputStream.bufferedReader().readText()
                 conn.disconnect()
                 val json = JSONObject(body)
-                val latestTag = json.optString("tag_name", "")
-                if (latestTag.isEmpty()) {
-                    notifyJs(JSONObject().put("has_update", false).put("error", "no tag"))
-                    return@Thread
-                }
-
-                val currentKiosk = try {
-                    packageManager.getPackageInfo(packageName, 0).versionName ?: ""
-                } catch (_: Exception) { "" }
-
-                val installedVc: Long = try {
-                    val pi = packageManager.getPackageInfo(packageName, 0)
-                    if (Build.VERSION.SDK_INT >= 28) pi.longVersionCode
-                    else @Suppress("DEPRECATION") pi.versionCode.toLong()
-                } catch (_: Exception) { -1L }
-
-                // The kiosk-latest release uses a non-semver tag ("kiosk-latest").
-                // Extract the actual kiosk version from the release body text.
-                // Body format: "Alias automatico → kiosk-X.Y.Z (versionCode N)".
                 val bodyText = json.optString("body", "")
                 val norm = { v: String -> v.replace(Regex("^[^0-9]*"), "") }
                 val remoteKioskVersion = Regex("""kiosk-v?(\d+\.\d+(?:\.\d+)?)""")
                     .find(bodyText)?.groupValues?.get(1)
                     ?.takeIf { it.isNotEmpty() }
-                    ?: norm(latestTag)
+                    ?: norm(json.optString("tag_name", ""))
 
                 val remoteVc = Regex("""versionCode[=:\s(]+(\d+)""", RegexOption.IGNORE_CASE)
                     .find(bodyText)?.groupValues?.get(1)?.toLongOrNull() ?: -1L
 
-                // Compare semver: returns true if `remote` is strictly greater than `local`
-                fun semverNewer(remote: String, local: String): Boolean {
-                    val r = remote.split(".").map { it.filter(Char::isDigit).toIntOrNull() ?: 0 }
-                    val l = local.split(".").map  { it.filter(Char::isDigit).toIntOrNull() ?: 0 }
-                    val len = maxOf(r.size, l.size)
-                    for (i in 0 until len) {
-                        val rv = r.getOrElse(i) { 0 }
-                        val lv = l.getOrElse(i) { 0 }
-                        if (rv != lv) return rv > lv
-                    }
-                    return false
-                }
-
-                val isSemver = remoteKioskVersion.matches(Regex("\\d+\\.\\d+.*"))
-
-                // Get APK URL from assets; fall back to the hardcoded KIOSK_DOWNLOAD_URL
                 val assets = json.optJSONArray("assets")
                 var kioskApkUrl = ""
                 if (assets != null) {
@@ -715,37 +753,33 @@ class KioskActivity : AppCompatActivity() {
                 }
                 if (kioskApkUrl.isEmpty()) kioskApkUrl = KIOSK_DOWNLOAD_URL
 
-                val kioskNeedsUpdate = when {
-                    remoteVc > 0 && installedVc >= 0 -> remoteVc > installedVc
-                    currentKiosk.isNotEmpty() && isSemver -> semverNewer(remoteKioskVersion, currentKiosk)
-                    else -> false
-                }
-
-                val result = JSONObject()
-                    .put("has_update", kioskNeedsUpdate)
-                    .put("current",    currentKiosk)
-                    .put("latest",     remoteKioskVersion)
-                    .put("apk_url",    kioskApkUrl)
-
-                notifyJs(result)
-
-                if (!kioskNeedsUpdate) {
-                    // Clear any stale pending update if the current version is now up to date
+                if (!needsUpdate(remoteKioskVersion, remoteVc)) {
+                    notifyJs(JSONObject().put("has_update", false))
                     prefs.edit().remove(KEY_PENDING_UPDATE_VERSION).remove(KEY_PENDING_UPDATE_URL).apply()
                     return@Thread
                 }
-
-                // Persist the pending update so the banner reappears after a crash/restart
-                prefs.edit()
-                    .putString(KEY_PENDING_UPDATE_VERSION, remoteKioskVersion)
-                    .putString(KEY_PENDING_UPDATE_URL, kioskApkUrl)
-                    .apply()
-
-                runOnUiThread { showNativeUpdateBanner("🔄 Kiosk $currentKiosk → $remoteKioskVersion", kioskApkUrl) }
+                applyUpdate(remoteKioskVersion, kioskApkUrl)
             } catch (e: Exception) {
                 notifyJs(JSONObject().put("has_update", false).put("error", e.message ?: "network error"))
             }
         }.start()
+    }
+
+    /** HTTPS with self-signed cert support (LAN servers). */
+    private fun openTrustedConnection(urlStr: String): java.net.HttpURLConnection {
+        val conn = URL(urlStr).openConnection()
+        if (conn is javax.net.ssl.HttpsURLConnection) {
+            val trustAll = arrayOf<javax.net.ssl.TrustManager>(object : javax.net.ssl.X509TrustManager {
+                override fun checkClientTrusted(c: Array<java.security.cert.X509Certificate>?, t: String?) {}
+                override fun checkServerTrusted(c: Array<java.security.cert.X509Certificate>?, t: String?) {}
+                override fun getAcceptedIssuers(): Array<java.security.cert.X509Certificate> = arrayOf()
+            })
+            val sc = javax.net.ssl.SSLContext.getInstance("TLS")
+            sc.init(null, trustAll, java.security.SecureRandom())
+            conn.sslSocketFactory = sc.socketFactory
+            conn.hostnameVerifier = javax.net.ssl.HostnameVerifier { _, _ -> true }
+        }
+        return conn as java.net.HttpURLConnection
     }
 
     /**

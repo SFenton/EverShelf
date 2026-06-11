@@ -77,7 +77,21 @@ jobs:
           sleep 3
           gh release create kiosk-latest \
             --title "EverShelf Kiosk Latest" \
-            --notes "Alias automatico → kiosk-${{ steps.version.outputs.name }} (versionCode ${{ steps.version.outputs.code }})" \
+            --notes "Auto alias → kiosk-${{ steps.version.outputs.name }} (versionCode ${{ steps.version.outputs.code }})" \
             --prerelease \
             artifacts/evershelf-kiosk.apk
+
+      - name: Publish APK to releases/ for LAN OTA
+        env:
+          GH_TOKEN: ${{ secrets.WORKFLOW_PAT || secrets.GITHUB_TOKEN }}
+        run: |
+          cp artifacts/evershelf-kiosk.apk releases/evershelf-kiosk.apk
+          printf '{"version":"%s","version_code":%s}\n' \
+            "${{ steps.version.outputs.name }}" "${{ steps.version.outputs.code }}" \
+            > releases/kiosk-version.json
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add releases/evershelf-kiosk.apk releases/kiosk-version.json
+          git diff --staged --quiet || git commit -m "chore(kiosk): publish APK v${{ steps.version.outputs.name }} for LAN OTA"
+          git push origin HEAD:${{ github.ref_name }}
 

@@ -55,6 +55,12 @@ if (($_GET['action'] ?? '') === 'ping') {
     exit;
 }
 
+// ── Kiosk OTA metadata (LAN self-host; no DB required) ───────────────────────
+if (($_GET['action'] ?? '') === 'kiosk_update') {
+    getKioskUpdate();
+    exit;
+}
+
 // ── App bootstrap — same-origin browsers receive API token automatically ───────
 if (($_GET['action'] ?? '') === 'app_bootstrap') {
     $required = evershelfApiTokenRequired();
@@ -4922,6 +4928,34 @@ function getConsumptionPredictions(PDO $db): void {
 }
 
 // ===== SETTINGS =====
+
+function getKioskUpdate(): void {
+    $root     = dirname(__DIR__);
+    $jsonPath = $root . '/releases/kiosk-version.json';
+    $apkPath  = $root . '/releases/evershelf-kiosk.apk';
+    if (!is_file($jsonPath) || !is_file($apkPath)) {
+        echo json_encode(['success' => false, 'error' => 'not_available']);
+        return;
+    }
+    $meta = json_decode((string)file_get_contents($jsonPath), true);
+    if (!is_array($meta)) {
+        echo json_encode(['success' => false, 'error' => 'invalid_metadata']);
+        return;
+    }
+    $scheme = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off')
+        || strtolower((string)($_SERVER['HTTP_X_FORWARDED_PROTO'] ?? '')) === 'https'
+        ? 'https' : 'http';
+    $host = $_SERVER['HTTP_HOST'] ?? 'localhost';
+    $script = $_SERVER['SCRIPT_NAME'] ?? '/api/index.php';
+    $basePath = preg_replace('#/api/index\.php$#', '', $script) ?: '';
+    $defaultApkUrl = $scheme . '://' . $host . $basePath . '/releases/evershelf-kiosk.apk';
+    echo json_encode([
+        'success'      => true,
+        'version'      => (string)($meta['version'] ?? ''),
+        'version_code' => (int)($meta['version_code'] ?? 0),
+        'apk_url'      => (string)($meta['apk_url'] ?? $defaultApkUrl),
+    ], JSON_UNESCAPED_UNICODE);
+}
 
 function getServerSettings(): void {
     EverLog::debug('getServerSettings');
