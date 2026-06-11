@@ -667,16 +667,24 @@ class KioskActivity : AppCompatActivity() {
                     packageManager.getPackageInfo(packageName, 0).versionName ?: ""
                 } catch (_: Exception) { "" }
 
+                val installedVc: Long = try {
+                    val pi = packageManager.getPackageInfo(packageName, 0)
+                    if (Build.VERSION.SDK_INT >= 28) pi.longVersionCode
+                    else @Suppress("DEPRECATION") pi.versionCode.toLong()
+                } catch (_: Exception) { -1L }
+
                 // The kiosk-latest release uses a non-semver tag ("kiosk-latest").
                 // Extract the actual kiosk version from the release body text.
-                // Body format: "Alias automatico → kiosk-X.Y.Z" or just "kiosk-X.Y.Z".
-                // Fall back to stripping the tag prefix if body parsing fails.
+                // Body format: "Alias automatico → kiosk-X.Y.Z (versionCode N)".
                 val bodyText = json.optString("body", "")
                 val norm = { v: String -> v.replace(Regex("^[^0-9]*"), "") }
                 val remoteKioskVersion = Regex("""kiosk-v?(\d+\.\d+(?:\.\d+)?)""")
                     .find(bodyText)?.groupValues?.get(1)
                     ?.takeIf { it.isNotEmpty() }
                     ?: norm(latestTag)
+
+                val remoteVc = Regex("""versionCode[=:\s(]+(\d+)""", RegexOption.IGNORE_CASE)
+                    .find(bodyText)?.groupValues?.get(1)?.toLongOrNull() ?: -1L
 
                 // Compare semver: returns true if `remote` is strictly greater than `local`
                 fun semverNewer(remote: String, local: String): Boolean {
@@ -707,10 +715,11 @@ class KioskActivity : AppCompatActivity() {
                 }
                 if (kioskApkUrl.isEmpty()) kioskApkUrl = KIOSK_DOWNLOAD_URL
 
-                // Only flag an update when the remote version is parseable as semver AND
-                // strictly greater than the installed version.
-                val kioskNeedsUpdate = currentKiosk.isNotEmpty() && isSemver &&
-                    semverNewer(remoteKioskVersion, currentKiosk)
+                val kioskNeedsUpdate = when {
+                    remoteVc > 0 && installedVc >= 0 -> remoteVc > installedVc
+                    currentKiosk.isNotEmpty() && isSemver -> semverNewer(remoteKioskVersion, currentKiosk)
+                    else -> false
+                }
 
                 val result = JSONObject()
                     .put("has_update", kioskNeedsUpdate)

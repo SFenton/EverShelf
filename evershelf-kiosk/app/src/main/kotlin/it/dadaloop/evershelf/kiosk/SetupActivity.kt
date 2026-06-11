@@ -697,6 +697,58 @@ class SetupActivity : AppCompatActivity() {
         })
     }
 
+    private fun normalizeDiscoveredBase(urlStr: String): String {
+        var base = urlStr.substringBefore("/api/")
+        if (base.endsWith(":443")) base = base.removeSuffix(":443")
+        if (base.endsWith(":80"))  base = base.removeSuffix(":80")
+        return if (base.endsWith("/")) base else "$base/"
+    }
+
+    private fun probeEverShelfEndpoint(urlStr: String): String? {
+        return try {
+            val conn = openConn(urlStr) ?: return null
+            val code = conn.responseCode
+            if (code !in 200..399) {
+                conn.disconnect()
+                return null
+            }
+            val body = conn.inputStream.bufferedReader().readText()
+            conn.disconnect()
+            if (body.contains("gemini_key_set") || body.contains("\"success\"") || body.contains("\"ok\"")) {
+                normalizeDiscoveredBase(urlStr)
+            } else null
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun probeEverShelfHost(ip: String, port: Int): String? {
+        val reachable = try {
+            Socket().use { s -> s.connect(InetSocketAddress(ip, port), 800); true }
+        } catch (_: Exception) {
+            false
+        }
+        if (!reachable) return null
+
+        val scheme = if (port == 443 || port == 8443) "https" else "http"
+        val portInUrl = when {
+            scheme == "https" && port == 443  -> ""
+            scheme == "http"  && port == 80   -> ""
+            else -> ":$port"
+        }
+        val paths = listOf(
+            "/dispensa/api/index.php?action=ping",
+            "/api/index.php?action=ping",
+            "/dispensa/api/index.php?action=get_settings",
+            "/api/index.php?action=get_settings",
+            "/evershelf/api/index.php?action=get_settings",
+        )
+        for (path in paths) {
+            probeEverShelfEndpoint("$scheme://$ip$portInUrl$path")?.let { return it }
+        }
+        return null
+    }
+
     private fun openConn(urlStr: String): HttpURLConnection? {
         return try {
             val conn = URL(urlStr).openConnection()
@@ -772,9 +824,52 @@ class SetupActivity : AppCompatActivity() {
             runOnUiThread { discoverStatus.text = "📡  $detectedLabel" }
 
             val ports = listOf(443, 80, 8080, 8443)
+
+            // ── 1b. Fast path: likely hosts on Wi-Fi subnet (incl. .128) before full sweep ─
+            val priorityIps = linkedSetOf<String>()
+            try {
+                val ifaces = NetworkInterface.getNetworkInterfaces()
+                while (ifaces != null && ifaces.hasMoreElements()) {
+                    val intf = ifaces.nextElement()
+                    if (!intf.isUp || intf.isLoopback) continue
+                    for (addr in intf.interfaceAddresses) {
+                        val ip = addr.address
+                        if (ip is java.net.Inet4Address && !ip.isLoopbackAddress) {
+                            priorityIps.add(ip.hostAddress ?: continue)
+                        }
+                    }
+                }
+            } catch (_: Exception) {}
+            for (subnet in wifiSubnets.ifEmpty { subnets.take(1) }) {
+                for (last in listOf(1, 128, 100, 10, 50, 254)) {
+                    priorityIps.add("$subnet.$last")
+                }
+            }
+
+            runOnUiThread { discoverStatus.text = "🔍  ${getString(R.string.setup_discovering_detail)}" }
+            for (ip in priorityIps) {
+                if (discoverCancelled.get()) break
+                for (port in ports) {
+                    val hit = probeEverShelfHost(ip, port)
+                    if (hit != null) {
+                        runOnUiThread {
+                            urlEdit.setText(hit)
+                            discoverStatus.text = "✅ ${getString(R.string.setup_server_found)}: $hit"
+                            discoverStatus.setTextColor(0xFF34d399.toInt())
+                            showUrlStatus("✅ ${getString(R.string.setup_server_found)}", true)
+                            btnDiscover.isEnabled = true
+                            btnDiscover.text = getString(R.string.setup_discover_btn)
+                        }
+                        return@Thread
+                    }
+                }
+            }
+
             val paths = listOf(
-                "/api/index.php?action=get_settings",
+                "/dispensa/api/index.php?action=ping",
+                "/api/index.php?action=ping",
                 "/dispensa/api/index.php?action=get_settings",
+                "/api/index.php?action=get_settings",
                 "/evershelf/api/index.php?action=get_settings",
             )
 
@@ -819,30 +914,24 @@ class SetupActivity : AppCompatActivity() {
 
                     // Full HTTP probe on reachable host
                     val scheme = if (port == 443 || port == 8443) "https" else "http"
+                    val portInUrl = when {
+                        scheme == "https" && port == 443  -> ""
+                        scheme == "http"  && port == 80   -> ""
+                        else -> ":$port"
+                    }
                     for (path in paths) {
                         if (discoverCancelled.get() || found.get()) break
-                        val urlStr = "$scheme://$ip:$port$path"
-                        try {
-                            val conn = openConn(urlStr) ?: continue
-                            val code = conn.responseCode
-                            if (code in 200..399) {
-                                val body = conn.inputStream.bufferedReader().readText()
-                                conn.disconnect()
-                                if (body.contains("gemini_key_set") || body.contains("\"success\"")) {
-                                    return@submit urlStr.substringBefore("/api/") + "/"
-                                }
-                            } else conn.disconnect()
-                        } catch (_: Exception) {}
+                        probeEverShelfEndpoint("$scheme://$ip$portInUrl$path")?.let { return@submit it }
                     }
                     null
                 }
             }
 
-            // ── 3. Collect results as they complete (not in submission order) ────
+            // ── 3. Collect results until all tasks finish or a server is found ────
             var result: String? = null
             var collected = 0
-            while (collected < total && !discoverCancelled.get()) {
-                val future = cs.poll(3, TimeUnit.SECONDS) ?: break
+            while (collected < total && !discoverCancelled.get() && result == null) {
+                val future = cs.poll(500, TimeUnit.MILLISECONDS) ?: continue
                 collected++
                 val r = try { future.get() } catch (_: Exception) { null }
                 if (r != null && found.compareAndSet(false, true)) {

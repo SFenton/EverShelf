@@ -37,8 +37,10 @@ jobs:
         id: version
         run: |
           VERSION=$(grep 'versionName' evershelf-kiosk/app/build.gradle.kts | grep -oP '"\K[^"]+')
+          VCODE=$(grep 'versionCode' evershelf-kiosk/app/build.gradle.kts | grep -oP '\d+')
           echo "name=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "Kiosk version: $VERSION"
+          echo "code=$VCODE" >> "$GITHUB_OUTPUT"
+          echo "Kiosk version: $VERSION (versionCode $VCODE)"
 
       - name: Build debug APK
         run: gradle assembleDebug --no-daemon
@@ -75,7 +77,7 @@ jobs:
           sleep 3
           gh release create kiosk-latest \
             --title "EverShelf Kiosk Latest" \
-            --notes "Alias automatico → kiosk-${{ steps.version.outputs.name }}" \
+            --notes "Alias automatico → kiosk-${{ steps.version.outputs.name }} (versionCode ${{ steps.version.outputs.code }})" \
             --prerelease \
             artifacts/evershelf-kiosk.apk
 
