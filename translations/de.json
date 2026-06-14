@@ -353,6 +353,18 @@
     "throw_all_confirm_btn": "🗑️ Ja, entsorgen",
     "locations_short": "Orte"
   },
+  "waste": {
+    "reason_title": "Warum wirfst du es weg?",
+    "reason_subtitle": "Das hilft uns, ähnliche Verschwendung zu vermeiden.",
+    "reason_expired": "⏰ Abgelaufen",
+    "reason_spoiled": "🦠 Verdorben",
+    "reason_wrong_location": "📍 Falscher Lagerort",
+    "reason_kept_too_long": "⏳ Zu lange aufbewahrt",
+    "reason_bought_too_much": "🛒 Zu viel gekauft",
+    "reason_forgotten": "😴 Vergessen / nicht rechtzeitig genutzt",
+    "reason_bad_quality": "👎 Schlechte Qualität beim Kauf",
+    "reason_other": "❓ Sonstiges"
+  },
   "product": {
     "title_new": "Neues Produkt",
     "title_edit": "Produkt bearbeiten",

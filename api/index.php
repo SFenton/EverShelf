@@ -3127,6 +3127,121 @@ function addToInventory(PDO $db): void {
     invalidateSmartShoppingCache();
 }
 
+/** Waste transaction notes use format Buttato|reason_key (legacy: plain "Buttato"). */
+function _isWasteNotes(string $notes): bool {
+    return $notes === 'Buttato' || str_starts_with($notes, 'Buttato|');
+}
+
+function _wasteReasonKey(string $notes): ?string {
+    if ($notes === 'Buttato') {
+        return 'unknown';
+    }
+    if (preg_match('/^Buttato\|([a-z_]+)/', $notes, $m)) {
+        return $m[1];
+    }
+    return null;
+}
+
+function _loadWasteLearning(PDO $db): array {
+    static $cache = null;
+    if ($cache !== null) {
+        return $cache;
+    }
+    $row = $db->query("SELECT value FROM app_settings WHERE key = 'waste_learning'")->fetchColumn();
+    $cache = ($row !== false && $row !== '') ? (json_decode((string)$row, true) ?: []) : [];
+    return $cache;
+}
+
+function _saveWasteLearning(PDO $db, array $data): void {
+    $stmt = $db->prepare("INSERT INTO app_settings (key, value, updated_at) VALUES ('waste_learning', ?, datetime('now'))
+                      ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at");
+    $stmt->execute([json_encode($data, JSON_UNESCAPED_UNICODE)]);
+    invalidateSmartShoppingCache();
+}
+
+function _guessPreferredStorageLocation(string $name, string $category): string {
+    $n = mb_strtolower($name . ' ' . $category);
+    if (preg_match('/surgelat|gelato|congelat|frozen|piselli surg|spinaci surg|basilico surg/', $n)) {
+        return 'freezer';
+    }
+    if (preg_match('/latte|yogurt|formaggio|burro|panna|uova|insalata|rucola|spinaci|pollo|carne|pesce|prosciutto|salame|mortadella|bresaola|affettato/', $n)) {
+        return 'frigo';
+    }
+    return 'dispensa';
+}
+
+function _applyWasteLearning(PDO $db, int $productId, string $reason, string $location, array $product): void {
+    if ($reason === '' || $reason === 'other') {
+        return;
+    }
+    $data = _loadWasteLearning($db);
+    $pid = (string)$productId;
+    if (!isset($data[$pid])) {
+        $data[$pid] = [];
+    }
+    $data[$pid]['last_reason'] = $reason;
+    $data[$pid]['last_at'] = time();
+    $data[$pid]['count_' . $reason] = (int)($data[$pid]['count_' . $reason] ?? 0) + 1;
+
+    switch ($reason) {
+        case 'expired':
+        case 'spoiled':
+            $data[$pid]['alert_days_sooner'] = min(5, (int)($data[$pid]['alert_days_sooner'] ?? 0) + 1);
+            break;
+        case 'wrong_location':
+            $preferred = _guessPreferredStorageLocation($product['name'] ?? '', $product['category'] ?? '');
+            if ($preferred !== $location) {
+                $data[$pid]['preferred_location'] = $preferred;
+            }
+            break;
+        case 'kept_too_long':
+        case 'forgotten':
+            $data[$pid]['buy_smaller'] = true;
+            $data[$pid]['max_suggested_pz'] = 2;
+            break;
+        case 'bought_too_much':
+            $data[$pid]['buy_less'] = true;
+            $data[$pid]['max_suggested_conf'] = 1;
+            $data[$pid]['max_suggested_pz'] = 2;
+            break;
+        case 'bad_quality':
+            $data[$pid]['buy_less'] = true;
+            break;
+    }
+    _saveWasteLearning($db, $data);
+}
+
+function _maybeApplyWasteLearning(PDO $db, int $productId, string $notes, string $location): void {
+    if (!_isWasteNotes($notes)) {
+        return;
+    }
+    $reason = _wasteReasonKey($notes) ?? 'unknown';
+    $stmt = $db->prepare("SELECT name, category FROM products WHERE id = ?");
+    $stmt->execute([$productId]);
+    $product = $stmt->fetch(PDO::FETCH_ASSOC);
+    if (!$product) {
+        return;
+    }
+    _applyWasteLearning($db, $productId, $reason, $location, $product);
+}
+
+function _applyWasteHintsToSuggestion(int $productId, $suggestedQty, string $suggestedUnit, array $wasteLearning): array {
+    $hint = $wasteLearning[(string)$productId] ?? [];
+    if ($suggestedQty === null || empty($hint)) {
+        return [$suggestedQty, $suggestedUnit];
+    }
+    if (!empty($hint['buy_less']) || !empty($hint['buy_smaller'])) {
+        if ($suggestedUnit === 'conf') {
+            $cap = (float)($hint['max_suggested_conf'] ?? 1);
+            $suggestedQty = min((float)$suggestedQty, max(1.0, $cap));
+        } elseif ($suggestedUnit === 'pz') {
+            $cap = (float)($hint['max_suggested_pz'] ?? 2);
+            $suggestedQty = min((float)$suggestedQty, max(1.0, $cap));
+        }
+    }
+    return [$suggestedQty, $suggestedUnit];
+}
+
 function useFromInventory(PDO $db): void {
     EverLog::info('useFromInventory');
     $input = json_decode(file_get_contents('php://input'), true);
@@ -3143,6 +3258,18 @@ function useFromInventory(PDO $db): void {
         return;
     }
 
+    try {
+        dbWithRetry(function () use ($db, $productId, $quantity, $useAll, $location, $notes): void {
+            useFromInventoryCore($db, $productId, $quantity, $useAll, $location, $notes);
+        });
+    } catch (\PDOException $e) {
+        EverLog::error('useFromInventory db error', ['msg' => $e->getMessage()]);
+        http_response_code(500);
+        echo json_encode(['success' => false, 'error' => 'Database busy — please retry']);
+    }
+}
+
+function useFromInventoryCore(PDO $db, $productId, $quantity, $useAll, $location, $notes): void {
     // ── Server-side deduplication ─────────────────────────────────────────
     // Guard against accidental double-consume triggers (scale jitter, double tap,
     // delayed/offline replay burst). We only apply this stricter gate to manual
@@ -3201,10 +3328,10 @@ function useFromInventory(PDO $db): void {
         $stmt->execute([$productId]);
         $allItems = $stmt->fetchAll();
         $totalRemoved = 0;
-        $explicitFinish = ($notes !== 'Buttato');
+        $explicitFinish = !_isWasteNotes($notes);
         foreach ($allItems as $item) {
             $totalRemoved += $item['quantity'];
-            $type = ($notes === 'Buttato') ? 'waste' : 'out';
+            $type = _isWasteNotes($notes) ? 'waste' : 'out';
             $stmt = $db->prepare("INSERT INTO transactions (product_id, type, quantity, location, notes) VALUES (?, ?, ?, ?, ?)");
             $stmt->execute([$productId, $type, $item['quantity'], $item['location'], $notes]);
 
@@ -3218,6 +3345,7 @@ function useFromInventory(PDO $db): void {
                 $stmt->execute([$item['id']]);
             }
         }
+        _maybeApplyWasteLearning($db, (int)$productId, $notes, $location === '__all__' ? 'dispensa' : $location);
         echo json_encode(['success' => true, 'remaining' => 0, 'removed' => $totalRemoved]);
         return;
     }
@@ -3276,9 +3404,10 @@ function useFromInventory(PDO $db): void {
             }
             
             // Log transaction
-            $type = ($notes === 'Buttato') ? 'waste' : 'out';
+            $type = _isWasteNotes($notes) ? 'waste' : 'out';
             $stmt3 = $db->prepare("INSERT INTO transactions (product_id, type, quantity, location, notes) VALUES (?, ?, ?, ?, ?)");
             $stmt3->execute([$productId, $type, $quantity, $location, $notes]);
+            _maybeApplyWasteLearning($db, (int)$productId, $notes, $location);
             
             $remaining = $newFraction > 0.001 ? $newFraction : 0;
             // Skip the normal flow — jump to Bring! check and response
@@ -3367,13 +3496,14 @@ function useFromInventory(PDO $db): void {
     }
     
     // Log transaction (actual amount removed, not requested)
-    $type = ($notes === 'Buttato') ? 'waste' : 'out';
+    $type = _isWasteNotes($notes) ? 'waste' : 'out';
     $stmt = $db->prepare("INSERT INTO transactions (product_id, type, quantity, location, notes) VALUES (?, ?, ?, ?, ?)");
     $stmt->execute([$productId, $type, $actualDeducted, $location, $notes]);
+    _maybeApplyWasteLearning($db, (int)$productId, $notes, $location);
 
     // User explicitly chose "use all/finished": remove this row now instead of
     // leaving quantity=0 pending confirmation.
-    if ($useAll && $notes !== 'Buttato' && $newQty <= 0) {
+    if ($useAll && !_isWasteNotes($notes) && $newQty <= 0) {
         $stmt = $db->prepare("DELETE FROM inventory WHERE id = ?");
         $stmt->execute([$existing['id']]);
     }
@@ -10612,6 +10742,7 @@ function invalidateSmartShoppingCache(): void {
 
 function smartShoppingCached(PDO $db): void {
     EverLog::info('smartShoppingCached');
+    set_time_limit(120);
     // Never let the browser or proxy cache this — urgency is time-sensitive
     header('Cache-Control: no-cache, no-store, must-revalidate');
     header('Pragma: no-cache');
@@ -10690,6 +10821,7 @@ function _productOnBring(string $productName, array $bringItems, string $shoppin
 
 function smartShopping(PDO $db): void {
     EverLog::info('smartShopping');
+    set_time_limit(120);
     $now = time();
     $today = date('Y-m-d');
 
@@ -10801,6 +10933,7 @@ function smartShopping(PDO $db): void {
 
     // 5. Analyze each product
     $items = [];
+    $wasteLearning = _loadWasteLearning($db);
     foreach ($products as $p) {
         $pid = $p['id'];
         $inv = $inventory[$pid] ?? null;
@@ -11363,6 +11496,13 @@ function smartShopping(PDO $db): void {
             }
         }
 
+        [$suggestedQty, $suggestedUnit] = _applyWasteHintsToSuggestion($pid, $suggestedQty, $suggestedUnit ?? $unit, $wasteLearning);
+        $wHint = $wasteLearning[(string)$pid] ?? [];
+        if (!empty($wHint['preferred_location'])) {
+            $locLabel = $wHint['preferred_location'];
+            $reasons[] = "Past waste: store in {$locLabel}";
+        }
+
         $items[] = [
             'product_id' => $pid,
             'name' => $p['name'],
@@ -11644,10 +11784,30 @@ function shoppingGetList(PDO $db): void {
 
 function shoppingAdd(PDO $db): void {
     if (isShoppingBringMode()) {
-        bringAddItems($db);
+        try {
+            dbWithRetry(function () use ($db): void {
+                bringAddItems($db);
+            });
+        } catch (\PDOException $e) {
+            EverLog::error('shoppingAdd/bring db error', ['msg' => $e->getMessage()]);
+            http_response_code(500);
+            echo json_encode(['success' => false, 'error' => 'Database busy — please retry']);
+        }
         return;
     }
     $input = json_decode(file_get_contents('php://input'), true) ?? [];
+    try {
+        dbWithRetry(function () use ($db, $input): void {
+            shoppingAddInternal($db, $input);
+        });
+    } catch (\PDOException $e) {
+        EverLog::error('shoppingAdd db error', ['msg' => $e->getMessage()]);
+        http_response_code(500);
+        echo json_encode(['success' => false, 'error' => 'Database busy — please retry']);
+    }
+}
+
+function shoppingAddInternal(PDO $db, array $input): void {
     $items = $input['items'] ?? [];
     $added = 0; $updated = 0; $skipped = 0;
     foreach ($items as $item) {

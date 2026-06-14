@@ -353,6 +353,18 @@
     "throw_all_confirm_btn": "🗑️ Sì, butta",
     "locations_short": "posti"
   },
+  "waste": {
+    "reason_title": "Perché lo butti?",
+    "reason_subtitle": "Ci aiuta a evitare sprechi simili in futuro.",
+    "reason_expired": "⏰ Scaduto",
+    "reason_spoiled": "🦠 Andato a male / deperito",
+    "reason_wrong_location": "📍 Posto sbagliato (frigo/freezer/dispensa)",
+    "reason_kept_too_long": "⏳ Tenuto troppo a lungo",
+    "reason_bought_too_much": "🛒 Comprato troppo",
+    "reason_forgotten": "😴 Dimenticato / non usato in tempo",
+    "reason_bad_quality": "👎 Qualità scadente all'acquisto",
+    "reason_other": "❓ Altro"
+  },
   "product": {
     "title_new": "Nuovo Prodotto",
     "title_edit": "Modifica Prodotto",

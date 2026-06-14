@@ -353,6 +353,18 @@
     "throw_all_confirm_btn": "🗑️ Yes, discard",
     "locations_short": "places"
   },
+  "waste": {
+    "reason_title": "Why are you discarding it?",
+    "reason_subtitle": "This helps us prevent similar waste next time.",
+    "reason_expired": "⏰ Expired",
+    "reason_spoiled": "🦠 Spoiled / gone bad",
+    "reason_wrong_location": "📍 Wrong storage (fridge/freezer/pantry)",
+    "reason_kept_too_long": "⏳ Kept too long",
+    "reason_bought_too_much": "🛒 Bought too much",
+    "reason_forgotten": "😴 Forgotten / not used in time",
+    "reason_bad_quality": "👎 Poor quality when bought",
+    "reason_other": "❓ Other"
+  },
   "product": {
     "title_new": "New Product",
     "title_edit": "Edit Product",

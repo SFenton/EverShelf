@@ -353,6 +353,18 @@
     "throw_all_confirm_btn": "🗑️ Sí, desechar",
     "locations_short": "ubicaciones"
   },
+  "waste": {
+    "reason_title": "¿Por qué lo tiras?",
+    "reason_subtitle": "Nos ayuda a evitar desperdicios similares.",
+    "reason_expired": "⏰ Caducado",
+    "reason_spoiled": "🦠 Estropeado",
+    "reason_wrong_location": "📍 Lugar de guardado incorrecto",
+    "reason_kept_too_long": "⏳ Guardado demasiado tiempo",
+    "reason_bought_too_much": "🛒 Comprado de más",
+    "reason_forgotten": "😴 Olvidado / no usado a tiempo",
+    "reason_bad_quality": "👎 Mala calidad al comprar",
+    "reason_other": "❓ Otro"
+  },
   "product": {
     "title_new": "Nuevo producto",
     "title_edit": "Editar producto",

@@ -6809,6 +6809,53 @@ async function quickUse(productId, location) {
     }
 }
 
+const WASTE_REASON_KEYS = ['expired', 'spoiled', 'wrong_location', 'kept_too_long', 'bought_too_much', 'forgotten', 'bad_quality', 'other'];
+
+function _wasteNotesForReason(reason) {
+    return 'Buttato|' + reason;
+}
+
+function _showWasteReasonModal(productLabel, onPick) {
+    const buttons = WASTE_REASON_KEYS.map(r =>
+        `<button type="button" class="btn btn-large full-width" style="margin-bottom:8px;text-align:left" data-waste-reason="${r}">${escapeHtml(t('waste.reason_' + r))}</button>`
+    ).join('');
+    document.getElementById('modal-content').innerHTML = `
+        <div class="modal-header">
+            <h3>${t('waste.reason_title')}</h3>
+            <button class="modal-close" onclick="closeModal()">✕</button>
+        </div>
+        <p style="color:var(--text-muted);margin:8px 0 16px">${escapeHtml(productLabel)}</p>
+        <p style="color:var(--text-muted);margin:0 0 12px;font-size:0.9rem">${t('waste.reason_subtitle')}</p>
+        <div style="display:flex;flex-direction:column;gap:0">${buttons}
+            <button type="button" class="btn btn-secondary full-width" style="margin-top:8px" onclick="closeModal()">${t('confirm.cancel')}</button>
+        </div>
+    `;
+    document.getElementById('modal-overlay').style.display = 'flex';
+    document.querySelectorAll('[data-waste-reason]').forEach(btn => {
+        btn.addEventListener('click', () => {
+            const reason = btn.getAttribute('data-waste-reason');
+            closeModal();
+            onPick(reason);
+        });
+    });
+}
+
+function _inventoryWaste(payload, productLabel) {
+    return new Promise((resolve, reject) => {
+        _showWasteReasonModal(productLabel || '', async (reason) => {
+            showLoading(true);
+            try {
+                const result = await api('inventory_use', {}, 'POST', { ...payload, notes: _wasteNotesForReason(reason) });
+                resolve(result);
+            } catch (e) {
+                reject(e);
+            } finally {
+                showLoading(false);
+            }
+        });
+    });
+}
+
 async function deleteInventoryItem(id) {
     const item = currentInventory.find(i => i.id === id);
     const unit = item ? (item.unit || 'pz') : 'pz';
@@ -6853,19 +6900,15 @@ async function _discardOnePiece(inventoryId) {
     const item = currentInventory.find(i => i.id === inventoryId);
     if (!item) { closeModal(); return; }
     closeModal();
-    showLoading(true);
     try {
-        await api('inventory_use', {}, 'POST', {
+        await _inventoryWaste({
             product_id: item.product_id,
             quantity: 1,
             location: item.location,
-            notes: 'Buttato'
-        });
-        showLoading(false);
+        }, item.name);
         showToast(t('toast.thrown_away_partial', { qty: 1, unit: item.unit || 'pz', name: item.name }), 'success');
         refreshCurrentPage();
     } catch(e) {
-        showLoading(false);
         showToast(t('error.connection'), 'error');
     }
 }
@@ -6874,19 +6917,15 @@ async function _discardAllFromModal(inventoryId) {
     const item = currentInventory.find(i => i.id === inventoryId);
     if (!item) { closeModal(); return; }
     closeModal();
-    showLoading(true);
     try {
-        await api('inventory_use', {}, 'POST', {
+        await _inventoryWaste({
             product_id: item.product_id,
             use_all: true,
             location: item.location,
-            notes: 'Buttato'
-        });
-        showLoading(false);
+        }, item.name);
         showToast(t('toast.thrown_away', { name: item.name }), 'success');
         refreshCurrentPage();
     } catch(e) {
-        showLoading(false);
         showToast(t('error.connection'), 'error');
     }
 }
@@ -9180,15 +9219,12 @@ async function throwAll() {
         t('use.throw_all_confirm_title') || '🗑️ Butta tutto',
         (t('use.throw_all_confirm_msg') || 'Vuoi davvero buttare via tutto il prodotto?') + (name ? `\n"${name}"` : ''),
         async () => {
-            showLoading(true);
             try {
-                const result = await api('inventory_use', {}, 'POST', {
+                const result = await _inventoryWaste({
                     product_id: currentProduct.id,
                     use_all: true,
                     location: '__all__',
-                    notes: 'Buttato'
-                });
-                showLoading(false);
+                }, name);
                 if (result.success) {
                     showToast(t('toast.thrown_away', { name: currentProduct.name }), 'success');
                     showPage('dashboard');
@@ -9196,7 +9232,6 @@ async function throwAll() {
                     showToast(result.error || t('error.generic'), 'error');
                 }
             } catch(e) {
-                showLoading(false);
                 showToast(t('error.connection'), 'error');
             }
         },
@@ -9208,15 +9243,12 @@ async function throwPartial() {
     const qty = parseFloat(document.getElementById('throw-quantity').value) || 1;
     const loc = document.getElementById('throw-location').value;
     closeModal();
-    showLoading(true);
     try {
-        const result = await api('inventory_use', {}, 'POST', {
+        const result = await _inventoryWaste({
             product_id: currentProduct.id,
             quantity: qty,
             location: loc,
-            notes: 'Buttato'
-        });
-        showLoading(false);
+        }, currentProduct.name);
         if (result.success) {
             showToast(t('toast.thrown_away_partial', { qty, unit: currentProduct.unit || 'pz', name: currentProduct.name }), 'success');
             showPage('dashboard');
@@ -9224,7 +9256,6 @@ async function throwPartial() {
             showToast(result.error || t('error.generic'), 'error');
         }
     } catch(e) {
-        showLoading(false);
         showToast(t('error.connection'), 'error');
     }
 }
