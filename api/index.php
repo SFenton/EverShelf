@@ -154,6 +154,68 @@ if (($_GET['action'] ?? '') === 'gemini_usage') {
         }
     }
 
+    // ── Per-request AI telemetry (rolling request log) ───────────────────────
+    $aiRequests = file_exists(AI_REQUESTS_PATH)
+        ? (json_decode(file_get_contents(AI_REQUESTS_PATH), true) ?: []) : [];
+    $currentMonthRequests = array_values(array_filter($aiRequests, fn($row) => str_starts_with((string)($row['ts'] ?? ''), $month)));
+
+    $summarizeRequests = function(array $rows): array {
+        $summary = [
+            'calls' => count($rows),
+            'ok' => 0,
+            'failed' => 0,
+            'timeouts' => 0,
+            'avg_ms' => 0,
+            'p95_ms' => 0,
+            'max_ms' => 0,
+            'by_action' => [],
+            'by_model' => [],
+        ];
+        if (empty($rows)) return $summary;
+
+        $durations = [];
+        foreach ($rows as $row) {
+            $ok = !empty($row['ok']);
+            $isTimeout = !empty($row['timeout']);
+            $elapsedMs = max(0, (int)($row['elapsed_ms'] ?? 0));
+            $action = (string)($row['action'] ?? 'unknown');
+            $model = (string)($row['model'] ?? 'unknown');
+
+            $durations[] = $elapsedMs;
+            $summary[$ok ? 'ok' : 'failed']++;
+            if ($isTimeout) $summary['timeouts']++;
+
+            foreach ([['by_action', $action], ['by_model', $model]] as [$bucketName, $bucketKey]) {
+                if (!isset($summary[$bucketName][$bucketKey])) {
+                    $summary[$bucketName][$bucketKey] = ['calls' => 0, 'ok' => 0, 'failed' => 0, 'timeouts' => 0, 'avg_ms' => 0, 'max_ms' => 0];
+                }
+                $bucket = &$summary[$bucketName][$bucketKey];
+                $bucket['calls']++;
+                $bucket[$ok ? 'ok' : 'failed']++;
+                if ($isTimeout) $bucket['timeouts']++;
+                $bucket['avg_ms'] += $elapsedMs;
+                $bucket['max_ms'] = max($bucket['max_ms'], $elapsedMs);
+                unset($bucket);
+            }
+        }
+
+        sort($durations);
+        $summary['avg_ms'] = (int)round(array_sum($durations) / count($durations));
+        $summary['p95_ms'] = $durations[(int)floor((count($durations) - 1) * 0.95)] ?? 0;
+        $summary['max_ms'] = max($durations);
+
+        foreach (['by_action', 'by_model'] as $bucketName) {
+            foreach ($summary[$bucketName] as &$bucket) {
+                $bucket['avg_ms'] = (int)round($bucket['avg_ms'] / max(1, $bucket['calls']));
+            }
+            unset($bucket);
+        }
+
+        return $summary;
+    };
+
+    $recentRequests = array_reverse(array_slice($aiRequests, -50));
+
     // ── Cache item counts (for caches card) ──────────────────────────────────
     $priceCache = file_exists(PRICE_CACHE_PATH)
         ? (json_decode(file_get_contents(PRICE_CACHE_PATH), true) ?: []) : [];
@@ -215,6 +277,10 @@ if (($_GET['action'] ?? '') === 'gemini_usage') {
             'by_action'    => $cur['by_action'] ?? [],
             'by_model'     => $cur['by_model']  ?? [],
         ],
+
+        // Request-level telemetry (rolling, prompt/image data intentionally omitted)
+        'request_stats' => $summarizeRequests($currentMonthRequests),
+        'recent_requests' => $recentRequests,
 
         // Current year (from ai_usage.json — all months summed)
         'year_stats' => [
@@ -2739,7 +2805,12 @@ function saveProduct(PDO $db): void {
             INSERT INTO products (barcode, name, brand, category, image_url, unit, default_quantity, notes, package_unit, shopping_name, nutriments_json)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ");
-        $stmt->execute($params);
+        $stmt->execute([
+            $barcode, $input['name'], $input['brand'] ?? '', $input['category'] ?? '',
+            $input['image_url'] ?? '', $input['unit'] ?? 'pz',
+            $input['default_quantity'] ?? 1, $input['notes'] ?? '',
+            $input['package_unit'] ?? '', $shoppingName, $nutriJson,
+        ]);
         echo json_encode(['success' => true, 'id' => (int)$db->lastInsertId(), 'merged' => false]);
     } catch (PDOException $e) {
         if (str_contains($e->getMessage(), 'UNIQUE constraint failed: products.barcode') && $barcode !== null) {
@@ -5304,20 +5375,14 @@ function saveSettings(): void {
         $envVars['APPLIANCES'] = is_array($input['appliances']) ? implode(',', $input['appliances']) : (string)$input['appliances'];
     }
 
-    // Write .env file
-    $lines = [];
-    foreach ($envVars as $key => $val) {
-        $lines[] = "{$key}={$val}";
-    }
-    $result = file_put_contents($envFile, implode("\n", $lines) . "\n");
+    $result = evershelfWriteFileInPlace($envFile, evershelfFormatEnvVars($envVars, $envFile));
     
-    // Clear cached env
-    static $cache = null;
-    $cache = null;
+    envCacheClear();
     
     if ($result !== false) {
         echo json_encode(['success' => true]);
     } else {
+        EverLog::error('saveSettings: could not write .env file');
         echo json_encode(['success' => false, 'error' => 'Could not write .env file']);
     }
 }
@@ -5328,7 +5393,7 @@ function saveSettings(): void {
  * Calls the Gemini REST API with exponential backoff on 429 / 503.
  * - Reads Google's Retry-After response header.
  * - Reads Google's retryDelay field inside the error body (e.g. "10s").
- * - Up to 4 attempts; default wait sequence: 2 s, 4 s, 8 s.
+ * - Up to 4 attempts; default wait sequence: 2 s, 4 s, 6 s.
  *
  * @return array{http_code:int, body:string, data:array|null}
  */
@@ -5336,10 +5401,14 @@ function callGemini(string $url, array $payload, int $timeout = 60): array {
     $maxAttempts = 4;
     $lastCode    = 0;
     $lastBody    = '';
+    $lastCurlErrno = 0;
+    $lastCurlError = '';
+    $attempts    = 0;
     $promptLen   = strlen(json_encode($payload));
     $t0          = microtime(true);
 
     for ($attempt = 1; $attempt <= $maxAttempts; $attempt++) {
+        $attempts = $attempt;
         $retryAfterHeader = null;
 
         $ch = curl_init($url);
@@ -5361,6 +5430,8 @@ function callGemini(string $url, array $payload, int $timeout = 60): array {
 
         $body     = curl_exec($ch);
         $lastCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $lastCurlErrno = curl_errno($ch);
+        $lastCurlError = curl_error($ch);
         curl_close($ch);
 
         if ($body !== false) $lastBody = $body;
@@ -5393,7 +5464,8 @@ function callGemini(string $url, array $payload, int $timeout = 60): array {
     if ($lastCode === 200) {
         EverLog::aiResponse('gemini', strlen($lastBody), $elapsed, true);
     } else {
-        EverLog::aiResponse('gemini', strlen($lastBody), $elapsed, false, "HTTP {$lastCode}: " . substr($lastBody, 0, 300));
+        $errorDetail = $lastCurlErrno ? "curl {$lastCurlErrno}: {$lastCurlError}" : "HTTP {$lastCode}: " . substr($lastBody, 0, 300);
+        EverLog::aiResponse('gemini', strlen($lastBody), $elapsed, false, $errorDetail);
     }
 
     $data = $lastBody ? json_decode($lastBody, true) : null;
@@ -5408,6 +5480,13 @@ function callGemini(string $url, array $payload, int $timeout = 60): array {
         'data'       => $data,
         'tokens_in'  => $tokIn,
         'tokens_out' => $tokOut,
+        'elapsed_s'  => $elapsed,
+        'attempts'   => $attempts,
+        'timeout_s'  => $timeout,
+        'prompt_chars' => $promptLen,
+        'output_chars' => strlen($lastBody),
+        'curl_errno' => $lastCurlErrno,
+        'curl_error' => $lastCurlError,
     ];
 }
 
@@ -5446,18 +5525,73 @@ function _recordAiUsage(string $model, int $tokIn, int $tokOut, string $action =
 }
 
 /**
+ * Record request-level Gemini telemetry without storing prompt/image payloads.
+ * Keeps a rolling window so slow/timeouting actions can be diagnosed later.
+ */
+function _recordAiRequest(array $event): void {
+    $rows = [];
+    if (file_exists(AI_REQUESTS_PATH)) {
+        $rows = json_decode(file_get_contents(AI_REQUESTS_PATH), true) ?: [];
+    }
+
+    $curlErrno = (int)($event['curl_errno'] ?? 0);
+    $curlError = (string)($event['curl_error'] ?? '');
+    $httpCode = (int)($event['http_code'] ?? 0);
+    $timeout = $curlErrno === 28 || ($httpCode === 0 && stripos($curlError, 'timed out') !== false);
+
+    $rows[] = [
+        'ts' => gmdate('c'),
+        'action' => (string)($event['action'] ?? ''),
+        'model' => (string)($event['model'] ?? ''),
+        'fallback' => !empty($event['fallback']),
+        'ok' => !empty($event['ok']),
+        'timeout' => $timeout,
+        'http_code' => $httpCode,
+        'elapsed_ms' => (int)round(((float)($event['elapsed_s'] ?? 0)) * 1000),
+        'timeout_s' => (int)($event['timeout_s'] ?? 0),
+        'attempts' => (int)($event['attempts'] ?? 0),
+        'prompt_chars' => (int)($event['prompt_chars'] ?? 0),
+        'output_chars' => (int)($event['output_chars'] ?? 0),
+        'tokens_in' => (int)($event['tokens_in'] ?? 0),
+        'tokens_out' => (int)($event['tokens_out'] ?? 0),
+        'error' => substr($event['error'] ?? ($curlErrno ? "curl {$curlErrno}: {$curlError}" : ''), 0, 180),
+    ];
+
+    $rows = array_slice($rows, -250);
+    @file_put_contents(AI_REQUESTS_PATH, json_encode($rows, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES), LOCK_EX);
+}
+
+/**
  * Like callGemini() but tries gemini-2.5-flash first, falls back to gemini-2.0-flash
  * on quota/rate-limit errors (429/503). Builds the URL from model name + API key.
  */
 function callGeminiWithFallback(string $apiKey, array $payload, int $timeout = 30, string $usageAction = ''): array {
     $models   = ['gemini-2.5-flash', 'gemini-2.0-flash'];
-    $last     = ['http_code' => 0, 'body' => '', 'data' => null, 'tokens_in' => 0, 'tokens_out' => 0];
+    $last     = ['http_code' => 0, 'body' => '', 'data' => null, 'tokens_in' => 0, 'tokens_out' => 0, 'elapsed_s' => 0, 'attempts' => 0, 'timeout_s' => $timeout, 'prompt_chars' => 0, 'output_chars' => 0, 'curl_errno' => 0, 'curl_error' => ''];
     $promptLen = strlen(json_encode($payload));
     foreach ($models as $idx => $model) {
         $isFallback = $idx > 0;
         EverLog::aiCall($model, $promptLen, $isFallback);
         $url  = "https://generativelanguage.googleapis.com/v1beta/models/{$model}:generateContent?key={$apiKey}";
         $last = callGemini($url, $payload, $timeout);
+        $ok = $last['http_code'] === 200;
+        _recordAiRequest([
+            'action' => $usageAction,
+            'model' => $model,
+            'fallback' => $isFallback,
+            'ok' => $ok,
+            'http_code' => $last['http_code'],
+            'elapsed_s' => $last['elapsed_s'] ?? 0,
+            'timeout_s' => $last['timeout_s'] ?? $timeout,
+            'attempts' => $last['attempts'] ?? 0,
+            'prompt_chars' => $last['prompt_chars'] ?? $promptLen,
+            'output_chars' => $last['output_chars'] ?? strlen((string)($last['body'] ?? '')),
+            'tokens_in' => $last['tokens_in'] ?? 0,
+            'tokens_out' => $last['tokens_out'] ?? 0,
+            'curl_errno' => $last['curl_errno'] ?? 0,
+            'curl_error' => $last['curl_error'] ?? '',
+            'error' => $ok ? '' : ($last['data']['error']['message'] ?? ''),
+        ]);
         if ($last['http_code'] === 200) {
             _recordAiUsage($model, $last['tokens_in'], $last['tokens_out'], $usageAction);
             return $last;
@@ -5794,13 +5928,15 @@ function geminiReadExpiry(): void {
         return;
     }
 
+    $today = date('Y-m-d');
+
     // Call Gemini API
     $payload = [
         'contents' => [
             [
                 'parts' => [
                     [
-                        'text' => "Analizza questa immagine di un prodotto alimentare. Cerca la data di scadenza (\"da consumarsi entro\", \"da consumarsi preferibilmente entro\", \"scad.\", \"exp\", \"best before\", \"TMC\", o date stampate).\n\nRispondi SOLO con un JSON nel formato: {\"found\": true, \"date\": \"YYYY-MM-DD\", \"raw_text\": \"testo letto\"}\nSe non trovi una data: {\"found\": false, \"raw_text\": \"testo letto se presente\"}\n\nSe la data ha solo mese e anno (es. 03/2027), usa il primo giorno del mese. Se ha solo giorno e mese (es. 15/04), assumi l'anno corrente o il prossimo se la data è già passata."
+                        'text' => "Analyze this image of a food or household product container and find the expiration, best-by, use-by, or freshness date. Today is {$today}.\n\nLook for labels and nearby text such as: use by, best by, best before, best if used by, best if used before, sell by, enjoy by, freeze by, expires, expiration, expiry, exp, BB, BBE, TMC, da consumarsi entro, da consumarsi preferibilmente entro, scad., scadenza, or other printed date markers.\n\nRecognize common container date formats including: YYYY-MM-DD, YYYY/MM/DD, YYYY.MM.DD, MM/DD/YYYY, M/D/YY, MM-DD-YY, MM.DD.YY, MMM DD YYYY, MON-DD-YY, YYYYMMDD, MMDDYY, MMDDYYYY, and compact stamped forms such as EXP062526, BB 063026, BEST BY 06 30 26, or JUN 2026. Month names or abbreviations may be in English or Italian.\n\nIf multiple dates are visible, prefer an explicit expiration/use-by/best-by/freshness date over sell-by, packed-on, manufactured-on, MFG, MFD, lot, batch, or code dates. Do not return a manufacturing, packed, lot, batch, or Julian code as the expiration date unless nearby text clearly says it is an expiration/use-by/best-by date.\n\nRespond ONLY with JSON in this format: {\"found\": true, \"date\": \"YYYY-MM-DD\", \"raw_text\": \"text read\"}\nIf no expiration/use-by/best-by/freshness date is found, respond: {\"found\": false, \"raw_text\": \"text read if present\"}\n\nIf the date has only month and year, such as 03/2027, 04/15, 4/15, or JUN 2026, use the first day of that month. Treat two-part numeric slash dates as month/year, not month/day. If a two-digit year is present, interpret it as 20YY."
                     ],
                     [
                         'inline_data' => [
@@ -8783,9 +8919,11 @@ function _gdriveSetEnvVar(string $key, string $value): void {
     $envFile = __DIR__ . '/../.env';
     $envVars = loadEnv();
     $envVars[$key] = $value;
-    $lines = [];
-    foreach ($envVars as $k => $v) { $lines[] = "$k=$v"; }
-    file_put_contents($envFile, implode("\n", $lines) . "\n");
+    if (evershelfWriteFileInPlace($envFile, evershelfFormatEnvVars($envVars, $envFile)) === false) {
+        EverLog::error('_gdriveSetEnvVar: could not write .env file', ['key' => $key]);
+        throw new RuntimeException('Could not write .env file');
+    }
+    envCacheClear();
 }
 
 /**
@@ -13635,4 +13773,3 @@ function _formatPrice(float $amount, string $currency): string {
     };
     return $sym . number_format($amount, 2, '.', '');
 }
-

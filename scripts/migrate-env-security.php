@@ -49,7 +49,10 @@ if (empty($vars['API_TOKEN']) && empty($vars['SETTINGS_TOKEN'])) {
 }
 
 if ($changed) {
-    file_put_contents($envFile, implode("\n", $lines) . "\n");
+    if (evershelfWriteFileInPlace($envFile, implode("\n", $lines) . "\n") === false) {
+        fwrite(STDERR, "Could not write .env\n");
+        exit(1);
+    }
     chmod($envFile, 0640);
     echo "Updated .env\n";
 } else {

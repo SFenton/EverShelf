@@ -4098,8 +4098,32 @@ function togglePasswordVisibility(inputId) {
     input.type = input.type === 'password' ? 'text' : 'password';
 }
 
+async function _recoverApiTokenFromBootstrap() {
+    try {
+        const res = await fetch(`${API_BASE}?action=app_bootstrap`, { cache: 'no-store' });
+        if (!res.ok) return false;
+        const data = await res.json();
+        window._apiTokenRequired = !!data.api_token_required;
+        if (data.api_token && typeof setApiToken === 'function') {
+            setApiToken(data.api_token);
+            return true;
+        }
+        if (typeof getApiToken === 'function' && getApiToken() && typeof setApiToken === 'function') {
+            setApiToken('');
+        }
+        if (data.api_token_required && typeof _promptApiTokenIfNeeded === 'function') {
+            _promptApiTokenIfNeeded();
+        }
+    } catch (err) {
+        if (typeof remoteLog === 'function') {
+            remoteLog('API_AUTH_RECOVERY_FAIL', err?.message || String(err));
+        }
+    }
+    return false;
+}
+
 // ===== API HELPER =====
-async function api(action, params = {}, method = 'GET', body = null, extraHeaders = {}) {
+async function api(action, params = {}, method = 'GET', body = null, extraHeaders = {}, _authRetry = false) {
     // In demo mode, all shopping write operations are no-ops
     if (_demoMode) {
         const BRING_WRITE_ACTIONS = ['bring_add', 'bring_remove', 'bring_migrate_names', 'bring_set_spec',
@@ -4148,6 +4172,13 @@ async function api(action, params = {}, method = 'GET', body = null, extraHeader
         remoteLog('API_ERROR', `${action} HTTP ${res.status}`);
         if (res.status === 401) {
             window._apiTokenRequired = true;
+            if (!_authRetry && await _recoverApiTokenFromBootstrap()) {
+                const retryHeaders = { ...extraHeaders };
+                if (retryHeaders['X-API-Token'] && typeof getApiToken === 'function') {
+                    retryHeaders['X-API-Token'] = getApiToken();
+                }
+                return api(action, params, method, body, retryHeaders, true);
+            }
             if (typeof _promptApiTokenIfNeeded === 'function') _promptApiTokenIfNeeded();
         }
         // Report HTTP 5xx as server errors (not 4xx which are usually user errors)
@@ -19777,4 +19808,3 @@ async function _backgroundBringSync() {
 
     } catch (e) { /* silent — best effort */ }
 }
-

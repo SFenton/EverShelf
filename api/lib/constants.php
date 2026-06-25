@@ -12,6 +12,7 @@ define('FOODFACTS_CACHE_PATH',     EVERSHELF_ROOT . '/data/food_facts_cache.json
 define('SHOPPING_NAME_CACHE_PATH', EVERSHELF_ROOT . '/data/shopping_name_cache.json');
 define('BRING_TOKEN_PATH',         EVERSHELF_ROOT . '/data/bring_token.json');
 define('AI_USAGE_PATH',            EVERSHELF_ROOT . '/data/ai_usage.json');
+define('AI_REQUESTS_PATH',         EVERSHELF_ROOT . '/data/ai_requests.json');
 define('BACKUP_DIR',               EVERSHELF_ROOT . '/data/backups');
 define('BACKUP_LAST_TS_PATH',      EVERSHELF_ROOT . '/data/backup_last_ts.json');
 define('CRON_LOG_PATH',            EVERSHELF_ROOT . '/data/cron.log');
