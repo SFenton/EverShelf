@@ -101,7 +101,7 @@ Connect your pantry to your smart home in minutes — no YAML, no manual sensor 
 - **Smart chat assistant** — Ask questions about your inventory, get cooking tips
 - **Shopping suggestions with tips** — AI-powered purchase recommendations, each enriched with a short practical buying/storing tip
 - **Anomaly explanation** — "Explain" button on anomaly banners explains in plain language why a discrepancy likely occurred and what to do
-- **Model fallback** — All AI endpoints try `gemini-2.5-flash` first and fall back to `gemini-2.0-flash` automatically
+- **Model fallback** — Expiry scans try `gemini-3-flash` first, then `gemini-2.5-flash` and `gemini-2.0-flash`; other AI endpoints try `gemini-2.5-flash` first and fall back to `gemini-2.0-flash`
 - **Graceful no-key state** — When no Gemini key is configured, AI entry points show a friendly message; the header button is visually greyed with an amber dot
 
 ### 🛒 Shopping List
@@ -254,6 +254,8 @@ TRANSACTION_RETENTION_DAYS=90   # delete stock transactions older than N days (m
 VACUUM_EXPIRY_EXTENSION_DAYS=30 # extra days before vacuum-sealed items are flagged expired
 
 # Optional: Gemini cost rates (USD per million tokens, for the Info tab cost estimate)
+GEMINI_COST_3F_IN=0.50
+GEMINI_COST_3F_OUT=3.00
 GEMINI_COST_25F_IN=0.15
 GEMINI_COST_25F_OUT=0.60
 GEMINI_COST_20F_IN=0.10

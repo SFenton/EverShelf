@@ -99,7 +99,7 @@ When the dashboard shows a suspicious quantity banner, tap **🤖 Spiega** to ge
 
 ### Model Fallback
 
-All AI endpoints try `gemini-2.5-flash` first and automatically fall back to `gemini-2.0-flash` if unavailable.
+Expiry scans try `gemini-3-flash` first, then `gemini-2.5-flash` and `gemini-2.0-flash` if unavailable. Other AI endpoints try `gemini-2.5-flash` first and automatically fall back to `gemini-2.0-flash`.
 
 ---
 

@@ -19,5 +19,7 @@ define('CRON_LOG_PATH',            EVERSHELF_ROOT . '/data/cron.log');
 
 define('GEMINI_COST_25F_IN',  (float)(getenv('GEMINI_COST_25F_IN')  ?: 0.15));
 define('GEMINI_COST_25F_OUT', (float)(getenv('GEMINI_COST_25F_OUT') ?: 0.60));
+define('GEMINI_COST_3F_IN',   (float)(getenv('GEMINI_COST_3F_IN')   ?: 0.50));
+define('GEMINI_COST_3F_OUT',  (float)(getenv('GEMINI_COST_3F_OUT')  ?: 3.00));
 define('GEMINI_COST_20F_IN',  (float)(getenv('GEMINI_COST_20F_IN')  ?: 0.10));
 define('GEMINI_COST_20F_OUT', (float)(getenv('GEMINI_COST_20F_OUT') ?: 0.40));

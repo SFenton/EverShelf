@@ -1014,7 +1014,7 @@
       "ai_calls": "Appels",
       "by_action": "Répartition par fonction",
       "by_model": "Répartition par modèle",
-      "pricing_note": "Tarifs Gemini : 2.5-flash $0.15/M in · $0.60/M out — 2.0-flash $0.10/M in · $0.40/M out.",
+      "pricing_note": "Tarifs Gemini : 3-flash $0.50/M in · $3.00/M out — 2.5-flash $0.15/M in · $0.60/M out — 2.0-flash $0.10/M in · $0.40/M out.",
       "system_title": "Système",
       "db_size": "Base de données",
       "log_size": "Logs",

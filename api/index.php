@@ -128,9 +128,28 @@ if (($_GET['action'] ?? '') === 'gemini_usage') {
 
     // ── Cost helper ───────────────────────────────────────────────────────────
     $calcCost = function(int $tokIn, int $tokOut, string $modelHint = '2.5'): float {
-        $inRate  = str_contains($modelHint, '2.5') ? GEMINI_COST_25F_IN  : GEMINI_COST_20F_IN;
-        $outRate = str_contains($modelHint, '2.5') ? GEMINI_COST_25F_OUT : GEMINI_COST_20F_OUT;
+        if (str_contains($modelHint, '3')) {
+            $inRate  = GEMINI_COST_3F_IN;
+            $outRate = GEMINI_COST_3F_OUT;
+        } elseif (str_contains($modelHint, '2.5')) {
+            $inRate  = GEMINI_COST_25F_IN;
+            $outRate = GEMINI_COST_25F_OUT;
+        } else {
+            $inRate  = GEMINI_COST_20F_IN;
+            $outRate = GEMINI_COST_20F_OUT;
+        }
         return round(($tokIn / 1_000_000) * $inRate + ($tokOut / 1_000_000) * $outRate, 6);
+    };
+    $calcUsageCost = function(array $usage) use ($calcCost): float {
+        $byModel = $usage['by_model'] ?? [];
+        if (!empty($byModel)) {
+            $cost = 0.0;
+            foreach ($byModel as $model => $modelUsage) {
+                $cost += $calcCost((int)($modelUsage['in'] ?? 0), (int)($modelUsage['out'] ?? 0), (string)$model);
+            }
+            return round($cost, 6);
+        }
+        return $calcCost((int)($usage['input_tokens'] ?? 0), (int)($usage['output_tokens'] ?? 0));
     };
 
     // ── Tracked usage (ai_usage.json) ────────────────────────────────────────
@@ -273,7 +292,7 @@ if (($_GET['action'] ?? '') === 'gemini_usage') {
             'calls'        => (int)$cur['calls'],
             'input_tokens' => (int)$cur['input_tokens'],
             'output_tokens'=> (int)$cur['output_tokens'],
-            'cost_usd'     => $calcCost((int)$cur['input_tokens'], (int)$cur['output_tokens']),
+            'cost_usd'     => $calcUsageCost($cur),
             'by_action'    => $cur['by_action'] ?? [],
             'by_model'     => $cur['by_model']  ?? [],
         ],
@@ -287,7 +306,7 @@ if (($_GET['action'] ?? '') === 'gemini_usage') {
             'calls'        => (int)$yearBucket['calls'],
             'input_tokens' => (int)$yearBucket['input_tokens'],
             'output_tokens'=> (int)$yearBucket['output_tokens'],
-            'cost_usd'     => $calcCost((int)$yearBucket['input_tokens'], (int)$yearBucket['output_tokens']),
+            'cost_usd'     => $calcUsageCost($yearBucket),
         ],
 
         // DB activity
@@ -308,6 +327,7 @@ if (($_GET['action'] ?? '') === 'gemini_usage') {
 
         // Current Gemini pricing (from .env / defaults)
         'pricing' => [
+            '3-flash' => ['in' => GEMINI_COST_3F_IN, 'out' => GEMINI_COST_3F_OUT],
             '2.5-flash' => ['in' => GEMINI_COST_25F_IN, 'out' => GEMINI_COST_25F_OUT],
             '2.0-flash' => ['in' => GEMINI_COST_20F_IN, 'out' => GEMINI_COST_20F_OUT],
         ],
@@ -326,7 +346,7 @@ if (($_GET['action'] ?? '') === 'gemini_usage') {
             'input_tokens' => (int)($v['input_tokens']  ?? 0),
             'output_tokens'=> (int)($v['output_tokens'] ?? 0),
             'calls'        => (int)($v['calls'] ?? 0),
-            'cost_usd'     => $calcCost((int)($v['input_tokens'] ?? 0), (int)($v['output_tokens'] ?? 0)),
+            'cost_usd'     => $calcUsageCost($v),
         ], array_keys($aiData), array_values($aiData)),
     ], JSON_UNESCAPED_UNICODE);
     exit;
@@ -653,7 +673,7 @@ function checkRateLimit(string $action): void {
     }
 
     // Determine limit based on action
-    $aiActions = ['gemini_readExpiry', 'gemini_chat', 'gemini_identify', 'gemini_suggest_shopping', 'chat_to_recipe', 'recipe_from_ingredient', 'gemini_number_ocr', 'gemini_barcode_visual'];
+    $aiActions = ['gemini_expiry', 'gemini_readExpiry', 'gemini_chat', 'gemini_identify', 'gemini_suggest_shopping', 'chat_to_recipe', 'recipe_from_ingredient', 'gemini_number_ocr', 'gemini_barcode_visual'];
     $loginActions = [];
     $recipeActions = ['generate_recipe', 'generate_recipe_stream'];
     $errorActions = ['report_error', 'check_update'];
@@ -5568,11 +5588,13 @@ function _recordAiRequest(array $event): void {
 }
 
 /**
- * Like callGemini() but tries gemini-2.5-flash first, falls back to gemini-2.0-flash
+ * Like callGemini() but tries the preferred model first, then fallback models
  * on quota/rate-limit errors (429/503). Builds the URL from model name + API key.
  */
 function callGeminiWithFallback(string $apiKey, array $payload, int $timeout = 30, string $usageAction = ''): array {
-    $models   = ['gemini-2.5-flash', 'gemini-2.0-flash'];
+    $models   = $usageAction === 'expiry_ocr'
+        ? ['gemini-3-flash', 'gemini-2.5-flash', 'gemini-2.0-flash']
+        : ['gemini-2.5-flash', 'gemini-2.0-flash'];
     $last     = ['http_code' => 0, 'body' => '', 'data' => null, 'tokens_in' => 0, 'tokens_out' => 0, 'elapsed_s' => 0, 'attempts' => 0, 'timeout_s' => $timeout, 'prompt_chars' => 0, 'output_chars' => 0, 'curl_errno' => 0, 'curl_error' => ''];
     $promptLen = strlen(json_encode($payload));
     foreach ($models as $idx => $model) {
@@ -5602,7 +5624,7 @@ function callGeminiWithFallback(string $apiKey, array $payload, int $timeout = 3
             _recordAiUsage($model, $last['tokens_in'], $last['tokens_out'], $usageAction);
             return $last;
         }
-        if ($last['http_code'] !== 429 && $last['http_code'] !== 503) return $last; // non-retryable
+        if (!in_array($last['http_code'], [404, 429, 503], true)) return $last; // non-retryable
         EverLog::warn('AI model exhausted, trying fallback', ['model' => $model, 'code' => $last['http_code']]);
     }
     return $last;
@@ -5910,7 +5932,62 @@ function geminiReadExpiry(): void {
         return;
     }
 
-    // ── Step 1: Try Tesseract offline OCR first ────────────────────────────
+    // ── Step 1: Try Gemini Vision first ────────────────────────────────────
+    $apiKey = env('GEMINI_API_KEY');
+    $geminiRawText = '';
+    $geminiError = null;
+    $geminiHttpCode = null;
+    if (!empty($apiKey)) {
+        $today = date('Y-m-d');
+        $prompt = "Read the label image for an expiration/best-by/use-by/freeze-by/freshness date. Today: {$today}. Assume US date formats.\n"
+            . 'Return JSON only: {"found":true,"date":"YYYY-MM-DD","raw_text":"<=60 chars"} or {"found":false,"raw_text":""}.' . "\n"
+            . "Rules: prefer EXP/Use By/Best By/BB/BBE over Sell By. Never use MFG/MFD/packed/lot/batch/Julian codes unless explicitly tied to expiry. Numeric dates are MM/DD[/YY|YYYY] (DD/MM only if MM is impossible). MM/YYYY, MM-YY, MMM YYYY => first day of month. MM/DD with no year => next future occurrence after today. Compact EXP062526/BB063026 => MMDDYY. 2-digit years => 20YY. If uncertain, found=false.";
+
+        $payload = [
+            'contents' => [[
+                'parts' => [
+                    ['text' => $prompt],
+                    ['inline_data' => ['mime_type' => 'image/jpeg', 'data' => $imageBase64]],
+                ],
+            ]],
+            'generationConfig' => [
+                'temperature' => 0,
+                'maxOutputTokens' => 100,
+                'responseMimeType' => 'application/json',
+                'responseSchema' => [
+                    'type' => 'object',
+                    'properties' => [
+                        'found' => ['type' => 'boolean'],
+                        'date' => ['type' => 'string'],
+                        'raw_text' => ['type' => 'string'],
+                    ],
+                    'required' => ['found', 'raw_text'],
+                ],
+                'thinkingConfig' => ['thinkingBudget' => 0],
+            ],
+        ];
+
+        $result = callGeminiWithFallback($apiKey, $payload, 30, 'expiry_ocr');
+        $geminiHttpCode = $result['http_code'];
+        if ($geminiHttpCode === 200) {
+            $geminiRawText = $result['data']['candidates'][0]['content']['parts'][0]['text'] ?? '';
+            $text = preg_replace('/^```json\\s*/i', '', $geminiRawText);
+            $text = preg_replace('/\\s*```$/i', '', $text);
+            $parsed = json_decode(trim($text), true);
+            if ($parsed && !empty($parsed['found']) && !empty($parsed['date'])) {
+                $date = (string)$parsed['date'];
+                if (preg_match('/^(\d{4})-(\d{2})-(\d{2})$/', $date, $parts) && checkdate((int)$parts[2], (int)$parts[3], (int)$parts[1])) {
+                    echo json_encode(['success' => true, 'expiry_date' => $date, 'raw_text' => $parsed['raw_text'] ?? '', 'source' => 'gemini']);
+                    return;
+                }
+            }
+            $geminiRawText = $parsed['raw_text'] ?? trim($text);
+        } else {
+            $geminiError = $result['data']['error']['message'] ?? 'Gemini API error';
+        }
+    }
+
+    // ── Step 2: Fall back to local OCR if Gemini is unavailable or unsure ───
     $ocrResult = tesseractReadExpiry($imageBase64);
     if ($ocrResult !== null && !empty($ocrResult['found']) && !empty($ocrResult['date'])) {
         echo json_encode([
@@ -5922,10 +5999,7 @@ function geminiReadExpiry(): void {
         return;
     }
 
-    // ── Step 2: Fall back to Gemini Vision ────────────────────────────────
-    $apiKey = env('GEMINI_API_KEY');
     if (empty($apiKey)) {
-        // No Gemini key and OCR failed/unavailable
         echo json_encode([
             'success'  => false,
             'error'    => 'no_api_key',
@@ -5934,64 +6008,15 @@ function geminiReadExpiry(): void {
         return;
     }
 
-    $today = date('Y-m-d');
-
-    // Call Gemini API
-    $payload = [
-        'contents' => [
-            [
-                'parts' => [
-                    [
-                        'text' => "Analyze this image of a food or household product container and find the expiration, best-by, use-by, or freshness date. Today is {$today}.\n\nLook for labels and nearby text such as: use by, best by, best before, best if used by, best if used before, sell by, enjoy by, freeze by, expires, expiration, expiry, exp, BB, BBE, TMC, da consumarsi entro, da consumarsi preferibilmente entro, scad., scadenza, or other printed date markers.\n\nRecognize common container date formats including: YYYY-MM-DD, YYYY/MM/DD, YYYY.MM.DD, MM/DD/YYYY, M/D/YY, MM-DD-YY, MM.DD.YY, MMM DD YYYY, MON-DD-YY, YYYYMMDD, MMDDYY, MMDDYYYY, and compact stamped forms such as EXP062526, BB 063026, BEST BY 06 30 26, or JUN 2026. Month names or abbreviations may be in English or Italian.\n\nIf multiple dates are visible, prefer an explicit expiration/use-by/best-by/freshness date over sell-by, packed-on, manufactured-on, MFG, MFD, lot, batch, or code dates. Do not return a manufacturing, packed, lot, batch, or Julian code as the expiration date unless nearby text clearly says it is an expiration/use-by/best-by date.\n\nRespond ONLY with JSON in this format: {\"found\": true, \"date\": \"YYYY-MM-DD\", \"raw_text\": \"text read\"}\nIf no expiration/use-by/best-by/freshness date is found, respond: {\"found\": false, \"raw_text\": \"text read if present\"}\n\nIf the date has only month and year, such as 03/2027, 04/15, 4/15, or JUN 2026, use the first day of that month. Treat two-part numeric slash dates as month/year, not month/day. If a two-digit year is present, interpret it as 20YY."
-                    ],
-                    [
-                        'inline_data' => [
-                            'mime_type' => 'image/jpeg',
-                            'data' => $imageBase64
-                        ]
-                    ]
-                ]
-            ]
-        ],
-        'generationConfig' => [
-            'temperature' => 0.1,
-            'maxOutputTokens' => 256
-        ]
-    ];
-    
-    $result   = callGeminiWithFallback($apiKey, $payload, 30, 'expiry_ocr');
-    $httpCode = $result['http_code'];
-
-    if ($httpCode !== 200) {
-        $errMsg = $result['data']['error']['message'] ?? 'Gemini API error';
-        echo json_encode(['success' => false, 'error' => $errMsg, 'http_code' => $httpCode]);
+    if ($geminiError !== null) {
+        echo json_encode(['success' => false, 'error' => $geminiError, 'http_code' => $geminiHttpCode, 'raw_text' => $ocrResult['raw_text'] ?? '']);
         return;
     }
 
-    $data = $result['data'];
-    $text = $data['candidates'][0]['content']['parts'][0]['text'] ?? '';
-    
-    // Parse the JSON response from Gemini
-    // Remove potential markdown code block wrapping
-    $text = preg_replace('/^```json\\s*/i', '', $text);
-    $text = preg_replace('/\\s*```$/i', '', $text);
-    $text = trim($text);
-    
-    $parsed = json_decode($text, true);
-    
-    if ($parsed && !empty($parsed['found']) && !empty($parsed['date'])) {
-        // Validate date format
-        $date = $parsed['date'];
-        if (preg_match('/^\d{4}-\d{2}-\d{2}$/', $date)) {
-            echo json_encode(['success' => true, 'expiry_date' => $date, 'raw_text' => $parsed['raw_text'] ?? '', 'source' => 'gemini']);
-            return;
-        }
-    }
-    
     echo json_encode([
-        'success' => false, 
+        'success' => false,
         'error' => 'Could not parse expiry date',
-        'raw_text' => $parsed['raw_text'] ?? $text
+        'raw_text' => $geminiRawText ?: ($ocrResult['raw_text'] ?? ''),
     ]);
 }
 
