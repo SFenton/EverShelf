@@ -1258,7 +1258,7 @@ function exportInventory(PDO $db): void {
         header('Content-Type: text/html; charset=utf-8');
         $rows_html = '';
         foreach ($rows as $r) {
-            $loc_icon = ['dispensa'=>'🗄️','frigo'=>'🧊','freezer'=>'❄️','altro'=>'📦'][$r['location']] ?? '📦';
+            $loc_icon = ['dispensa'=>'🗄️','frigo'=>'🧊','freezer'=>'❄️','spice_rack'=>'🧂','cabinet'=>'🚪','altro'=>'📦'][$r['location']] ?? '📦';
             $expiry = $r['expiry_date'] ? htmlspecialchars($r['expiry_date']) : '—';
             $brand  = $r['brand'] ? htmlspecialchars($r['brand']) : '';
             $rows_html .= '<tr>'
@@ -1655,7 +1655,9 @@ function haInventorySensor(PDO $db): void {
         $itemsDispensa = $locationMap['dispensa'] ?? 0;
         $itemsFrigo    = $locationMap['frigo']    ?? 0;
         $itemsFreezer  = $locationMap['freezer']  ?? 0;
-        $itemsOther    = array_sum($locationMap) - $itemsDispensa - $itemsFrigo - $itemsFreezer;
+        $itemsSpiceRack = $locationMap['spice_rack'] ?? 0;
+        $itemsCabinet  = $locationMap['cabinet'] ?? 0;
+        $itemsOther    = array_sum($locationMap) - $itemsDispensa - $itemsFrigo - $itemsFreezer - $itemsSpiceRack - $itemsCabinet;
 
         // Low stock (qty > 0 but <= 1) and zero stock
         $lowStockItems  = (int)$db->query("SELECT COUNT(*) FROM inventory WHERE quantity > 0 AND quantity <= 1")->fetchColumn();
@@ -1754,6 +1756,8 @@ function haInventorySensor(PDO $db): void {
                 'items_dispensa'         => $itemsDispensa,
                 'items_frigo'            => $itemsFrigo,
                 'items_freezer'          => $itemsFreezer,
+                'items_spice_rack'       => $itemsSpiceRack,
+                'items_cabinet'          => $itemsCabinet,
                 'items_other'            => $itemsOther,
                 'low_stock_items'        => $lowStockItems,
                 'zero_stock_items'       => $zeroStockItems,
@@ -1865,7 +1869,7 @@ function haSuggestRecipe(PDO $db): void {
             $otherRows
         );
 
-        $locationHint = $location ? " nel $location" : " in dispensa/frigo/freezer";
+        $locationHint = $location ? " nel $location" : " in dispensa/frigo/freezer/spice_rack/cabinet";
         $ingredientList = implode(', ', $expParts);
         if ($otherParts) $ingredientList .= '. Altri disponibili: ' . implode(', ', $otherParts);
 
@@ -3123,7 +3127,7 @@ function addToInventory(PDO $db): void {
     }
 
     // Validate location
-    $validLocations = ['dispensa', 'frigo', 'freezer', 'altro'];
+    $validLocations = ['dispensa', 'frigo', 'freezer', 'spice_rack', 'cabinet', 'altro'];
     if (!in_array($location, $validLocations)) {
         EverLog::warn('addToInventory: invalid location (400)');
         http_response_code(400);
@@ -12032,7 +12036,7 @@ function familySiblingSuggest(PDO $db): void {
         return;
     }
 
-    $validLocations = ['dispensa', 'frigo', 'freezer', 'altro'];
+    $validLocations = ['dispensa', 'frigo', 'freezer', 'spice_rack', 'cabinet', 'altro'];
     $location = $input['location'] ?? 'dispensa';
     if (!in_array($location, $validLocations, true)) {
         $location = 'dispensa';
@@ -12788,12 +12792,12 @@ function geminiProductHint(): void {
     $prompt = "You are a food safety expert. For the food product named \"{$name}\" (category: {$category}), "
         . "answer in {$langLabel} with a strict JSON object and NOTHING else:\n"
         . "{\n"
-        . "  \"location\": \"dispensa\" | \"frigo\" | \"freezer\",\n"
+        . "  \"location\": \"dispensa\" | \"frigo\" | \"freezer\" | \"spice_rack\" | \"cabinet\",\n"
         . "  \"expiry_days\": <integer, typical unopened shelf life in days>,\n"
         . "  \"reason\": \"<1 short sentence explaining location and duration>\"\n"
         . "}\n"
-        . "Rules: location must be one of the three values. expiry_days must be a positive integer. "
-        . "If the product is typically refrigerated use 'frigo'. If frozen use 'freezer'. Otherwise 'dispensa'. "
+        . "Rules: location must be one of the five values. expiry_days must be a positive integer. "
+        . "If the product is typically refrigerated use 'frigo'. If frozen use 'freezer'. If it is primarily dried spices or seasonings use 'spice_rack'. If it belongs in a kitchen cabinet but not the pantry use 'cabinet'. Otherwise 'dispensa'. "
         . "Output ONLY the JSON, no markdown, no extra text.";
 
     $payload = ['contents' => [['parts' => [['text' => $prompt]]]]];
@@ -12810,7 +12814,7 @@ function geminiProductHint(): void {
     $text = preg_replace('/\s*```$/i', '', $text);
     $parsed = json_decode(trim($text), true);
 
-    $allowedLocations = ['dispensa', 'frigo', 'freezer'];
+    $allowedLocations = ['dispensa', 'frigo', 'freezer', 'spice_rack', 'cabinet'];
     if (
         !is_array($parsed)
         || empty($parsed['location'])

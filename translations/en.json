@@ -43,6 +43,8 @@
     "dispensa": "Pantry",
     "frigo": "Fridge",
     "freezer": "Freezer",
+    "spice_rack": "Spice Rack",
+    "cabinet": "Cabinet",
     "altro": "Other"
   },
   "categories": {

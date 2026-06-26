@@ -66,7 +66,7 @@ Connect your pantry to your smart home in minutes — no YAML, no manual sensor 
 
 | | |
 |---|---|
-| **16 sensors** | Expiry counts, stock levels by location (pantry / fridge / freezer), shopping list total, AI API usage, last backup timestamp, days to next expiry |
+| **18 sensors** | Expiry counts, stock levels by location (pantry / fridge / freezer / spice rack / cabinet), shopping list total, AI API usage, last backup timestamp, days to next expiry |
 | **6 binary sensors** | Expired items, expiring items, expiring today, shopping list active, backup overdue, Bring! connected |
 | **5 action buttons** | Refresh data, Refresh prices, **Suggest Recipe** (AI — result as HA notification), Sync smart shopping, Clear expired rows |
 | **Shopping list todo** | Bidirectional sync — add, remove, check off items directly from HA |

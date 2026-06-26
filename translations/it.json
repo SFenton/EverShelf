@@ -43,6 +43,8 @@
     "dispensa": "Dispensa",
     "frigo": "Frigo",
     "freezer": "Freezer",
+    "spice_rack": "Spezie",
+    "cabinet": "Credenza",
     "altro": "Altro"
   },
   "categories": {

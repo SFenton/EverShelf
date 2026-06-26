@@ -1337,6 +1337,8 @@ const LOCATIONS = {
     'dispensa': { icon: '🗄️', label: t('locations.dispensa') },
     'frigo': { icon: '🧊', label: t('locations.frigo') },
     'freezer': { icon: '❄️', label: t('locations.freezer') },
+    'spice_rack': { icon: '🧂', label: t('locations.spice_rack') },
+    'cabinet': { icon: '🚪', label: t('locations.cabinet') },
     'altro': { icon: '📦', label: t('locations.altro') },
 };
 const CATEGORY_ICONS = {
@@ -5080,7 +5082,7 @@ function _applyInsightPhase() {
 // ===== DASHBOARD =====
 async function loadDashboard() {
     // Show shimmer on stat cards while loading
-    ['stat-dispensa', 'stat-frigo', 'stat-freezer'].forEach(id => {
+    ['stat-dispensa', 'stat-frigo', 'stat-freezer', 'stat-spice_rack', 'stat-cabinet'].forEach(id => {
         const el = document.getElementById(id);
         if (el) el.classList.add('stat-loading');
     });
@@ -5094,7 +5096,7 @@ async function loadDashboard() {
         // Update stat cards
         const summary = summaryData.summary || [];
         let total = 0;
-        ['dispensa', 'frigo', 'freezer'].forEach(loc => {
+        ['dispensa', 'frigo', 'freezer', 'spice_rack', 'cabinet'].forEach(loc => {
             const s = summary.find(x => x.location === loc);
             const count = s ? s.product_count : 0;
             const el = document.getElementById(`stat-${loc}`);
@@ -5104,7 +5106,7 @@ async function loadDashboard() {
         });
         // Add non-standard locations
         summary.forEach(s => {
-            if (!['dispensa', 'frigo', 'freezer'].includes(s.location)) {
+            if (!['dispensa', 'frigo', 'freezer', 'spice_rack', 'cabinet'].includes(s.location)) {
                 total += s.product_count;
             }
         });
@@ -5324,7 +5326,7 @@ async function loadDashboard() {
     } catch (err) {
         console.error('Dashboard load error:', err);
         // Remove shimmer even on error so numbers don't disappear forever
-        ['stat-dispensa', 'stat-frigo', 'stat-freezer'].forEach(id => {
+        ['stat-dispensa', 'stat-frigo', 'stat-freezer', 'stat-spice_rack', 'stat-cabinet'].forEach(id => {
             const el = document.getElementById(id);
             if (el) { el.classList.remove('stat-loading'); if (el.textContent === '') el.textContent = '-'; }
         });
@@ -9622,7 +9624,7 @@ async function _applyAIProductHint() {
 
         // Show a toast only if location changed
         if (locChanged) {
-            const locLabels = { dispensa: t('location.dispensa') || 'Dispensa', frigo: t('location.frigo') || 'Frigo', freezer: t('location.freezer') || 'Freezer' };
+            const locLabels = Object.fromEntries(Object.entries(LOCATIONS).map(([key, value]) => [key, value.label]));
             showToast(t('ai.conservation_hint', { location: locLabels[data.location] || data.location }), 'info', 4000);
         }
     } catch (e) {

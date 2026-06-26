@@ -43,6 +43,8 @@
     "dispensa": "Vorratskammer",
     "frigo": "Kühlschrank",
     "freezer": "Gefrierschrank",
+    "spice_rack": "Gewürzregal",
+    "cabinet": "Schrank",
     "altro": "Sonstiges"
   },
   "categories": {

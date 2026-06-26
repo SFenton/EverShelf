@@ -43,6 +43,8 @@
     "dispensa": "Despensa",
     "frigo": "Nevera",
     "freezer": "Congelador",
+    "spice_rack": "Especiero",
+    "cabinet": "Armario",
     "altro": "Otro"
   },
   "categories": {

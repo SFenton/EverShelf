@@ -43,6 +43,8 @@
     "dispensa": "Garde-manger",
     "frigo": "Réfrigérateur",
     "freezer": "Congélateur",
+    "spice_rack": "Étagère à épices",
+    "cabinet": "Placard",
     "altro": "Autre"
   },
   "categories": {
