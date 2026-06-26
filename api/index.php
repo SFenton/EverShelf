@@ -3082,7 +3082,9 @@ function addToInventory(PDO $db): void {
     $productId = (int)($input['product_id'] ?? 0);
     $quantity = (float)($input['quantity'] ?? 1);
     $location = $input['location'] ?? 'dispensa';
-    $expiry = $input['expiry_date'] ?? null;
+    $expiry = isset($input['expiry_date']) && trim((string)$input['expiry_date']) !== ''
+        ? trim((string)$input['expiry_date'])
+        : null;
     $unit = $input['unit'] ?? null;
     
     if (!$productId) {
@@ -3137,26 +3139,30 @@ function addToInventory(PDO $db): void {
     $vacuumSealed = (int)($input['vacuum_sealed'] ?? 0);
     $expiryUserSet = (int)($input['expiry_user_set'] ?? 0);
     
-    // Check if a SEALED (not yet opened) row exists for this product+location.
-    // We merge new stock into a sealed row only — never into an already-opened
-    // pack, because that would conflate two physically distinct containers and
-    // corrupt the opened_at timestamp tracking.
+    // Check if a matching sealed batch exists. New stock only merges into an
+    // unopened row when product, location, expiration date, and sealed treatment
+    // all match; otherwise each physical batch needs its own row so older food
+    // remains visible even after a fresher package is scanned.
     $stmt = $db->prepare("
         SELECT id, quantity FROM inventory
-        WHERE product_id = ? AND location = ? AND opened_at IS NULL
+        WHERE product_id = ?
+          AND location = ?
+          AND opened_at IS NULL
+          AND COALESCE(expiry_date, '') = COALESCE(?, '')
+          AND COALESCE(vacuum_sealed, 0) = ?
         ORDER BY added_at ASC LIMIT 1
     ");
-    $stmt->execute([$productId, $location]);
+    $stmt->execute([$productId, $location, $expiry, $vacuumSealed]);
     $existing = $stmt->fetch();
 
     if ($existing) {
-        // Merge into the existing sealed row
+        // Merge into the existing sealed batch.
         $newQty = $existing['quantity'] + $quantity;
-        $stmt = $db->prepare("UPDATE inventory SET quantity = ?, expiry_date = COALESCE(?, expiry_date), vacuum_sealed = ?, expiry_user_set = CASE WHEN ? = 1 THEN 1 ELSE expiry_user_set END, updated_at = CURRENT_TIMESTAMP WHERE id = ?");
-        $stmt->execute([$newQty, $expiry, $vacuumSealed, $expiryUserSet, $existing['id']]);
+        $stmt = $db->prepare("UPDATE inventory SET quantity = ?, expiry_user_set = CASE WHEN ? = 1 THEN 1 ELSE expiry_user_set END, updated_at = CURRENT_TIMESTAMP WHERE id = ?");
+        $stmt->execute([$newQty, $expiryUserSet, $existing['id']]);
     } else {
         $newQty = $quantity;
-        // All existing rows (if any) are opened packs — insert a new sealed row
+        // Different expiry/sealed batches and opened packs get distinct rows.
         $stmt = $db->prepare("INSERT INTO inventory (product_id, location, quantity, expiry_date, vacuum_sealed, expiry_user_set) VALUES (?, ?, ?, ?, ?, ?)");
         $stmt->execute([$productId, $location, $quantity, $expiry, $vacuumSealed, $expiryUserSet]);
     }
