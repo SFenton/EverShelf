@@ -753,6 +753,7 @@ if ($rateLimitAction) {
 // the explicit header is an additional defence-in-depth check for POST writes.
 $_writeActions = [
     'inventory_add','inventory_use','inventory_update','inventory_remove','inventory_delete',
+    'inventory_delete_one','inventory_update_one',
     'inventory_confirm_finished','inventory_restore_ghost',
     'product_save','product_delete','product_merge',
     'bring_add','bring_remove','bring_sync','bring_set_spec','bring_migrate_names',
@@ -859,6 +860,12 @@ try {
             break;
         case 'inventory_delete':
             deleteInventory($db);
+            break;
+        case 'inventory_delete_one':
+            deleteInventoryOne($db);
+            break;
+        case 'inventory_update_one':
+            updateInventoryOne($db);
             break;
         case 'inventory_finished_items':
             getFinishedItems($db);
@@ -3812,6 +3819,127 @@ function deleteInventory(PDO $db): void {
 
     $db->prepare("DELETE FROM inventory WHERE id = ?")->execute([$id]);
     echo json_encode(['success' => true]);
+}
+
+function _inventoryRowById(PDO $db, int $id): ?array {
+    $stmt = $db->prepare("SELECT id, product_id, quantity, location, expiry_date, expiry_user_set, vacuum_sealed, opened_at FROM inventory WHERE id = ?");
+    $stmt->execute([$id]);
+    $row = $stmt->fetch(PDO::FETCH_ASSOC);
+    return $row ?: null;
+}
+
+function deleteInventoryOne(PDO $db): void {
+    EverLog::info('deleteInventoryOne');
+    $input = json_decode(file_get_contents('php://input'), true) ?? [];
+    $id = (int)($input['id'] ?? 0);
+    if (!$id) {
+        http_response_code(400);
+        echo json_encode(['success' => false, 'error' => 'Inventory ID required']);
+        return;
+    }
+
+    $row = _inventoryRowById($db, $id);
+    if (!$row) {
+        http_response_code(404);
+        echo json_encode(['success' => false, 'error' => 'Inventory row not found']);
+        return;
+    }
+
+    $remaining = 0.0;
+    $removedRow = false;
+    dbWithRetry(function () use ($db, $row, $id, &$remaining, &$removedRow): void {
+        $db->beginTransaction();
+        try {
+            $qty = max(0.0, (float)$row['quantity']);
+            $removeQty = min(1.0, $qty);
+            $remaining = max(0.0, $qty - $removeQty);
+            if ($remaining > 0.0001) {
+                $db->prepare("UPDATE inventory SET quantity = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?")
+                   ->execute([$remaining, $id]);
+            } else {
+                $db->prepare("DELETE FROM inventory WHERE id = ?")->execute([$id]);
+                $removedRow = true;
+            }
+            if ($removeQty > 0.0001) {
+                $db->prepare("INSERT INTO transactions (product_id, type, quantity, location, notes) VALUES (?, 'out', ?, ?, ?)")
+                   ->execute([(int)$row['product_id'], $removeQty, $row['location'], '[Eliminazione inventario]']);
+            }
+            $db->commit();
+        } catch (Throwable $e) {
+            if ($db->inTransaction()) $db->rollBack();
+            throw $e;
+        }
+    });
+    invalidateSmartShoppingCache();
+    echo json_encode(['success' => true, 'remaining' => $remaining, 'removed_row' => $removedRow]);
+}
+
+function updateInventoryOne(PDO $db): void {
+    EverLog::info('updateInventoryOne');
+    $input = json_decode(file_get_contents('php://input'), true) ?? [];
+    $id = (int)($input['id'] ?? 0);
+    if (!$id) {
+        http_response_code(400);
+        echo json_encode(['success' => false, 'error' => 'Inventory ID required']);
+        return;
+    }
+    if (!array_key_exists('expiry_date', $input)) {
+        http_response_code(400);
+        echo json_encode(['success' => false, 'error' => 'Expiry date required']);
+        return;
+    }
+
+    $expiry = trim((string)($input['expiry_date'] ?? ''));
+    if ($expiry !== '' && !preg_match('/^\d{4}-\d{2}-\d{2}$/', $expiry)) {
+        http_response_code(400);
+        echo json_encode(['success' => false, 'error' => 'Invalid expiry date']);
+        return;
+    }
+    $expiry = $expiry === '' ? null : $expiry;
+
+    $row = _inventoryRowById($db, $id);
+    if (!$row) {
+        http_response_code(404);
+        echo json_encode(['success' => false, 'error' => 'Inventory row not found']);
+        return;
+    }
+
+    $targetId = $id;
+    $split = false;
+    $remaining = max(0.0, (float)$row['quantity']);
+    dbWithRetry(function () use ($db, $row, $id, $expiry, &$targetId, &$split, &$remaining): void {
+        $db->beginTransaction();
+        try {
+            $qty = max(0.0, (float)$row['quantity']);
+            if ($qty > 1.0001) {
+                $remaining = $qty - 1.0;
+                $db->prepare("UPDATE inventory SET quantity = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?")
+                   ->execute([$remaining, $id]);
+                $db->prepare("
+                    INSERT INTO inventory (product_id, location, quantity, expiry_date, vacuum_sealed, expiry_user_set, opened_at)
+                    VALUES (?, ?, 1, ?, ?, 1, ?)
+                ")->execute([
+                    (int)$row['product_id'],
+                    $row['location'],
+                    $expiry,
+                    (int)($row['vacuum_sealed'] ?? 0),
+                    $row['opened_at'] ?? null,
+                ]);
+                $targetId = (int)$db->lastInsertId();
+                $split = true;
+            } else {
+                $remaining = 1.0;
+                $db->prepare("UPDATE inventory SET expiry_date = ?, expiry_user_set = 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?")
+                   ->execute([$expiry, $id]);
+            }
+            $db->commit();
+        } catch (Throwable $e) {
+            if ($db->inTransaction()) $db->rollBack();
+            throw $e;
+        }
+    });
+    invalidateSmartShoppingCache();
+    echo json_encode(['success' => true, 'inventory_id' => $targetId, 'split' => $split, 'remaining' => $remaining]);
 }
 
 function productQtyThreshold(string $unit): float {

@@ -25,7 +25,7 @@
 [![SQLite](https://img.shields.io/badge/SQLite-3-blue.svg)](https://www.sqlite.org/)
 [![Docker](https://img.shields.io/badge/Docker-Ready-2496ED.svg)](Dockerfile)
 [![i18n](https://img.shields.io/badge/i18n-IT%20%7C%20EN%20%7C%20DE%20%7C%20FR%20%7C%20ES-orange.svg)](translations/)
-[![Version](https://img.shields.io/badge/version-1.7.43-brightgreen.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-1.7.44-brightgreen.svg)](CHANGELOG.md)
 [![GitHub stars](https://img.shields.io/github/stars/dadaloop82/EverShelf?style=social)](https://github.com/dadaloop82/EverShelf/stargazers)
 [![Last commit](https://img.shields.io/github/last-commit/dadaloop82/EverShelf/main)](https://github.com/dadaloop82/EverShelf/commits/main)
 [![Contributors](https://img.shields.io/github/contributors/dadaloop82/EverShelf)](https://github.com/dadaloop82/EverShelf/graphs/contributors)
@@ -40,11 +40,11 @@
 
 ---
 
-### 🆕 Release 1.7.43 (2026-06-26)
+### 🆕 Release 1.7.44 (2026-06-26)
 
-- **Shopping cart quantities** — Internal shopping-list rows now store quantity; explicit quantity adds increment an existing row instead of silently skipping.
-- **HA quantity sync** — Home Assistant cart adds can increase quantity and HA todo items can display returned quantity context.
-- **Quantity-aware shopping total** — Price totals use the stored cart quantity multiplier.
+- **Split-safe inventory item edits** — Multi-quantity inventory rows can split one item into a separate row when changing its expiry date.
+- **Single-item inventory delete** — Deleting from a multi-quantity row decrements by one instead of deleting the entire row.
+- **Shopping cart quantities** — Internal shopping-list rows store quantity and explicit adds increment existing rows.
 
 See [CHANGELOG.md](CHANGELOG.md) for full details.
 

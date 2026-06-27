@@ -11,6 +11,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Recipe scraps tips** — During cooking steps, detect "waste" generated (peels, cores, bones, eggshells, coffee grounds, citrus zest, etc.) and surface AI-powered tips on how to reuse them (compost, natural cleaner, broth, candied peel, etc.). Could be shown as an optional collapsible hint card below the step that generates the scrap.
 
+## [1.7.44] - 2026-06-26
+
+### Added
+- **Split-safe inventory item APIs** — `inventory_update_one` updates one item from a multi-quantity row, splitting it into a separate row when needed.
+- **Single-item delete API** — `inventory_delete_one` removes one item from an inventory row, decrementing rows with quantity greater than 1 instead of deleting the entire row.
+
 ## [1.7.43] - 2026-06-26
 
 ### Added
