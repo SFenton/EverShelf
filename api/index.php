@@ -752,7 +752,7 @@ if ($rateLimitAction) {
 // JSON Content-Type already requires a CORS preflight which provides a baseline;
 // the explicit header is an additional defence-in-depth check for POST writes.
 $_writeActions = [
-    'inventory_add','inventory_use','inventory_update','inventory_remove',
+    'inventory_add','inventory_use','inventory_update','inventory_remove','inventory_delete',
     'inventory_confirm_finished','inventory_restore_ghost',
     'product_save','product_delete','product_merge',
     'bring_add','bring_remove','bring_sync','bring_set_spec','bring_migrate_names',
