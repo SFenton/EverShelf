@@ -11,6 +11,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Recipe scraps tips** — During cooking steps, detect "waste" generated (peels, cores, bones, eggshells, coffee grounds, citrus zest, etc.) and surface AI-powered tips on how to reuse them (compost, natural cleaner, broth, candied peel, etc.). Could be shown as an optional collapsible hint card below the step that generates the scrap.
 
+## [1.7.43] - 2026-06-26
+
+### Added
+- **Shopping cart quantities** — Internal `shopping_list` rows now store a `quantity` value with an automatic migration for existing carts.
+- **Quantity increment semantics** — `shopping_add` increments an existing row when callers provide `quantity`; callers that omit quantity keep the previous idempotent skip behavior for automated suggestions.
+- **Quantity-aware HA output** — `shopping_list` and `ha_shopping_items` include quantity so Home Assistant and UI clients can display the cart amount.
+
+### Changed
+- Shopping price totals now include the stored cart quantity multiplier.
+
 ## [1.7.42] - 2026-06-11
 
 ### Added

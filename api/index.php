@@ -1702,38 +1702,34 @@ function haInventorySensor(PDO $db): void {
                 if ($auth) {
                     $listData = bringRequest('GET', "https://api.getbring.com/rest/v2/bringlists/{$auth['bringListUUID']}");
                     foreach ($listData['purchase'] ?? [] as $item) {
-                        $shopNames[] = bringToItalian($item['name'] ?? '');
+                        $shopNames[] = ['name' => bringToItalian($item['name'] ?? ''), 'quantity' => 1];
                     }
                 }
             } else {
                 $shopRows = $db->query("
-                    SELECT sl.name, COALESCE(p.shopping_name, sl.name) AS sname
+                    SELECT sl.name, sl.quantity, COALESCE(p.shopping_name, sl.name) AS sname
                     FROM shopping_list sl
                     LEFT JOIN products p ON lower(p.name) = lower(sl.name)
                 ")->fetchAll(PDO::FETCH_ASSOC);
-                $seenNames = [];
+                $byName = [];
                 foreach ($shopRows as $r) {
                     $sname = $r['sname'] ?? $r['name'];
-                    if (isset($seenNames[$sname])) continue;
-                    $seenNames[$sname] = true;
-                    $shopNames[] = $sname;
+                    if (!isset($byName[$sname])) {
+                        $byName[$sname] = ['name' => $sname, 'quantity' => 0.0];
+                    }
+                    $byName[$sname]['quantity'] += normalizeShoppingQuantity($r['quantity'] ?? 1);
                 }
+                $shopNames = array_values($byName);
             }
             if (!empty($shopNames)) {
-                $listHash = _shoppingListHash($shopNames, $country, $priceCurrency);
-                $cached = _loadCanonicalShoppingTotal($listHash);
-                if ($cached !== null) {
-                    $shoppingTotal = round((float)($cached['total'] ?? 0), 2);
-                } else {
-                    $computed = _computeAllShoppingPrices(
-                        array_map(static fn($n) => ['name' => $n], $shopNames),
-                        $country,
-                        $priceCurrency,
-                        'it',
-                        false
-                    );
-                    $shoppingTotal = round((float)($computed['total'] ?? 0), 2);
-                }
+                $computed = _computeAllShoppingPrices(
+                    $shopNames,
+                    $country,
+                    $priceCurrency,
+                    'it',
+                    false
+                );
+                $shoppingTotal = round((float)($computed['total'] ?? 0), 2);
             }
         }
 
@@ -1923,22 +1919,24 @@ function haRefreshPrices(PDO $db): void {
             if ($auth) {
                 $listData = bringRequest('GET', "https://api.getbring.com/rest/v2/bringlists/{$auth['bringListUUID']}");
                 foreach ($listData['purchase'] ?? [] as $item) {
-                    $clientItems[] = ['name' => bringToItalian($item['name'] ?? '')];
+                    $clientItems[] = ['name' => bringToItalian($item['name'] ?? ''), 'quantity' => 1];
                 }
             }
         } else {
             $rows = $db->query("
-                SELECT sl.name, COALESCE(p.shopping_name, sl.name) AS sname
+                SELECT sl.name, sl.quantity, COALESCE(p.shopping_name, sl.name) AS sname
                 FROM shopping_list sl
                 LEFT JOIN products p ON lower(p.name) = lower(sl.name)
             ")->fetchAll(PDO::FETCH_ASSOC);
-            $seen = [];
+            $byName = [];
             foreach ($rows as $r) {
                 $sname = $r['sname'] ?? $r['name'];
-                if (isset($seen[$sname])) continue;
-                $seen[$sname] = true;
-                $clientItems[] = ['name' => $sname];
+                if (!isset($byName[$sname])) {
+                    $byName[$sname] = ['name' => $sname, 'quantity' => 0.0];
+                }
+                $byName[$sname]['quantity'] += normalizeShoppingQuantity($r['quantity'] ?? 1);
             }
+            $clientItems = array_values($byName);
         }
 
         $result = _computeAllShoppingPrices($clientItems, $country, $currency, $lang, false);
@@ -2070,19 +2068,21 @@ function haGetShoppingItems(PDO $db): void {
             }
             $listData = bringRequest('GET', "https://api.getbring.com/rest/v2/bringlists/{$auth['bringListUUID']}");
             $items = array_map(fn($r) => [
-                'id'   => $r['uuid'] ?? md5(($r['name'] ?? '') . uniqid()),
-                'name' => $r['name'] ?? '',
-                'note' => $r['specification'] ?? '',
+                'id'       => $r['uuid'] ?? md5(($r['name'] ?? '') . uniqid()),
+                'name'     => $r['name'] ?? '',
+                'quantity' => 1,
+                'note'     => $r['specification'] ?? '',
             ], $listData['purchase'] ?? []);
             echo json_encode(['items' => $items, 'count' => count($items), 'mode' => 'bring'], JSON_UNESCAPED_UNICODE);
         } else {
             $rows = $db->query(
-                "SELECT rowid AS id, name, specification AS note FROM shopping_list ORDER BY sort_order ASC, added_at ASC"
+                "SELECT rowid AS id, name, quantity, specification AS note FROM shopping_list ORDER BY sort_order ASC, added_at ASC"
             )->fetchAll(PDO::FETCH_ASSOC);
             $items = array_map(fn($r) => [
-                'id'   => (string)$r['id'],
-                'name' => $r['name'],
-                'note' => $r['note'] ?? '',
+                'id'       => (string)$r['id'],
+                'name'     => $r['name'],
+                'quantity' => (float)($r['quantity'] ?? 1),
+                'note'     => $r['note'] ?? '',
             ], $rows);
             echo json_encode(['items' => $items, 'count' => count($items), 'mode' => 'internal'], JSON_UNESCAPED_UNICODE);
         }
@@ -8805,7 +8805,7 @@ function bringQuickSyncProduct(PDO $db, int $productId): void {
             $spec = $genericName !== $prod['name']
                 ? $prod['name'] . ($prod['brand'] ? ' · ' . $prod['brand'] : '')
                 : ($prod['brand'] ?: '');
-            $db->prepare("INSERT OR IGNORE INTO shopping_list (name, raw_name, specification) VALUES (?, ?, ?)")
+            $db->prepare("INSERT OR IGNORE INTO shopping_list (name, raw_name, specification, quantity) VALUES (?, ?, ?, 1)")
                ->execute([$genericName, $prod['name'], $spec]);
             EverLog::info('shoppingQuickSync: added to internal list', ['product_id' => $productId, 'name' => $genericName]);
         } elseif ($totalQty > $threshold && $onList) {
@@ -9972,7 +9972,7 @@ function shoppingSyncProductFromCache(PDO $db, int $productId): void {
                ->execute([$spec, $si['name'] ?? $genericName, (int)$existing['id']]);
         }
     } else {
-        $db->prepare("INSERT OR IGNORE INTO shopping_list (name, raw_name, specification) VALUES (?, ?, ?)")
+        $db->prepare("INSERT OR IGNORE INTO shopping_list (name, raw_name, specification, quantity) VALUES (?, ?, ?, 1)")
            ->execute([$genericName, $si['name'] ?? $genericName, $spec]);
     }
 }
@@ -11940,11 +11940,12 @@ function shoppingGetList(PDO $db): void {
         return;
     }
     $items   = $db->query(
-        "SELECT name, raw_name, specification FROM shopping_list ORDER BY sort_order ASC, added_at ASC"
+        "SELECT name, raw_name, quantity, specification FROM shopping_list ORDER BY sort_order ASC, added_at ASC"
     )->fetchAll();
     $purchase = array_map(fn($r) => [
         'name'          => $r['name'],
         'rawName'       => $r['raw_name'] ?: $r['name'],
+        'quantity'      => (float)($r['quantity'] ?? 1),
         'specification' => $r['specification'],
     ], $items);
     echo json_encode([
@@ -11980,6 +11981,13 @@ function shoppingAdd(PDO $db): void {
     }
 }
 
+function normalizeShoppingQuantity(mixed $value): float {
+    if (!is_numeric($value)) {
+        return 1.0;
+    }
+    return max(0.001, (float)$value);
+}
+
 function shoppingAddInternal(PDO $db, array $input): void {
     $items = $input['items'] ?? [];
     $added = 0; $updated = 0; $skipped = 0;
@@ -11989,18 +11997,34 @@ function shoppingAddInternal(PDO $db, array $input): void {
         $rawName = trim($item['rawName'] ?? $item['raw_name'] ?? $name);
         $spec    = $item['specification'] ?? '';
         $updateSpec = !empty($item['update_spec']);
-        $stmt = $db->prepare("SELECT id, specification FROM shopping_list WHERE lower(name) = lower(?)");
+        $hasQuantity = array_key_exists('quantity', $item);
+        $quantity = $hasQuantity ? normalizeShoppingQuantity($item['quantity']) : null;
+        $stmt = $db->prepare("SELECT id, specification, quantity FROM shopping_list WHERE lower(name) = lower(?)");
         $stmt->execute([$name]);
         $existing = $stmt->fetch();
         if ($existing) {
+            $fields = [];
+            $values = [];
+            if ($hasQuantity) {
+                $fields[] = "quantity=?";
+                $values[] = max(0.001, (float)($existing['quantity'] ?? 1) + $quantity);
+            }
             if ($updateSpec && $existing['specification'] !== $spec) {
-                $db->prepare("UPDATE shopping_list SET specification=?, raw_name=? WHERE id=?")->execute([$spec, $rawName, $existing['id']]);
+                $fields[] = "specification=?";
+                $values[] = $spec;
+                $fields[] = "raw_name=?";
+                $values[] = $rawName;
+            }
+            if (!empty($fields)) {
+                $values[] = $existing['id'];
+                $db->prepare("UPDATE shopping_list SET " . implode(', ', $fields) . " WHERE id=?")->execute($values);
                 $updated++;
             } else {
                 $skipped++;
             }
         } else {
-            $db->prepare("INSERT INTO shopping_list (name, raw_name, specification) VALUES (?, ?, ?)")->execute([$name, $rawName, $spec]);
+            $db->prepare("INSERT INTO shopping_list (name, raw_name, specification, quantity) VALUES (?, ?, ?, ?)")
+                ->execute([$name, $rawName, $spec, $quantity ?? 1.0]);
             $added++;
             _fireHaWebhook('shopping_add', ['item' => $name, 'specification' => $spec]);
         }
@@ -13289,7 +13313,13 @@ function _shoppingListPriceItems(array $clientItems, array $smartItems = []): ar
     foreach ($clientItems as $ci) {
         $name = trim($ci['name'] ?? '');
         if ($name === '') continue;
-        $items[] = _resolveShoppingPriceItem($name, $smartItems);
+        $item = _resolveShoppingPriceItem($name, $smartItems);
+        $cartQuantity = array_key_exists('quantity', $ci) ? normalizeShoppingQuantity($ci['quantity']) : 1.0;
+        if ($cartQuantity !== 1.0) {
+            $item['quantity'] = max(0.001, (float)$item['quantity'] * $cartQuantity);
+        }
+        $item['cart_quantity'] = $cartQuantity;
+        $items[] = $item;
     }
     return $items;
 }
@@ -13340,6 +13370,7 @@ function _computeAllShoppingPrices(array $clientItems, string $country, string $
                 'from_cache'            => true,
                 '_resolved_qty'         => $item['quantity'],
                 '_resolved_unit'        => $item['unit'],
+                '_cart_qty'             => $item['cart_quantity'] ?? 1,
             ]);
             $total += $est ?? 0;
             continue;
@@ -13352,6 +13383,7 @@ function _computeAllShoppingPrices(array $clientItems, string $country, string $
                 'from_cache'            => true,
                 '_resolved_qty'         => $item['quantity'],
                 '_resolved_unit'        => $item['unit'],
+                '_cart_qty'             => $item['cart_quantity'] ?? 1,
             ]);
             $total += $est ?? 0;
             continue;
@@ -13389,6 +13421,7 @@ function _computeAllShoppingPrices(array $clientItems, string $country, string $
                     'from_cache'            => false,
                     '_resolved_qty'         => $item['quantity'],
                     '_resolved_unit'        => $item['unit'],
+                    '_cart_qty'             => $item['cart_quantity'] ?? 1,
                 ]);
                 $total += $est ?? 0;
             } else {
@@ -13616,8 +13649,8 @@ function getShoppingPrice(PDO $db): void {
 
 /**
  * GET /api/?action=get_all_shopping_prices
- * POST body: { items: [{name}], country, currency, lang, force_refresh }
- * qty/unit are resolved SERVER-SIDE from smart_shopping_cache — not trusted from client.
+ * POST body: { items: [{name, quantity?}], country, currency, lang, force_refresh }
+ * unit/default quantity are resolved SERVER-SIDE from smart_shopping_cache; quantity is the cart multiplier.
  *
  * Returns: { success, prices: { name → priceEntry }, total, total_label, from_total_cache }
  */

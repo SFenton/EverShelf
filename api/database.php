@@ -328,12 +328,18 @@ function migrateDB(PDO $db): void {
                 name          TEXT NOT NULL,
                 raw_name      TEXT NOT NULL DEFAULT '',
                 specification TEXT NOT NULL DEFAULT '',
+                quantity      REAL NOT NULL DEFAULT 1,
                 added_at      INTEGER DEFAULT (strftime('%s','now')),
                 sort_order    INTEGER DEFAULT 0
             )
         ");
         $db->exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_shopping_list_name ON shopping_list(lower(name))");
     }
+    $shopCols = array_column($db->query("PRAGMA table_info(shopping_list)")->fetchAll(PDO::FETCH_ASSOC), 'name');
+    if (!in_array('quantity', $shopCols, true)) {
+        $db->exec("ALTER TABLE shopping_list ADD COLUMN quantity REAL NOT NULL DEFAULT 1");
+    }
+    $db->exec("UPDATE shopping_list SET quantity = 1 WHERE quantity IS NULL OR quantity <= 0");
 
     // Add is_favorite column to recipes if missing (#124)
     $recCols = array_column($db->query("PRAGMA table_info(recipes)")->fetchAll(), 'name');

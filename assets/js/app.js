@@ -10813,16 +10813,17 @@ async function addLowStockToBring() {
         const spec = window._lowStockSpec || '';
         window._lowStockName = null;
         window._lowStockSpec = null;
-        const payload = { items: [{ name: bringName, specification: spec }] };
+        const payload = { items: [{ name: bringName, specification: spec, quantity: 1 }] };
         if (shoppingListUUID) payload.listUUID = shoppingListUUID;
         const data = await api('shopping_add', {}, 'POST', payload);
-        if (data.success && data.added > 0) {
+        const changed = (data.added || 0) + (data.updated || 0);
+        if (data.success && changed > 0) {
             // Pin as user-added so cleanup never auto-removes it
             const pinned = Object.assign({}, _pinnedBringCache || {});
             pinned[bringName.toLowerCase()] = Date.now();
             _pinnedBringCache = pinned;
             _saveToServer('pinned_bring', pinned);
-            showToast(t('shopping.added_to_bring').replace('{n}', data.added), 'success');
+            showToast(t('shopping.added_to_bring').replace('{n}', changed), 'success');
         } else if (data.success && data.skipped > 0) {
             showToast(t('shopping.already_in_list_short'), 'info');
         }
@@ -12185,49 +12186,22 @@ async function syncShoppingPriceTotal(forceRefresh = false) {
     return _priceTotalFetchPromise;
 }
 
-/**
- * Build the items payload for the price API from the current shoppingItems array.
- * Tries to parse quantity/unit from the Bring! specification field.
- */
+function _shoppingItemQuantity(item) {
+    const q = parseFloat(item?.quantity);
+    return Number.isFinite(q) && q > 0 ? q : 1;
+}
+
+function _formatCartQuantity(q) {
+    const n = Number.isInteger(q) ? q : parseFloat(q.toFixed(2));
+    return String(n);
+}
+
+/** Build the items payload for the price API from the current shoppingItems array. */
 function _buildPricePayload() {
-    return shoppingItems.map((item) => {
-        const smart = _matchBringToSmart(item.name, smartShoppingItems);
-        if (smart) {
-            const unit = smart.unit || 'conf';
-            const defQty = parseFloat(smart.default_qty) || 0;
-            const pkgUnit = smart.package_unit || '';
-            // One shopping-list line ≈ one retail purchase (not 14-day restock qty).
-            if (unit === 'conf' && defQty > 0 && pkgUnit) {
-                return {
-                    name: item.name,
-                    quantity: defQty,
-                    unit: pkgUnit.toLowerCase(),
-                    default_quantity: defQty,
-                    package_unit: pkgUnit,
-                };
-            }
-            if (unit === 'pz') {
-                const gramsPerPiece = defQty >= 20 ? defQty : 200;
-                return {
-                    name: item.name,
-                    quantity: 2,
-                    unit: 'pz',
-                    default_quantity: gramsPerPiece,
-                    package_unit: 'g',
-                };
-            }
-            if ((unit === 'g' || unit === 'ml') && defQty > 0) {
-                return {
-                    name: item.name,
-                    quantity: defQty,
-                    unit,
-                    default_quantity: defQty,
-                    package_unit: pkgUnit,
-                };
-            }
-        }
-        return { name: item.name, quantity: 1, unit: 'conf', default_quantity: 0, package_unit: '' };
-    });
+    return shoppingItems.map((item) => ({
+        name: item.name,
+        quantity: _shoppingItemQuantity(item),
+    }));
 }
 
 /** Format inventory qty for human-readable pantry hints (conf → grams/ml when known). */
@@ -12309,11 +12283,13 @@ function _resolveShoppingDisplayName(item, smartData) {
 function _dedupeShoppingByGeneric(enriched) {
     const seen = new Map();
     const out = [];
-    for (const e of enriched) {
+    for (const rawEntry of enriched) {
+        const e = { ...rawEntry, item: { ...rawEntry.item, quantity: _shoppingItemQuantity(rawEntry.item) } };
         const key = (e.smartData?.shopping_name || e.item.name).toLowerCase();
         if (seen.has(key)) {
             const prev = seen.get(key);
             if (!prev.duplicateNames.includes(e.item.name)) prev.duplicateNames.push(e.item.name);
+            prev.item.quantity = _shoppingItemQuantity(prev.item) + _shoppingItemQuantity(e.item);
             continue;
         }
         e.duplicateNames = [];
@@ -12354,7 +12330,7 @@ function _applyPriceBadgesFromCache() {
     const s = getSettings();
     const sym = _currencySymbol(s.price_currency || 'EUR');
     let total = 0, count = 0;
-    // Build a quick name→{quantity,unit} map from current smart data
+    // Build a quick name→{quantity} map from the current cart state.
     const qtyMap = {};
     for (const p of _buildPricePayload()) qtyMap[p.name] = p;
     shoppingItems.forEach((item, idx) => {
@@ -12362,9 +12338,9 @@ function _applyPriceBadgesFromCache() {
         if (!badge) return;
         const entry = _cachedPrices[item.name];
         if (!entry) return;
-        // Validate qty/unit — if smart data changed, treat as uncached
+        // Validate cart quantity — if it changed, treat as uncached.
         const current = qtyMap[item.name];
-        if (current && (entry._qty !== current.quantity || entry._unit !== current.unit)) return;
+        if (current && (entry._cart_qty ?? 1) !== current.quantity) return;
         badge.innerHTML = _buildPriceBadgeHTML(entry, sym);
         if (entry.estimated_total != null) { total += entry.estimated_total; count++; }
     });
@@ -12457,8 +12433,7 @@ async function fetchAllPrices(forceRefresh = false) {
     const country  = s.price_country  || 'Italia';
     const currency = s.price_currency || 'EUR';
 
-    // Send only item names — server resolves qty/unit from smart_shopping_cache
-    const itemsPayload = shoppingItems.map(i => ({ name: i.name }));
+    const itemsPayload = _buildPricePayload();
 
     let serverTotal = null;
     try {
@@ -12480,6 +12455,7 @@ async function fetchAllPrices(forceRefresh = false) {
                         ...entry,
                         _qty:  entry._resolved_qty  ?? 1,
                         _unit: entry._resolved_unit ?? 'conf',
+                        _cart_qty: entry._cart_qty ?? _shoppingItemQuantity(item),
                     };
                     if (badge) badge.innerHTML = _buildPriceBadgeHTML(entry, sym);
                 } else {
@@ -13026,6 +13002,7 @@ async function addSmartToBring() {
             itemsToAdd.push({
                 name: shoppingName,
                 specification: spec,
+                quantity: 1,
             });
         }
     });
@@ -13038,12 +13015,13 @@ async function addSmartToBring() {
         });
         showLoading(false);
         if (result.success) {
-            const msg = result.added > 0
-                ? t('shopping.added_to_bring', { n: result.added }) + (result.skipped > 0 ? ` (${t('shopping.added_to_bring_skip', { n: result.skipped })})` : '')
+            const changed = (result.added || 0) + (result.updated || 0);
+            const msg = changed > 0
+                ? t('shopping.added_to_bring', { n: changed }) + (result.skipped > 0 ? ` (${t('shopping.added_to_bring_skip', { n: result.skipped })})` : '')
                 : t('shopping.all_on_bring');
-            showToast(msg, result.added > 0 ? 'success' : 'info');
+            showToast(msg, changed > 0 ? 'success' : 'info');
             // Mark all manually-added items as user-pinned so cleanupObsoleteBringItems never removes them
-            if (result.added > 0) {
+            if (changed > 0) {
                 const pinned = Object.assign({}, _pinnedBringCache || {});
                 const now = Date.now();
                 for (const it of itemsToAdd) pinned[it.name.toLowerCase()] = now;
@@ -13452,6 +13430,10 @@ async function renderShoppingItems() {
             const localTagHtml = localTags.map(t =>
                 `<span class="sinv-badge badge-local-tag" onclick="event.stopPropagation(); toggleShoppingTag(${idx}, '${t}')">${TAG_LABELS[t] || t} ✕</span>`
             ).join('');
+            const cartQty = _shoppingItemQuantity(item);
+            const quantityBadge = cartQty !== 1
+                ? `<span class="sinv-badge badge-local-tag">×${escapeHtml(_formatCartQuantity(cartQty))}</span>`
+                : '';
 
             const tagMenu = `<div class="shopping-tag-menu" onclick="event.stopPropagation()">
                 ${Object.entries(TAG_LABELS).map(([k, v]) =>
@@ -13473,7 +13455,7 @@ async function renderShoppingItems() {
                             </div>
                             ${specificLineHtml}
                             ${(!isGenericGroup && _specDisplayText(item.specification)) ? `<div class="shopping-item-spec">${escapeHtml(_specDisplayText(item.specification))}</div>` : ''}
-                            ${(urgencyBadge || freqBadge || localTagHtml) ? `<div class="shopping-item-badges">${urgencyBadge}${freqBadge}${localTagHtml}</div>` : ''}
+                            ${(quantityBadge || urgencyBadge || freqBadge || localTagHtml) ? `<div class="shopping-item-badges">${quantityBadge}${urgencyBadge}${freqBadge}${localTagHtml}</div>` : ''}
                         </div>
                         ${priceEnabled ? `<div class="shopping-item-price-col" id="price-badge-${idx}"><span class="price-col-loading">…</span></div>` : ''}
                         <div class="shopping-item-right" onclick="event.stopPropagation()">
@@ -13736,13 +13718,14 @@ async function addSelectedSuggestions() {
     
     try {
         const items = selected.map(s => {
-            return { name: s.name };
+            return { name: s.name, quantity: 1 };
         });
         
         const data = await api('shopping_add', {}, 'POST', { items, listUUID: shoppingListUUID });
         
         if (data.success) {
-            let msg = data.added === 1 ? t('shopping.bring_added_one') : t('shopping.bring_added_many').replace('{n}', data.added);
+            const changed = (data.added || 0) + (data.updated || 0);
+            let msg = changed === 1 ? t('shopping.bring_added_one') : t('shopping.bring_added_many').replace('{n}', changed);
             if (data.skipped > 0) msg += ` ${t('shopping.bring_skipped').replace('{n}', data.skipped)}`;
             showToast(msg, 'success');
             // Refresh list
@@ -15321,6 +15304,7 @@ async function addRecipeShoppingSuggestions() {
             items: items.map(s => ({
                 name: s.name,
                 specification: s.qty ? `Da ricetta · ${s.qty}` : 'Da ricetta',
+                quantity: 1,
             })),
             listUUID: typeof shoppingListUUID !== 'undefined' ? shoppingListUUID : undefined,
         };

@@ -25,7 +25,7 @@
 [![SQLite](https://img.shields.io/badge/SQLite-3-blue.svg)](https://www.sqlite.org/)
 [![Docker](https://img.shields.io/badge/Docker-Ready-2496ED.svg)](Dockerfile)
 [![i18n](https://img.shields.io/badge/i18n-IT%20%7C%20EN%20%7C%20DE%20%7C%20FR%20%7C%20ES-orange.svg)](translations/)
-[![Version](https://img.shields.io/badge/version-1.7.42-brightgreen.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-1.7.43-brightgreen.svg)](CHANGELOG.md)
 [![GitHub stars](https://img.shields.io/github/stars/dadaloop82/EverShelf?style=social)](https://github.com/dadaloop82/EverShelf/stargazers)
 [![Last commit](https://img.shields.io/github/last-commit/dadaloop82/EverShelf/main)](https://github.com/dadaloop82/EverShelf/commits/main)
 [![Contributors](https://img.shields.io/github/contributors/dadaloop82/EverShelf)](https://github.com/dadaloop82/EverShelf/graphs/contributors)
@@ -40,12 +40,11 @@
 
 ---
 
-### 🆕 Release 1.7.42 (2026-06-11)
+### 🆕 Release 1.7.43 (2026-06-26)
 
-- **Stable shopping total** — Each list item is priced as one typical purchase (no more inflated totals from 14-day restock quantities or €/kg × piece count).
-- **Waste reason picker** — When discarding food, choose why (expired, wrong storage, bought too much, …); EverShelf learns and adjusts restock suggestions and storage hints.
-- **Fewer SQLite lock errors** — `inventory_use` and `shopping_add` retry on `SQLITE_BUSY`; smart shopping gets a longer PHP time limit on large pantries.
-- **Android kiosk** — Locale string escaping fix; setup wizard JSON save fix (CI build).
+- **Shopping cart quantities** — Internal shopping-list rows now store quantity; explicit quantity adds increment an existing row instead of silently skipping.
+- **HA quantity sync** — Home Assistant cart adds can increase quantity and HA todo items can display returned quantity context.
+- **Quantity-aware shopping total** — Price totals use the stored cart quantity multiplier.
 
 See [CHANGELOG.md](CHANGELOG.md) for full details.
 
