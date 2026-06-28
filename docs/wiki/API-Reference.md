@@ -82,7 +82,7 @@ Return canonical/common ingredient mappings for a product.
 | `product_id` | int | Product ID |
 
 ### `canonical_ingredients_assess` — GET
-Return coverage and examples for canonical ingredient mappings. Defaults to active inventory products; pass `scope=all` for all products.
+Return coverage, examples, and FoodOn link counts for canonical ingredient mappings. Defaults to active inventory products; pass `scope=all` for all products.
 
 ---
 

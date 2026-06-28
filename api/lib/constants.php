@@ -9,6 +9,7 @@ define('PRICE_CACHE_PATH',         EVERSHELF_ROOT . '/data/shopping_price_cache.
 define('CATEGORY_CACHE_PATH',      EVERSHELF_ROOT . '/data/category_ai_cache.json');
 define('SHELF_CACHE_PATH',         EVERSHELF_ROOT . '/data/opened_shelf_cache.json');
 define('FOODFACTS_CACHE_PATH',     EVERSHELF_ROOT . '/data/food_facts_cache.json');
+define('FOODON_CACHE_PATH',        EVERSHELF_ROOT . '/data/foodon_lookup_cache.json');
 define('SHOPPING_NAME_CACHE_PATH', EVERSHELF_ROOT . '/data/shopping_name_cache.json');
 define('BRING_TOKEN_PATH',         EVERSHELF_ROOT . '/data/bring_token.json');
 define('AI_USAGE_PATH',            EVERSHELF_ROOT . '/data/ai_usage.json');

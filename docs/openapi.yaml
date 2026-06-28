@@ -664,6 +664,9 @@ components:
           type: string
         evidence:
           type: string
+        external_ids:
+          type: object
+          description: External ontology links, e.g. FoodOn IDs from EBI OLS
 
     InventoryItem:
       type: object

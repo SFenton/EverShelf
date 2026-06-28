@@ -8,12 +8,13 @@
  */
 
 const CANONICAL_INGREDIENT_RULESET_VERSION = 'evershelf_common_ingredients_v1';
+const FOODON_LOOKUP_CACHE_VERSION = 'foodon_ols4_v5';
 
 function canonicalIngredientNormalizeText(string $text): string {
     $text = mb_strtolower(trim($text), 'UTF-8');
     $text = str_replace(
-        ['’', "'", '`', '&', '/', '_', '+'],
-        [' ', ' ', ' ', ' and ', ' ', ' ', ' plus '],
+        ['’', "'", '`', '&', '/', '_', '+', '-'],
+        [' ', ' ', ' ', ' and ', ' ', ' ', ' plus ', ' '],
         $text
     );
     $text = preg_replace('/[^\p{L}0-9\s\-]+/u', ' ', $text) ?? $text;
@@ -367,7 +368,301 @@ function canonicalIngredientInferProduct(array $product): array {
     return array_values($mappings);
 }
 
+function canonicalIngredientEnvBool(string $key, bool $default): bool {
+    $raw = function_exists('env') ? env($key, $default ? 'true' : 'false') : ($default ? 'true' : 'false');
+    return in_array(strtolower(trim((string)$raw)), ['1', 'true', 'yes', 'on'], true);
+}
+
+function canonicalIngredientFoodOnEnabled(): bool {
+    return canonicalIngredientEnvBool('FOODON_ENABLED', true);
+}
+
+function canonicalIngredientFoodOnLookupOnSave(): bool {
+    return canonicalIngredientEnvBool('FOODON_LOOKUP_ON_SAVE', true);
+}
+
+function canonicalIngredientFoodOnCacheLoad(): array {
+    static $cache = null;
+    if (is_array($cache)) {
+        return $cache;
+    }
+    $cache = [];
+    $path = defined('FOODON_CACHE_PATH') ? FOODON_CACHE_PATH : (__DIR__ . '/../../data/foodon_lookup_cache.json');
+    if (is_file($path)) {
+        $raw = @file_get_contents($path);
+        $decoded = $raw ? json_decode($raw, true) : null;
+        if (is_array($decoded)) {
+            $cache = $decoded;
+        }
+    }
+    return $cache;
+}
+
+function canonicalIngredientFoodOnCacheStore(string $key, array $entry): void {
+    $cache = canonicalIngredientFoodOnCacheLoad();
+    $cache[$key] = $entry;
+    $path = defined('FOODON_CACHE_PATH') ? FOODON_CACHE_PATH : (__DIR__ . '/../../data/foodon_lookup_cache.json');
+    $dir = dirname($path);
+    if (!is_dir($dir)) {
+        @mkdir($dir, 0775, true);
+    }
+    $tmp = $path . '.tmp';
+    @file_put_contents($tmp, json_encode($cache, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE), LOCK_EX);
+    if (is_file($tmp)) {
+        @rename($tmp, $path);
+    }
+}
+
+function canonicalIngredientFoodOnPreferredQuery(string $slug, string $name): string {
+    static $queries = [
+        'beef-stock' => 'beef broth',
+        'carrot' => 'carrot food product',
+        'bitters' => 'bitters',
+        'chicken-stock' => 'chicken broth',
+        'clams' => 'clam food product',
+        'cookies' => 'cookie',
+        'sports-drink' => 'sports drinks rehydration',
+        'green-onion' => 'green onions',
+        'pickles' => 'pickled cucumber',
+        'ketchup' => 'tomato ketchup',
+        'pickled-peppers' => 'pepper pickle food product',
+        'bread-crumbs' => 'breadcrumbs',
+        'barbecue-sauce' => 'barbecue or steak sauces',
+        'steak-sauce' => 'barbecue or steak sauces',
+        'jasmine-rice' => 'rice grain long-grain',
+        'dijon-mustard' => 'dijon mustard',
+        'pepper-jack-cheese' => 'Monterey Jack cheese',
+        'corn-starch' => 'maize starch',
+        'buns' => 'roll or bun',
+        'almonds' => 'almond food product',
+        'peanuts' => 'peanut food product',
+        'tacos' => 'taco',
+        'soda' => 'soft drink',
+        'ginger' => 'ginger food product',
+        'rice' => 'rice food product',
+        'grain' => 'cereal grain food product',
+        'mustard' => 'mustard condiment food product',
+        'brown-mustard' => 'mustard condiment food product',
+        'spicy-brown-mustard' => 'mustard condiment food product',
+        'chicken-breast' => 'chicken breast raw',
+        'chicken' => 'chicken meat food product',
+        'poultry' => 'poultry meat food product',
+        'tomato' => 'tomato food product',
+        'salsa' => 'salsa food product',
+        'sauce' => 'condiment sauce',
+        'plant-based-milk' => 'plant-based milk',
+        'coffee-creamer' => 'coffee creamer',
+        'butter' => 'butter',
+        'coconut' => 'coconut food product',
+        'coffee' => 'coffee beverage',
+        'cream' => 'cream food product',
+        'garlic' => 'garlic food product',
+        'gelatin' => 'gelatin product',
+        'honey' => 'honey food product',
+        'milk' => 'mammalian milk product',
+        'molasses' => 'sugar syrup molasses',
+        'sour-cream' => 'sour cream',
+        'seasoning-blend' => 'herb blend seasoning',
+        'alcoholic-beverage' => 'alcoholic beverage',
+        'vegetables' => 'vegetable food product',
+        'vegetable' => 'vegetable food product',
+        'fruit' => 'fruit food product',
+        'stock' => 'broth or stock',
+        'dairy' => 'dairy food product',
+        'cheese' => 'cheese food product',
+        'bread' => 'bread food product',
+        'oil' => 'edible oil',
+        'sweetener' => 'sweetener food product',
+    ];
+    return $queries[$slug] ?? $name;
+}
+
+function canonicalIngredientFoodOnSkipSlug(string $slug): bool {
+    static $skip = [
+        // FoodOn search currently resolves these broad terms to overly specific products.
+        'beef' => true,
+        'sweetener' => true,
+    ];
+    return isset($skip[$slug]);
+}
+
+function canonicalIngredientFoodOnNormalizeLabel(string $label, bool $stripQualifiers = false): string {
+    $label = preg_replace('/^\s*\d+\s*-\s*/u', '', $label) ?? $label;
+    if ($stripQualifiers) {
+        $label = preg_replace('/\([^)]*\)/u', ' ', $label) ?? $label;
+    }
+    return canonicalIngredientNormalizeText($label);
+}
+
+function canonicalIngredientFoodOnSelectBest(array $docs, string $name, string $query): ?array {
+    $target = canonicalIngredientNormalizeText($name);
+    $queryNorm = canonicalIngredientNormalizeText($query);
+    $best = null;
+    $bestScore = 0;
+    foreach ($docs as $doc) {
+        $label = (string)($doc['label'] ?? '');
+        $iri = (string)($doc['iri'] ?? '');
+        $shortForm = (string)($doc['short_form'] ?? '');
+        if ($label === '' || $iri === '' || !str_starts_with($shortForm, 'FOODON_')) {
+            continue;
+        }
+
+        $labelNorm = canonicalIngredientFoodOnNormalizeLabel($label);
+        $labelStripped = canonicalIngredientFoodOnNormalizeLabel($label, true);
+        $desc = strtolower((string)(($doc['description'][0] ?? '')));
+        $score = 0;
+        if ($labelNorm === $target) $score += 60;
+        if ($labelStripped === $target) $score += 55;
+        if ($labelNorm === $queryNorm) $score += 60;
+        if ($labelStripped === $queryNorm) $score += 55;
+        if ($target !== '' && str_contains($labelNorm, $target)) $score += 28;
+        if ($queryNorm !== '' && str_contains($labelNorm, $queryNorm)) $score += 40;
+        if ($labelNorm !== '' && str_contains($target, $labelNorm)) $score += 20;
+        if (str_contains($labelNorm, 'food product')) $score += 12;
+        if (str_contains($desc, 'food product')) $score += 8;
+        if (str_contains($labelNorm, 'raw') && str_contains($queryNorm, 'raw')) $score += 6;
+        if (str_contains($labelNorm, 'plant') && !str_contains($target, 'plant') && !str_contains($queryNorm, 'plant')) $score -= 20;
+        if (str_contains($labelNorm, 'supplement') && !str_contains($target, 'supplement')) $score -= 15;
+        if (($doc['type'] ?? '') === 'class') $score += 2;
+
+        if ($score > $bestScore) {
+            $bestScore = $score;
+            $best = $doc + ['_match_score' => $score];
+        }
+    }
+    return $bestScore >= 35 ? $best : null;
+}
+
+function canonicalIngredientFoodOnThrottle(): void {
+    static $lastRequestAt = 0.0;
+    $intervalMs = max(0, (int)(function_exists('env') ? env('FOODON_MIN_REQUEST_INTERVAL_MS', '250') : '250'));
+    if ($intervalMs <= 0) {
+        return;
+    }
+    $now = microtime(true);
+    $elapsedMs = ($now - $lastRequestAt) * 1000;
+    if ($lastRequestAt > 0 && $elapsedMs < $intervalMs) {
+        usleep((int)(($intervalMs - $elapsedMs) * 1000));
+    }
+    $lastRequestAt = microtime(true);
+}
+
+function canonicalIngredientFoodOnLookup(string $name, string $slug = '', string $category = ''): ?array {
+    if (!canonicalIngredientFoodOnEnabled() || trim($name) === '') {
+        return null;
+    }
+
+    $slug = $slug !== '' ? $slug : canonicalIngredientSlug($name);
+    if (canonicalIngredientFoodOnSkipSlug($slug)) {
+        return null;
+    }
+    $query = canonicalIngredientFoodOnPreferredQuery($slug, $name);
+    $cacheKey = FOODON_LOOKUP_CACHE_VERSION . ':' . canonicalIngredientSlug($query);
+    $ttlDays = max(1, (int)(function_exists('env') ? env('FOODON_CACHE_TTL_DAYS', '30') : '30'));
+    $ttlSeconds = $ttlDays * 86400;
+    $cache = canonicalIngredientFoodOnCacheLoad();
+    $cached = $cache[$cacheKey] ?? null;
+    if (is_array($cached) && isset($cached['ts']) && (time() - (int)$cached['ts']) < $ttlSeconds) {
+        return !empty($cached['found']) && is_array($cached['foodon'] ?? null) ? $cached['foodon'] : null;
+    }
+
+    canonicalIngredientFoodOnThrottle();
+    $timeout = max(2, (int)(function_exists('env') ? env('FOODON_TIMEOUT_SEC', '6') : '6'));
+    $userAgent = function_exists('env')
+        ? env('FOODON_USER_AGENT', 'EverShelf/1.0 (FoodOn integration; https://github.com/SFenton/EverShelf)')
+        : 'EverShelf/1.0 (FoodOn integration; https://github.com/SFenton/EverShelf)';
+    $url = 'https://www.ebi.ac.uk/ols4/api/search?' . http_build_query([
+        'q' => $query,
+        'ontology' => 'foodon',
+        'rows' => 8,
+        'type' => 'class',
+    ]);
+
+    $ch = curl_init($url);
+    curl_setopt_array($ch, [
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_TIMEOUT => $timeout,
+        CURLOPT_CONNECTTIMEOUT => min(3, $timeout),
+        CURLOPT_FOLLOWLOCATION => false,
+        CURLOPT_HTTPHEADER => [
+            'Accept: application/json',
+            'Accept-Encoding: gzip, deflate',
+            'User-Agent: ' . $userAgent,
+        ],
+        CURLOPT_ENCODING => '',
+    ]);
+    $body = curl_exec($ch);
+    $code = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    $err = curl_error($ch);
+    curl_close($ch);
+
+    if ($body === false || $code < 200 || $code >= 300) {
+        if (class_exists('EverLog', false)) {
+            EverLog::warn('FoodOn lookup failed', ['query' => $query, 'http_code' => $code, 'error' => $err]);
+        }
+        return null;
+    }
+
+    $decoded = json_decode((string)$body, true);
+    $docs = $decoded['response']['docs'] ?? [];
+    $best = is_array($docs) ? canonicalIngredientFoodOnSelectBest($docs, $name, $query) : null;
+    if (!$best) {
+        canonicalIngredientFoodOnCacheStore($cacheKey, ['ts' => time(), 'found' => false, 'query' => $query]);
+        return null;
+    }
+
+    $foodOn = [
+        'id' => $best['obo_id'] ?? str_replace('_', ':', (string)$best['short_form']),
+        'short_form' => $best['short_form'],
+        'iri' => $best['iri'],
+        'label' => $best['label'],
+        'query' => $query,
+        'source' => 'ebi_ols4',
+        'match_score' => (int)$best['_match_score'],
+    ];
+    if (!empty($best['description'][0])) {
+        $foodOn['description'] = mb_substr((string)$best['description'][0], 0, 500, 'UTF-8');
+    }
+    canonicalIngredientFoodOnCacheStore($cacheKey, ['ts' => time(), 'found' => true, 'query' => $query, 'foodon' => $foodOn]);
+    return $foodOn;
+}
+
+function canonicalIngredientMergeExternalIds(?string $existingJson, array $newExternalIds): array {
+    $existing = $existingJson ? json_decode($existingJson, true) : [];
+    if (!is_array($existing)) {
+        $existing = [];
+    }
+    return array_replace_recursive($existing, $newExternalIds);
+}
+
+function canonicalIngredientEnrichMappingsWithFoodOn(array $mappings): array {
+    if (!canonicalIngredientFoodOnLookupOnSave()) {
+        return $mappings;
+    }
+    foreach ($mappings as &$mapping) {
+        if (!empty($mapping['external_ids']['foodon'])) {
+            continue;
+        }
+        $foodOn = canonicalIngredientFoodOnLookup(
+            (string)($mapping['name'] ?? ''),
+            (string)($mapping['slug'] ?? ''),
+            (string)($mapping['category'] ?? '')
+        );
+        if ($foodOn) {
+            $mapping['external_ids']['foodon'] = $foodOn;
+        }
+    }
+    unset($mapping);
+    return $mappings;
+}
+
 function canonicalIngredientUpsert(PDO $db, array $mapping): int {
+    $externalIds = $mapping['external_ids'] ?? [];
+    if (!empty($externalIds)) {
+        $existing = $db->prepare("SELECT external_ids_json FROM canonical_ingredients WHERE slug = ?");
+        $existing->execute([$mapping['slug']]);
+        $externalIds = canonicalIngredientMergeExternalIds($existing->fetchColumn() ?: null, $externalIds);
+    }
     $stmt = $db->prepare("
         INSERT INTO canonical_ingredients (slug, name, parent_slug, category, source, external_ids_json, updated_at)
         VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
@@ -379,8 +674,8 @@ function canonicalIngredientUpsert(PDO $db, array $mapping): int {
             external_ids_json = COALESCE(excluded.external_ids_json, canonical_ingredients.external_ids_json),
             updated_at = CURRENT_TIMESTAMP
     ");
-    $externalJson = !empty($mapping['external_ids'])
-        ? json_encode($mapping['external_ids'], JSON_UNESCAPED_UNICODE)
+    $externalJson = !empty($externalIds)
+        ? json_encode($externalIds, JSON_UNESCAPED_UNICODE)
         : null;
     $stmt->execute([
         $mapping['slug'],
@@ -406,6 +701,7 @@ function canonicalIngredientSyncProduct(PDO $db, int $productId, ?array $product
     }
 
     $mappings = canonicalIngredientInferProduct($product);
+    $mappings = canonicalIngredientEnrichMappingsWithFoodOn($mappings);
     $db->beginTransaction();
     try {
         $db->prepare("DELETE FROM product_ingredients WHERE product_id = ? AND source != 'manual'")
@@ -502,6 +798,75 @@ function canonicalIngredientNamesByProduct(PDO $db, array $productIds, array $ro
     return $out;
 }
 
+function canonicalIngredientEnrichFoodOnTable(PDO $db, bool $missingOnly = true, int $limit = 0): array {
+    $where = $missingOnly
+        ? "WHERE external_ids_json IS NULL OR external_ids_json NOT LIKE '%\"foodon\"%'"
+        : "";
+    $sql = "SELECT id, slug, name, category, external_ids_json FROM canonical_ingredients $where ORDER BY name ASC";
+    if ($limit > 0) {
+        $sql .= " LIMIT " . (int)$limit;
+    }
+    $rows = $db->query($sql)->fetchAll(PDO::FETCH_ASSOC);
+    $updated = 0;
+    $misses = 0;
+    $examples = [];
+    $stmt = $db->prepare("UPDATE canonical_ingredients SET external_ids_json = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?");
+    foreach ($rows as $row) {
+        $foodOn = canonicalIngredientFoodOnLookup((string)$row['name'], (string)$row['slug'], (string)($row['category'] ?? ''));
+        if (!$foodOn) {
+            $misses++;
+            continue;
+        }
+        $externalIds = canonicalIngredientMergeExternalIds($row['external_ids_json'] ?? null, ['foodon' => $foodOn]);
+        $stmt->execute([json_encode($externalIds, JSON_UNESCAPED_UNICODE), (int)$row['id']]);
+        $updated++;
+        if (count($examples) < 20) {
+            $examples[] = [
+                'name' => $row['name'],
+                'foodon_id' => $foodOn['id'] ?? '',
+                'foodon_label' => $foodOn['label'] ?? '',
+                'query' => $foodOn['query'] ?? '',
+            ];
+        }
+    }
+
+    return [
+        'processed' => count($rows),
+        'updated' => $updated,
+        'misses' => $misses,
+        'examples' => $examples,
+    ];
+}
+
+function canonicalIngredientFoodOnStats(PDO $db, bool $activeOnly = true): array {
+    $termsTotal = (int)$db->query("SELECT COUNT(*) FROM canonical_ingredients")->fetchColumn();
+    $termsWithFoodOn = (int)$db->query("SELECT COUNT(*) FROM canonical_ingredients WHERE external_ids_json LIKE '%\"foodon\"%'")->fetchColumn();
+    $productWhere = $activeOnly
+        ? "AND EXISTS (SELECT 1 FROM inventory i WHERE i.product_id = p.id AND i.quantity > 0)"
+        : "";
+    $productsWithPrimaryFoodOn = (int)$db->query("
+        SELECT COUNT(DISTINCT p.id)
+        FROM products p
+        JOIN product_ingredients pi ON pi.product_id = p.id AND pi.role = 'primary'
+        JOIN canonical_ingredients ci ON ci.id = pi.ingredient_id
+        WHERE ci.external_ids_json LIKE '%\"foodon\"%' $productWhere
+    ")->fetchColumn();
+    $productsWithAnyFoodOn = (int)$db->query("
+        SELECT COUNT(DISTINCT p.id)
+        FROM products p
+        JOIN product_ingredients pi ON pi.product_id = p.id
+        JOIN canonical_ingredients ci ON ci.id = pi.ingredient_id
+        WHERE ci.external_ids_json LIKE '%\"foodon\"%' $productWhere
+    ")->fetchColumn();
+    return [
+        'canonical_terms_total' => $termsTotal,
+        'canonical_terms_with_foodon' => $termsWithFoodOn,
+        'canonical_terms_foodon_pct' => $termsTotal > 0 ? round(($termsWithFoodOn / $termsTotal) * 100, 1) : 0,
+        'products_with_primary_foodon' => $productsWithPrimaryFoodOn,
+        'products_with_any_foodon' => $productsWithAnyFoodOn,
+    ];
+}
+
 function canonicalIngredientAssess(PDO $db, bool $activeOnly = true): array {
     $where = $activeOnly
         ? "WHERE EXISTS (SELECT 1 FROM inventory i WHERE i.product_id = p.id AND i.quantity > 0)"
@@ -569,6 +934,7 @@ function canonicalIngredientAssess(PDO $db, bool $activeOnly = true): array {
         'products_total' => $total,
         'products_with_primary' => $matched,
         'coverage_pct' => $total > 0 ? round(($matched / $total) * 100, 1) : 0,
+        'foodon' => canonicalIngredientFoodOnStats($db, $activeOnly),
         'role_counts' => $roleCounts,
         'source_counts' => $sourceCounts,
         'examples' => $examples,
