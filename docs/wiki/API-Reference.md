@@ -45,7 +45,7 @@ Look up a barcode on Open Food Facts (external call).
 | `barcode` | string | EAN/UPC barcode |
 
 ### `product_save` — POST
-Create or update a product. Pass `id` to update.
+Create or update a product. Pass `id` to update. The save path also refreshes canonical/common ingredient mappings and returns them in `canonical_ingredients`.
 
 ```json
 {
@@ -55,12 +55,15 @@ Create or update a product. Pass `id` to update.
   "category": "pasta",
   "unit": "g",
   "default_quantity": 500,
-  "barcode": "8076800105988"
+  "barcode": "8076800105988",
+  "ingredients_text": "durum wheat semolina",
+  "ingredients_tags": ["en:durum-wheat-semolina"],
+  "off_generic_name": "pasta"
 }
 ```
 
 ### `product_get` — GET
-Get product details by `id`.
+Get product details by `id`, including `canonical_ingredients` when mappings exist.
 
 ### `product_delete` — POST
 Delete a product by `id`.
@@ -70,6 +73,16 @@ List all products.
 
 ### `products_search` — GET
 Search products by name (`?q=pasta`).
+
+### `product_ingredients` — GET
+Return canonical/common ingredient mappings for a product.
+
+| Param | Type | Description |
+|-------|------|-------------|
+| `product_id` | int | Product ID |
+
+### `canonical_ingredients_assess` — GET
+Return coverage and examples for canonical ingredient mappings. Defaults to active inventory products; pass `scope=all` for all products.
 
 ---
 

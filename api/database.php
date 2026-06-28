@@ -123,7 +123,11 @@ function initializeDB(PDO $db): void {
             unit TEXT DEFAULT 'pz',
             default_quantity REAL DEFAULT 1,
             notes TEXT DEFAULT '',
+            ingredients_text TEXT DEFAULT '',
+            ingredients_tags_json TEXT DEFAULT NULL,
+            off_generic_name TEXT DEFAULT '',
             shopping_name TEXT DEFAULT '',
+            nutriments_json TEXT DEFAULT NULL,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
         );
@@ -161,6 +165,39 @@ function initializeDB(PDO $db): void {
         CREATE INDEX IF NOT EXISTS idx_transactions_type_date ON transactions(type, created_at);
         -- smartShopping(): GROUP BY product_id filtering on type+undone
         CREATE INDEX IF NOT EXISTS idx_transactions_pid_type_undone ON transactions(product_id, type, undone);
+
+        CREATE TABLE IF NOT EXISTS canonical_ingredients (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            slug TEXT NOT NULL UNIQUE,
+            name TEXT NOT NULL,
+            parent_slug TEXT DEFAULT NULL,
+            category TEXT DEFAULT '',
+            source TEXT NOT NULL DEFAULT 'local',
+            external_ids_json TEXT DEFAULT NULL,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE IF NOT EXISTS product_ingredients (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            product_id INTEGER NOT NULL,
+            ingredient_id INTEGER NOT NULL,
+            role TEXT NOT NULL CHECK(role IN ('primary', 'broader', 'contains', 'inferred')),
+            confidence REAL NOT NULL DEFAULT 0,
+            source TEXT NOT NULL DEFAULT 'local_rule',
+            evidence TEXT DEFAULT '',
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(product_id, ingredient_id, role),
+            FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE CASCADE,
+            FOREIGN KEY (ingredient_id) REFERENCES canonical_ingredients(id) ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_canonical_ingredients_slug ON canonical_ingredients(slug);
+        CREATE INDEX IF NOT EXISTS idx_canonical_ingredients_parent ON canonical_ingredients(parent_slug);
+        CREATE INDEX IF NOT EXISTS idx_product_ingredients_product ON product_ingredients(product_id);
+        CREATE INDEX IF NOT EXISTS idx_product_ingredients_ingredient ON product_ingredients(ingredient_id);
+        CREATE INDEX IF NOT EXISTS idx_product_ingredients_role ON product_ingredients(role);
     ");
 }
 
@@ -184,6 +221,18 @@ function migrateDB(PDO $db): void {
     }
     if (!in_array('shopping_name', $colNames)) {
         try { $db->exec("ALTER TABLE products ADD COLUMN shopping_name TEXT DEFAULT ''"); }
+        catch (PDOException $e) { if (strpos($e->getMessage(), 'duplicate column') === false) throw $e; }
+    }
+    if (!in_array('ingredients_text', $colNames)) {
+        try { $db->exec("ALTER TABLE products ADD COLUMN ingredients_text TEXT DEFAULT ''"); }
+        catch (PDOException $e) { if (strpos($e->getMessage(), 'duplicate column') === false) throw $e; }
+    }
+    if (!in_array('ingredients_tags_json', $colNames)) {
+        try { $db->exec("ALTER TABLE products ADD COLUMN ingredients_tags_json TEXT DEFAULT NULL"); }
+        catch (PDOException $e) { if (strpos($e->getMessage(), 'duplicate column') === false) throw $e; }
+    }
+    if (!in_array('off_generic_name', $colNames)) {
+        try { $db->exec("ALTER TABLE products ADD COLUMN off_generic_name TEXT DEFAULT ''"); }
         catch (PDOException $e) { if (strpos($e->getMessage(), 'duplicate column') === false) throw $e; }
     }
 
@@ -354,6 +403,41 @@ function migrateDB(PDO $db): void {
         try { $db->exec("ALTER TABLE products ADD COLUMN nutriments_json TEXT DEFAULT NULL"); }
         catch (PDOException $e) { if (strpos($e->getMessage(), 'duplicate column') === false) throw $e; }
     }
+
+    $db->exec("
+        CREATE TABLE IF NOT EXISTS canonical_ingredients (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            slug TEXT NOT NULL UNIQUE,
+            name TEXT NOT NULL,
+            parent_slug TEXT DEFAULT NULL,
+            category TEXT DEFAULT '',
+            source TEXT NOT NULL DEFAULT 'local',
+            external_ids_json TEXT DEFAULT NULL,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE IF NOT EXISTS product_ingredients (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            product_id INTEGER NOT NULL,
+            ingredient_id INTEGER NOT NULL,
+            role TEXT NOT NULL CHECK(role IN ('primary', 'broader', 'contains', 'inferred')),
+            confidence REAL NOT NULL DEFAULT 0,
+            source TEXT NOT NULL DEFAULT 'local_rule',
+            evidence TEXT DEFAULT '',
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(product_id, ingredient_id, role),
+            FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE CASCADE,
+            FOREIGN KEY (ingredient_id) REFERENCES canonical_ingredients(id) ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_canonical_ingredients_slug ON canonical_ingredients(slug);
+        CREATE INDEX IF NOT EXISTS idx_canonical_ingredients_parent ON canonical_ingredients(parent_slug);
+        CREATE INDEX IF NOT EXISTS idx_product_ingredients_product ON product_ingredients(product_id);
+        CREATE INDEX IF NOT EXISTS idx_product_ingredients_ingredient ON product_ingredients(ingredient_id);
+        CREATE INDEX IF NOT EXISTS idx_product_ingredients_role ON product_ingredients(role);
+    ");
 }
 
 /**

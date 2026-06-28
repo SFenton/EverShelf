@@ -135,6 +135,35 @@ paths:
         "200":
           description: Matching products
 
+  /index.php?action=product_ingredients:
+    get:
+      summary: Get canonical ingredient mappings for a product
+      tags: [Products]
+      parameters:
+        - name: product_id
+          in: query
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Canonical/common ingredient mappings
+
+  /index.php?action=canonical_ingredients_assess:
+    get:
+      summary: Assess canonical ingredient mapping coverage
+      tags: [Products]
+      parameters:
+        - name: scope
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [active, all]
+      responses:
+        "200":
+          description: Coverage summary and examples
+
   /index.php?action=inventory_list:
     get:
       summary: List all inventory items
@@ -574,6 +603,17 @@ components:
           type: string
         notes:
           type: string
+        ingredients_text:
+          type: string
+        ingredients_tags_json:
+          type: string
+          nullable: true
+        off_generic_name:
+          type: string
+        canonical_ingredients:
+          type: array
+          items:
+            $ref: "#/components/schemas/CanonicalIngredientMapping"
         created_at:
           type: string
           format: date-time
@@ -599,6 +639,31 @@ components:
           type: number
         package_size:
           type: number
+        ingredients_text:
+          type: string
+        ingredients_tags:
+          type: array
+          items:
+            type: string
+        off_generic_name:
+          type: string
+
+    CanonicalIngredientMapping:
+      type: object
+      properties:
+        slug:
+          type: string
+        name:
+          type: string
+        role:
+          type: string
+          enum: [primary, broader, contains, inferred]
+        confidence:
+          type: number
+        source:
+          type: string
+        evidence:
+          type: string
 
     InventoryItem:
       type: object

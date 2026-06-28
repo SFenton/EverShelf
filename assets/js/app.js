@@ -2336,6 +2336,14 @@ async function _fetchAiMatchCandidates(aiProduct) {
         return { in_stock: [], finished: [], catalog: [] };
     }
 }
+
+function _applyCanonicalFromSave(product, saveResult) {
+    if (product && Array.isArray(saveResult?.canonical_ingredients)) {
+        product.canonical_ingredients = saveResult.canonical_ingredients;
+    }
+    return product;
+}
+
 async function _confirmAiDetectedProduct() {
     const p = _aiDetectedProductDraft;
     if (!p) return;
@@ -2355,7 +2363,7 @@ async function _confirmAiDetectedProduct() {
         const newId = saveResult?.id;
         if (saveResult?.success && newId) {
             const full = await api('product_get', { id: newId }).catch(() => null);
-            currentProduct = full?.product || {
+            currentProduct = full?.product || _applyCanonicalFromSave({
                 id: newId,
                 barcode: '',
                 name: p.name || t('product.not_recognized'),
@@ -2367,10 +2375,11 @@ async function _confirmAiDetectedProduct() {
                 package_unit: '',
                 _confCount: 0,
                 weight_info: '',
-            };
+            }, saveResult);
             if (saveResult.merged) {
                 showToast(t('scan.ai_match_merged_existing'), 'info');
             }
+
             addToScanRecents(currentProduct);
             _clearAiMatchPanel();
             showLoading(false);
@@ -7966,7 +7975,9 @@ function _currentProductFromExternal(p, barcode, saveId) {
         _confCount: detected.confCount || 0,
         weight_info: p.quantity_info || '',
         nutriscore: p.nutriscore || '',
+        generic_name: p.generic_name || '',
         ingredients: p.ingredients || '',
+        ingredients_tags: p.ingredients_tags || [],
         allergens: p.allergens || '',
         conservation: p.conservation || '',
         origin: p.origin || '',
@@ -8021,9 +8032,13 @@ async function _handleBarcodeResolve(result, barcode) {
             default_quantity: detected.quantity,
             package_unit: detected.packageUnit || '',
             notes: _externalBarcodeNotes(p),
+            ingredients_text: p.ingredients || '',
+            ingredients_tags: p.ingredients_tags || [],
+            off_generic_name: p.generic_name || '',
         });
         if (saveResult.id) {
             currentProduct = _currentProductFromExternal(p, code, saveResult.id);
+            _applyCanonicalFromSave(currentProduct, saveResult);
             _finishBarcodeResolved(code);
             return true;
         }
@@ -8200,14 +8215,14 @@ async function createQuickProduct(name) {
         });
         
         if (result.success || result.id) {
-            currentProduct = {
+            currentProduct = _applyCanonicalFromSave({
                 id: result.id,
                 name: name,
                 brand: '',
                 category: category,
                 unit: 'pz',
                 default_quantity: 1,
-            };
+            }, result);
             showLoading(false);
             clearQuickNameResults();
             showToast(t('toast.product_created'), 'success');
@@ -8549,7 +8564,7 @@ async function submitProduct(e) {
     try {
         const result = await api('product_save', {}, 'POST', productData);
         if (result.success) {
-            currentProduct = { ...productData, id: result.id };
+            currentProduct = _applyCanonicalFromSave({ ...productData, id: result.id }, result);
             showLoading(false);
             showToast(t('toast.product_saved'), 'success');
             showProductAction();
@@ -9333,6 +9348,7 @@ async function saveEditedProductInfo() {
             currentProduct.brand = brand;
             currentProduct.notes = notes;
             if (category) currentProduct.category = category;
+            _applyCanonicalFromSave(currentProduct, result);
             showToast(t('toast.product_updated'), 'success');
             // Refresh the action page with updated data
             showProductAction();
@@ -11484,10 +11500,13 @@ async function selectAIMatch(idx) {
                 unit: detected.unit,
                 default_quantity: detected.quantity,
                 notes: notesParts.join(' · '),
+                ingredients_text: p.ingredients || '',
+                ingredients_tags: p.ingredients_tags || [],
+                off_generic_name: p.generic_name || '',
             });
 
             if (saveResult.id) {
-                currentProduct = {
+                currentProduct = _applyCanonicalFromSave({
                     id: saveResult.id,
                     barcode: match.barcode,
                     name: p.name || match.name,
@@ -11497,7 +11516,10 @@ async function selectAIMatch(idx) {
                     unit: detected.unit,
                     default_quantity: detected.quantity,
                     weight_info: p.quantity_info || '',
-                };
+                    generic_name: p.generic_name || '',
+                    ingredients: p.ingredients || '',
+                    ingredients_tags: p.ingredients_tags || [],
+                }, saveResult);
                 showLoading(false);
                 showProductAction();
                 return;
@@ -11516,7 +11538,7 @@ async function selectAIMatch(idx) {
         });
 
         if (saveResult.id) {
-            currentProduct = { id: saveResult.id, barcode: match.barcode, name: match.name, brand: match.brand || '', category: match.category || '', image_url: match.image_url || '', unit: 'pz', default_quantity: 1 };
+            currentProduct = _applyCanonicalFromSave({ id: saveResult.id, barcode: match.barcode, name: match.name, brand: match.brand || '', category: match.category || '', image_url: match.image_url || '', unit: 'pz', default_quantity: 1 }, saveResult);
             showLoading(false);
             showProductAction();
         } else {
@@ -11545,7 +11567,7 @@ async function saveAIProductDirect() {
         });
 
         if (result.success || result.id) {
-            currentProduct = { id: result.id, name: id.name, brand: id.brand || '', category: id.category || '', unit: 'pz', default_quantity: 1 };
+            currentProduct = _applyCanonicalFromSave({ id: result.id, name: id.name, brand: id.brand || '', category: id.category || '', unit: 'pz', default_quantity: 1 }, result);
             showLoading(false);
             showToast(t('toast.product_saved'), 'success');
             showProductAction();

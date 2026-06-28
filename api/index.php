@@ -841,6 +841,12 @@ try {
         case 'ai_product_suggest':
             aiProductSuggest($db);
             break;
+        case 'product_ingredients':
+            productIngredients($db);
+            break;
+        case 'canonical_ingredients_assess':
+            canonicalIngredientsAssess($db);
+            break;
 
         // ===== INVENTORY =====
         case 'inventory_list':
@@ -2448,6 +2454,7 @@ function _parseOffProductJson(?string $json): ?array {
         $name = $latinName !== '' ? $latinName : (!empty($p['brands']) ? $p['brands'] : 'Prodotto sconosciuto');
     }
 
+    $genericName = $p['generic_name_it'] ?? $p['generic_name'] ?? '';
     $ingredients = $p['ingredients_text_it'] ?? $p['ingredients_text'] ?? '';
     $catHierarchy = $p['categories_hierarchy'] ?? [];
     $category = $p['categories_tags'][0] ?? (empty($catHierarchy) ? null : end($catHierarchy)) ?? $p['categories'] ?? '';
@@ -2474,12 +2481,14 @@ function _parseOffProductJson(?string $json): ?array {
 
     return [
         'name'          => $name,
+        'generic_name'  => $genericName,
         'brand'         => $p['brands'] ?? '',
         'category'      => $category,
         'image_url'     => $p['image_front_small_url'] ?? $p['image_url'] ?? '',
         'quantity_info' => $p['quantity'] ?? '',
         'nutriscore'    => $p['nutriscore_grade'] ?? '',
         'ingredients'   => $ingredients,
+        'ingredients_tags' => $p['ingredients_tags'] ?? [],
         'allergens'     => $allergens,
         'conservation'  => $p['conservation_conditions_it'] ?? $p['conservation_conditions'] ?? '',
         'origin'        => $p['origins_it'] ?? $p['origins'] ?? $p['manufacturing_places'] ?? '',
@@ -2555,7 +2564,7 @@ function barcodeResolveExternal(PDO $db, string $barcode): ?array {
         return $cached['found'] ? $cached : null;
     }
 
-    $offFields = 'product_name,product_name_it,generic_name,generic_name_it,brands,categories_tags,categories_hierarchy,categories,image_front_small_url,image_url,quantity,nutriscore_grade,ingredients_text_it,ingredients_text,allergens_tags,conservation_conditions_it,conservation_conditions,origins_it,origins,manufacturing_places,nova_group,ecoscore_grade,labels,stores,nutriments';
+    $offFields = 'product_name,product_name_it,generic_name,generic_name_it,brands,categories_tags,categories_hierarchy,categories,image_front_small_url,image_url,quantity,nutriscore_grade,ingredients_text_it,ingredients_text,ingredients_tags,allergens_tags,conservation_conditions_it,conservation_conditions,origins_it,origins,manufacturing_places,nova_group,ecoscore_grade,labels,stores,nutriments';
     $altFields = 'product_name,product_name_it,brands,categories_tags,categories_hierarchy,image_front_small_url,image_url,quantity';
     $priority = ['off_it', 'off_world', 'opf', 'obf', 'upc'];
 
@@ -2810,13 +2819,52 @@ function saveProduct(PDO $db): void {
         }
     }
 
-    $nutriJson = isset($input['nutriments']) ? json_encode($input['nutriments']) : null;
+    $existing = null;
+    if ($id) {
+        $existingStmt = $db->prepare("SELECT * FROM products WHERE id = ?");
+        $existingStmt->execute([$id]);
+        $existing = $existingStmt->fetch(PDO::FETCH_ASSOC) ?: null;
+        if (!$existing) {
+            http_response_code(404);
+            echo json_encode(['success' => false, 'error' => 'Product not found']);
+            return;
+        }
+    }
+
+    $ingredientsText = array_key_exists('ingredients_text', $input)
+        ? trim((string)$input['ingredients_text'])
+        : (array_key_exists('ingredients', $input)
+            ? trim((string)$input['ingredients'])
+            : (string)($existing['ingredients_text'] ?? ''));
+    $ingredientsTagsProvided = array_key_exists('ingredients_tags_json', $input) || array_key_exists('ingredients_tags', $input);
+    $ingredientsTagsJson = $existing['ingredients_tags_json'] ?? null;
+    if ($ingredientsTagsProvided) {
+        $tags = canonicalIngredientDecodeTags($input['ingredients_tags_json'] ?? ($input['ingredients_tags'] ?? []));
+        $ingredientsTagsJson = empty($tags) ? null : json_encode($tags, JSON_UNESCAPED_UNICODE);
+    }
+    $offGenericName = array_key_exists('off_generic_name', $input)
+        ? trim((string)$input['off_generic_name'])
+        : (array_key_exists('generic_name', $input)
+            ? trim((string)$input['generic_name'])
+            : (string)($existing['off_generic_name'] ?? ''));
+    $nutriJson = isset($input['nutriments'])
+        ? json_encode($input['nutriments'], JSON_UNESCAPED_UNICODE)
+        : ($existing['nutriments_json'] ?? null);
     $params = [
         $input['name'], $input['brand'] ?? '', $input['category'] ?? '',
         $input['image_url'] ?? '', $input['unit'] ?? 'pz',
         $input['default_quantity'] ?? 1, $input['notes'] ?? '',
         $barcode, $input['package_unit'] ?? '',
-        $shoppingName, $nutriJson,
+        $shoppingName, $nutriJson, $ingredientsText, $ingredientsTagsJson, $offGenericName,
+    ];
+    $canonicalProduct = [
+        'name' => $input['name'],
+        'brand' => $input['brand'] ?? '',
+        'category' => $input['category'] ?? '',
+        'shopping_name' => $shoppingName,
+        'ingredients_text' => $ingredientsText,
+        'ingredients_tags_json' => $ingredientsTagsJson,
+        'off_generic_name' => $offGenericName,
     ];
 
     try {
@@ -2824,37 +2872,61 @@ function saveProduct(PDO $db): void {
             $stmt = $db->prepare("
                 UPDATE products SET name=?, brand=?, category=?, image_url=?, unit=?,
                 default_quantity=?, notes=?, barcode=?, package_unit=?, shopping_name=?,
-                nutriments_json=?,
+                nutriments_json=?, ingredients_text=?, ingredients_tags_json=?, off_generic_name=?,
                 updated_at=CURRENT_TIMESTAMP WHERE id=?
             ");
             $stmt->execute([...$params, $id]);
-            echo json_encode(['success' => true, 'id' => $id, 'merged' => $merged]);
+            $canonical = canonicalIngredientSyncProduct($db, $id, $canonicalProduct);
+            echo json_encode(productSaveResponse($db, $id, $merged, $canonical), JSON_UNESCAPED_UNICODE);
             return;
         }
 
         $stmt = $db->prepare("
-            INSERT INTO products (barcode, name, brand, category, image_url, unit, default_quantity, notes, package_unit, shopping_name, nutriments_json)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO products (
+                barcode, name, brand, category, image_url, unit, default_quantity, notes,
+                package_unit, shopping_name, nutriments_json, ingredients_text,
+                ingredients_tags_json, off_generic_name
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ");
         $stmt->execute([
             $barcode, $input['name'], $input['brand'] ?? '', $input['category'] ?? '',
             $input['image_url'] ?? '', $input['unit'] ?? 'pz',
             $input['default_quantity'] ?? 1, $input['notes'] ?? '',
             $input['package_unit'] ?? '', $shoppingName, $nutriJson,
+            $ingredientsText, $ingredientsTagsJson, $offGenericName,
         ]);
-        echo json_encode(['success' => true, 'id' => (int)$db->lastInsertId(), 'merged' => false]);
+        $newId = (int)$db->lastInsertId();
+        $canonical = canonicalIngredientSyncProduct($db, $newId, $canonicalProduct);
+        echo json_encode(productSaveResponse($db, $newId, false, $canonical), JSON_UNESCAPED_UNICODE);
     } catch (PDOException $e) {
         if (str_contains($e->getMessage(), 'UNIQUE constraint failed: products.barcode') && $barcode !== null) {
             $owner = findDuplicateProductId($db, $input['name'], $input['brand'] ?? '', $barcode, null);
             if ($owner) {
+                $ownerExistingStmt = $db->prepare("SELECT * FROM products WHERE id = ?");
+                $ownerExistingStmt->execute([$owner]);
+                $ownerExisting = $ownerExistingStmt->fetch(PDO::FETCH_ASSOC) ?: [];
+                if (!$ingredientsTagsProvided) {
+                    $params[12] = $ownerExisting['ingredients_tags_json'] ?? null;
+                    $canonicalProduct['ingredients_tags_json'] = $params[12];
+                }
+                if (!array_key_exists('ingredients_text', $input) && !array_key_exists('ingredients', $input)) {
+                    $params[11] = $ownerExisting['ingredients_text'] ?? '';
+                    $canonicalProduct['ingredients_text'] = $params[11];
+                }
+                if (!array_key_exists('off_generic_name', $input) && !array_key_exists('generic_name', $input)) {
+                    $params[13] = $ownerExisting['off_generic_name'] ?? '';
+                    $canonicalProduct['off_generic_name'] = $params[13];
+                }
                 $stmt = $db->prepare("
                     UPDATE products SET name=?, brand=?, category=?, image_url=?, unit=?,
                     default_quantity=?, notes=?, barcode=?, package_unit=?, shopping_name=?,
-                    nutriments_json=?,
+                    nutriments_json=?, ingredients_text=?, ingredients_tags_json=?, off_generic_name=?,
                     updated_at=CURRENT_TIMESTAMP WHERE id=?
                 ");
                 $stmt->execute([...$params, $owner]);
-                echo json_encode(['success' => true, 'id' => $owner, 'merged' => true]);
+                $canonical = canonicalIngredientSyncProduct($db, $owner, $canonicalProduct);
+                echo json_encode(productSaveResponse($db, $owner, true, $canonical), JSON_UNESCAPED_UNICODE);
                 return;
             }
             http_response_code(409);
@@ -2870,6 +2942,16 @@ function saveProduct(PDO $db): void {
     }
 }
 
+function productSaveResponse(PDO $db, int $id, bool $merged, array $canonical): array {
+    return [
+        'success' => true,
+        'id' => $id,
+        'merged' => $merged,
+        'canonical_count' => $canonical['mapped'] ?? 0,
+        'canonical_ingredients' => canonicalIngredientRowsForProduct($db, $id),
+    ];
+}
+
 function getProduct(PDO $db): void {
     $id = $_GET['id'] ?? 0;
     $stmt = $db->prepare("SELECT * FROM products WHERE id = ?");
@@ -2877,6 +2959,7 @@ function getProduct(PDO $db): void {
     $product = $stmt->fetch();
     if ($product) {
         EverLog::debug('getProduct');
+        $product['canonical_ingredients'] = canonicalIngredientRowsForProduct($db, (int)$product['id']);
         echo json_encode(['success' => true, 'product' => $product]);
     } else {
         http_response_code(404);
@@ -2905,6 +2988,28 @@ function searchProducts(PDO $db): void {
     $like = "%{$q}%";
     $stmt->execute([$like, $like, $like]);
     echo json_encode(['products' => $stmt->fetchAll()]);
+}
+
+function productIngredients(PDO $db): void {
+    $productId = (int)($_GET['product_id'] ?? ($_GET['id'] ?? 0));
+    if ($productId <= 0) {
+        http_response_code(400);
+        echo json_encode(['success' => false, 'error' => 'product_id required']);
+        return;
+    }
+    echo json_encode([
+        'success' => true,
+        'product_id' => $productId,
+        'ingredients' => canonicalIngredientRowsForProduct($db, $productId),
+    ], JSON_UNESCAPED_UNICODE);
+}
+
+function canonicalIngredientsAssess(PDO $db): void {
+    $activeOnly = ($_GET['scope'] ?? 'active') !== 'all';
+    echo json_encode([
+        'success' => true,
+        'assessment' => canonicalIngredientAssess($db, $activeOnly),
+    ], JSON_UNESCAPED_UNICODE);
 }
 
 function searchInventoryProducts(PDO $db): void {
@@ -6721,6 +6826,12 @@ function recipeNormalizeName(string $name): string {
 /** Location / state flags appended to pantry lines sent to the recipe AI. */
 function recipePantryLineExtraFlags(array $item, ?int $expiryGroup = null): string {
     $flags = '';
+    if (!empty($item['canonical_aliases']) && is_array($item['canonical_aliases'])) {
+        $aliases = array_slice(array_values(array_filter($item['canonical_aliases'])), 0, 5);
+        if (!empty($aliases)) {
+            $flags .= ' [common: ' . implode(', ', $aliases) . ']';
+        }
+    }
     $loc = strtolower((string)($item['location'] ?? ''));
     if ($loc === 'freezer') {
         $flags .= ' [❄️ SURGELATO — in freezer, non fresco]';
@@ -6732,6 +6843,40 @@ function recipePantryLineExtraFlags(array $item, ?int $expiryGroup = null): stri
         $flags .= ' [APERTO]';
     }
     return $flags;
+}
+
+function recipeCanonicalAliasUsable(string $alias): bool {
+    $n = recipeNormalizeName($alias);
+    static $tooBroad = [
+        'beverage', 'condiment', 'dairy', 'dessert', 'flavoring', 'fruit', 'grain',
+        'legume', 'meat', 'nuts', 'oil', 'prepared meal', 'sauce', 'seafood', 'seed',
+        'spice', 'stock', 'sweetener', 'vegetable', 'vegetables',
+    ];
+    return $n !== '' && !in_array($n, $tooBroad, true);
+}
+
+function recipeAttachCanonicalAliases(PDO $db, array &$items): void {
+    $ids = [];
+    foreach ($items as $item) {
+        $pid = (int)($item['product_id'] ?? 0);
+        if ($pid > 0) {
+            $ids[] = $pid;
+        }
+    }
+    $aliasesByProduct = canonicalIngredientNamesByProduct($db, $ids, ['primary', 'broader']);
+    foreach ($items as &$item) {
+        $pid = (int)($item['product_id'] ?? 0);
+        $aliases = [];
+        foreach (($aliasesByProduct[$pid] ?? []) as $alias) {
+            if (recipeCanonicalAliasUsable($alias) && !in_array($alias, $aliases, true)) {
+                $aliases[] = $alias;
+            }
+        }
+        if (!empty($aliases)) {
+            $item['canonical_aliases'] = array_slice($aliases, 0, 6);
+        }
+    }
+    unset($item);
 }
 
 /** Always-available staples — never link to a pantry product row. */
@@ -6876,7 +7021,7 @@ function recipeEnrichIngredientsFromPantry(PDO $db, array &$ingredients, array $
         if ((float)($item['quantity'] ?? 0) <= 0) continue;
         $pid = (int)$item['product_id'];
         if (!isset($catalog[$pid])) {
-            $catalog[$pid] = ['name' => $item['name'], 'rows' => []];
+            $catalog[$pid] = ['name' => $item['name'], 'aliases' => $item['canonical_aliases'] ?? [], 'rows' => []];
         }
         $catalog[$pid]['rows'][] = $item;
     }
@@ -6892,6 +7037,9 @@ function recipeEnrichIngredientsFromPantry(PDO $db, array &$ingredients, array $
         $bestScore = 0;
         foreach ($catalog as $pid => $meta) {
             $score = recipeScorePantryMatch($ingName, $meta['name']);
+            foreach (($meta['aliases'] ?? []) as $alias) {
+                $score = max($score, recipeScorePantryMatch($ingName, $alias));
+            }
             if ($score > $bestScore) {
                 $bestScore = $score;
                 $bestPid = $pid;
@@ -6960,6 +7108,7 @@ function generateRecipe(PDO $db): void {
         ORDER BY days_left ASC
     ");
     $items = $stmt->fetchAll(PDO::FETCH_ASSOC);
+    recipeAttachCanonicalAliases($db, $items);
 
     if (empty($items)) {
         echo json_encode(['success' => false, 'error' => recipeText($lang, 'error_pantry_empty')]);
@@ -7474,6 +7623,7 @@ function recipeFromIngredient(PDO $db): void {
         ORDER BY days_left ASC
     ");
     $items = $stmt->fetchAll(PDO::FETCH_ASSOC);
+    recipeAttachCanonicalAliases($db, $items);
 
     // Build compact pantry text (same logic as generateRecipe)
     $ingredientLines = [];
@@ -7611,6 +7761,7 @@ function generateRecipeStream(PDO $db): void {
         ORDER BY days_left ASC
     ");
     $items = $stmt->fetchAll(PDO::FETCH_ASSOC);
+    recipeAttachCanonicalAliases($db, $items);
 
     if (empty($items)) { $send('error', ['error' => recipeText($lang, 'error_pantry_empty')]); return; }
 
