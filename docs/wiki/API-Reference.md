@@ -72,7 +72,12 @@ Delete a product by `id`.
 List all products.
 
 ### `products_search` — GET
-Search products by name (`?q=pasta`).
+Search products by product name, brand, barcode, category, and canonical taxonomy terms. Token matching is order-independent and requires every query token to appear somewhere in the searchable fields, so `fried tenders` can match `Fried Chicken Tenders`.
+
+| Param | Type | Description |
+|-------|------|-------------|
+| `q` | string | Search text |
+| `limit` | int | Optional result cap (default 20, max 100) |
 
 ### `product_ingredients` — GET
 Return canonical/common ingredient mappings for a product.
@@ -122,6 +127,14 @@ Add a product to inventory.
   "vacuum_sealed": false
 }
 ```
+
+### `inventory_search` — GET
+Search active inventory by product name, brand, barcode, category, and canonical taxonomy terms. Uses the same tokenized matching as `products_search`.
+
+| Param | Type | Description |
+|-------|------|-------------|
+| `q` | string | Search text |
+| `limit` | int | Optional result cap (default 3, max 50) |
 
 **Locations:** `dispensa`, `frigo`, `freezer`, `altro`
 

@@ -41,7 +41,7 @@ Add EverShelf pantry data as native HA sensor entities that update automatically
 | `/api/?action=ha_sensor&sensor=total` | Total pantry items | `sensor.evershelf_total` |
 | `/api/?action=ha_sensor&sensor=product` | Full inventory — all items with complete details | `sensor.evershelf_products` |
 | `/api/?action=ha_sensor&sensor=product&id=42` | Full details for inventory row `id=42` | — |
-| `/api/?action=ha_sensor&sensor=product&name=milk` | Full details for items whose name contains "milk" | — |
+| `/api/?action=ha_sensor&sensor=product&name=milk` | Full details for items matching product name or canonical taxonomy terms | — |
 | `/api/?action=ha_sensor&sensor=product&location=frigo` | All items in a specific location | — |
 
 ### Generate & Copy YAML

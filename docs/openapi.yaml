@@ -123,7 +123,7 @@ paths:
 
   /index.php?action=products_search:
     get:
-      summary: Search products by name
+      summary: Search products by name and canonical taxonomy
       tags: [Products]
       parameters:
         - name: q
@@ -131,9 +131,39 @@ paths:
           required: true
           schema:
             type: string
+          description: Tokenized search across product, brand, barcode, category, and canonical taxonomy terms.
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 20
+            maximum: 100
       responses:
         "200":
           description: Matching products
+
+  /index.php?action=inventory_search:
+    get:
+      summary: Search active inventory by name and canonical taxonomy
+      tags: [Inventory]
+      parameters:
+        - name: q
+          in: query
+          required: true
+          schema:
+            type: string
+          description: Tokenized search across active product, brand, barcode, category, and canonical taxonomy terms.
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 3
+            maximum: 50
+      responses:
+        "200":
+          description: Matching active inventory products
 
   /index.php?action=product_ingredients:
     get:

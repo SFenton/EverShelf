@@ -1566,7 +1566,20 @@ function haInventorySensor(PDO $db): void {
             $where  = "WHERE i.quantity > 0";
             $params = [];
             if ($invId > 0)      { $where .= " AND i.id = ?";                  $params[] = $invId; }
-            elseif ($search !== '') { $where .= " AND LOWER(p.name) LIKE ?";   $params[] = '%' . mb_strtolower($search, 'UTF-8') . '%'; }
+            elseif ($search !== '') {
+                $matchedRows = foodSearchFilterAndRank(foodSearchProductRows($db, true), $search, 500);
+                $matchedProductIds = array_values(array_unique(array_map(fn($row) => (int)$row['id'], $matchedRows)));
+                if (empty($matchedProductIds)) {
+                    echo json_encode([
+                        'state' => 0,
+                        'items' => [],
+                        'last_updated' => date('c'),
+                    ], JSON_UNESCAPED_UNICODE);
+                    return;
+                }
+                $where .= " AND p.id IN (" . implode(',', array_fill(0, count($matchedProductIds), '?')) . ")";
+                $params = array_merge($params, $matchedProductIds);
+            }
             if ($loc !== '')     { $where .= " AND i.location = ?";             $params[] = $loc; }
             $stmt = $db->prepare(
                 "SELECT " . _haProductSelect() . "
@@ -2972,13 +2985,160 @@ function listProducts(PDO $db): void {
     echo json_encode(['products' => $stmt->fetchAll()]);
 }
 
+function foodSearchTokens(string $q): array {
+    $normalized = canonicalIngredientNormalizeText($q);
+    $normalized = preg_replace('/\bbbq\b/u', 'barbecue', $normalized) ?? $normalized;
+    $tokens = preg_split('/\s+/u', $normalized, -1, PREG_SPLIT_NO_EMPTY) ?: [];
+    $stop = ['and','or','the','with','for','from','di','de','del','della','con','per','il','la','le','i','gli'];
+    return array_values(array_unique(array_filter($tokens, static function(string $token) use ($stop): bool {
+        return mb_strlen($token, 'UTF-8') >= 2 && !in_array($token, $stop, true);
+    })));
+}
+
+function foodSearchCanonicalSubquery(): string {
+    return "
+        SELECT
+            pi.product_id,
+            GROUP_CONCAT(ci.name, ' ') AS canonical_names,
+            GROUP_CONCAT(ci.slug, ' ') AS canonical_slugs,
+            GROUP_CONCAT(COALESCE(ci.category, ''), ' ') AS canonical_categories,
+            GROUP_CONCAT(pi.role || ':' || ci.name, ' ') AS canonical_roles,
+            GROUP_CONCAT(COALESCE(ci.external_ids_json, ''), ' ') AS canonical_external
+        FROM product_ingredients pi
+        JOIN canonical_ingredients ci ON ci.id = pi.ingredient_id
+        GROUP BY pi.product_id
+    ";
+}
+
+function foodSearchHaystack(array $row): string {
+    return canonicalIngredientNormalizeText(implode(' ', array_filter([
+        $row['name'] ?? '',
+        $row['brand'] ?? '',
+        $row['barcode'] ?? '',
+        $row['category'] ?? '',
+        $row['shopping_name'] ?? '',
+        $row['off_generic_name'] ?? '',
+        $row['ingredients_text'] ?? '',
+        $row['canonical_names'] ?? '',
+        $row['canonical_slugs'] ?? '',
+        $row['canonical_categories'] ?? '',
+        $row['canonical_external'] ?? '',
+    ], static fn($v) => trim((string)$v) !== '')));
+}
+
+function foodSearchScore(array $row, array $tokens, string $query): int {
+    $queryNorm = canonicalIngredientNormalizeText($query);
+    $nameNorm = canonicalIngredientNormalizeText((string)($row['name'] ?? ''));
+    $brandNorm = canonicalIngredientNormalizeText((string)($row['brand'] ?? ''));
+    $categoryNorm = canonicalIngredientNormalizeText((string)($row['category'] ?? ''));
+    $shoppingNorm = canonicalIngredientNormalizeText((string)($row['shopping_name'] ?? ''));
+    $canonicalNorm = canonicalIngredientNormalizeText(implode(' ', [
+        $row['canonical_names'] ?? '',
+        $row['canonical_slugs'] ?? '',
+        $row['canonical_categories'] ?? '',
+    ]));
+
+    $score = 0;
+    if ($queryNorm !== '' && $nameNorm === $queryNorm) $score += 1000;
+    if ($queryNorm !== '' && str_contains($nameNorm, $queryNorm)) $score += 350;
+    if ($queryNorm !== '' && str_contains($canonicalNorm, $queryNorm)) $score += 240;
+    if ($queryNorm !== '' && str_contains($brandNorm, $queryNorm)) $score += 120;
+    if ($queryNorm !== '' && str_contains($categoryNorm, $queryNorm)) $score += 80;
+
+    foreach ($tokens as $token) {
+        if (str_contains($nameNorm, $token)) $score += 40;
+        if (str_contains($canonicalNorm, $token)) $score += 32;
+        if (str_contains($shoppingNorm, $token)) $score += 24;
+        if (str_contains($brandNorm, $token)) $score += 12;
+        if (str_contains($categoryNorm, $token)) $score += 10;
+    }
+    return $score;
+}
+
+function foodSearchFilterAndRank(array $rows, string $q, int $limit): array {
+    $tokens = foodSearchTokens($q);
+    if (empty($tokens)) {
+        return array_slice($rows, 0, $limit);
+    }
+
+    $matches = [];
+    foreach ($rows as $row) {
+        $haystack = foodSearchHaystack($row);
+        $ok = true;
+        foreach ($tokens as $token) {
+            if (!str_contains($haystack, $token)) {
+                $ok = false;
+                break;
+            }
+        }
+        if (!$ok) {
+            continue;
+        }
+        $row['_search_score'] = foodSearchScore($row, $tokens, $q);
+        $matches[] = $row;
+    }
+
+    usort($matches, static function(array $a, array $b): int {
+        $score = ((int)($b['_search_score'] ?? 0)) <=> ((int)($a['_search_score'] ?? 0));
+        if ($score !== 0) return $score;
+        $stock = ((float)($b['total_qty'] ?? 0)) <=> ((float)($a['total_qty'] ?? 0));
+        if ($stock !== 0) return $stock;
+        return strcasecmp((string)($a['name'] ?? ''), (string)($b['name'] ?? ''));
+    });
+
+    return array_slice($matches, 0, $limit);
+}
+
+function foodSearchAttachCanonicalRows(PDO $db, array &$rows): void {
+    foreach ($rows as &$row) {
+        $row['canonical_ingredients'] = canonicalIngredientRowsForProduct($db, (int)$row['id']);
+        unset($row['canonical_names'], $row['canonical_slugs'], $row['canonical_categories'], $row['canonical_roles'], $row['canonical_external']);
+    }
+    unset($row);
+}
+
+function foodSearchProductRows(PDO $db, bool $activeOnly): array {
+    $canonicalSql = foodSearchCanonicalSubquery();
+    if ($activeOnly) {
+        $sql = "
+            SELECT
+                p.*,
+                SUM(i.quantity) AS total_qty,
+                GROUP_CONCAT(DISTINCT i.location) AS locations,
+                c.canonical_names, c.canonical_slugs, c.canonical_categories, c.canonical_roles, c.canonical_external
+            FROM inventory i
+            JOIN products p ON p.id = i.product_id
+            LEFT JOIN ({$canonicalSql}) c ON c.product_id = p.id
+            WHERE i.quantity > 0
+            GROUP BY p.id
+            ORDER BY p.name ASC
+        ";
+    } else {
+        $sql = "
+            SELECT
+                p.*,
+                COALESCE((SELECT SUM(i.quantity) FROM inventory i WHERE i.product_id = p.id AND i.quantity > 0), 0) AS total_qty,
+                (SELECT GROUP_CONCAT(DISTINCT i.location) FROM inventory i WHERE i.product_id = p.id AND i.quantity > 0) AS locations,
+                c.canonical_names, c.canonical_slugs, c.canonical_categories, c.canonical_roles, c.canonical_external
+            FROM products p
+            LEFT JOIN ({$canonicalSql}) c ON c.product_id = p.id
+            ORDER BY p.name ASC
+        ";
+    }
+    return $db->query($sql)->fetchAll(PDO::FETCH_ASSOC);
+}
+
 function searchProducts(PDO $db): void {
     EverLog::debug('listProducts');
-    $q = $_GET['q'] ?? '';
-    $stmt = $db->prepare("SELECT * FROM products WHERE name LIKE ? OR brand LIKE ? OR barcode LIKE ? ORDER BY name ASC LIMIT 20");
-    $like = "%{$q}%";
-    $stmt->execute([$like, $like, $like]);
-    echo json_encode(['products' => $stmt->fetchAll()]);
+    $q = trim((string)($_GET['q'] ?? ''));
+    $limit = (int)($_GET['limit'] ?? 20);
+    if ($limit < 1) $limit = 1;
+    if ($limit > 100) $limit = 100;
+
+    $rows = foodSearchProductRows($db, false);
+    $matches = $q === '' ? array_slice($rows, 0, $limit) : foodSearchFilterAndRank($rows, $q, $limit);
+    foodSearchAttachCanonicalRows($db, $matches);
+    echo json_encode(['products' => $matches], JSON_UNESCAPED_UNICODE);
 }
 
 function productIngredients(PDO $db): void {
@@ -3008,50 +3168,17 @@ function searchInventoryProducts(PDO $db): void {
     $q = trim((string)($_GET['q'] ?? ''));
     $limit = (int)($_GET['limit'] ?? 3);
     if ($limit < 1) $limit = 1;
-    if ($limit > 10) $limit = 10;
+    if ($limit > 50) $limit = 50;
 
     if ($q === '' || mb_strlen($q) < 2) {
         echo json_encode(['items' => []]);
         return;
     }
 
-    $like = "%{$q}%";
-    $prefix = mb_strtolower($q) . '%';
-    $exact = mb_strtolower($q);
-
-    $sql = "
-        SELECT
-            p.id,
-            p.name,
-            p.brand,
-            p.category,
-            p.barcode,
-            p.image_url,
-            p.unit,
-            p.default_quantity,
-            p.package_unit,
-            p.notes,
-            SUM(i.quantity) AS total_qty,
-            GROUP_CONCAT(DISTINCT i.location) AS locations
-        FROM inventory i
-        JOIN products p ON p.id = i.product_id
-        WHERE i.quantity > 0
-          AND (p.name LIKE ? OR p.brand LIKE ?)
-        GROUP BY p.id
-        ORDER BY
-            CASE
-                WHEN lower(p.name) = ? THEN 0
-                WHEN lower(p.name) LIKE ? THEN 1
-                ELSE 2
-            END,
-            total_qty DESC,
-            p.name ASC
-        LIMIT {$limit}
-    ";
-
-    $stmt = $db->prepare($sql);
-    $stmt->execute([$like, $like, $exact, $prefix]);
-    echo json_encode(['items' => $stmt->fetchAll()]);
+    $rows = foodSearchProductRows($db, true);
+    $matches = foodSearchFilterAndRank($rows, $q, $limit);
+    foodSearchAttachCanonicalRows($db, $matches);
+    echo json_encode(['items' => $matches], JSON_UNESCAPED_UNICODE);
 }
 
 /**
