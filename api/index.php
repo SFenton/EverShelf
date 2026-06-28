@@ -2857,16 +2857,6 @@ function saveProduct(PDO $db): void {
         $barcode, $input['package_unit'] ?? '',
         $shoppingName, $nutriJson, $ingredientsText, $ingredientsTagsJson, $offGenericName,
     ];
-    $canonicalProduct = [
-        'name' => $input['name'],
-        'brand' => $input['brand'] ?? '',
-        'category' => $input['category'] ?? '',
-        'shopping_name' => $shoppingName,
-        'ingredients_text' => $ingredientsText,
-        'ingredients_tags_json' => $ingredientsTagsJson,
-        'off_generic_name' => $offGenericName,
-    ];
-
     try {
         if ($id) {
             $stmt = $db->prepare("
@@ -2876,8 +2866,8 @@ function saveProduct(PDO $db): void {
                 updated_at=CURRENT_TIMESTAMP WHERE id=?
             ");
             $stmt->execute([...$params, $id]);
-            $canonical = canonicalIngredientSyncProduct($db, $id, $canonicalProduct);
-            echo json_encode(productSaveResponse($db, $id, $merged, $canonical), JSON_UNESCAPED_UNICODE);
+            $queue = canonicalIngredientEnqueueProduct($db, $id, $merged ? 'product_save_merge_update' : 'product_save_update');
+            echo json_encode(productSaveResponse($db, $id, $merged, $queue), JSON_UNESCAPED_UNICODE);
             return;
         }
 
@@ -2897,8 +2887,8 @@ function saveProduct(PDO $db): void {
             $ingredientsText, $ingredientsTagsJson, $offGenericName,
         ]);
         $newId = (int)$db->lastInsertId();
-        $canonical = canonicalIngredientSyncProduct($db, $newId, $canonicalProduct);
-        echo json_encode(productSaveResponse($db, $newId, false, $canonical), JSON_UNESCAPED_UNICODE);
+        $queue = canonicalIngredientEnqueueProduct($db, $newId, 'product_save_create');
+        echo json_encode(productSaveResponse($db, $newId, false, $queue), JSON_UNESCAPED_UNICODE);
     } catch (PDOException $e) {
         if (str_contains($e->getMessage(), 'UNIQUE constraint failed: products.barcode') && $barcode !== null) {
             $owner = findDuplicateProductId($db, $input['name'], $input['brand'] ?? '', $barcode, null);
@@ -2908,15 +2898,12 @@ function saveProduct(PDO $db): void {
                 $ownerExisting = $ownerExistingStmt->fetch(PDO::FETCH_ASSOC) ?: [];
                 if (!$ingredientsTagsProvided) {
                     $params[12] = $ownerExisting['ingredients_tags_json'] ?? null;
-                    $canonicalProduct['ingredients_tags_json'] = $params[12];
                 }
                 if (!array_key_exists('ingredients_text', $input) && !array_key_exists('ingredients', $input)) {
                     $params[11] = $ownerExisting['ingredients_text'] ?? '';
-                    $canonicalProduct['ingredients_text'] = $params[11];
                 }
                 if (!array_key_exists('off_generic_name', $input) && !array_key_exists('generic_name', $input)) {
                     $params[13] = $ownerExisting['off_generic_name'] ?? '';
-                    $canonicalProduct['off_generic_name'] = $params[13];
                 }
                 $stmt = $db->prepare("
                     UPDATE products SET name=?, brand=?, category=?, image_url=?, unit=?,
@@ -2925,8 +2912,8 @@ function saveProduct(PDO $db): void {
                     updated_at=CURRENT_TIMESTAMP WHERE id=?
                 ");
                 $stmt->execute([...$params, $owner]);
-                $canonical = canonicalIngredientSyncProduct($db, $owner, $canonicalProduct);
-                echo json_encode(productSaveResponse($db, $owner, true, $canonical), JSON_UNESCAPED_UNICODE);
+                $queue = canonicalIngredientEnqueueProduct($db, $owner, 'product_save_barcode_merge');
+                echo json_encode(productSaveResponse($db, $owner, true, $queue), JSON_UNESCAPED_UNICODE);
                 return;
             }
             http_response_code(409);
@@ -2942,13 +2929,17 @@ function saveProduct(PDO $db): void {
     }
 }
 
-function productSaveResponse(PDO $db, int $id, bool $merged, array $canonical): array {
+function productSaveResponse(PDO $db, int $id, bool $merged, array $queue): array {
+    $canonicalRows = canonicalIngredientRowsForProduct($db, $id);
     return [
         'success' => true,
         'id' => $id,
         'merged' => $merged,
-        'canonical_count' => $canonical['mapped'] ?? 0,
-        'canonical_ingredients' => canonicalIngredientRowsForProduct($db, $id),
+        'canonical_queued' => !empty($queue['queued']),
+        'canonical_queue_id' => (int)($queue['queue_id'] ?? 0),
+        'canonical_queue_status' => $queue['status'] ?? 'pending',
+        'canonical_count' => count($canonicalRows),
+        'canonical_ingredients' => $canonicalRows,
     ];
 }
 

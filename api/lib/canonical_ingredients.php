@@ -9,6 +9,7 @@
 
 const CANONICAL_INGREDIENT_RULESET_VERSION = 'evershelf_common_ingredients_v1';
 const FOODON_LOOKUP_CACHE_VERSION = 'foodon_ols4_v5';
+const USDA_FDC_LOOKUP_CACHE_VERSION = 'usda_fdc_v5';
 
 function canonicalIngredientNormalizeText(string $text): string {
     $text = mb_strtolower(trim($text), 'UTF-8');
@@ -702,6 +703,7 @@ function canonicalIngredientSyncProduct(PDO $db, int $productId, ?array $product
 
     $mappings = canonicalIngredientInferProduct($product);
     $mappings = canonicalIngredientEnrichMappingsWithFoodOn($mappings);
+    $mappings = canonicalIngredientEnrichMappingsWithUsda($mappings);
     $db->beginTransaction();
     try {
         $db->prepare("DELETE FROM product_ingredients WHERE product_id = ? AND source != 'manual'")
@@ -735,6 +737,123 @@ function canonicalIngredientSyncProduct(PDO $db, int $productId, ?array $product
     }
 
     return ['product_id' => $productId, 'mapped' => count($mappings), 'mappings' => $mappings];
+}
+
+function canonicalIngredientEnqueueProduct(PDO $db, int $productId, string $reason = 'product_save'): array {
+    if ($productId <= 0) {
+        return ['queued' => false, 'status' => 'invalid_product'];
+    }
+    $stmt = $db->prepare("
+        INSERT INTO canonical_processing_queue (product_id, reason, status, attempts, last_error, requested_at, started_at, processed_at, updated_at)
+        VALUES (?, ?, 'pending', 0, '', CURRENT_TIMESTAMP, NULL, NULL, CURRENT_TIMESTAMP)
+        ON CONFLICT(product_id) DO UPDATE SET
+            reason = excluded.reason,
+            status = 'pending',
+            attempts = 0,
+            last_error = '',
+            requested_at = CURRENT_TIMESTAMP,
+            started_at = NULL,
+            processed_at = NULL,
+            updated_at = CURRENT_TIMESTAMP
+    ");
+    $stmt->execute([$productId, mb_substr($reason, 0, 80, 'UTF-8')]);
+
+    $status = canonicalIngredientQueueStatusForProduct($db, $productId);
+    return [
+        'queued' => true,
+        'queue_id' => (int)($status['id'] ?? 0),
+        'status' => $status['status'] ?? 'pending',
+        'reason' => $reason,
+    ];
+}
+
+function canonicalIngredientQueueStatusForProduct(PDO $db, int $productId): ?array {
+    $stmt = $db->prepare("SELECT * FROM canonical_processing_queue WHERE product_id = ?");
+    $stmt->execute([$productId]);
+    $row = $stmt->fetch(PDO::FETCH_ASSOC);
+    return $row ?: null;
+}
+
+function canonicalIngredientQueueStats(PDO $db): array {
+    $stats = ['pending' => 0, 'in_progress' => 0, 'done' => 0, 'failed' => 0];
+    foreach ($db->query("SELECT status, COUNT(*) AS c FROM canonical_processing_queue GROUP BY status") as $row) {
+        $stats[$row['status']] = (int)$row['c'];
+    }
+    return $stats;
+}
+
+function canonicalIngredientProcessQueue(PDO $db, int $limit = 5, int $maxAttempts = 3): array {
+    $limit = max(0, min(50, $limit));
+    if ($limit === 0) {
+        return [
+            'processed' => 0,
+            'succeeded' => 0,
+            'failed' => 0,
+            'pending' => canonicalIngredientQueueStats($db)['pending'] ?? 0,
+            'items' => [],
+        ];
+    }
+
+    $maxAttempts = max(1, $maxAttempts);
+    $stmt = $db->prepare("
+        SELECT q.id, q.product_id, q.attempts
+        FROM canonical_processing_queue q
+        JOIN products p ON p.id = q.product_id
+        WHERE q.status IN ('pending', 'failed')
+          AND q.attempts < ?
+        ORDER BY q.requested_at ASC, q.id ASC
+        LIMIT {$limit}
+    ");
+    $stmt->execute([$maxAttempts]);
+    $queueRows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+    $processed = 0;
+    $succeeded = 0;
+    $failed = 0;
+    $items = [];
+    foreach ($queueRows as $queueRow) {
+        $queueId = (int)$queueRow['id'];
+        $productId = (int)$queueRow['product_id'];
+        $processed++;
+        $db->prepare("
+            UPDATE canonical_processing_queue
+            SET status = 'in_progress', attempts = attempts + 1, started_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+        ")->execute([$queueId]);
+
+        try {
+            $result = canonicalIngredientSyncProduct($db, $productId);
+            $mapped = (int)($result['mapped'] ?? 0);
+            $db->prepare("
+                UPDATE canonical_processing_queue
+                SET status = 'done', processed_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP, last_error = ''
+                WHERE id = ?
+            ")->execute([$queueId]);
+            $succeeded++;
+            $items[] = ['product_id' => $productId, 'status' => 'done', 'mapped' => $mapped];
+        } catch (Throwable $e) {
+            $message = mb_substr($e->getMessage(), 0, 500, 'UTF-8');
+            $db->prepare("
+                UPDATE canonical_processing_queue
+                SET status = 'failed', last_error = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+            ")->execute([$message, $queueId]);
+            if (class_exists('EverLog', false)) {
+                EverLog::exception($e, 'canonical_queue');
+            }
+            $failed++;
+            $items[] = ['product_id' => $productId, 'status' => 'failed', 'error' => $message];
+        }
+    }
+
+    $stats = canonicalIngredientQueueStats($db);
+    return [
+        'processed' => $processed,
+        'succeeded' => $succeeded,
+        'failed' => $failed,
+        'pending' => $stats['pending'] ?? 0,
+        'items' => $items,
+    ];
 }
 
 function canonicalIngredientRowsForProduct(PDO $db, int $productId): array {
@@ -867,6 +986,397 @@ function canonicalIngredientFoodOnStats(PDO $db, bool $activeOnly = true): array
     ];
 }
 
+function canonicalIngredientUsdaEnabled(): bool {
+    $enabled = canonicalIngredientEnvBool('USDA_FDC_ENABLED', true);
+    $apiKey = trim((string)(function_exists('env') ? env('USDA_FDC_API_KEY', '') : ''));
+    return $enabled && $apiKey !== '';
+}
+
+function canonicalIngredientUsdaLookupOnSave(): bool {
+    return canonicalIngredientEnvBool('USDA_FDC_LOOKUP_ON_SAVE', true);
+}
+
+function canonicalIngredientUsdaCacheLoad(): array {
+    static $cache = null;
+    if (is_array($cache)) {
+        return $cache;
+    }
+    $cache = [];
+    $path = defined('USDA_FDC_CACHE_PATH') ? USDA_FDC_CACHE_PATH : (__DIR__ . '/../../data/usda_fdc_lookup_cache.json');
+    if (is_file($path)) {
+        $raw = @file_get_contents($path);
+        $decoded = $raw ? json_decode($raw, true) : null;
+        if (is_array($decoded)) {
+            $cache = $decoded;
+        }
+    }
+    return $cache;
+}
+
+function canonicalIngredientUsdaCacheStore(string $key, array $entry): void {
+    $cache = canonicalIngredientUsdaCacheLoad();
+    $cache[$key] = $entry;
+    $path = defined('USDA_FDC_CACHE_PATH') ? USDA_FDC_CACHE_PATH : (__DIR__ . '/../../data/usda_fdc_lookup_cache.json');
+    $dir = dirname($path);
+    if (!is_dir($dir)) {
+        @mkdir($dir, 0775, true);
+    }
+    $tmp = $path . '.tmp';
+    @file_put_contents($tmp, json_encode($cache, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE), LOCK_EX);
+    if (is_file($tmp)) {
+        @rename($tmp, $path);
+    }
+}
+
+function canonicalIngredientUsdaPreferredQuery(string $slug, string $name): string {
+    static $queries = [
+        'arborio-rice' => 'rice white short grain raw',
+        'rice' => 'rice white raw',
+        'grain' => 'rice white raw',
+        'chicken-breast' => 'chicken breast raw',
+        'chicken' => 'chicken raw',
+        'chicken-stock' => 'chicken broth',
+        'beef-stock' => 'beef broth',
+        'bacon' => 'pork cured bacon',
+        'black-beans' => 'beans black mature seeds raw',
+        'mustard' => 'mustard prepared yellow',
+        'brown-mustard' => 'mustard prepared yellow',
+        'spicy-brown-mustard' => 'mustard prepared yellow',
+        'yellow-mustard' => 'mustard prepared yellow',
+        'heavy-cream' => 'cream heavy',
+        'cream' => 'cream heavy',
+        'cream-cheese' => 'cream cheese',
+        'butter' => 'butter salted',
+        'carrot' => 'carrots raw',
+        'tomato' => 'tomatoes raw',
+        'tomato-sauce' => 'sauce tomato canned',
+        'marinara-sauce' => 'sauce marinara',
+        'barbecue-sauce' => 'sauce barbecue',
+        'soy-sauce' => 'soy sauce',
+        'bread' => 'bread white commercially prepared',
+        'brown-sugar' => 'sugars brown',
+        'buns' => 'hamburger bun plain',
+        'cake' => 'cake yellow commercially prepared',
+        'coffee' => 'coffee brewed',
+        'coffee-creamer' => 'coffee creamer',
+        'creamer' => 'coffee creamer',
+        'cucumber' => 'cucumber raw',
+        'almonds' => 'almonds raw',
+        'peanuts' => 'peanuts raw',
+        'honey' => 'honey',
+        'maple-syrup' => 'syrup maple',
+        'molasses' => 'molasses',
+        'baking-powder' => 'baking powder',
+        'baking-soda' => 'baking soda',
+        'corn-starch' => 'cornstarch',
+        'gelatin' => 'gelatin dry powder',
+        'coconut-milk' => 'coconut milk',
+        'sesame-oil' => 'oil sesame',
+        'sesame-seeds' => 'seeds sesame',
+        'vinegar' => 'vinegar',
+        'lime-juice' => 'lime juice',
+        'garlic' => 'garlic raw',
+        'ginger' => 'ginger root raw',
+        'spinach' => 'spinach raw',
+        'cauliflower' => 'cauliflower raw',
+        'green-onion' => 'onions spring raw',
+        'onion' => 'onions raw',
+        'pineapple' => 'pineapple raw',
+        'mozzarella' => 'cheese mozzarella',
+        'parmesan' => 'cheese parmesan',
+        'swiss-cheese' => 'cheese swiss',
+        'cheese' => 'cheese',
+        'milk' => 'milk whole',
+        'evaporated-milk' => 'milk evaporated',
+        'condensed-milk' => 'milk condensed sweetened',
+        'sour-cream' => 'sour cream',
+        'half-and-half' => 'cream half and half',
+        'soda' => 'soft drink cola',
+        'sports-drink' => 'sports drink',
+        'oyster' => 'oyster raw',
+        'pizza' => 'pizza cheese regular crust',
+    ];
+    return $queries[$slug] ?? $name;
+}
+
+function canonicalIngredientUsdaSkipSlug(string $slug): bool {
+    static $skip = [
+        // USDA FDC is useful for concrete food/nutrition references, not broad classes.
+        'alcoholic-beverage' => true,
+        'beans' => true,
+        'beef' => true,
+        'beverage' => true,
+        'buns' => true,
+        'cake' => true,
+        'chicken' => true,
+        'condiment' => true,
+        'dairy' => true,
+        'dessert' => true,
+        'flavoring' => true,
+        'fruit' => true,
+        'grain' => true,
+        'meat' => true,
+        'milk-alternative' => true,
+        'nuts' => true,
+        'oil' => true,
+        'prepared-meal' => true,
+        'poultry' => true,
+        'salad' => true,
+        'sauce' => true,
+        'seafood' => true,
+        'seed' => true,
+        'seasoning' => true,
+        'sesame' => true,
+        'spice' => true,
+        'soup' => true,
+        'spread' => true,
+        'starch' => true,
+        'stock' => true,
+        'sweetener' => true,
+        'tamarind' => true,
+        'vegetable' => true,
+        'vegetables' => true,
+        'wheat' => true,
+    ];
+    return isset($skip[$slug]);
+}
+
+function canonicalIngredientUsdaNormalizeText(string $text): string {
+    $text = canonicalIngredientNormalizeText($text);
+    $text = preg_replace('/\b(raw|cooked|boiled|canned|dry|powder|prepared|yellow|white|whole|salted|unsalted)\b/u', ' ', $text) ?? $text;
+    return trim(preg_replace('/\s+/u', ' ', $text) ?? $text);
+}
+
+function canonicalIngredientUsdaSelectBest(array $foods, string $name, string $query): ?array {
+    $target = canonicalIngredientUsdaNormalizeText($name);
+    $queryNorm = canonicalIngredientUsdaNormalizeText($query);
+    $best = null;
+    $bestScore = 0;
+    foreach ($foods as $food) {
+        $description = (string)($food['description'] ?? '');
+        $fdcId = (int)($food['fdcId'] ?? 0);
+        if ($description === '' || $fdcId <= 0) {
+            continue;
+        }
+        $descNorm = canonicalIngredientUsdaNormalizeText($description);
+        $rawDescNorm = canonicalIngredientNormalizeText($description);
+        $dataType = (string)($food['dataType'] ?? '');
+        $score = 0;
+        if ($descNorm === $target) $score += 70;
+        if ($descNorm === $queryNorm) $score += 70;
+        if ($target !== '' && str_contains($descNorm, $target)) $score += 35;
+        if ($queryNorm !== '' && str_contains($descNorm, $queryNorm)) $score += 35;
+        if ($descNorm !== '' && str_contains($target, $descNorm)) $score += 20;
+        if ($dataType === 'Foundation') $score += 14;
+        if ($dataType === 'SR Legacy') $score += 10;
+        if (str_contains($rawDescNorm, 'babyfood')) $score -= 25;
+        if (str_contains($rawDescNorm, 'snacks')) $score -= 20;
+        if (str_contains($rawDescNorm, 'toasted') && !str_contains($queryNorm, 'toasted')) $score -= 18;
+        if (str_contains($rawDescNorm, 'restaurant') && !str_contains($queryNorm, 'restaurant')) $score -= 8;
+        if (str_contains($rawDescNorm, 'breaded')) $score -= 15;
+        if (str_contains($rawDescNorm, 'with ') && !str_contains($queryNorm, 'with ')) $score -= 8;
+        if ($score > $bestScore) {
+            $bestScore = $score;
+            $best = $food + ['_match_score' => $score];
+        }
+    }
+    return $bestScore >= 35 ? $best : null;
+}
+
+function canonicalIngredientUsdaThrottle(): void {
+    static $lastRequestAt = 0.0;
+    $intervalMs = max(0, (int)(function_exists('env') ? env('USDA_FDC_MIN_REQUEST_INTERVAL_MS', '4000') : '4000'));
+    if ($intervalMs <= 0) {
+        return;
+    }
+    $now = microtime(true);
+    $elapsedMs = ($now - $lastRequestAt) * 1000;
+    if ($lastRequestAt > 0 && $elapsedMs < $intervalMs) {
+        usleep((int)(($intervalMs - $elapsedMs) * 1000));
+    }
+    $lastRequestAt = microtime(true);
+}
+
+function canonicalIngredientUsdaLookup(string $name, string $slug = '', string $category = ''): ?array {
+    static $circuitUntil = 0;
+    if (!canonicalIngredientUsdaEnabled() || trim($name) === '' || time() < $circuitUntil) {
+        return null;
+    }
+
+    $slug = $slug !== '' ? $slug : canonicalIngredientSlug($name);
+    if (canonicalIngredientUsdaSkipSlug($slug)) {
+        return null;
+    }
+    $query = canonicalIngredientUsdaPreferredQuery($slug, $name);
+    $cacheKey = USDA_FDC_LOOKUP_CACHE_VERSION . ':' . canonicalIngredientSlug($query);
+    $ttlDays = max(1, (int)(function_exists('env') ? env('USDA_FDC_CACHE_TTL_DAYS', '30') : '30'));
+    $ttlSeconds = $ttlDays * 86400;
+    $cache = canonicalIngredientUsdaCacheLoad();
+    $cached = $cache[$cacheKey] ?? null;
+    if (is_array($cached) && isset($cached['ts']) && (time() - (int)$cached['ts']) < $ttlSeconds) {
+        return !empty($cached['found']) && is_array($cached['usda_fdc'] ?? null) ? $cached['usda_fdc'] : null;
+    }
+
+    canonicalIngredientUsdaThrottle();
+    $apiKey = trim((string)env('USDA_FDC_API_KEY', ''));
+    $timeout = max(2, (int)env('USDA_FDC_TIMEOUT_SEC', '8'));
+    $userAgent = env('USDA_FDC_USER_AGENT', 'EverShelf/1.0 (USDA FDC integration; https://github.com/SFenton/EverShelf)');
+    $url = 'https://api.nal.usda.gov/fdc/v1/foods/search?' . http_build_query([
+        'api_key' => $apiKey,
+        'query' => $query,
+        'pageSize' => 8,
+        'requireAllWords' => 'false',
+    ]) . '&dataType=Foundation&dataType=SR%20Legacy';
+
+    $ch = curl_init($url);
+    curl_setopt_array($ch, [
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_TIMEOUT => $timeout,
+        CURLOPT_CONNECTTIMEOUT => min(3, $timeout),
+        CURLOPT_FOLLOWLOCATION => false,
+        CURLOPT_HTTPHEADER => [
+            'Accept: application/json',
+            'Accept-Encoding: gzip, deflate',
+            'User-Agent: ' . $userAgent,
+        ],
+        CURLOPT_ENCODING => '',
+        CURLOPT_HEADER => true,
+    ]);
+    $response = curl_exec($ch);
+    $code = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    $headerSize = (int)curl_getinfo($ch, CURLINFO_HEADER_SIZE);
+    $err = curl_error($ch);
+    curl_close($ch);
+
+    $headers = is_string($response) ? substr($response, 0, $headerSize) : '';
+    $body = is_string($response) ? substr($response, $headerSize) : '';
+    if ($response === false || $code < 200 || $code >= 300) {
+        if ($code === 429) {
+            $retrySeconds = 3600;
+            if (preg_match('/Retry-After:\s*(\d+)/i', $headers, $m)) {
+                $retrySeconds = max(60, (int)$m[1]);
+            }
+            $circuitUntil = time() + $retrySeconds;
+        }
+        if (class_exists('EverLog', false)) {
+            EverLog::warn('USDA FDC lookup failed', ['query' => $query, 'http_code' => $code, 'error' => $err]);
+        }
+        return null;
+    }
+
+    $decoded = json_decode($body, true);
+    $foods = $decoded['foods'] ?? [];
+    $best = is_array($foods) ? canonicalIngredientUsdaSelectBest($foods, $name, $query) : null;
+    if (!$best) {
+        canonicalIngredientUsdaCacheStore($cacheKey, ['ts' => time(), 'found' => false, 'query' => $query]);
+        return null;
+    }
+
+    $fdc = [
+        'fdc_id' => (int)$best['fdcId'],
+        'description' => $best['description'],
+        'data_type' => $best['dataType'] ?? '',
+        'food_category' => $best['foodCategory'] ?? '',
+        'query' => $query,
+        'source' => 'usda_fdc',
+        'match_score' => (int)$best['_match_score'],
+    ];
+    canonicalIngredientUsdaCacheStore($cacheKey, ['ts' => time(), 'found' => true, 'query' => $query, 'usda_fdc' => $fdc]);
+    return $fdc;
+}
+
+function canonicalIngredientEnrichMappingsWithUsda(array $mappings): array {
+    if (!canonicalIngredientUsdaLookupOnSave()) {
+        return $mappings;
+    }
+    foreach ($mappings as &$mapping) {
+        if (!empty($mapping['external_ids']['usda_fdc'])) {
+            continue;
+        }
+        $fdc = canonicalIngredientUsdaLookup(
+            (string)($mapping['name'] ?? ''),
+            (string)($mapping['slug'] ?? ''),
+            (string)($mapping['category'] ?? '')
+        );
+        if ($fdc) {
+            $mapping['external_ids']['usda_fdc'] = $fdc;
+        }
+    }
+    unset($mapping);
+    return $mappings;
+}
+
+function canonicalIngredientEnrichUsdaTable(PDO $db, bool $missingOnly = true, int $limit = 0): array {
+    $where = $missingOnly
+        ? "WHERE external_ids_json IS NULL OR external_ids_json NOT LIKE '%\"usda_fdc\"%'"
+        : "";
+    $sql = "SELECT id, slug, name, category, external_ids_json FROM canonical_ingredients $where ORDER BY name ASC";
+    if ($limit > 0) {
+        $sql .= " LIMIT " . (int)$limit;
+    }
+    $rows = $db->query($sql)->fetchAll(PDO::FETCH_ASSOC);
+    $updated = 0;
+    $misses = 0;
+    $examples = [];
+    $stmt = $db->prepare("UPDATE canonical_ingredients SET external_ids_json = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?");
+    foreach ($rows as $row) {
+        $fdc = canonicalIngredientUsdaLookup((string)$row['name'], (string)$row['slug'], (string)($row['category'] ?? ''));
+        if (!$fdc) {
+            $misses++;
+            continue;
+        }
+        $externalIds = canonicalIngredientMergeExternalIds($row['external_ids_json'] ?? null, ['usda_fdc' => $fdc]);
+        $stmt->execute([json_encode($externalIds, JSON_UNESCAPED_UNICODE), (int)$row['id']]);
+        $updated++;
+        if (count($examples) < 20) {
+            $examples[] = [
+                'name' => $row['name'],
+                'fdc_id' => $fdc['fdc_id'] ?? 0,
+                'description' => $fdc['description'] ?? '',
+                'data_type' => $fdc['data_type'] ?? '',
+                'query' => $fdc['query'] ?? '',
+            ];
+        }
+    }
+
+    return [
+        'processed' => count($rows),
+        'updated' => $updated,
+        'misses' => $misses,
+        'examples' => $examples,
+    ];
+}
+
+function canonicalIngredientUsdaStats(PDO $db, bool $activeOnly = true): array {
+    $termsTotal = (int)$db->query("SELECT COUNT(*) FROM canonical_ingredients")->fetchColumn();
+    $termsWithUsda = (int)$db->query("SELECT COUNT(*) FROM canonical_ingredients WHERE external_ids_json LIKE '%\"usda_fdc\"%'")->fetchColumn();
+    $productWhere = $activeOnly
+        ? "AND EXISTS (SELECT 1 FROM inventory i WHERE i.product_id = p.id AND i.quantity > 0)"
+        : "";
+    $productsWithPrimaryUsda = (int)$db->query("
+        SELECT COUNT(DISTINCT p.id)
+        FROM products p
+        JOIN product_ingredients pi ON pi.product_id = p.id AND pi.role = 'primary'
+        JOIN canonical_ingredients ci ON ci.id = pi.ingredient_id
+        WHERE ci.external_ids_json LIKE '%\"usda_fdc\"%' $productWhere
+    ")->fetchColumn();
+    $productsWithAnyUsda = (int)$db->query("
+        SELECT COUNT(DISTINCT p.id)
+        FROM products p
+        JOIN product_ingredients pi ON pi.product_id = p.id
+        JOIN canonical_ingredients ci ON ci.id = pi.ingredient_id
+        WHERE ci.external_ids_json LIKE '%\"usda_fdc\"%' $productWhere
+    ")->fetchColumn();
+    return [
+        'canonical_terms_total' => $termsTotal,
+        'canonical_terms_with_usda_fdc' => $termsWithUsda,
+        'canonical_terms_usda_fdc_pct' => $termsTotal > 0 ? round(($termsWithUsda / $termsTotal) * 100, 1) : 0,
+        'products_with_primary_usda_fdc' => $productsWithPrimaryUsda,
+        'products_with_any_usda_fdc' => $productsWithAnyUsda,
+        'enabled' => canonicalIngredientUsdaEnabled(),
+    ];
+}
+
 function canonicalIngredientAssess(PDO $db, bool $activeOnly = true): array {
     $where = $activeOnly
         ? "WHERE EXISTS (SELECT 1 FROM inventory i WHERE i.product_id = p.id AND i.quantity > 0)"
@@ -935,6 +1445,8 @@ function canonicalIngredientAssess(PDO $db, bool $activeOnly = true): array {
         'products_with_primary' => $matched,
         'coverage_pct' => $total > 0 ? round(($matched / $total) * 100, 1) : 0,
         'foodon' => canonicalIngredientFoodOnStats($db, $activeOnly),
+        'usda_fdc' => canonicalIngredientUsdaStats($db, $activeOnly),
+        'queue' => canonicalIngredientQueueStats($db),
         'role_counts' => $roleCounts,
         'source_counts' => $sourceCounts,
         'examples' => $examples,

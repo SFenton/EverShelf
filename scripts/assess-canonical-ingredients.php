@@ -26,6 +26,9 @@ echo 'Coverage: ' . $assessment['products_with_primary'] . '/' . $assessment['pr
     . ' (' . $assessment['coverage_pct'] . "%)\n";
 echo 'Roles: ' . json_encode($assessment['role_counts'], JSON_UNESCAPED_UNICODE) . PHP_EOL;
 echo 'Sources: ' . json_encode($assessment['source_counts'], JSON_UNESCAPED_UNICODE) . PHP_EOL;
+echo 'FoodOn: ' . json_encode($assessment['foodon'] ?? [], JSON_UNESCAPED_UNICODE) . PHP_EOL;
+echo 'USDA FDC: ' . json_encode($assessment['usda_fdc'] ?? [], JSON_UNESCAPED_UNICODE) . PHP_EOL;
+echo 'Queue: ' . json_encode($assessment['queue'] ?? [], JSON_UNESCAPED_UNICODE) . PHP_EOL;
 
 echo PHP_EOL . "Examples\n";
 foreach (array_slice($assessment['examples'], 0, 12) as $row) {

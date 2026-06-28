@@ -83,7 +83,8 @@ Connect your pantry to your smart home in minutes — no YAML, no manual sensor 
 ### 📦 Inventory Management
 - **Export inventory** — Download the full inventory as a UTF-8 CSV (Excel-compatible) or open a print-ready page to save as PDF; export button always visible in the inventory page header
 - **Barcode scanning** — Scan products with your phone camera using QuaggaJS; last 20 scanned products saved as tappable chips so you can re-select them without rescanning
-- **Canonical ingredients** — Products are mapped to common ingredient aliases and broader terms (e.g. "Chicken breast" → "Chicken") with optional FoodOn IDs for better grouping and recipe matching
+- **Canonical ingredients** — Products are mapped to common ingredient aliases and broader terms (e.g. "Chicken breast" → "Chicken") with optional FoodOn and USDA FoodData Central IDs for better grouping and recipe matching
+- **Queued enrichment** — Product saves return immediately; canonical/FoodOn/USDA post-processing runs from cron or the CLI worker so Home Assistant/API additions stay responsive
 - **AI identification** — Take a photo and let Google Gemini identify the product, with suggestions from your existing inventory; gracefully shows a friendly message when AI quota is exhausted instead of a raw API error
 - **Smart locations** — Track items across Pantry, Fridge, Freezer, and custom locations
 - **Expiry tracking** — Automatic shelf-life estimation based on product type and storage

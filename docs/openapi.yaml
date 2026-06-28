@@ -666,7 +666,28 @@ components:
           type: string
         external_ids:
           type: object
-          description: External ontology links, e.g. FoodOn IDs from EBI OLS
+          description: External ontology/reference links, e.g. FoodOn IDs from EBI OLS and USDA FoodData Central IDs
+
+    ProductSaveResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+        id:
+          type: integer
+        merged:
+          type: boolean
+        canonical_queued:
+          type: boolean
+        canonical_queue_status:
+          type: string
+          enum: [pending, in_progress, done, failed]
+        canonical_count:
+          type: integer
+        canonical_ingredients:
+          type: array
+          items:
+            $ref: "#/components/schemas/CanonicalIngredientMapping"
 
     InventoryItem:
       type: object

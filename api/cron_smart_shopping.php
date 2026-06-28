@@ -102,6 +102,23 @@ try {
         echo '[' . date('Y-m-d H:i:s') . '] Shelf life pre-warm warning: ' . $pe->getMessage() . "\n";
     }
 
+    // ── Canonical ingredient post-processing ───────────────────────────────
+    // Product saves are intentionally fast; canonical/FoodOn/USDA enrichment is
+    // picked up here in small batches so HA/API callers don't wait on taxonomy IO.
+    try {
+        $queueLimit = max(0, (int)env('CANONICAL_QUEUE_CRON_LIMIT', '3'));
+        $maxAttempts = max(1, (int)env('CANONICAL_QUEUE_MAX_ATTEMPTS', '3'));
+        $queueResult = canonicalIngredientProcessQueue($db, $queueLimit, $maxAttempts);
+        if (($queueResult['processed'] ?? 0) > 0) {
+            echo '[' . date('Y-m-d H:i:s') . '] Canonical queue — processed: ' . ($queueResult['processed'] ?? 0)
+                . ', ok: ' . ($queueResult['succeeded'] ?? 0)
+                . ', failed: ' . ($queueResult['failed'] ?? 0)
+                . ', pending: ' . ($queueResult['pending'] ?? 0) . "\n";
+        }
+    } catch (Throwable $qe) {
+        echo '[' . date('Y-m-d H:i:s') . '] Canonical queue warning: ' . $qe->getMessage() . "\n";
+    }
+
     // ── DB cleanup (retention policy) ────────────────────────────────────
     // Delete old recipes and transactions based on .env retention settings.
     try {

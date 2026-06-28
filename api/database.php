@@ -193,11 +193,26 @@ function initializeDB(PDO $db): void {
             FOREIGN KEY (ingredient_id) REFERENCES canonical_ingredients(id) ON DELETE CASCADE
         );
 
+        CREATE TABLE IF NOT EXISTS canonical_processing_queue (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            product_id INTEGER NOT NULL UNIQUE,
+            reason TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'in_progress', 'done', 'failed')),
+            attempts INTEGER NOT NULL DEFAULT 0,
+            last_error TEXT DEFAULT '',
+            requested_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            started_at DATETIME DEFAULT NULL,
+            processed_at DATETIME DEFAULT NULL,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE CASCADE
+        );
+
         CREATE INDEX IF NOT EXISTS idx_canonical_ingredients_slug ON canonical_ingredients(slug);
         CREATE INDEX IF NOT EXISTS idx_canonical_ingredients_parent ON canonical_ingredients(parent_slug);
         CREATE INDEX IF NOT EXISTS idx_product_ingredients_product ON product_ingredients(product_id);
         CREATE INDEX IF NOT EXISTS idx_product_ingredients_ingredient ON product_ingredients(ingredient_id);
         CREATE INDEX IF NOT EXISTS idx_product_ingredients_role ON product_ingredients(role);
+        CREATE INDEX IF NOT EXISTS idx_canonical_queue_status ON canonical_processing_queue(status, requested_at);
     ");
 }
 
@@ -432,11 +447,26 @@ function migrateDB(PDO $db): void {
             FOREIGN KEY (ingredient_id) REFERENCES canonical_ingredients(id) ON DELETE CASCADE
         );
 
+        CREATE TABLE IF NOT EXISTS canonical_processing_queue (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            product_id INTEGER NOT NULL UNIQUE,
+            reason TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'in_progress', 'done', 'failed')),
+            attempts INTEGER NOT NULL DEFAULT 0,
+            last_error TEXT DEFAULT '',
+            requested_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            started_at DATETIME DEFAULT NULL,
+            processed_at DATETIME DEFAULT NULL,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE CASCADE
+        );
+
         CREATE INDEX IF NOT EXISTS idx_canonical_ingredients_slug ON canonical_ingredients(slug);
         CREATE INDEX IF NOT EXISTS idx_canonical_ingredients_parent ON canonical_ingredients(parent_slug);
         CREATE INDEX IF NOT EXISTS idx_product_ingredients_product ON product_ingredients(product_id);
         CREATE INDEX IF NOT EXISTS idx_product_ingredients_ingredient ON product_ingredients(ingredient_id);
         CREATE INDEX IF NOT EXISTS idx_product_ingredients_role ON product_ingredients(role);
+        CREATE INDEX IF NOT EXISTS idx_canonical_queue_status ON canonical_processing_queue(status, requested_at);
     ");
 }
 

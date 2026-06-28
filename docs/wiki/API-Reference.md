@@ -45,7 +45,7 @@ Look up a barcode on Open Food Facts (external call).
 | `barcode` | string | EAN/UPC barcode |
 
 ### `product_save` — POST
-Create or update a product. Pass `id` to update. The save path also refreshes canonical/common ingredient mappings and returns them in `canonical_ingredients`.
+Create or update a product. Pass `id` to update. The save path queues canonical/common ingredient post-processing and returns immediately after the product is persisted. Existing mappings may be returned in `canonical_ingredients`; queued work is processed by cron or `scripts/process-canonical-queue.php`.
 
 ```json
 {
@@ -82,7 +82,7 @@ Return canonical/common ingredient mappings for a product.
 | `product_id` | int | Product ID |
 
 ### `canonical_ingredients_assess` — GET
-Return coverage, examples, and FoodOn link counts for canonical ingredient mappings. Defaults to active inventory products; pass `scope=all` for all products.
+Return coverage, examples, and external FoodOn/USDA FDC link counts for canonical ingredient mappings. Defaults to active inventory products; pass `scope=all` for all products.
 
 ---
 
