@@ -178,6 +178,95 @@ function initializeDB(PDO $db): void {
             updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
         );
 
+        CREATE TABLE IF NOT EXISTS taxonomy_trees (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            slug TEXT NOT NULL UNIQUE,
+            name TEXT NOT NULL,
+            description TEXT DEFAULT '',
+            version TEXT DEFAULT '',
+            editable INTEGER NOT NULL DEFAULT 1,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE IF NOT EXISTS taxonomy_nodes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            tree_id INTEGER NOT NULL,
+            slug TEXT NOT NULL,
+            name TEXT NOT NULL,
+            category TEXT DEFAULT '',
+            description TEXT DEFAULT '',
+            source TEXT NOT NULL DEFAULT 'local',
+            external_ids_json TEXT DEFAULT NULL,
+            active INTEGER NOT NULL DEFAULT 1,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(tree_id, slug),
+            FOREIGN KEY (tree_id) REFERENCES taxonomy_trees(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS taxonomy_edges (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            tree_id INTEGER NOT NULL,
+            parent_node_id INTEGER NOT NULL,
+            child_node_id INTEGER NOT NULL,
+            relation TEXT NOT NULL DEFAULT 'is_a',
+            is_primary INTEGER NOT NULL DEFAULT 1,
+            sort_order INTEGER NOT NULL DEFAULT 0,
+            active INTEGER NOT NULL DEFAULT 1,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(tree_id, parent_node_id, child_node_id, relation),
+            FOREIGN KEY (tree_id) REFERENCES taxonomy_trees(id) ON DELETE CASCADE,
+            FOREIGN KEY (parent_node_id) REFERENCES taxonomy_nodes(id) ON DELETE CASCADE,
+            FOREIGN KEY (child_node_id) REFERENCES taxonomy_nodes(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS taxonomy_closure (
+            tree_id INTEGER NOT NULL,
+            ancestor_node_id INTEGER NOT NULL,
+            descendant_node_id INTEGER NOT NULL,
+            depth INTEGER NOT NULL,
+            PRIMARY KEY (tree_id, ancestor_node_id, descendant_node_id),
+            FOREIGN KEY (tree_id) REFERENCES taxonomy_trees(id) ON DELETE CASCADE,
+            FOREIGN KEY (ancestor_node_id) REFERENCES taxonomy_nodes(id) ON DELETE CASCADE,
+            FOREIGN KEY (descendant_node_id) REFERENCES taxonomy_nodes(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS taxonomy_aliases (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            tree_id INTEGER NOT NULL,
+            node_id INTEGER NOT NULL,
+            alias TEXT NOT NULL,
+            normalized_alias TEXT NOT NULL,
+            source TEXT NOT NULL DEFAULT 'local',
+            active INTEGER NOT NULL DEFAULT 1,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(tree_id, normalized_alias, node_id),
+            FOREIGN KEY (tree_id) REFERENCES taxonomy_trees(id) ON DELETE CASCADE,
+            FOREIGN KEY (node_id) REFERENCES taxonomy_nodes(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS taxonomy_match_rules (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            tree_id INTEGER NOT NULL,
+            pattern TEXT NOT NULL,
+            primary_slug TEXT NOT NULL,
+            path_json TEXT NOT NULL DEFAULT '[]',
+            contains_json TEXT NOT NULL DEFAULT '[]',
+            tags_json TEXT NOT NULL DEFAULT '[]',
+            category TEXT DEFAULT '',
+            confidence REAL NOT NULL DEFAULT 0.8,
+            priority INTEGER NOT NULL DEFAULT 1000,
+            source TEXT NOT NULL DEFAULT 'seed',
+            active INTEGER NOT NULL DEFAULT 1,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(tree_id, pattern, primary_slug),
+            FOREIGN KEY (tree_id) REFERENCES taxonomy_trees(id) ON DELETE CASCADE
+        );
+
         CREATE TABLE IF NOT EXISTS product_ingredients (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             product_id INTEGER NOT NULL,
@@ -223,6 +312,12 @@ function initializeDB(PDO $db): void {
 
         CREATE INDEX IF NOT EXISTS idx_canonical_ingredients_slug ON canonical_ingredients(slug);
         CREATE INDEX IF NOT EXISTS idx_canonical_ingredients_parent ON canonical_ingredients(parent_slug);
+        CREATE INDEX IF NOT EXISTS idx_taxonomy_nodes_tree_slug ON taxonomy_nodes(tree_id, slug);
+        CREATE INDEX IF NOT EXISTS idx_taxonomy_edges_child ON taxonomy_edges(child_node_id);
+        CREATE INDEX IF NOT EXISTS idx_taxonomy_edges_parent ON taxonomy_edges(parent_node_id);
+        CREATE INDEX IF NOT EXISTS idx_taxonomy_closure_descendant ON taxonomy_closure(tree_id, descendant_node_id, depth);
+        CREATE INDEX IF NOT EXISTS idx_taxonomy_aliases_normalized ON taxonomy_aliases(tree_id, normalized_alias);
+        CREATE INDEX IF NOT EXISTS idx_taxonomy_match_rules_active ON taxonomy_match_rules(tree_id, active, priority);
         CREATE INDEX IF NOT EXISTS idx_product_ingredients_product ON product_ingredients(product_id);
         CREATE INDEX IF NOT EXISTS idx_product_ingredients_ingredient ON product_ingredients(ingredient_id);
         CREATE INDEX IF NOT EXISTS idx_product_ingredients_role ON product_ingredients(role);
@@ -448,6 +543,95 @@ function migrateDB(PDO $db): void {
             updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
         );
 
+        CREATE TABLE IF NOT EXISTS taxonomy_trees (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            slug TEXT NOT NULL UNIQUE,
+            name TEXT NOT NULL,
+            description TEXT DEFAULT '',
+            version TEXT DEFAULT '',
+            editable INTEGER NOT NULL DEFAULT 1,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE IF NOT EXISTS taxonomy_nodes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            tree_id INTEGER NOT NULL,
+            slug TEXT NOT NULL,
+            name TEXT NOT NULL,
+            category TEXT DEFAULT '',
+            description TEXT DEFAULT '',
+            source TEXT NOT NULL DEFAULT 'local',
+            external_ids_json TEXT DEFAULT NULL,
+            active INTEGER NOT NULL DEFAULT 1,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(tree_id, slug),
+            FOREIGN KEY (tree_id) REFERENCES taxonomy_trees(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS taxonomy_edges (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            tree_id INTEGER NOT NULL,
+            parent_node_id INTEGER NOT NULL,
+            child_node_id INTEGER NOT NULL,
+            relation TEXT NOT NULL DEFAULT 'is_a',
+            is_primary INTEGER NOT NULL DEFAULT 1,
+            sort_order INTEGER NOT NULL DEFAULT 0,
+            active INTEGER NOT NULL DEFAULT 1,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(tree_id, parent_node_id, child_node_id, relation),
+            FOREIGN KEY (tree_id) REFERENCES taxonomy_trees(id) ON DELETE CASCADE,
+            FOREIGN KEY (parent_node_id) REFERENCES taxonomy_nodes(id) ON DELETE CASCADE,
+            FOREIGN KEY (child_node_id) REFERENCES taxonomy_nodes(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS taxonomy_closure (
+            tree_id INTEGER NOT NULL,
+            ancestor_node_id INTEGER NOT NULL,
+            descendant_node_id INTEGER NOT NULL,
+            depth INTEGER NOT NULL,
+            PRIMARY KEY (tree_id, ancestor_node_id, descendant_node_id),
+            FOREIGN KEY (tree_id) REFERENCES taxonomy_trees(id) ON DELETE CASCADE,
+            FOREIGN KEY (ancestor_node_id) REFERENCES taxonomy_nodes(id) ON DELETE CASCADE,
+            FOREIGN KEY (descendant_node_id) REFERENCES taxonomy_nodes(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS taxonomy_aliases (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            tree_id INTEGER NOT NULL,
+            node_id INTEGER NOT NULL,
+            alias TEXT NOT NULL,
+            normalized_alias TEXT NOT NULL,
+            source TEXT NOT NULL DEFAULT 'local',
+            active INTEGER NOT NULL DEFAULT 1,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(tree_id, normalized_alias, node_id),
+            FOREIGN KEY (tree_id) REFERENCES taxonomy_trees(id) ON DELETE CASCADE,
+            FOREIGN KEY (node_id) REFERENCES taxonomy_nodes(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS taxonomy_match_rules (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            tree_id INTEGER NOT NULL,
+            pattern TEXT NOT NULL,
+            primary_slug TEXT NOT NULL,
+            path_json TEXT NOT NULL DEFAULT '[]',
+            contains_json TEXT NOT NULL DEFAULT '[]',
+            tags_json TEXT NOT NULL DEFAULT '[]',
+            category TEXT DEFAULT '',
+            confidence REAL NOT NULL DEFAULT 0.8,
+            priority INTEGER NOT NULL DEFAULT 1000,
+            source TEXT NOT NULL DEFAULT 'seed',
+            active INTEGER NOT NULL DEFAULT 1,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(tree_id, pattern, primary_slug),
+            FOREIGN KEY (tree_id) REFERENCES taxonomy_trees(id) ON DELETE CASCADE
+        );
+
         CREATE TABLE IF NOT EXISTS product_ingredients (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             product_id INTEGER NOT NULL,
@@ -493,6 +677,12 @@ function migrateDB(PDO $db): void {
 
         CREATE INDEX IF NOT EXISTS idx_canonical_ingredients_slug ON canonical_ingredients(slug);
         CREATE INDEX IF NOT EXISTS idx_canonical_ingredients_parent ON canonical_ingredients(parent_slug);
+        CREATE INDEX IF NOT EXISTS idx_taxonomy_nodes_tree_slug ON taxonomy_nodes(tree_id, slug);
+        CREATE INDEX IF NOT EXISTS idx_taxonomy_edges_child ON taxonomy_edges(child_node_id);
+        CREATE INDEX IF NOT EXISTS idx_taxonomy_edges_parent ON taxonomy_edges(parent_node_id);
+        CREATE INDEX IF NOT EXISTS idx_taxonomy_closure_descendant ON taxonomy_closure(tree_id, descendant_node_id, depth);
+        CREATE INDEX IF NOT EXISTS idx_taxonomy_aliases_normalized ON taxonomy_aliases(tree_id, normalized_alias);
+        CREATE INDEX IF NOT EXISTS idx_taxonomy_match_rules_active ON taxonomy_match_rules(tree_id, active, priority);
         CREATE INDEX IF NOT EXISTS idx_product_ingredients_product ON product_ingredients(product_id);
         CREATE INDEX IF NOT EXISTS idx_product_ingredients_ingredient ON product_ingredients(ingredient_id);
         CREATE INDEX IF NOT EXISTS idx_product_ingredients_role ON product_ingredients(role);

@@ -30,7 +30,7 @@ $unmatched = [];
 foreach ($rows as $product) {
     $processed++;
     if ($dryRun) {
-        $dryRunMappings = canonicalIngredientInferProduct($product);
+        $dryRunMappings = canonicalIngredientInferProduct($product, $db);
         $result = ['mappings' => $dryRunMappings, 'mapped' => count($dryRunMappings)];
     } else {
         $result = canonicalIngredientSyncProduct($db, (int)$product['id'], $product);

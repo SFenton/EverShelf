@@ -1567,7 +1567,7 @@ function haInventorySensor(PDO $db): void {
             $params = [];
             if ($invId > 0)      { $where .= " AND i.id = ?";                  $params[] = $invId; }
             elseif ($search !== '') {
-                $matchedRows = foodSearchFilterAndRank(foodSearchProductRows($db, true), $search, 500);
+                $matchedRows = foodSearchCombinedFilterAndRank($db, foodSearchProductRows($db, true), $search, 500);
                 $matchedProductIds = array_values(array_unique(array_map(fn($row) => (int)$row['id'], $matchedRows)));
                 if (empty($matchedProductIds)) {
                     echo json_encode([
@@ -3001,9 +3001,7 @@ function foodSearchCanonicalSubquery(): string {
             pi.product_id,
             GROUP_CONCAT(ci.name, ' ') AS canonical_names,
             GROUP_CONCAT(ci.slug, ' ') AS canonical_slugs,
-            GROUP_CONCAT(COALESCE(ci.category, ''), ' ') AS canonical_categories,
-            GROUP_CONCAT(pi.role || ':' || ci.name, ' ') AS canonical_roles,
-            GROUP_CONCAT(COALESCE(ci.external_ids_json, ''), ' ') AS canonical_external
+            GROUP_CONCAT(pi.role || ':' || ci.name, ' ') AS canonical_roles
         FROM product_ingredients pi
         JOIN canonical_ingredients ci ON ci.id = pi.ingredient_id
         GROUP BY pi.product_id
@@ -3021,8 +3019,6 @@ function foodSearchHaystack(array $row): string {
         $row['ingredients_text'] ?? '',
         $row['canonical_names'] ?? '',
         $row['canonical_slugs'] ?? '',
-        $row['canonical_categories'] ?? '',
-        $row['canonical_external'] ?? '',
     ], static fn($v) => trim((string)$v) !== '')));
 }
 
@@ -3035,7 +3031,6 @@ function foodSearchScore(array $row, array $tokens, string $query): int {
     $canonicalNorm = canonicalIngredientNormalizeText(implode(' ', [
         $row['canonical_names'] ?? '',
         $row['canonical_slugs'] ?? '',
-        $row['canonical_categories'] ?? '',
     ]));
 
     $score = 0;
@@ -3089,10 +3084,135 @@ function foodSearchFilterAndRank(array $rows, string $q, int $limit): array {
     return array_slice($matches, 0, $limit);
 }
 
+function foodSearchMatchingTaxonomyNodeIds(PDO $db, array $tokens): array {
+    if (empty($tokens)) {
+        return [];
+    }
+    taxonomySeedFromCanonicalRules($db);
+    $tree = taxonomyDefaultTree($db);
+    $treeId = (int)($tree['id'] ?? 0);
+    if ($treeId <= 0) {
+        return [];
+    }
+
+    $stmt = $db->prepare("
+        SELECT id, name, slug
+        FROM taxonomy_nodes
+        WHERE tree_id = ? AND active = 1
+    ");
+    $stmt->execute([$treeId]);
+    $matched = [];
+    foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $node) {
+        $haystack = canonicalIngredientNormalizeText(implode(' ', [
+            $node['name'] ?? '',
+            $node['slug'] ?? '',
+        ]));
+        $ok = true;
+        foreach ($tokens as $token) {
+            if (!str_contains($haystack, $token)) {
+                $ok = false;
+                break;
+            }
+        }
+        if ($ok) {
+            $matched[] = (int)$node['id'];
+        }
+    }
+    if (empty($matched)) {
+        return [];
+    }
+
+    $placeholders = implode(',', array_fill(0, count($matched), '?'));
+    $descStmt = $db->prepare("
+        SELECT DISTINCT descendant_node_id
+        FROM taxonomy_closure
+        WHERE tree_id = ?
+          AND ancestor_node_id IN ({$placeholders})
+    ");
+    $descStmt->execute(array_merge([$treeId], $matched));
+    return array_values(array_unique(array_map('intval', $descStmt->fetchAll(PDO::FETCH_COLUMN))));
+}
+
+function foodSearchTaxonomyProductScores(PDO $db, array $tokens): array {
+    $nodeIds = foodSearchMatchingTaxonomyNodeIds($db, $tokens);
+    if (empty($nodeIds)) {
+        return [];
+    }
+    $slugsStmt = $db->prepare("
+        SELECT slug
+        FROM taxonomy_nodes
+        WHERE id IN (" . implode(',', array_fill(0, count($nodeIds), '?')) . ")
+    ");
+    $slugsStmt->execute($nodeIds);
+    $slugs = array_values(array_unique(array_filter(array_map('strval', $slugsStmt->fetchAll(PDO::FETCH_COLUMN)))));
+    if (empty($slugs)) {
+        return [];
+    }
+    $placeholders = implode(',', array_fill(0, count($slugs), '?'));
+    $stmt = $db->prepare("
+        SELECT
+            pi.product_id,
+            MIN(CASE pi.role WHEN 'primary' THEN 0 WHEN 'broader' THEN 1 WHEN 'contains' THEN 2 ELSE 3 END) AS best_role_rank,
+            MAX(pi.confidence) AS confidence
+        FROM product_ingredients pi
+        JOIN canonical_ingredients ci ON ci.id = pi.ingredient_id
+        WHERE ci.slug IN ({$placeholders})
+        GROUP BY pi.product_id
+    ");
+    $stmt->execute($slugs);
+    $scores = [];
+    foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
+        $roleRank = (int)($row['best_role_rank'] ?? 3);
+        $scores[(int)$row['product_id']] = 210 - ($roleRank * 25) + (int)round(((float)($row['confidence'] ?? 0)) * 20);
+    }
+    return $scores;
+}
+
+function foodSearchCombinedFilterAndRank(PDO $db, array $rows, string $q, int $limit): array {
+    $tokens = foodSearchTokens($q);
+    if (empty($tokens)) {
+        return array_slice($rows, 0, $limit);
+    }
+
+    $byId = [];
+    foreach ($rows as $row) {
+        $byId[(int)$row['id']] = $row;
+    }
+
+    $matches = [];
+    foreach (foodSearchFilterAndRank($rows, $q, PHP_INT_MAX) as $row) {
+        $productId = (int)$row['id'];
+        $row['_search_score'] = (int)($row['_search_score'] ?? 0);
+        $row['_search_match_type'] = 'product';
+        $matches[$productId] = $row;
+    }
+
+    foreach (foodSearchTaxonomyProductScores($db, $tokens) as $productId => $score) {
+        if (!isset($byId[$productId])) {
+            continue;
+        }
+        $row = $matches[$productId] ?? $byId[$productId];
+        $row['_search_score'] = max((int)($row['_search_score'] ?? 0), $score);
+        $row['_search_match_type'] = isset($matches[$productId]) ? 'product+taxonomy' : 'taxonomy';
+        $matches[$productId] = $row;
+    }
+
+    $result = array_values($matches);
+    usort($result, static function(array $a, array $b): int {
+        $score = ((int)($b['_search_score'] ?? 0)) <=> ((int)($a['_search_score'] ?? 0));
+        if ($score !== 0) return $score;
+        $stock = ((float)($b['total_qty'] ?? 0)) <=> ((float)($a['total_qty'] ?? 0));
+        if ($stock !== 0) return $stock;
+        return strcasecmp((string)($a['name'] ?? ''), (string)($b['name'] ?? ''));
+    });
+
+    return array_slice($result, 0, $limit);
+}
+
 function foodSearchAttachCanonicalRows(PDO $db, array &$rows): void {
     foreach ($rows as &$row) {
         $row['canonical_ingredients'] = canonicalIngredientRowsForProduct($db, (int)$row['id']);
-        unset($row['canonical_names'], $row['canonical_slugs'], $row['canonical_categories'], $row['canonical_roles'], $row['canonical_external']);
+        unset($row['canonical_names'], $row['canonical_slugs'], $row['canonical_roles']);
     }
     unset($row);
 }
@@ -3105,7 +3225,7 @@ function foodSearchProductRows(PDO $db, bool $activeOnly): array {
                 p.*,
                 SUM(i.quantity) AS total_qty,
                 GROUP_CONCAT(DISTINCT i.location) AS locations,
-                c.canonical_names, c.canonical_slugs, c.canonical_categories, c.canonical_roles, c.canonical_external
+                c.canonical_names, c.canonical_slugs, c.canonical_roles
             FROM inventory i
             JOIN products p ON p.id = i.product_id
             LEFT JOIN ({$canonicalSql}) c ON c.product_id = p.id
@@ -3119,7 +3239,7 @@ function foodSearchProductRows(PDO $db, bool $activeOnly): array {
                 p.*,
                 COALESCE((SELECT SUM(i.quantity) FROM inventory i WHERE i.product_id = p.id AND i.quantity > 0), 0) AS total_qty,
                 (SELECT GROUP_CONCAT(DISTINCT i.location) FROM inventory i WHERE i.product_id = p.id AND i.quantity > 0) AS locations,
-                c.canonical_names, c.canonical_slugs, c.canonical_categories, c.canonical_roles, c.canonical_external
+                c.canonical_names, c.canonical_slugs, c.canonical_roles
             FROM products p
             LEFT JOIN ({$canonicalSql}) c ON c.product_id = p.id
             ORDER BY p.name ASC
@@ -3136,7 +3256,7 @@ function searchProducts(PDO $db): void {
     if ($limit > 100) $limit = 100;
 
     $rows = foodSearchProductRows($db, false);
-    $matches = $q === '' ? array_slice($rows, 0, $limit) : foodSearchFilterAndRank($rows, $q, $limit);
+    $matches = $q === '' ? array_slice($rows, 0, $limit) : foodSearchCombinedFilterAndRank($db, $rows, $q, $limit);
     foodSearchAttachCanonicalRows($db, $matches);
     echo json_encode(['products' => $matches], JSON_UNESCAPED_UNICODE);
 }
@@ -3176,7 +3296,7 @@ function searchInventoryProducts(PDO $db): void {
     }
 
     $rows = foodSearchProductRows($db, true);
-    $matches = foodSearchFilterAndRank($rows, $q, $limit);
+    $matches = foodSearchCombinedFilterAndRank($db, $rows, $q, $limit);
     foodSearchAttachCanonicalRows($db, $matches);
     echo json_encode(['items' => $matches], JSON_UNESCAPED_UNICODE);
 }

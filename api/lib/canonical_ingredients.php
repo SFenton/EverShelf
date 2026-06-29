@@ -249,6 +249,186 @@ function canonicalIngredientHasPrimary(array $mappings): bool {
     return false;
 }
 
+function taxonomyDefaultTree(PDO $db): array {
+    static $trees = [];
+    $cacheKey = (string)spl_object_id($db);
+    if (isset($trees[$cacheKey]) && is_array($trees[$cacheKey])) {
+        return $trees[$cacheKey];
+    }
+    $db->prepare("
+        INSERT INTO taxonomy_trees (slug, name, description, version, updated_at)
+        VALUES ('food', 'Food taxonomy', 'EverShelf editable food taxonomy graph', ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(slug) DO UPDATE SET version = excluded.version, updated_at = CURRENT_TIMESTAMP
+    ")->execute([CANONICAL_INGREDIENT_RULESET_VERSION]);
+    $stmt = $db->prepare("SELECT * FROM taxonomy_trees WHERE slug = 'food'");
+    $stmt->execute();
+    $trees[$cacheKey] = $stmt->fetch(PDO::FETCH_ASSOC) ?: ['id' => 0, 'slug' => 'food'];
+    return $trees[$cacheKey];
+}
+
+function taxonomyUpsertNode(PDO $db, int $treeId, string $name, string $category = '', string $source = 'seed', array $externalIds = []): int {
+    $slug = canonicalIngredientSlug($name);
+    if ($slug === '') {
+        return 0;
+    }
+    $externalJson = !empty($externalIds) ? json_encode($externalIds, JSON_UNESCAPED_UNICODE) : null;
+    $db->prepare("
+        INSERT INTO taxonomy_nodes (tree_id, slug, name, category, source, external_ids_json, active, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, 1, CURRENT_TIMESTAMP)
+        ON CONFLICT(tree_id, slug) DO UPDATE SET
+            name = excluded.name,
+            category = COALESCE(NULLIF(excluded.category, ''), taxonomy_nodes.category),
+            source = excluded.source,
+            external_ids_json = COALESCE(excluded.external_ids_json, taxonomy_nodes.external_ids_json),
+            active = 1,
+            updated_at = CURRENT_TIMESTAMP
+    ")->execute([$treeId, $slug, $name, $category, $source, $externalJson]);
+    $stmt = $db->prepare("SELECT id FROM taxonomy_nodes WHERE tree_id = ? AND slug = ?");
+    $stmt->execute([$treeId, $slug]);
+    return (int)$stmt->fetchColumn();
+}
+
+function taxonomyUpsertEdge(PDO $db, int $treeId, int $parentId, int $childId, string $source = 'seed'): void {
+    if ($treeId <= 0 || $parentId <= 0 || $childId <= 0 || $parentId === $childId) {
+        return;
+    }
+    $db->prepare("
+        INSERT INTO taxonomy_edges (tree_id, parent_node_id, child_node_id, relation, is_primary, active, updated_at)
+        VALUES (?, ?, ?, 'is_a', 1, 1, CURRENT_TIMESTAMP)
+        ON CONFLICT(tree_id, parent_node_id, child_node_id, relation) DO UPDATE SET
+            active = 1,
+            updated_at = CURRENT_TIMESTAMP
+    ")->execute([$treeId, $parentId, $childId]);
+}
+
+function taxonomyRebuildClosure(PDO $db, int $treeId): void {
+    $db->prepare("DELETE FROM taxonomy_closure WHERE tree_id = ?")->execute([$treeId]);
+    $nodeIds = $db->prepare("SELECT id FROM taxonomy_nodes WHERE tree_id = ? AND active = 1");
+    $nodeIds->execute([$treeId]);
+    $insert = $db->prepare("
+        INSERT OR IGNORE INTO taxonomy_closure (tree_id, ancestor_node_id, descendant_node_id, depth)
+        VALUES (?, ?, ?, ?)
+    ");
+    foreach ($nodeIds->fetchAll(PDO::FETCH_COLUMN) as $nodeId) {
+        $insert->execute([$treeId, (int)$nodeId, (int)$nodeId, 0]);
+    }
+    $db->prepare("
+        WITH RECURSIVE paths(ancestor_id, descendant_id, depth) AS (
+            SELECT parent_node_id, child_node_id, 1
+            FROM taxonomy_edges
+            WHERE tree_id = ? AND active = 1
+            UNION ALL
+            SELECT p.ancestor_id, e.child_node_id, p.depth + 1
+            FROM paths p
+            JOIN taxonomy_edges e ON e.parent_node_id = p.descendant_id
+            WHERE e.tree_id = ? AND e.active = 1 AND p.depth < 20
+        )
+        INSERT OR IGNORE INTO taxonomy_closure (tree_id, ancestor_node_id, descendant_node_id, depth)
+        SELECT ?, ancestor_id, descendant_id, MIN(depth)
+        FROM paths
+        GROUP BY ancestor_id, descendant_id
+    ")->execute([$treeId, $treeId, $treeId]);
+}
+
+function taxonomySeedFromCanonicalRules(PDO $db, bool $force = false): array {
+    $tree = taxonomyDefaultTree($db);
+    $treeId = (int)$tree['id'];
+    if ($treeId <= 0) {
+        return ['seeded' => 0, 'tree_id' => 0];
+    }
+    $doneKey = 'taxonomy_seed_' . CANONICAL_INGREDIENT_RULESET_VERSION;
+    $existing = $db->prepare("SELECT value FROM app_settings WHERE key = ?");
+    $existing->execute([$doneKey]);
+    if (!$force && $existing->fetchColumn()) {
+        return ['seeded' => 0, 'tree_id' => $treeId, 'skipped' => true];
+    }
+
+    $ruleStmt = $db->prepare("
+        INSERT INTO taxonomy_match_rules (tree_id, pattern, primary_slug, path_json, contains_json, tags_json, category, confidence, priority, source, active, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'seed', 1, CURRENT_TIMESTAMP)
+        ON CONFLICT(tree_id, pattern, primary_slug) DO UPDATE SET
+            path_json = excluded.path_json,
+            contains_json = excluded.contains_json,
+            tags_json = excluded.tags_json,
+            category = excluded.category,
+            confidence = excluded.confidence,
+            priority = excluded.priority,
+            active = 1,
+            updated_at = CURRENT_TIMESTAMP
+    ");
+
+    $seeded = 0;
+    foreach (canonicalIngredientRuleDefinitions() as $priority => $rule) {
+        $path = array_values(array_filter(array_map('strval', $rule['path'] ?? [])));
+        if (empty($path) || empty($rule['rx'])) {
+            continue;
+        }
+        $category = (string)($rule['category'] ?? '');
+        $nodeIds = [];
+        foreach ($path as $name) {
+            $nodeIds[] = taxonomyUpsertNode($db, $treeId, $name, $category, 'seed');
+        }
+        for ($i = 0; $i < count($nodeIds) - 1; $i++) {
+            taxonomyUpsertEdge($db, $treeId, $nodeIds[$i + 1], $nodeIds[$i]);
+        }
+        foreach (($rule['contains'] ?? []) as $containsName) {
+            taxonomyUpsertNode($db, $treeId, (string)$containsName, $category, 'seed');
+        }
+        $ruleStmt->execute([
+            $treeId,
+            (string)$rule['rx'],
+            canonicalIngredientSlug($path[0]),
+            json_encode($path, JSON_UNESCAPED_UNICODE),
+            json_encode($rule['contains'] ?? [], JSON_UNESCAPED_UNICODE),
+            json_encode($rule['tags'] ?? [], JSON_UNESCAPED_UNICODE),
+            $category,
+            (float)($rule['confidence'] ?? 0.8),
+            $priority,
+        ]);
+        $seeded++;
+    }
+
+    taxonomyRebuildClosure($db, $treeId);
+    $db->prepare("INSERT OR REPLACE INTO app_settings (key, value, updated_at) VALUES (?, '1', CURRENT_TIMESTAMP)")
+        ->execute([$doneKey]);
+    return ['seeded' => $seeded, 'tree_id' => $treeId];
+}
+
+function taxonomyMatchRules(PDO $db): array {
+    taxonomySeedFromCanonicalRules($db);
+    $tree = taxonomyDefaultTree($db);
+    $treeId = (int)$tree['id'];
+    if ($treeId <= 0) {
+        return [];
+    }
+    $stmt = $db->prepare("
+        SELECT pattern, path_json, contains_json, tags_json, category, confidence, source
+        FROM taxonomy_match_rules
+        WHERE tree_id = ? AND active = 1
+        ORDER BY priority ASC, id ASC
+    ");
+    $stmt->execute([$treeId]);
+    $rules = [];
+    foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
+        $path = json_decode((string)$row['path_json'], true);
+        if (!is_array($path) || empty($path)) {
+            continue;
+        }
+        $contains = json_decode((string)$row['contains_json'], true);
+        $tags = json_decode((string)$row['tags_json'], true);
+        $rules[] = [
+            'rx' => (string)$row['pattern'],
+            'path' => array_values(array_filter(array_map('strval', $path))),
+            'contains' => is_array($contains) ? array_values(array_filter(array_map('strval', $contains))) : [],
+            'tags' => is_array($tags) ? $tags : [],
+            'category' => (string)($row['category'] ?? ''),
+            'confidence' => (float)($row['confidence'] ?? 0.8),
+            'source' => (string)($row['source'] ?? 'db_rule'),
+        ];
+    }
+    return $rules;
+}
+
 function canonicalIngredientIsWeakFallbackName(string $name): bool {
     $n = canonicalIngredientNormalizeText($name);
     if ($n === '' || mb_strlen($n, 'UTF-8') < 3) {
@@ -290,12 +470,13 @@ function canonicalIngredientFallbackProductName(array $product): ?string {
     return canonicalIngredientTitle(implode(' ', $tokens));
 }
 
-function canonicalIngredientInferProduct(array $product): array {
+function canonicalIngredientInferProduct(array $product, ?PDO $db = null): array {
     $mappings = [];
     $searchText = canonicalIngredientSearchText($product);
     $source = CANONICAL_INGREDIENT_RULESET_VERSION;
 
-    foreach (canonicalIngredientRuleDefinitions() as $rule) {
+    $rules = $db ? taxonomyMatchRules($db) : canonicalIngredientRuleDefinitions();
+    foreach ($rules as $rule) {
         if (empty($rule['rx']) || !preg_match($rule['rx'], $searchText, $match)) {
             continue;
         }
@@ -305,11 +486,12 @@ function canonicalIngredientInferProduct(array $product): array {
         }
         $evidence = 'matched "' . ($match[0] ?? $rule['rx']) . '" in product metadata';
         $allowPrimary = !canonicalIngredientHasPrimary($mappings);
+        $ruleSource = (string)($rule['source'] ?? $source);
         canonicalIngredientPutPath(
             $mappings,
             $matchedPath,
             (float)($rule['confidence'] ?? 0.85),
-            $source,
+            $ruleSource,
             $evidence,
             (string)($rule['category'] ?? ''),
             $allowPrimary
@@ -320,7 +502,7 @@ function canonicalIngredientInferProduct(array $product): array {
                 $containsName,
                 'contains',
                 max(0.1, ((float)($rule['confidence'] ?? 0.85)) - 0.12),
-                $source,
+                $ruleSource,
                 $evidence,
                 (string)($rule['category'] ?? '')
             );
@@ -338,7 +520,7 @@ function canonicalIngredientInferProduct(array $product): array {
     }
     if (!empty($tagTexts)) {
         $tagHaystack = canonicalIngredientNormalizeText(implode(' ', $tagTexts));
-        foreach (canonicalIngredientRuleDefinitions() as $rule) {
+        foreach ($rules as $rule) {
             if (empty($rule['rx']) || !preg_match($rule['rx'], $tagHaystack, $match)) {
                 continue;
             }
@@ -719,7 +901,7 @@ function canonicalIngredientSyncProduct(PDO $db, int $productId, ?array $product
         return ['product_id' => $productId, 'mapped' => 0, 'mappings' => [], 'tags' => []];
     }
 
-    $mappings = canonicalIngredientInferProduct($product);
+    $mappings = canonicalIngredientInferProduct($product, $db);
     if (str_contains(canonicalIngredientSearchText($product), 'dairy free')) {
         $mappings = array_values(array_filter($mappings, static function(array $mapping): bool {
             return !(($mapping['role'] ?? '') === 'contains' && ($mapping['slug'] ?? '') === 'milk');
@@ -851,6 +1033,10 @@ function canonicalProductInferTags(array $product, array $mappings): array {
         if (preg_match($rx, $text, $match)) {
             canonicalProductTagPut($tags, $facet, $value, 'local_rule', (float)$confidence, 'matched "' . trim((string)$match[0]) . '"');
         }
+    }
+
+    if (preg_match('/\b(chicken\s+base|bouillon|stock\s+base)\b/u', $text)) {
+        unset($tags['preparation:dried'], $tags['preparation:roasted']);
     }
 
     foreach ($mappings as $mapping) {
