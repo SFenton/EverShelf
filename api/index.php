@@ -1514,11 +1514,18 @@ function _sendHaNotify(string $message, array $data = []): void {
  * Normalise a DB inventory+product row into a full product info array
  * used consistently across all HA sensor attributes and webhook payloads.
  */
+function _haDaysRemaining(?string $expiryDate): ?int {
+    if (empty($expiryDate)) {
+        return null;
+    }
+    $diff = (new DateTime(date('Y-m-d')))->diff(new DateTime($expiryDate));
+    return (int)$diff->format('%r%a');
+}
+
 function _haFormatProduct(array $row): array {
     $daysRemaining = null;
     if (!empty($row['expiry_date'])) {
-        $diff = (new DateTime(date('Y-m-d')))->diff(new DateTime($row['expiry_date']));
-        $daysRemaining = (int)$diff->format('%r%a');
+        $daysRemaining = _haDaysRemaining((string)$row['expiry_date']);
     }
     return [
         'product_id'       => (int)($row['product_id'] ?? 0),
@@ -1535,6 +1542,39 @@ function _haFormatProduct(array $row): array {
         'days_remaining'   => $daysRemaining,
         'opened_at'        => $row['opened_at'] ?? null,
         'vacuum_sealed'    => !empty($row['vacuum_sealed']),
+    ];
+}
+
+function _haFormatProductSearchResult(array $row): array {
+    $locations = array_values(array_filter(array_map('trim', explode(',', (string)($row['locations'] ?? '')))));
+    $inventoryIds = array_values(array_unique(array_filter(array_map(
+        'intval',
+        preg_split('/\s*,\s*/', (string)($row['inventory_ids'] ?? ''), -1, PREG_SPLIT_NO_EMPTY) ?: []
+    ), static fn(int $id): bool => $id > 0)));
+    $inventoryCount = (int)($row['inventory_count'] ?? count($inventoryIds));
+    $expiryDate = !empty($row['expiry_date']) ? (string)$row['expiry_date'] : null;
+    $singleInventoryId = $inventoryCount === 1 && count($inventoryIds) === 1 ? $inventoryIds[0] : null;
+
+    return [
+        'product_id'         => (int)($row['id'] ?? $row['product_id'] ?? 0),
+        'inventory_id'       => $singleInventoryId,
+        'inventory_ids'      => $inventoryIds,
+        'inventory_count'    => $inventoryCount,
+        'name'               => $row['name'],
+        'brand'              => $row['brand'] ?? null,
+        'category'           => $row['category'] ?? null,
+        'quantity'           => (float)($row['total_qty'] ?? $row['quantity'] ?? 0),
+        'unit'               => $row['unit'] ?? '',
+        'default_quantity'   => (float)($row['default_quantity'] ?? 0),
+        'package_unit'       => $row['package_unit'] ?? null,
+        'location'           => count($locations) === 1 ? $locations[0] : implode(',', $locations),
+        'locations'          => $locations,
+        'expiry_date'        => $expiryDate,
+        'days_remaining'     => _haDaysRemaining($expiryDate),
+        'opened_at'          => $row['opened_at'] ?? null,
+        'vacuum_sealed'      => !empty($row['vacuum_sealed']),
+        '_search_match_type' => $row['_search_match_type'] ?? null,
+        '_search_score'      => isset($row['_search_score']) ? (int)$row['_search_score'] : null,
     ];
 }
 
@@ -1567,18 +1607,14 @@ function haInventorySensor(PDO $db): void {
             $params = [];
             if ($invId > 0)      { $where .= " AND i.id = ?";                  $params[] = $invId; }
             elseif ($search !== '') {
-                $matchedRows = foodSearchCombinedFilterAndRank($db, foodSearchProductRows($db, true), $search, 500);
-                $matchedProductIds = array_values(array_unique(array_map(fn($row) => (int)$row['id'], $matchedRows)));
-                if (empty($matchedProductIds)) {
-                    echo json_encode([
-                        'state' => 0,
-                        'items' => [],
-                        'last_updated' => date('c'),
-                    ], JSON_UNESCAPED_UNICODE);
-                    return;
-                }
-                $where .= " AND p.id IN (" . implode(',', array_fill(0, count($matchedProductIds), '?')) . ")";
-                $params = array_merge($params, $matchedProductIds);
+                $matchedRows = foodSearchCombinedFilterAndRank($db, foodSearchProductRows($db, true, $loc), $search, 500);
+                $items = array_map('_haFormatProductSearchResult', $matchedRows);
+                echo json_encode([
+                    'state'        => count($items),
+                    'items'        => $items,
+                    'last_updated' => date('c'),
+                ], JSON_UNESCAPED_UNICODE);
+                return;
             }
             if ($loc !== '')     { $where .= " AND i.location = ?";             $params[] = $loc; }
             $stmt = $db->prepare(
@@ -3217,28 +3253,49 @@ function foodSearchAttachCanonicalRows(PDO $db, array &$rows): void {
     unset($row);
 }
 
-function foodSearchProductRows(PDO $db, bool $activeOnly): array {
+function foodSearchProductRows(PDO $db, bool $activeOnly, string $location = ''): array {
     $canonicalSql = foodSearchCanonicalSubquery();
     if ($activeOnly) {
+        $where = "WHERE i.quantity > 0";
+        $params = [];
+        if ($location !== '') {
+            $where .= " AND i.location = ?";
+            $params[] = $location;
+        }
         $sql = "
             SELECT
                 p.*,
                 SUM(i.quantity) AS total_qty,
                 GROUP_CONCAT(DISTINCT i.location) AS locations,
+                MIN(i.id) AS inventory_id,
+                GROUP_CONCAT(i.id) AS inventory_ids,
+                COUNT(i.id) AS inventory_count,
+                MIN(NULLIF(i.expiry_date, '')) AS expiry_date,
+                MAX(i.opened_at) AS opened_at,
+                MAX(COALESCE(i.vacuum_sealed, 0)) AS vacuum_sealed,
                 c.canonical_names, c.canonical_slugs, c.canonical_roles
             FROM inventory i
             JOIN products p ON p.id = i.product_id
             LEFT JOIN ({$canonicalSql}) c ON c.product_id = p.id
-            WHERE i.quantity > 0
+            {$where}
             GROUP BY p.id
             ORDER BY p.name ASC
         ";
+        $stmt = $db->prepare($sql);
+        $stmt->execute($params);
+        return $stmt->fetchAll(PDO::FETCH_ASSOC);
     } else {
         $sql = "
             SELECT
                 p.*,
                 COALESCE((SELECT SUM(i.quantity) FROM inventory i WHERE i.product_id = p.id AND i.quantity > 0), 0) AS total_qty,
                 (SELECT GROUP_CONCAT(DISTINCT i.location) FROM inventory i WHERE i.product_id = p.id AND i.quantity > 0) AS locations,
+                (SELECT MIN(i.id) FROM inventory i WHERE i.product_id = p.id AND i.quantity > 0) AS inventory_id,
+                (SELECT GROUP_CONCAT(i.id) FROM inventory i WHERE i.product_id = p.id AND i.quantity > 0) AS inventory_ids,
+                (SELECT COUNT(i.id) FROM inventory i WHERE i.product_id = p.id AND i.quantity > 0) AS inventory_count,
+                (SELECT MIN(NULLIF(i.expiry_date, '')) FROM inventory i WHERE i.product_id = p.id AND i.quantity > 0) AS expiry_date,
+                (SELECT MAX(i.opened_at) FROM inventory i WHERE i.product_id = p.id AND i.quantity > 0) AS opened_at,
+                (SELECT MAX(COALESCE(i.vacuum_sealed, 0)) FROM inventory i WHERE i.product_id = p.id AND i.quantity > 0) AS vacuum_sealed,
                 c.canonical_names, c.canonical_slugs, c.canonical_roles
             FROM products p
             LEFT JOIN ({$canonicalSql}) c ON c.product_id = p.id

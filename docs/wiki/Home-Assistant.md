@@ -41,7 +41,7 @@ Add EverShelf pantry data as native HA sensor entities that update automatically
 | `/api/?action=ha_sensor&sensor=total` | Total pantry items | `sensor.evershelf_total` |
 | `/api/?action=ha_sensor&sensor=product` | Full inventory — all items with complete details | `sensor.evershelf_products` |
 | `/api/?action=ha_sensor&sensor=product&id=42` | Full details for inventory row `id=42` | — |
-| `/api/?action=ha_sensor&sensor=product&name=milk` | Full details for items matching product name or canonical taxonomy terms | — |
+| `/api/?action=ha_sensor&sensor=product&name=milk` | Product-level, de-duplicated summaries matching product name or canonical taxonomy terms | — |
 | `/api/?action=ha_sensor&sensor=product&location=frigo` | All items in a specific location | — |
 
 ### Generate & Copy YAML
@@ -97,7 +97,7 @@ sensor:
 
 Restart Home Assistant after editing `configuration.yaml`.
 
-Every product entry inside `expiring_list`, `expired_list`, `low_stock_list`, and `sensor=product` responses follows the same schema:
+Every product entry inside `expiring_list`, `expired_list`, `low_stock_list`, and unfiltered `sensor=product` responses follows the same schema. `sensor=product&name=...` search responses are de-duplicated by product and may include aggregate `inventory_ids`, `inventory_count`, and `locations`; `inventory_id` is `null` when more than one inventory row is represented.
 
 ```json
 {
@@ -123,7 +123,7 @@ Field details:
 | Field | Type | Description |
 |-------|------|-------------|
 | `product_id` | int | Products table ID |
-| `inventory_id` | int | Inventory row ID |
+| `inventory_id` | int\|null | Inventory row ID; `null` for product-level search summaries that aggregate multiple rows |
 | `name` | string | Product name |
 | `brand` | string\|null | Brand (if set) |
 | `category` | string\|null | Category (if set) |
@@ -132,6 +132,9 @@ Field details:
 | `default_quantity` | float | Default package size (e.g. 1000 for 1-litre carton) |
 | `package_unit` | string\|null | Unit of the default package (`g`, `ml`) |
 | `location` | string\|null | Storage location (`frigo`, `freezer`, `dispensa`, …) |
+| `locations` | string[] | Storage locations included in a product-level search summary |
+| `inventory_ids` | int[] | Inventory rows included in a product-level search summary |
+| `inventory_count` | int | Number of inventory rows included in a product-level search summary |
 | `expiry_date` | string\|null | ISO date `YYYY-MM-DD` |
 | `days_remaining` | int\|null | Days until expiry (negative = already expired) |
 | `opened_at` | string\|null | ISO date when the package was opened |
