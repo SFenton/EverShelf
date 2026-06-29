@@ -74,13 +74,13 @@ function canonicalIngredientSearchText(array $product): string {
 function canonicalIngredientRuleDefinitions(): array {
     return [
         // Sauces and condiments: specific before generic.
-        ['rx' => '/\b(spicy\s+brown\s+mustard|brown\s+mustard)\b/u', 'path' => ['Spicy brown mustard', 'Brown mustard', 'Mustard', 'Condiment'], 'category' => 'condiments', 'confidence' => 0.98],
+        ['rx' => '/\b(spicy\s+brown\s+mustard|brown\s+mustard|mustard\s+spicy\s+brown)\b/u', 'path' => ['Spicy brown mustard', 'Brown mustard', 'Mustard', 'Condiment'], 'category' => 'condiments', 'confidence' => 0.98],
         ['rx' => '/\bdijon\s+mustard\b/u', 'path' => ['Dijon mustard', 'Mustard', 'Condiment'], 'category' => 'condiments', 'confidence' => 0.98],
         ['rx' => '/\b(yellow\s+mustard|classic\s+yellow\s+mustard)\b/u', 'path' => ['Yellow mustard', 'Mustard', 'Condiment'], 'category' => 'condiments', 'confidence' => 0.98],
         ['rx' => '/\bmustard\b/u', 'path' => ['Mustard', 'Condiment'], 'category' => 'condiments', 'confidence' => 0.94],
         ['rx' => '/\b(arrabbiata|marinara)\b/u', 'path' => ['Marinara sauce', 'Tomato sauce', 'Tomato', 'Sauce'], 'category' => 'sauces', 'confidence' => 0.93],
         ['rx' => '/\btomato\s+sauce\b/u', 'path' => ['Tomato sauce', 'Tomato', 'Sauce'], 'category' => 'sauces', 'confidence' => 0.95],
-        ['rx' => '/\b(chili\s+garlic\s+sauce|hot\s+chili\s+sauce|sriracha)\b/u', 'path' => ['Chili garlic sauce', 'Chili pepper', 'Sauce'], 'contains' => ['Garlic'], 'category' => 'sauces', 'confidence' => 0.96],
+        ['rx' => '/\b(chili\s+garlic\s+sauce|hot\s+chili\s+sauce|sriracha)\b/u', 'path' => ['Chili garlic sauce', 'Sauce'], 'contains' => ['Chili pepper', 'Garlic'], 'category' => 'sauces', 'confidence' => 0.96],
         ['rx' => '/\b(chimichurri)\b/u', 'path' => ['Chimichurri sauce', 'Sauce'], 'category' => 'sauces', 'confidence' => 0.96],
         ['rx' => '/\b(steak\s+sauce)\b/u', 'path' => ['Steak sauce', 'Sauce'], 'category' => 'sauces', 'confidence' => 0.94],
         ['rx' => '/\b(barbecue|bbq)\s+sauce\b/u', 'path' => ['Barbecue sauce', 'Sauce'], 'category' => 'sauces', 'confidence' => 0.96],
@@ -88,23 +88,28 @@ function canonicalIngredientRuleDefinitions(): array {
         ['rx' => '/\b(mayonnaise|mayo)\b/u', 'path' => ['Mayonnaise', 'Condiment'], 'category' => 'condiments', 'confidence' => 0.98],
         ['rx' => '/\b(hoisin\s+sauce)\b/u', 'path' => ['Hoisin sauce', 'Sauce'], 'category' => 'sauces', 'confidence' => 0.97],
         ['rx' => '/\b(oyster\s+sauce)\b/u', 'path' => ['Oyster sauce', 'Sauce'], 'contains' => ['Oyster'], 'category' => 'sauces', 'confidence' => 0.97],
-        ['rx' => '/\b(tamari|soy\s+sauce)\b/u', 'path' => ['Soy sauce', 'Soybean', 'Condiment'], 'category' => 'condiments', 'confidence' => 0.97],
+        ['rx' => '/\b(tamari|soy\s+sauce)\b/u', 'path' => ['Soy sauce', 'Condiment'], 'contains' => ['Soybean'], 'category' => 'condiments', 'confidence' => 0.97],
         ['rx' => '/\b(caesar\s+dressing)\b/u', 'path' => ['Caesar dressing', 'Salad dressing', 'Condiment'], 'category' => 'condiments', 'confidence' => 0.96],
         ['rx' => '/\b(red\s+curry\s+paste|curry\s+paste)\b/u', 'path' => ['Curry paste', 'Condiment'], 'category' => 'condiments', 'confidence' => 0.96],
-        ['rx' => '/\b(fermented\s+chile\s+paste|chile\s+paste|chili\s+paste)\b/u', 'path' => ['Chili paste', 'Chili pepper', 'Condiment'], 'category' => 'condiments', 'confidence' => 0.95],
+        ['rx' => '/\b(fermented\s+chile\s+paste|chile\s+paste|chili\s+paste)\b/u', 'path' => ['Chili paste', 'Condiment'], 'contains' => ['Chili pepper'], 'category' => 'condiments', 'confidence' => 0.95],
         ['rx' => '/\b(salsa\s+verde|chunky\s+salsa|salsa)\b/u', 'path' => ['Salsa', 'Sauce'], 'contains' => ['Tomato'], 'category' => 'sauces', 'confidence' => 0.94],
-        ['rx' => '/\btartinables?\b/u', 'path' => ['Spread', 'Condiment'], 'category' => 'condiments', 'confidence' => 0.72],
-        ['rx' => '/\bblack\s+bean\b.*\bsauce\b/u', 'path' => ['Black bean sauce', 'Black beans', 'Sauce'], 'contains' => ['Garlic'], 'category' => 'sauces', 'confidence' => 0.96],
+        ['rx' => '/\btartinables?\b/u', 'path' => ['Spread'], 'category' => 'spreads', 'confidence' => 0.72],
+        ['rx' => '/\bblack\s+bean\b.*\bsauce\b/u', 'path' => ['Black bean sauce', 'Sauce'], 'contains' => ['Black beans', 'Garlic'], 'category' => 'sauces', 'confidence' => 0.96],
         ['rx' => '/\b(seasoning\s+blend|herb\s+seasoning)\b/u', 'path' => ['Seasoning blend', 'Seasoning', 'Spice'], 'contains' => ['Onion'], 'category' => 'spices', 'confidence' => 0.93],
         ['rx' => '/\b(rice\s+vinegar|vinegar)\b/u', 'path' => ['Vinegar', 'Condiment'], 'category' => 'condiments', 'confidence' => 0.94],
-        ['rx' => '/\b(pickles?|dill\s+(chips|pickles?)|hamburger\s+dill)\b/u', 'path' => ['Pickles', 'Cucumber', 'Vegetable'], 'category' => 'vegetables', 'confidence' => 0.93],
+        ['rx' => '/\b(dill\s+chips|hamburger\s+dill|pickle\s+chips?)\b/u', 'path' => ['Pickle chips', 'Pickles', 'Vegetable'], 'category' => 'vegetables', 'confidence' => 0.95],
+        ['rx' => '/\bpickles?\b/u', 'path' => ['Pickles', 'Vegetable'], 'category' => 'vegetables', 'confidence' => 0.93],
         ['rx' => '/\b(jalape(?:n|ñ)o|banana\s+pepper|pepper\s+rings)\b/u', 'path' => ['Pickled peppers', 'Pepper', 'Vegetable'], 'category' => 'vegetables', 'confidence' => 0.92],
 
         // Meat, seafood, stocks.
         ['rx' => '/\bchicken\s+breasts?\b/u', 'path' => ['Chicken breast', 'Chicken', 'Poultry'], 'category' => 'meat', 'confidence' => 0.99],
-        ['rx' => '/\b(chicken\s+(stock|broth)|chicken\s+base|chicken.*bouillon|bouillon.*chicken)\b/u', 'path' => ['Chicken stock', 'Chicken', 'Stock'], 'category' => 'broths', 'confidence' => 0.96],
+        ['rx' => '/\b(chicken\s+base|chicken.*bouillon|bouillon.*chicken)\b/u', 'path' => ['Chicken stock base', 'Stock base', 'Stock'], 'contains' => ['Chicken'], 'category' => 'broths', 'confidence' => 0.97],
+        ['rx' => '/\bchicken\s+(stock|broth)\b/u', 'path' => ['Chicken stock', 'Stock'], 'contains' => ['Chicken'], 'category' => 'broths', 'confidence' => 0.96],
         ['rx' => '/\bbeef\s+stock\b/u', 'path' => ['Beef stock', 'Beef', 'Stock'], 'category' => 'broths', 'confidence' => 0.97],
-        ['rx' => '/\b(tortilla\s+soup|soup)\b/u', 'path' => ['Soup', 'Prepared meal'], 'category' => 'prepared meals', 'confidence' => 0.78],
+        ['rx' => '/\b(vegetable|verdure|veggie)\s+soup\b/u', 'path' => ['Vegetable soup', 'Soup'], 'contains' => ['Vegetables'], 'category' => 'soups', 'confidence' => 0.9],
+        ['rx' => '/\bcheese\s+soup\b/u', 'path' => ['Cheese soup', 'Soup'], 'contains' => ['Cheese'], 'category' => 'soups', 'confidence' => 0.9],
+        ['rx' => '/\b(tortilla\s+soup|chicken\s+tortilla\s+soup)\b/u', 'path' => ['Multi-ingredient soup', 'Soup'], 'contains' => ['Chicken'], 'category' => 'soups', 'confidence' => 0.84],
+        ['rx' => '/\bsoup\b/u', 'path' => ['Soup'], 'category' => 'soups', 'confidence' => 0.78],
         ['rx' => '/\bbacon\b/u', 'path' => ['Bacon', 'Pork', 'Meat'], 'category' => 'meat', 'confidence' => 0.98],
         ['rx' => '/\bfoie\s+gras\b/u', 'path' => ['Foie gras', 'Duck', 'Meat'], 'category' => 'meat', 'confidence' => 0.97],
         ['rx' => '/\b(clams?|sea\s+clams?)\b/u', 'path' => ['Clams', 'Shellfish', 'Seafood'], 'category' => 'seafood', 'confidence' => 0.98],
@@ -118,8 +123,9 @@ function canonicalIngredientRuleDefinitions(): array {
         ['rx' => '/\b(condensed\s+milk|sweetened\s+condensed)\b/u', 'path' => ['Condensed milk', 'Milk', 'Dairy'], 'category' => 'dairy', 'confidence' => 0.98],
         ['rx' => '/\bdairy[\s-]?free\b.*\bmilk\b/u', 'path' => ['Plant-based milk', 'Milk alternative'], 'category' => 'plant milks', 'confidence' => 0.92],
         ['rx' => '/\breduced\s+fat\s+milk\b/u', 'path' => ['Milk', 'Dairy'], 'category' => 'dairy', 'confidence' => 0.90],
-        ['rx' => '/\bcoconut\s*(milk|milk beverage|coconutmilk)\b/u', 'path' => ['Coconut milk', 'Coconut'], 'category' => 'plant milks', 'confidence' => 0.97],
-        ['rx' => '/\bbutter\b/u', 'path' => ['Butter', 'Dairy'], 'category' => 'dairy', 'confidence' => 0.98],
+        ['rx' => '/\b(coconut\s*(milk|milk beverage|coconutmilk)|coconutmilk)\b/u', 'path' => ['Coconut milk', 'Beverage'], 'contains' => ['Coconut'], 'category' => 'plant milks', 'confidence' => 0.97],
+        ['rx' => '/\bpeanut\s+butter\b/u', 'path' => ['Peanut butter', 'Nut butter', 'Butter', 'Spread'], 'contains' => ['Peanuts'], 'category' => 'spreads', 'confidence' => 0.99],
+        ['rx' => '/\bbutter\b/u', 'path' => ['Butter', 'Spread'], 'category' => 'spreads', 'confidence' => 0.98],
         ['rx' => '/\bmozzarella\b/u', 'path' => ['Mozzarella', 'Cheese', 'Dairy'], 'category' => 'dairy', 'confidence' => 0.98],
         ['rx' => '/\bparmesan\b/u', 'path' => ['Parmesan', 'Cheese', 'Dairy'], 'category' => 'dairy', 'confidence' => 0.98],
         ['rx' => '/\bpepper\s+jack\b/u', 'path' => ['Pepper jack cheese', 'Cheese', 'Dairy'], 'category' => 'dairy', 'confidence' => 0.98],
@@ -145,7 +151,8 @@ function canonicalIngredientRuleDefinitions(): array {
         ['rx' => '/\bspinach\b/u', 'path' => ['Spinach', 'Leafy vegetable', 'Vegetable'], 'category' => 'vegetables', 'confidence' => 0.99],
         ['rx' => '/\b(green\s+onions?|scallions?)\b/u', 'path' => ['Green onion', 'Onion', 'Vegetable'], 'category' => 'vegetables', 'confidence' => 0.98],
         ['rx' => '/\bonion\b/u', 'path' => ['Onion', 'Vegetable'], 'category' => 'vegetables', 'confidence' => 0.88],
-        ['rx' => '/\b(peeled\s+)?garlic\b/u', 'path' => ['Garlic', 'Vegetable'], 'category' => 'vegetables', 'confidence' => 0.98],
+        ['rx' => '/\bpeeled\s+garlic\b/u', 'path' => ['Garlic cloves', 'Garlic', 'Vegetable'], 'category' => 'vegetables', 'confidence' => 0.99],
+        ['rx' => '/\bgarlic\b/u', 'path' => ['Garlic', 'Vegetable'], 'category' => 'vegetables', 'confidence' => 0.98],
         ['rx' => '/\bginger\b/u', 'path' => ['Ginger', 'Spice'], 'category' => 'spices', 'confidence' => 0.98],
         ['rx' => '/\b(sun[\s-]?dried|dried)\s+tomatoes\b/u', 'path' => ['Sun-dried tomatoes', 'Tomato', 'Vegetable'], 'category' => 'vegetables', 'confidence' => 0.98],
         ['rx' => '/\btomatoes\b/u', 'path' => ['Tomato', 'Vegetable'], 'category' => 'vegetables', 'confidence' => 0.90],
@@ -156,7 +163,7 @@ function canonicalIngredientRuleDefinitions(): array {
         ['rx' => '/\bwalnuts?\b/u', 'path' => ['Walnuts', 'Tree nuts', 'Nuts'], 'category' => 'nuts', 'confidence' => 0.98],
         ['rx' => '/\balmonds?\b/u', 'path' => ['Almonds', 'Tree nuts', 'Nuts'], 'category' => 'nuts', 'confidence' => 0.98],
         ['rx' => '/\bpeanuts?\b/u', 'path' => ['Peanuts', 'Legume'], 'category' => 'nuts', 'confidence' => 0.98],
-        ['rx' => '/\bblack\s+bean\b.*\bsalad\b/u', 'path' => ['Black bean salad', 'Black beans', 'Salad'], 'contains' => ['Corn'], 'category' => 'prepared salads', 'confidence' => 0.93],
+        ['rx' => '/\bblack\s+bean\b.*\bsalad\b/u', 'path' => ['Black bean salad', 'Salad'], 'contains' => ['Black beans', 'Corn'], 'category' => 'prepared salads', 'confidence' => 0.93],
         ['rx' => '/\bblack\s+bean\b/u', 'path' => ['Black beans', 'Beans', 'Legume'], 'category' => 'legumes', 'confidence' => 0.90],
         ['rx' => '/\broasted\s+corn\b/u', 'path' => ['Corn', 'Vegetable'], 'category' => 'vegetables', 'confidence' => 0.78],
 
@@ -173,11 +180,12 @@ function canonicalIngredientRuleDefinitions(): array {
         ['rx' => '/\bsesame\s+oil\b/u', 'path' => ['Sesame oil', 'Sesame', 'Oil'], 'category' => 'oils', 'confidence' => 0.98],
         ['rx' => '/\bsesame\s+seeds?\b/u', 'path' => ['Sesame seeds', 'Sesame', 'Seed'], 'category' => 'seeds', 'confidence' => 0.98],
         ['rx' => '/\b(bitters?)\b/u', 'path' => ['Bitters', 'Flavoring'], 'category' => 'flavorings', 'confidence' => 0.92],
+        ['rx' => '/\b(k[\s-]?cup|coffee\s+pods?|pods?)\b/u', 'path' => ['Coffee pod', 'Coffee', 'Beverage'], 'category' => 'beverages', 'confidence' => 0.97],
         ['rx' => '/\b(coffee\s*mate|coffee\s+creamer|creamer)\b/u', 'path' => ['Coffee creamer', 'Creamer', 'Dairy'], 'category' => 'dairy', 'confidence' => 0.94],
         ['rx' => '/\b(coffee|k-cup)\b/u', 'path' => ['Coffee', 'Beverage'], 'category' => 'beverages', 'confidence' => 0.93],
         ['rx' => '/\bgatorade|sports?\s+drink|thirst\s+quencher\b/u', 'path' => ['Sports drink', 'Beverage'], 'category' => 'beverages', 'confidence' => 0.94],
         ['rx' => '/\b(cooking\s+wine|dessert\s+wine|soju|martini|buzzball|cocktail)\b/u', 'path' => ['Alcoholic beverage', 'Beverage'], 'category' => 'beverages', 'confidence' => 0.82],
-        ['rx' => '/\b(tamarind\s+(soft\s+drink|soda)|soda)\b/u', 'path' => ['Soda', 'Beverage'], 'contains' => ['Tamarind'], 'category' => 'beverages', 'confidence' => 0.89],
+        ['rx' => '/\b(tamarind\s+(soft\s+drink|soda)|zero\s+sugar\s+tamarind\s+soda|soft\s+drink)\b/u', 'path' => ['Soda', 'Beverage'], 'contains' => ['Tamarind'], 'category' => 'beverages', 'confidence' => 0.89],
     ];
 }
 
@@ -453,7 +461,10 @@ function canonicalIngredientFoodOnPreferredQuery(string $slug, string $name): st
         'sauce' => 'condiment sauce',
         'plant-based-milk' => 'plant-based milk',
         'coffee-creamer' => 'coffee creamer',
+        'coffee-pod' => 'coffee pod',
         'butter' => 'butter',
+        'peanut-butter' => 'peanut butter',
+        'nut-butter' => 'nut butter',
         'coconut' => 'coconut food product',
         'coffee' => 'coffee beverage',
         'cream' => 'cream food product',
@@ -698,15 +709,18 @@ function canonicalIngredientSyncProduct(PDO $db, int $productId, ?array $product
         $product = $stmt->fetch(PDO::FETCH_ASSOC) ?: null;
     }
     if (!$product) {
-        return ['product_id' => $productId, 'mapped' => 0, 'mappings' => []];
+        return ['product_id' => $productId, 'mapped' => 0, 'mappings' => [], 'tags' => []];
     }
 
     $mappings = canonicalIngredientInferProduct($product);
     $mappings = canonicalIngredientEnrichMappingsWithFoodOn($mappings);
     $mappings = canonicalIngredientEnrichMappingsWithUsda($mappings);
+    $tags = canonicalProductInferTags($product, $mappings);
     $db->beginTransaction();
     try {
         $db->prepare("DELETE FROM product_ingredients WHERE product_id = ? AND source != 'manual'")
+           ->execute([$productId]);
+        $db->prepare("DELETE FROM product_tags WHERE product_id = ? AND source != 'manual'")
            ->execute([$productId]);
         $link = $db->prepare("
             INSERT INTO product_ingredients (product_id, ingredient_id, role, confidence, source, evidence, updated_at)
@@ -728,6 +742,25 @@ function canonicalIngredientSyncProduct(PDO $db, int $productId, ?array $product
                 $mapping['evidence'],
             ]);
         }
+        $tagStmt = $db->prepare("
+            INSERT INTO product_tags (product_id, facet, value, source, confidence, evidence, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(product_id, facet, value) DO UPDATE SET
+                source = excluded.source,
+                confidence = excluded.confidence,
+                evidence = excluded.evidence,
+                updated_at = CURRENT_TIMESTAMP
+        ");
+        foreach ($tags as $tag) {
+            $tagStmt->execute([
+                $productId,
+                $tag['facet'],
+                $tag['value'],
+                $tag['source'],
+                $tag['confidence'],
+                $tag['evidence'],
+            ]);
+        }
         $db->commit();
     } catch (Throwable $e) {
         if ($db->inTransaction()) {
@@ -736,7 +769,118 @@ function canonicalIngredientSyncProduct(PDO $db, int $productId, ?array $product
         throw $e;
     }
 
-    return ['product_id' => $productId, 'mapped' => count($mappings), 'mappings' => $mappings];
+    return ['product_id' => $productId, 'mapped' => count($mappings), 'mappings' => $mappings, 'tags' => $tags];
+}
+
+function canonicalProductTagPut(array &$tags, string $facet, string $value, string $source, float $confidence, string $evidence): void {
+    $facet = canonicalIngredientSlug($facet);
+    $value = canonicalIngredientSlug($value);
+    if ($facet === '' || $value === '') {
+        return;
+    }
+    $key = "{$facet}:{$value}";
+    if (isset($tags[$key]) && (float)$tags[$key]['confidence'] >= $confidence) {
+        return;
+    }
+    $tags[$key] = [
+        'facet' => $facet,
+        'value' => $value,
+        'source' => $source,
+        'confidence' => max(0, min(1, $confidence)),
+        'evidence' => mb_substr($evidence, 0, 300, 'UTF-8'),
+    ];
+}
+
+function canonicalProductInferTags(array $product, array $mappings): array {
+    $tags = [];
+    $text = canonicalIngredientNormalizeText(implode(' ', array_filter([
+        $product['name'] ?? '',
+        $product['brand'] ?? '',
+        $product['category'] ?? '',
+        $product['off_generic_name'] ?? '',
+        $product['ingredients_text'] ?? '',
+        $product['package_unit'] ?? '',
+        $product['unit'] ?? '',
+    ], static fn($v) => trim((string)$v) !== '')));
+
+    $rules = [
+        ['form', 'liquid', '/\b(stock|broth|sauce|milk|heavy cream|whipping cream|half and half|juice|vinegar|oil|wine|soju|soft drink|beverage|tamari)\b/u', 0.78],
+        ['form', 'spread', '/\b(cream cheese|peanut butter|nut butter|marmalade|spread)\b/u', 0.86],
+        ['form', 'paste', '/\b(paste|base|concentrate)\b/u', 0.86],
+        ['form', 'cube', '/\b(cube|cubes)\b/u', 0.84],
+        ['form', 'powder', '/\b(powder|powdered|baking powder|baking soda|starch|gelatin|gelatine)\b/u', 0.86],
+        ['form', 'pod', '/\b(k cup|coffee pods?|pods?)\b/u', 0.94],
+        ['form', 'sliced', '/\b(sliced|slices)\b/u', 0.9],
+        ['form', 'shredded', '/\b(shredded|grated)\b/u', 0.9],
+        ['form', 'whole', '/\b(whole|unroasted|unsalted almonds|peanuts)\b/u', 0.74],
+        ['preparation', 'smoked', '/\bsmoked\b/u', 0.92],
+        ['preparation', 'roasted', '/\broasted\b/u', 0.9],
+        ['preparation', 'fried', '/\bfried\b/u', 0.9],
+        ['preparation', 'dried', '/\b(dried|sun dried|dehydrated)\b/u', 0.9],
+        ['preparation', 'frozen', '/\b(frozen|freezer|surgelat)\b/u', 0.82],
+        ['preparation', 'pickled', '/\b(pickle|pickled|dill chips|jalape(?:n|ñ)o peppers|pepper rings|vinegar)\b/u', 0.84],
+        ['preparation', 'fermented', '/\b(fermented|soy sauce|tamari|miso|yogurt|sour cream)\b/u', 0.82],
+        ['diet', 'dairy-free', '/\bdairy free\b/u', 0.95],
+        ['label', 'organic', '/\borganic\b/u', 0.9],
+        ['label', 'low-moisture', '/\blow moisture\b/u', 0.88],
+        ['label', 'low-sodium', '/\blow sodium|low sodium\b/u', 0.88],
+        ['use', 'concentrate', '/\b(base|concentrate|bouillon)\b/u', 0.88],
+        ['use', 'condiment', '/\b(mustard|ketchup|mayo|mayonnaise|sauce|dressing|salsa|chutney|vinegar)\b/u', 0.8],
+        ['use', 'pizza-sauce', '/\b(marinara|pizza\s+sauce)\b/u', 0.86],
+        ['use', 'baking', '/\b(baking|flour|brown sugar|starch|gelatin|breadcrumbs|bread crumbs)\b/u', 0.82],
+        ['use', 'ready-to-eat', '/\b(cookies|pizza|salad|cake|leftovers|taco)\b/u', 0.72],
+        ['use', 'single-serve', '/\b(k cup|coffee pods?|pods?)\b/u', 0.92],
+        ['packaging', 'k-cup', '/\bk cup\b/u', 0.94],
+    ];
+    foreach ($rules as [$facet, $value, $rx, $confidence]) {
+        if (preg_match($rx, $text, $match)) {
+            canonicalProductTagPut($tags, $facet, $value, 'local_rule', (float)$confidence, 'matched "' . trim((string)$match[0]) . '"');
+        }
+    }
+
+    foreach ($mappings as $mapping) {
+        $role = (string)($mapping['role'] ?? '');
+        $name = (string)($mapping['name'] ?? '');
+        $slug = (string)($mapping['slug'] ?? canonicalIngredientSlug($name));
+        if ($role === 'primary') {
+            canonicalProductTagPut($tags, 'canonical-primary', $slug, 'canonical', 0.99, 'primary canonical term');
+        }
+        if ($role === 'contains') {
+            canonicalProductTagPut($tags, 'contains', $slug, 'canonical', (float)($mapping['confidence'] ?? 0.8), 'canonical contains term');
+        }
+        if (in_array($slug, ['chicken','beef','pork','duck','tomato','rice','corn','garlic','almonds','peanuts','coconut','sesame','milk','oyster','tamarind'], true)) {
+            canonicalProductTagPut($tags, 'source', $slug, 'canonical', 0.86, 'canonical ingredient/source');
+        }
+    }
+
+    $nutriments = json_decode((string)($product['nutriments_json'] ?? ''), true);
+    if (is_array($nutriments)) {
+        if ((float)($nutriments['proteins_100g'] ?? 0) >= 15) {
+            canonicalProductTagPut($tags, 'nutrition', 'high-protein', 'nutriments', 0.78, 'protein >= 15g/100g');
+        }
+        if ((float)($nutriments['salt_100g'] ?? 0) >= 1.5) {
+            canonicalProductTagPut($tags, 'nutrition', 'salty', 'nutriments', 0.70, 'salt >= 1.5g/100g');
+        }
+    }
+
+    uasort($tags, static fn($a, $b) => [$a['facet'], $a['value']] <=> [$b['facet'], $b['value']]);
+    return array_values($tags);
+}
+
+function canonicalProductTagRowsForProduct(PDO $db, int $productId): array {
+    $stmt = $db->prepare("
+        SELECT facet, value, source, confidence, evidence, updated_at
+        FROM product_tags
+        WHERE product_id = ?
+        ORDER BY facet ASC, value ASC
+    ");
+    $stmt->execute([$productId]);
+    $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+    foreach ($rows as &$row) {
+        $row['confidence'] = round((float)$row['confidence'], 3);
+    }
+    unset($row);
+    return $rows;
 }
 
 function canonicalIngredientEnqueueProduct(PDO $db, int $productId, string $reason = 'product_save'): array {
@@ -1047,6 +1191,7 @@ function canonicalIngredientUsdaPreferredQuery(string $slug, string $name): stri
         'cream' => 'cream heavy',
         'cream-cheese' => 'cream cheese',
         'butter' => 'butter salted',
+        'peanut-butter' => 'peanut butter',
         'carrot' => 'carrots raw',
         'tomato' => 'tomatoes raw',
         'tomato-sauce' => 'sauce tomato canned',
@@ -1058,6 +1203,7 @@ function canonicalIngredientUsdaPreferredQuery(string $slug, string $name): stri
         'buns' => 'hamburger bun plain',
         'cake' => 'cake yellow commercially prepared',
         'coffee' => 'coffee brewed',
+        'coffee-pod' => 'coffee pod',
         'coffee-creamer' => 'coffee creamer',
         'creamer' => 'coffee creamer',
         'cucumber' => 'cucumber raw',

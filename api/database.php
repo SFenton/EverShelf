@@ -193,6 +193,20 @@ function initializeDB(PDO $db): void {
             FOREIGN KEY (ingredient_id) REFERENCES canonical_ingredients(id) ON DELETE CASCADE
         );
 
+        CREATE TABLE IF NOT EXISTS product_tags (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            product_id INTEGER NOT NULL,
+            facet TEXT NOT NULL,
+            value TEXT NOT NULL,
+            source TEXT NOT NULL DEFAULT 'local_rule',
+            confidence REAL NOT NULL DEFAULT 0,
+            evidence TEXT DEFAULT '',
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(product_id, facet, value),
+            FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE CASCADE
+        );
+
         CREATE TABLE IF NOT EXISTS canonical_processing_queue (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             product_id INTEGER NOT NULL UNIQUE,
@@ -212,6 +226,8 @@ function initializeDB(PDO $db): void {
         CREATE INDEX IF NOT EXISTS idx_product_ingredients_product ON product_ingredients(product_id);
         CREATE INDEX IF NOT EXISTS idx_product_ingredients_ingredient ON product_ingredients(ingredient_id);
         CREATE INDEX IF NOT EXISTS idx_product_ingredients_role ON product_ingredients(role);
+        CREATE INDEX IF NOT EXISTS idx_product_tags_product ON product_tags(product_id);
+        CREATE INDEX IF NOT EXISTS idx_product_tags_facet_value ON product_tags(facet, value);
         CREATE INDEX IF NOT EXISTS idx_canonical_queue_status ON canonical_processing_queue(status, requested_at);
     ");
 }
@@ -447,6 +463,20 @@ function migrateDB(PDO $db): void {
             FOREIGN KEY (ingredient_id) REFERENCES canonical_ingredients(id) ON DELETE CASCADE
         );
 
+        CREATE TABLE IF NOT EXISTS product_tags (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            product_id INTEGER NOT NULL,
+            facet TEXT NOT NULL,
+            value TEXT NOT NULL,
+            source TEXT NOT NULL DEFAULT 'local_rule',
+            confidence REAL NOT NULL DEFAULT 0,
+            evidence TEXT DEFAULT '',
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(product_id, facet, value),
+            FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE CASCADE
+        );
+
         CREATE TABLE IF NOT EXISTS canonical_processing_queue (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             product_id INTEGER NOT NULL UNIQUE,
@@ -466,6 +496,8 @@ function migrateDB(PDO $db): void {
         CREATE INDEX IF NOT EXISTS idx_product_ingredients_product ON product_ingredients(product_id);
         CREATE INDEX IF NOT EXISTS idx_product_ingredients_ingredient ON product_ingredients(ingredient_id);
         CREATE INDEX IF NOT EXISTS idx_product_ingredients_role ON product_ingredients(role);
+        CREATE INDEX IF NOT EXISTS idx_product_tags_product ON product_tags(product_id);
+        CREATE INDEX IF NOT EXISTS idx_product_tags_facet_value ON product_tags(facet, value);
         CREATE INDEX IF NOT EXISTS idx_canonical_queue_status ON canonical_processing_queue(status, requested_at);
     ");
 }
