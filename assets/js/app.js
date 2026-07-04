@@ -1110,7 +1110,7 @@ async function discoverScaleGateway() {
 }
 
 // ===== i18n TRANSLATION SYSTEM =====
-const _I18N_VERSION = '20260606n'; // bump when translations change
+const _I18N_VERSION = '20260704b'; // bump when translations change
 let _i18nStrings = null;   // current language translations (flat)
 let _i18nFallback = null;  // Italian fallback (flat)
 let _i18nLoadedVersion = null;
@@ -6900,75 +6900,69 @@ function _inventoryWaste(payload, productLabel) {
 
 async function deleteInventoryItem(id) {
     const item = currentInventory.find(i => i.id === id);
-    const unit = item ? (item.unit || 'pz') : 'pz';
-    const qty  = item ? (parseFloat(item.quantity) || 0) : 0;
-    const canDiscardOne = item && (unit === 'pz' || unit === 'conf') && qty > 1;
+    if (item && _inventoryItemNeedsQuantityDelete(item)) {
+        await _promptDeleteInventoryQuantity(item, 'current');
+        return;
+    }
+    await _confirmDeleteInventoryItem(id, 'current');
+}
 
-    if (!canDiscardOne) {
-        // Simple case: confirm → delete the whole row
-        if (confirm(t('confirm.remove_item'))) {
-            await api('inventory_delete', {}, 'POST', { id });
-            closeModal();
-            showToast(t('toast.product_removed'), 'success');
-            refreshCurrentPage();
-        }
+function _inventoryItemNeedsQuantityDelete(item) {
+    const qty = parseFloat(item?.quantity);
+    return Number.isFinite(qty) && qty > 1.0001;
+}
+
+async function _promptDeleteInventoryQuantity(item, refreshMode) {
+    const qty = parseFloat(item.quantity) || 0;
+    const unit = item.unit || 'pz';
+    const qtyDisplay = stripHtml(formatQuantity(qty, unit, item.default_quantity, item.package_unit));
+    const raw = prompt(
+        t('confirm.remove_quantity_prompt', {
+            name: item.name,
+            qty: qtyDisplay,
+            unit: getUnitDisplayLabel(unit),
+        }),
+        '1'
+    );
+    if (raw === null) return;
+
+    const normalized = String(raw).trim().replace(',', '.');
+    const quantity = parseFloat(normalized);
+    if (!/^\d+(\.\d+)?$/.test(normalized) || !Number.isFinite(quantity) || quantity < 1 || quantity > qty + 0.0001) {
+        showToast(t('confirm.remove_quantity_invalid', { qty: qtyDisplay }), 'error');
         return;
     }
 
-    // Show a choice modal: 1 piece vs everything
-    const qtyDisplay = formatQuantity(qty, unit, item.default_quantity, item.package_unit);
-    document.getElementById('modal-content').innerHTML = `
-        <div class="modal-header">
-            <h3>${t('use.throw_title')}</h3>
-            <button class="modal-close" onclick="closeModal()">✕</button>
-        </div>
-        <p style="color:var(--text-muted);margin:8px 0 16px">${escapeHtml(item.name)} · ${qtyDisplay}</p>
-        <div style="display:flex;flex-direction:column;gap:10px">
-            <button class="btn btn-large btn-warning full-width" onclick="_discardOnePiece(${id})">
-                ${t('confirm.discard_one')}
-            </button>
-            <button class="btn btn-large btn-danger full-width" onclick="_discardAllFromModal(${id})">
-                ${t('use.throw_all', { qty: qtyDisplay })}
-            </button>
-            <button class="btn btn-secondary full-width" onclick="closeModal()">
-                ${t('confirm.cancel')}
-            </button>
-        </div>
-    `;
-    document.getElementById('modal-overlay').style.display = 'flex';
+    await _deleteInventoryQuantity(item.id, quantity, refreshMode);
 }
 
-async function _discardOnePiece(inventoryId) {
-    const item = currentInventory.find(i => i.id === inventoryId);
-    if (!item) { closeModal(); return; }
-    closeModal();
-    try {
-        await _inventoryWaste({
-            product_id: item.product_id,
-            quantity: 1,
-            location: item.location,
-        }, item.name);
-        showToast(t('toast.thrown_away_partial', { qty: 1, unit: item.unit || 'pz', name: item.name }), 'success');
-        refreshCurrentPage();
-    } catch(e) {
-        showToast(t('error.connection'), 'error');
-    }
+async function _confirmDeleteInventoryItem(id, refreshMode) {
+    if (!confirm(t('confirm.remove_item'))) return;
+    await _deleteInventoryQuantity(id, null, refreshMode);
 }
 
-async function _discardAllFromModal(inventoryId) {
-    const item = currentInventory.find(i => i.id === inventoryId);
-    if (!item) { closeModal(); return; }
-    closeModal();
+function _refreshAfterInventoryDelete(refreshMode) {
+    if (refreshMode === 'action') showProductAction();
+    else refreshCurrentPage();
+}
+
+async function _deleteInventoryQuantity(id, quantity, refreshMode) {
+    const body = { id };
+    if (quantity !== null && quantity !== undefined) body.quantity = quantity;
+    showLoading(true);
     try {
-        await _inventoryWaste({
-            product_id: item.product_id,
-            use_all: true,
-            location: item.location,
-        }, item.name);
-        showToast(t('toast.thrown_away', { name: item.name }), 'success');
-        refreshCurrentPage();
+        const result = await api('inventory_delete', {}, 'POST', body);
+        if (result.success) {
+            closeModal();
+            showToast(t('toast.product_removed'), 'success');
+            _refreshAfterInventoryDelete(refreshMode);
+        } else {
+            showToast(result.error || t('error.generic'), 'error');
+        }
     } catch(e) {
         showToast(t('error.connection'), 'error');
+    } finally {
+        showLoading(false);
     }
 }
 
@@ -9103,12 +9097,12 @@ async function submitActionEditInventory(e, id, productId) {
 }
 
 async function deleteActionInventoryItem(id) {
-    if (confirm(t('confirm.remove_item'))) {
-        await api('inventory_delete', {}, 'POST', { id });
-        closeModal();
-        showToast(t('toast.product_removed'), 'success');
-        showProductAction(); // Refresh the action page
+    const item = _actionInventoryItems.find(i => i.id === id);
+    if (item && _inventoryItemNeedsQuantityDelete(item)) {
+        await _promptDeleteInventoryQuantity(item, 'action');
+        return;
     }
+    await _confirmDeleteInventoryItem(id, 'action');
 }
 
 // === THROW AWAY FORM ===
@@ -17709,7 +17703,16 @@ function _applyOptimisticUpdate(action, body) {
         }
     } else if (action === 'inventory_delete' && body.id) {
         const idx = cache.findIndex(i => i.id === body.id);
-        if (idx >= 0) { cache.splice(idx, 1); changed = true; }
+        if (idx >= 0) {
+            const removeQty = parseFloat(body.quantity);
+            const currentQty = parseFloat(cache[idx].quantity ?? 0);
+            if (Number.isFinite(removeQty) && removeQty > 0 && Number.isFinite(currentQty) && currentQty - removeQty > 0.0001) {
+                cache[idx].quantity = currentQty - removeQty;
+            } else {
+                cache.splice(idx, 1);
+            }
+            changed = true;
+        }
     } else if (action === 'inventory_add') {
         cache.push({ ...body, id: -(Date.now()), _offline: true });
         changed = true;

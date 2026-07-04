@@ -4195,11 +4195,22 @@ function updateInventory(PDO $db): void {
 function deleteInventory(PDO $db): void {
     EverLog::info('deleteInventory');
     $input = json_decode(file_get_contents('php://input'), true);
+    if (!is_array($input)) $input = [];
     $id = (int)($input['id'] ?? 0);
     if (!$id) {
         http_response_code(400);
         echo json_encode(['error' => 'Inventory ID required']);
         return;
+    }
+
+    $requestedQty = null;
+    if (array_key_exists('quantity', $input) && $input['quantity'] !== null && $input['quantity'] !== '') {
+        $requestedQty = (float)$input['quantity'];
+        if ($requestedQty < 1) {
+            http_response_code(400);
+            echo json_encode(['success' => false, 'error' => 'Invalid quantity']);
+            return;
+        }
     }
 
     $stmt = $db->prepare("SELECT id, product_id, quantity, location FROM inventory WHERE id = ?");
@@ -4212,13 +4223,37 @@ function deleteInventory(PDO $db): void {
     }
 
     $qty = (float)$row['quantity'];
-    if ($qty > 0.0001) {
-        $db->prepare("INSERT INTO transactions (product_id, type, quantity, location, notes) VALUES (?, 'out', ?, ?, ?)")
-           ->execute([(int)$row['product_id'], $qty, $row['location'], '[Eliminazione inventario]']);
+    if ($requestedQty !== null && $requestedQty > $qty + 0.0001) {
+        http_response_code(400);
+        echo json_encode(['success' => false, 'error' => 'Invalid quantity']);
+        return;
     }
 
-    $db->prepare("DELETE FROM inventory WHERE id = ?")->execute([$id]);
-    echo json_encode(['success' => true]);
+    $removedQty = $requestedQty === null ? $qty : $requestedQty;
+    $remaining = max(0.0, $qty - $removedQty);
+    $removedRow = $remaining <= 0.0001;
+
+    dbWithRetry(function () use ($db, $row, $id, $removedQty, $remaining, $removedRow): void {
+        $db->beginTransaction();
+        try {
+            if ($removedRow) {
+                $db->prepare("DELETE FROM inventory WHERE id = ?")->execute([$id]);
+            } else {
+                $db->prepare("UPDATE inventory SET quantity = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?")
+                   ->execute([$remaining, $id]);
+            }
+            if ($removedQty > 0.0001) {
+                $db->prepare("INSERT INTO transactions (product_id, type, quantity, location, notes) VALUES (?, 'out', ?, ?, ?)")
+                   ->execute([(int)$row['product_id'], $removedQty, $row['location'], '[Eliminazione inventario]']);
+            }
+            $db->commit();
+        } catch (Throwable $e) {
+            if ($db->inTransaction()) $db->rollBack();
+            throw $e;
+        }
+    });
+    invalidateSmartShoppingCache();
+    echo json_encode(['success' => true, 'remaining' => $remaining, 'removed_qty' => $removedQty, 'removed_row' => $removedRow]);
 }
 
 function _inventoryRowById(PDO $db, int $id): ?array {

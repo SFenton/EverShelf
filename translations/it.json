@@ -1206,7 +1206,9 @@
     "kiosk_exit": "Uscire dalla modalità kiosk?",
     "cancel": "Annulla",
     "proceed": "Conferma",
-    "discard_one": "Butta 1 pezzo"
+    "discard_one": "Butta 1 pezzo",
+    "remove_quantity_prompt": "Quanti {unit} di {name} vuoi rimuovere?\nDisponibile: {qty}",
+    "remove_quantity_invalid": "Inserisci un numero da 1 a {qty}."
   },
   "location": {
     "dispensa": "Dispensa",

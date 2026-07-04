@@ -1201,7 +1201,9 @@
     "kiosk_exit": "Quitter le mode kiosque ?",
     "cancel": "Annuler",
     "proceed": "Confirmer",
-    "discard_one": "Jeter 1 pièce"
+    "discard_one": "Jeter 1 pièce",
+    "remove_quantity_prompt": "Combien de {unit} de {name} voulez-vous supprimer ?\nDisponible : {qty}",
+    "remove_quantity_invalid": "Saisissez un nombre de 1 à {qty}."
   },
   "location": {
     "dispensa": "Garde-manger",

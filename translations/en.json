@@ -1206,7 +1206,9 @@
     "kiosk_exit": "Exit kiosk mode?",
     "cancel": "Cancel",
     "proceed": "Confirm",
-    "discard_one": "Discard 1 piece"
+    "discard_one": "Discard 1 piece",
+    "remove_quantity_prompt": "How many {unit} of {name} do you want to remove?\nAvailable: {qty}",
+    "remove_quantity_invalid": "Enter a number from 1 to {qty}."
   },
   "location": {
     "dispensa": "Pantry",

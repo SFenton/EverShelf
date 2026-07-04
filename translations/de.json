@@ -1201,7 +1201,9 @@
     "kiosk_exit": "Kioskmodus verlassen?",
     "cancel": "Abbrechen",
     "proceed": "Bestätigen",
-    "discard_one": "1 Stück wegwerfen"
+    "discard_one": "1 Stück wegwerfen",
+    "remove_quantity_prompt": "Wie viele {unit} von {name} möchtest du entfernen?\nVerfügbar: {qty}",
+    "remove_quantity_invalid": "Gib eine Zahl von 1 bis {qty} ein."
   },
   "location": {
     "dispensa": "Vorratskammer",
