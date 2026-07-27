@@ -753,9 +753,9 @@ if ($rateLimitAction) {
 // the explicit header is an additional defence-in-depth check for POST writes.
 $_writeActions = [
     'inventory_add','inventory_use','inventory_update','inventory_remove','inventory_delete',
-    'inventory_delete_one','inventory_update_one',
+    'inventory_delete_one','inventory_update_one','inventory_set_prepared_food',
     'inventory_confirm_finished','inventory_restore_ghost',
-    'product_save','product_delete','product_merge',
+    'product_save','product_delete','product_merge','product_set_prepared_food',
     'bring_add','bring_remove','bring_sync','bring_set_spec','bring_migrate_names',
     'shopping_add','shopping_remove',
     'dismiss_anomaly','save_settings',
@@ -875,6 +875,9 @@ try {
             break;
         case 'inventory_update_one':
             updateInventoryOne($db);
+            break;
+        case 'inventory_set_prepared_food':
+            setInventoryPreparedFood($db);
             break;
         case 'inventory_finished_items':
             getFinishedItems($db);
@@ -3624,21 +3627,29 @@ function addToInventory(PDO $db): void {
     
     $vacuumSealed = (int)($input['vacuum_sealed'] ?? 0);
     $expiryUserSet = (int)($input['expiry_user_set'] ?? 0);
-    
+    // New stock inherits the product's prepared-food state so the "any flagged row" rule
+    // stays consistent with what the product itself claims.
+    $preparedStmt = $db->prepare("SELECT prepared_food FROM products WHERE id = ?");
+    $preparedStmt->execute([$productId]);
+    $preparedFood = (int)($preparedStmt->fetchColumn() ?: 0);
+
     // Check if a matching sealed batch exists. New stock only merges into an
-    // unopened row when product, location, expiration date, and sealed treatment
-    // all match; otherwise each physical batch needs its own row so older food
-    // remains visible even after a fresher package is scanned.
+    // unopened row when product, location, expiration date, sealed treatment, and
+    // prepared-food state all match; otherwise each physical batch needs its own row so
+    // older food remains visible even after a fresher package is scanned.
+    // CAST on both sides: COALESCE drops column affinity and PDO binds execute() params as
+    // strings, so an uncast integer comparison here silently never matches.
     $stmt = $db->prepare("
         SELECT id, quantity FROM inventory
         WHERE product_id = ?
           AND location = ?
           AND opened_at IS NULL
           AND COALESCE(expiry_date, '') = COALESCE(?, '')
-          AND COALESCE(vacuum_sealed, 0) = ?
+          AND CAST(COALESCE(vacuum_sealed, 0) AS INTEGER) = CAST(? AS INTEGER)
+          AND CAST(COALESCE(prepared_food, 0) AS INTEGER) = CAST(? AS INTEGER)
         ORDER BY added_at ASC LIMIT 1
     ");
-    $stmt->execute([$productId, $location, $expiry, $vacuumSealed]);
+    $stmt->execute([$productId, $location, $expiry, $vacuumSealed, $preparedFood]);
     $existing = $stmt->fetch();
 
     if ($existing) {
@@ -3649,8 +3660,8 @@ function addToInventory(PDO $db): void {
     } else {
         $newQty = $quantity;
         // Different expiry/sealed batches and opened packs get distinct rows.
-        $stmt = $db->prepare("INSERT INTO inventory (product_id, location, quantity, expiry_date, vacuum_sealed, expiry_user_set) VALUES (?, ?, ?, ?, ?, ?)");
-        $stmt->execute([$productId, $location, $quantity, $expiry, $vacuumSealed, $expiryUserSet]);
+        $stmt = $db->prepare("INSERT INTO inventory (product_id, location, quantity, expiry_date, vacuum_sealed, expiry_user_set, prepared_food) VALUES (?, ?, ?, ?, ?, ?, ?)");
+        $stmt->execute([$productId, $location, $quantity, $expiry, $vacuumSealed, $expiryUserSet, $preparedFood]);
     }
     
     // Get total across all locations
@@ -4406,14 +4417,15 @@ function updateInventoryOne(PDO $db): void {
                 $db->prepare("UPDATE inventory SET quantity = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?")
                    ->execute([$remaining, $id]);
                 $db->prepare("
-                    INSERT INTO inventory (product_id, location, quantity, expiry_date, vacuum_sealed, expiry_user_set, opened_at)
-                    VALUES (?, ?, 1, ?, ?, 1, ?)
+                    INSERT INTO inventory (product_id, location, quantity, expiry_date, vacuum_sealed, expiry_user_set, opened_at, prepared_food)
+                    VALUES (?, ?, 1, ?, ?, 1, ?, ?)
                 ")->execute([
                     (int)$row['product_id'],
                     $row['location'],
                     $expiry,
                     (int)($row['vacuum_sealed'] ?? 0),
                     $row['opened_at'] ?? null,
+                    (int)($row['prepared_food'] ?? 0),
                 ]);
                 $targetId = (int)$db->lastInsertId();
                 $split = true;
@@ -4430,6 +4442,146 @@ function updateInventoryOne(PDO $db): void {
     });
     invalidateSmartShoppingCache();
     echo json_encode(['success' => true, 'inventory_id' => $targetId, 'split' => $split, 'remaining' => $remaining]);
+}
+
+/**
+ * Consolidate inventory rows that are identical in every respect that defines a batch.
+ *
+ * Toggling the prepared flag on part of a row splits it, so flipping back would otherwise
+ * leave two rows that the UI renders as one batch. Returns the surviving row id.
+ */
+function _inventoryMergeIdenticalRows(PDO $db, array $row, int $prepared, int $preferId = 0): int {
+    // COALESCE strips column affinity and PDO binds execute() params as strings, so both
+    // sides are cast explicitly — otherwise integer 0 never equals the bound '0'.
+    $stmt = $db->prepare("
+        SELECT id, quantity FROM inventory
+        WHERE product_id = ? AND location = ? AND CAST(COALESCE(prepared_food, 0) AS INTEGER) = CAST(? AS INTEGER)
+          AND (expiry_date IS ? OR expiry_date = ?)
+          AND CAST(COALESCE(vacuum_sealed, 0) AS INTEGER) = CAST(? AS INTEGER)
+          AND (opened_at IS ? OR opened_at = ?)
+        ORDER BY CASE WHEN id = ? THEN 0 ELSE 1 END, id ASC
+    ");
+    $stmt->execute([
+        (int)$row['product_id'], $row['location'], $prepared,
+        $row['expiry_date'], $row['expiry_date'],
+        (int)($row['vacuum_sealed'] ?? 0),
+        $row['opened_at'] ?? null, $row['opened_at'] ?? null,
+        $preferId,
+    ]);
+    $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+    if (count($rows) < 2) {
+        return (int)($rows[0]['id'] ?? $preferId);
+    }
+
+    $keepId = (int)$rows[0]['id'];
+    $total = 0.0;
+    foreach ($rows as $r) {
+        $total += (float)$r['quantity'];
+    }
+    $db->prepare("UPDATE inventory SET quantity = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?")
+       ->execute([$total, $keepId]);
+    foreach (array_slice($rows, 1) as $r) {
+        $db->prepare("DELETE FROM inventory WHERE id = ?")->execute([(int)$r['id']]);
+    }
+    return $keepId;
+}
+
+/** products.prepared_food is true when ANY stocked inventory row is flagged. */
+function _syncProductPreparedFood(PDO $db, int $productId): int {
+    $stmt = $db->prepare("SELECT EXISTS(SELECT 1 FROM inventory WHERE product_id = ? AND prepared_food = 1 AND quantity > 0)");
+    $stmt->execute([$productId]);
+    $any = (int)$stmt->fetchColumn();
+    $db->prepare("UPDATE products SET prepared_food = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?")
+       ->execute([$any, $productId]);
+    return $any;
+}
+
+/**
+ * Flag some or all units of an inventory row as prepared food.
+ *
+ * Passing a quantity below the row quantity splits those units into their own row so the
+ * rest of the batch keeps its previous state. The product-level flag is then recomputed
+ * and the product re-queued so its taxonomy regroups.
+ */
+function setInventoryPreparedFood(PDO $db): void {
+    EverLog::info('setInventoryPreparedFood');
+    $input = json_decode(file_get_contents('php://input'), true) ?? [];
+    $id = (int)($input['inventory_id'] ?? $input['id'] ?? 0);
+    if (!$id) {
+        http_response_code(400);
+        echo json_encode(['success' => false, 'error' => 'Inventory ID required']);
+        return;
+    }
+
+    $row = _inventoryRowById($db, $id);
+    if (!$row) {
+        http_response_code(404);
+        echo json_encode(['success' => false, 'error' => 'Inventory row not found']);
+        return;
+    }
+
+    $prepared = array_key_exists('prepared_food', $input)
+        ? (int)filter_var($input['prepared_food'], FILTER_VALIDATE_BOOLEAN)
+        : 1;
+    $rowQty = max(0.0, (float)$row['quantity']);
+    $qty = array_key_exists('quantity', $input) ? (float)$input['quantity'] : $rowQty;
+    if (!is_numeric($qty) || $qty <= 0 || $qty > $rowQty + 0.0001) {
+        http_response_code(400);
+        echo json_encode(['success' => false, 'error' => 'Invalid quantity', 'available' => $rowQty]);
+        return;
+    }
+
+    $productId = (int)$row['product_id'];
+    $targetId = $id;
+    $split = false;
+
+    dbWithRetry(function () use ($db, $row, $id, $prepared, $qty, $rowQty, &$targetId, &$split): void {
+        $db->beginTransaction();
+        try {
+            if ($qty >= $rowQty - 0.0001) {
+                $db->prepare("UPDATE inventory SET prepared_food = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?")
+                   ->execute([$prepared, $id]);
+                $targetId = _inventoryMergeIdenticalRows($db, $row, $prepared, $id);
+            } else {
+                $db->prepare("UPDATE inventory SET quantity = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?")
+                   ->execute([$rowQty - $qty, $id]);
+                $db->prepare("
+                    INSERT INTO inventory (product_id, location, quantity, expiry_date, vacuum_sealed, expiry_user_set, opened_at, prepared_food)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ")->execute([
+                    (int)$row['product_id'],
+                    $row['location'],
+                    $qty,
+                    $row['expiry_date'],
+                    (int)($row['vacuum_sealed'] ?? 0),
+                    (int)($row['expiry_user_set'] ?? 0),
+                    $row['opened_at'] ?? null,
+                    $prepared,
+                ]);
+                $targetId = _inventoryMergeIdenticalRows($db, $row, $prepared, (int)$db->lastInsertId());
+                $split = true;
+            }
+            $db->commit();
+        } catch (Throwable $e) {
+            if ($db->inTransaction()) $db->rollBack();
+            throw $e;
+        }
+    });
+
+    $productPrepared = _syncProductPreparedFood($db, $productId);
+    $queue = canonicalIngredientEnqueueProduct($db, $productId, 'inventory_prepared_food_flag');
+    invalidateSmartShoppingCache();
+
+    echo json_encode([
+        'success' => true,
+        'inventory_id' => $targetId,
+        'product_id' => $productId,
+        'prepared_food' => (bool)$prepared,
+        'quantity' => $qty,
+        'split' => $split,
+        'product_prepared_food' => (bool)$productPrepared,
+        'canonical_queued' => !empty($queue['queued']),
+    ], JSON_UNESCAPED_UNICODE);
 }
 
 function productQtyThreshold(string $unit): float {

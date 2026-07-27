@@ -139,6 +139,7 @@ function initializeDB(PDO $db): void {
             location TEXT NOT NULL DEFAULT 'dispensa',
             quantity REAL NOT NULL DEFAULT 1,
             expiry_date DATE,
+            prepared_food INTEGER DEFAULT 0,
             added_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE CASCADE
@@ -374,6 +375,10 @@ function migrateDB(PDO $db): void {
     $invColNames = array_column($invCols, 'name');
     if (!in_array('expiry_user_set', $invColNames)) {
         try { $db->exec("ALTER TABLE inventory ADD COLUMN expiry_user_set INTEGER DEFAULT 0"); }
+        catch (PDOException $e) { if (strpos($e->getMessage(), 'duplicate column') === false) throw $e; }
+    }
+    if (!in_array('prepared_food', $invColNames)) {
+        try { $db->exec("ALTER TABLE inventory ADD COLUMN prepared_food INTEGER DEFAULT 0"); }
         catch (PDOException $e) { if (strpos($e->getMessage(), 'duplicate column') === false) throw $e; }
     }
 

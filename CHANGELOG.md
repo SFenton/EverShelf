@@ -11,6 +11,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Recipe scraps tips** — During cooking steps, detect "waste" generated (peels, cores, bones, eggshells, coffee grounds, citrus zest, etc.) and surface AI-powered tips on how to reuse them (compost, natural cleaner, broth, candied peel, etc.). Could be shown as an optional collapsible hint card below the step that generates the scrap.
 
+## [1.8.1] - 2026-07-27
+
+### Added
+- **Per-item prepared food** — `inventory_set_prepared_food` marks some or all units of an inventory row as prepared. Passing a quantity below the row quantity splits those units onto their own row, so part of a batch can be prepared while the rest is not. The product counts as prepared when any stocked row is flagged, and its taxonomy is regrouped automatically. New stock inherits the product's state, and rows that become identical again are merged back together.
+
+### Fixed
+- **Inventory batch matching never matched on integer columns** — `COALESCE(...)` drops column affinity and PDO binds `execute()` parameters as strings, so `COALESCE(vacuum_sealed, 0) = ?` compared integer `0` against string `'0'` and always failed. Affected batch merging in `inventory_add`. Both sides are now cast explicitly.
+
 ## [1.8.0] - 2026-07-27
 
 ### Added
