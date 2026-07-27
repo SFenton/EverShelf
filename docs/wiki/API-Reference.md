@@ -58,6 +58,13 @@ Toggle the prepared-food flag on an existing product and re-queue its taxonomy g
 { "id": 42, "prepared_food": true }
 ```
 
+### `inventory_set_prepared_food` — POST
+Mark some or all units of an inventory row as prepared food. Passing a `quantity` below the row quantity splits those units onto their own inventory row so the rest of the batch keeps its previous state; rows that become identical again are merged back together. The product-level flag is recomputed as "any stocked row is flagged" and the product is re-queued so its taxonomy regroups.
+
+```json
+{ "inventory_id": 190, "prepared_food": true, "quantity": 2 }
+```
+
 ```json
 {
   "id": 42,
