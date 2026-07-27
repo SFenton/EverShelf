@@ -47,6 +47,17 @@ Look up a barcode on Open Food Facts (external call).
 ### `product_save` — POST
 Create or update a product. Pass `id` to update. The save path queues canonical/common ingredient post-processing and returns immediately after the product is persisted. Existing mappings may be returned in `canonical_ingredients`; queued work is processed by cron or `scripts/process-canonical-queue.php`.
 
+When the queue processes a product it first looks for a previous classification of the same item (barcode, name+brand, name, or recorded alias) and replays it. Only genuinely new items are sent to Gemini for taxonomy review, which confirms or corrects the heuristic placement against the whole tree and may add new nodes — never modifying existing ones.
+
+Pass `prepared_food: true` for finished dishes that should not be classified by ingredient. Those group straight under the existing prepared meal term and skip both the history lookup and the model. The flag is sticky: it only changes when explicitly supplied, so ordinary saves never clear it.
+
+### `product_set_prepared_food` — POST
+Toggle the prepared-food flag on an existing product and re-queue its taxonomy grouping. Separate from `product_save`, which rewrites every column from its input and would blank out fields a partial payload omits.
+
+```json
+{ "id": 42, "prepared_food": true }
+```
+
 ```json
 {
   "id": 42,

@@ -109,7 +109,10 @@ try {
         $queueLimit = max(0, (int)env('CANONICAL_QUEUE_CRON_LIMIT', '3'));
         $maxAttempts = max(1, (int)env('CANONICAL_QUEUE_MAX_ATTEMPTS', '3'));
         $queueResult = canonicalIngredientProcessQueue($db, $queueLimit, $maxAttempts);
-        if (($queueResult['processed'] ?? 0) > 0) {
+        if (!empty($queueResult['skipped'])) {
+            echo '[' . date('Y-m-d H:i:s') . '] Canonical queue — skipped (' . $queueResult['skipped']
+                . '), pending: ' . ($queueResult['pending'] ?? 0) . "\n";
+        } elseif (($queueResult['processed'] ?? 0) > 0) {
             echo '[' . date('Y-m-d H:i:s') . '] Canonical queue — processed: ' . ($queueResult['processed'] ?? 0)
                 . ', ok: ' . ($queueResult['succeeded'] ?? 0)
                 . ', failed: ' . ($queueResult['failed'] ?? 0)

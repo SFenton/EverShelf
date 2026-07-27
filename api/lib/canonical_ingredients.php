@@ -7,7 +7,7 @@
  * while product saves and backfills remain fast and offline-safe.
  */
 
-const CANONICAL_INGREDIENT_RULESET_VERSION = 'evershelf_common_ingredients_v1';
+const CANONICAL_INGREDIENT_RULESET_VERSION = 'evershelf_common_ingredients_v2';
 const FOODON_LOOKUP_CACHE_VERSION = 'foodon_ols4_v5';
 const USDA_FDC_LOOKUP_CACHE_VERSION = 'usda_fdc_v5';
 
@@ -61,6 +61,31 @@ function canonicalIngredientDecodeTags(mixed $value): array {
     return array_values(array_filter(array_map('trim', explode(',', $value))));
 }
 
+function canonicalIngredientSingularizeWord(string $word): string {
+    if (mb_strlen($word, 'UTF-8') <= 3 || preg_match('/(ss|us|is|as)$/u', $word)) {
+        return $word;
+    }
+    foreach ([['/ies$/u', 'y'], ['/(ch|sh|s|x|z)es$/u', '$1'], ['/oes$/u', 'o'], ['/s$/u', '']] as [$pattern, $replacement]) {
+        if (preg_match($pattern, $word)) {
+            return preg_replace($pattern, $replacement, $word) ?? $word;
+        }
+    }
+    return $word;
+}
+
+/**
+ * Naive English singularization, used to widen the rule haystack.
+ *
+ * Rule patterns are written in the singular and anchored with \b, so "Black Beans" could
+ * never match /\bblack\s+bean\b/ — the trailing \b falls between "n" and "s". The singular
+ * form is appended to (never substituted for) the original text, so widening the haystack
+ * can only ever add matches.
+ */
+function canonicalIngredientSingularize(string $text): string {
+    $words = preg_split('/\s+/u', $text, -1, PREG_SPLIT_NO_EMPTY) ?: [];
+    return implode(' ', array_map('canonicalIngredientSingularizeWord', $words));
+}
+
 function canonicalIngredientSearchText(array $product): string {
     $parts = [
         $product['name'] ?? '',
@@ -68,7 +93,9 @@ function canonicalIngredientSearchText(array $product): string {
         $product['generic_name'] ?? '',
         $product['category'] ?? '',
     ];
-    return canonicalIngredientNormalizeText(implode(' ', array_filter(array_map('strval', $parts))));
+    $text = canonicalIngredientNormalizeText(implode(' ', array_filter(array_map('strval', $parts))));
+    $singular = canonicalIngredientSingularize($text);
+    return $singular === $text ? $text : $text . ' ' . $singular;
 }
 
 function canonicalIngredientRuleDefinitions(): array {
@@ -132,6 +159,10 @@ function canonicalIngredientRuleDefinitions(): array {
         ['rx' => '/\bpepper\s+jack\b/u', 'path' => ['Pepper jack cheese', 'Cheese', 'Dairy'], 'category' => 'dairy', 'confidence' => 0.98],
         ['rx' => '/\bswiss\s+cheese\b/u', 'path' => ['Swiss cheese', 'Cheese', 'Dairy'], 'category' => 'dairy', 'confidence' => 0.98],
         ['rx' => '/\b(mexican-style\s+blend\s+cheese|shredded.*cheese|cheese\s+slices?|cheese\s+block)\b/u', 'path' => ['Cheese', 'Dairy'], 'category' => 'dairy', 'confidence' => 0.91],
+
+        // Eggs.
+        ['rx' => '/\begg\s+white\b/u', 'path' => ['Egg whites', 'Eggs'], 'category' => 'eggs', 'confidence' => 0.97],
+        ['rx' => '/\b(egg|eggs)\b/u', 'path' => ['Eggs'], 'category' => 'eggs', 'confidence' => 0.95],
 
         // Grains, bakery, prepared meals.
         ['rx' => '/\barborio\s+rice\b/u', 'path' => ['Arborio rice', 'Rice', 'Grain'], 'category' => 'grains', 'confidence' => 0.99],
@@ -891,7 +922,7 @@ function canonicalIngredientUpsert(PDO $db, array $mapping): int {
     return (int)$id->fetchColumn();
 }
 
-function canonicalIngredientSyncProduct(PDO $db, int $productId, ?array $product = null): array {
+function canonicalIngredientSyncProduct(PDO $db, int $productId, ?array $product = null, array $options = []): array {
     if ($product === null) {
         $stmt = $db->prepare("SELECT * FROM products WHERE id = ?");
         $stmt->execute([$productId]);
@@ -907,6 +938,20 @@ function canonicalIngredientSyncProduct(PDO $db, int $productId, ?array $product
             return !(($mapping['role'] ?? '') === 'contains' && ($mapping['slug'] ?? '') === 'milk');
         }));
     }
+
+    // Replay a previous classification when we have seen this item before, otherwise let
+    // Gemini confirm/adjust the heuristic against the whole tree. Falls back to the
+    // heuristic result whenever the model is unavailable.
+    $decision = 'heuristic';
+    $decisionDetail = [];
+    if (function_exists('taxonomyResolveForProduct')) {
+        $product['id'] = $productId;
+        $resolved = taxonomyResolveForProduct($db, $product, $mappings, $options['allow_ai'] ?? true);
+        $mappings = $resolved['mappings'];
+        $decision = $resolved['decision'];
+        $decisionDetail = $resolved['detail'];
+    }
+
     $mappings = canonicalIngredientEnrichMappingsWithFoodOn($mappings);
     $mappings = canonicalIngredientEnrichMappingsWithUsda($mappings);
     $tags = canonicalProductInferTags($product, $mappings);
@@ -963,7 +1008,14 @@ function canonicalIngredientSyncProduct(PDO $db, int $productId, ?array $product
         throw $e;
     }
 
-    return ['product_id' => $productId, 'mapped' => count($mappings), 'mappings' => $mappings, 'tags' => $tags];
+    return [
+        'product_id' => $productId,
+        'mapped' => count($mappings),
+        'mappings' => $mappings,
+        'tags' => $tags,
+        'decision' => $decision,
+        'decision_detail' => $decisionDetail,
+    ];
 }
 
 function canonicalProductTagPut(array &$tags, string $facet, string $value, string $source, float $confidence, string $evidence): void {
@@ -1130,6 +1182,39 @@ function canonicalIngredientQueueStats(PDO $db): array {
     return $stats;
 }
 
+/**
+ * Exclusive lock for queue processing.
+ *
+ * cron runs the worker every 5 minutes, but a batch that performs taxonomy review can
+ * easily outlive that interval. Overlapping runs duplicate work and collide on SQLite
+ * writes ("database is locked"), so a run that cannot take the lock simply yields.
+ *
+ * Returns a live handle, or false when another run holds the lock.
+ */
+function canonicalIngredientQueueLock(): mixed {
+    $path = __DIR__ . '/../../data/canonical_queue.lock';
+    $dir = dirname($path);
+    if (!is_dir($dir)) {
+        @mkdir($dir, 0775, true);
+    }
+    $handle = @fopen($path, 'c');
+    if ($handle === false) {
+        return null; // Cannot lock — better to work than to stall permanently.
+    }
+    if (!flock($handle, LOCK_EX | LOCK_NB)) {
+        fclose($handle);
+        return false;
+    }
+    return $handle;
+}
+
+function canonicalIngredientQueueUnlock(mixed $handle): void {
+    if (is_resource($handle)) {
+        @flock($handle, LOCK_UN);
+        @fclose($handle);
+    }
+}
+
 function canonicalIngredientProcessQueue(PDO $db, int $limit = 5, int $maxAttempts = 3): array {
     $limit = max(0, min(50, $limit));
     if ($limit === 0) {
@@ -1142,6 +1227,26 @@ function canonicalIngredientProcessQueue(PDO $db, int $limit = 5, int $maxAttemp
         ];
     }
 
+    $lock = canonicalIngredientQueueLock();
+    if ($lock === false) {
+        return [
+            'processed' => 0,
+            'succeeded' => 0,
+            'failed' => 0,
+            'pending' => canonicalIngredientQueueStats($db)['pending'] ?? 0,
+            'items' => [],
+            'skipped' => 'already_running',
+        ];
+    }
+
+    try {
+        return canonicalIngredientProcessQueueBatch($db, $limit, $maxAttempts);
+    } finally {
+        canonicalIngredientQueueUnlock($lock);
+    }
+}
+
+function canonicalIngredientProcessQueueBatch(PDO $db, int $limit, int $maxAttempts): array {
     $maxAttempts = max(1, $maxAttempts);
     $stmt = $db->prepare("
         SELECT q.id, q.product_id, q.attempts
@@ -1178,7 +1283,12 @@ function canonicalIngredientProcessQueue(PDO $db, int $limit = 5, int $maxAttemp
                 WHERE id = ?
             ")->execute([$queueId]);
             $succeeded++;
-            $items[] = ['product_id' => $productId, 'status' => 'done', 'mapped' => $mapped];
+            $items[] = [
+                'product_id' => $productId,
+                'status' => 'done',
+                'mapped' => $mapped,
+                'decision' => (string)($result['decision'] ?? 'heuristic'),
+            ];
         } catch (Throwable $e) {
             $message = mb_substr($e->getMessage(), 0, 500, 'UTF-8');
             $db->prepare("

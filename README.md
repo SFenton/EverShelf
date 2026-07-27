@@ -85,6 +85,9 @@ Connect your pantry to your smart home in minutes — no YAML, no manual sensor 
 - **Barcode scanning** — Scan products with your phone camera using QuaggaJS; last 20 scanned products saved as tappable chips so you can re-select them without rescanning
 - **Canonical ingredients** — Products are mapped to common ingredient aliases and editable taxonomy trees (e.g. "Chicken breast" → "Chicken") with optional FoodOn and USDA FoodData Central IDs for better grouping, search, and recipe matching
 - **Queued enrichment** — Product saves return immediately; canonical/FoodOn/USDA post-processing runs from cron or the CLI worker so Home Assistant/API additions stay responsive
+- **Taxonomy history reuse** — Re-adding a known item replays the placement it was given before (matched by barcode, name+brand, name, or a recorded alias) without calling the model
+- **AI taxonomy review** — Genuinely new items have their heuristic placement checked by Gemini against the whole taxonomy tree, which confirms or corrects the term and may add new nodes; it can never rename, move, or delete existing nodes
+- **Prepared food items** — Finished dishes can be flagged as prepared at add time so they group under the existing prepared meal term instead of being classified by ingredient
 - **AI identification** — Take a photo and let Google Gemini identify the product, with suggestions from your existing inventory; gracefully shows a friendly message when AI quota is exhausted instead of a raw API error
 - **Smart locations** — Track items across Pantry, Fridge, Freezer, and custom locations
 - **Expiry tracking** — Automatic shelf-life estimation based on product type and storage
@@ -331,14 +334,20 @@ Camera access requires HTTPS on most mobile browsers. Options:
 - **Self-signed certificate** (for local network only)
 - **Reverse proxy** (e.g., Caddy, Traefik) with automatic TLS
 
-### Cron Job (Optional)
+### Cron Job
 
-Set up a cron job for smart shopping predictions:
+The Docker image runs this on its own via `docker/evershelf-cron`, so no host setup is
+needed. Configure it manually only for non-Docker installs:
 
 ```bash
 # Run every 5 minutes
 */5 * * * * php /path/to/evershelf/api/cron_smart_shopping.php >> /path/to/evershelf/data/cron.log 2>&1
 ```
+
+This job is **not optional**: besides smart shopping predictions it drains the canonical
+ingredient/taxonomy queue. Without it, product saves keep enqueueing work that is never
+processed and new items silently never receive taxonomy terms. Overlapping runs are safe —
+the worker takes an exclusive lock and a second run yields instead of competing for writes.
 
 ### Backup (Optional)
 

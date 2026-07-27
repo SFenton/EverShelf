@@ -11,6 +11,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Recipe scraps tips** — During cooking steps, detect "waste" generated (peels, cores, bones, eggshells, coffee grounds, citrus zest, etc.) and surface AI-powered tips on how to reuse them (compost, natural cleaner, broth, candied peel, etc.). Could be shown as an optional collapsible hint card below the step that generates the scrap.
 
+## [1.8.0] - 2026-07-27
+
+### Added
+- **Prepared food items** — Products can be flagged `prepared_food` at save time. Finished dishes group straight under the existing prepared meal taxonomy term instead of being classified by ingredient, skipping both history lookup and the AI review. The flag is sticky, so ordinary saves never clear it, and `product_set_prepared_food` toggles it on an existing product without a destructive partial save.
+- **Taxonomy history reuse** — Items classified before replay that decision instead of being re-derived, matched by barcode, name+brand, name, or a recorded alias. Costs no model call.
+- **AI taxonomy review** — New items have their heuristic placement reviewed by Gemini against the entire taxonomy tree, which confirms/corrects the primary term, supplies ancestors, and reports a correctness verdict. Guarded so it may only add nodes and edges, never rename, move, or delete existing ones. Toggle with `TAXONOMY_AI_REVIEW`.
+- **Container-managed cron** — The image now runs `cron_smart_shopping.php` every 5 minutes itself via `docker/evershelf-cron`, so Docker installs no longer depend on host crontab configuration.
+- **Egg taxonomy rules** — Added `Eggs` and `Egg whites`; previously no rule matched eggs at all.
+
+### Fixed
+- **Enrichment queue never drained** — Product saves enqueued canonical/taxonomy work that nothing consumed on Docker deployments, so items added after the queue was introduced silently never received taxonomy terms while `product_save` still reported `canonical_queued: true`.
+- **Plural-blind rule matching** — Patterns are written singular and `\b`-anchored, so "Black Beans" could never match `/\bblack\s+bean\b/`. The rule haystack now also includes a singularized copy of the product text.
+- **Overlapping queue runs** — Concurrent workers raised `database is locked` and duplicated work; queue processing now takes an exclusive lock and a second run yields.
+
 ## [1.7.44] - 2026-06-26
 
 ### Added

@@ -9,6 +9,7 @@ RUN apt-get update && apt-get upgrade -y && apt-get install -y \
     tesseract-ocr \
     tesseract-ocr-ita \
     tesseract-ocr-eng \
+    cron \
     && docker-php-ext-install pdo_sqlite curl mbstring gd \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
@@ -38,6 +39,13 @@ RUN echo '<Directory /var/www/html>\n\
 SetEnvIf X-Forwarded-Proto "https" HTTPS=on' > /etc/apache2/conf-available/evershelf.conf \
     && a2enconf evershelf
 
+# Background jobs: cron drives the canonical/taxonomy enrichment queue, so it has to run
+# in the container rather than relying on host crontab configuration.
+COPY docker/evershelf-cron /etc/cron.d/evershelf
+COPY docker/entrypoint.sh /usr/local/bin/evershelf-entrypoint
+RUN chmod 0644 /etc/cron.d/evershelf \
+    && chmod 0755 /usr/local/bin/evershelf-entrypoint
+
 # Expose port 80
 EXPOSE 80
 
@@ -45,4 +53,4 @@ EXPOSE 80
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
     CMD curl -f http://localhost/ || exit 1
 
-CMD ["apache2-foreground"]
+CMD ["evershelf-entrypoint"]

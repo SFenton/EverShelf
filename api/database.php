@@ -128,6 +128,7 @@ function initializeDB(PDO $db): void {
             off_generic_name TEXT DEFAULT '',
             shopping_name TEXT DEFAULT '',
             nutriments_json TEXT DEFAULT NULL,
+            prepared_food INTEGER DEFAULT 0,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
         );
@@ -359,6 +360,10 @@ function migrateDB(PDO $db): void {
     }
     if (!in_array('off_generic_name', $colNames)) {
         try { $db->exec("ALTER TABLE products ADD COLUMN off_generic_name TEXT DEFAULT ''"); }
+        catch (PDOException $e) { if (strpos($e->getMessage(), 'duplicate column') === false) throw $e; }
+    }
+    if (!in_array('prepared_food', $colNames)) {
+        try { $db->exec("ALTER TABLE products ADD COLUMN prepared_food INTEGER DEFAULT 0"); }
         catch (PDOException $e) { if (strpos($e->getMessage(), 'duplicate column') === false) throw $e; }
     }
 
