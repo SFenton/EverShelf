@@ -1,0 +1,12 @@
+# EverShelf background jobs.
+#
+# cron_smart_shopping.php drives shopping predictions, shelf-life pre-warming AND the
+# canonical/taxonomy enrichment queue. Without this file the queue fills up on every
+# product save and never drains, so new items silently never receive taxonomy terms.
+#
+# Runs as www-data so anything written under data/ keeps the expected ownership.
+SHELL=/bin/sh
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+*/5 * * * * www-data php /var/www/html/api/cron_smart_shopping.php >> /var/www/html/data/cron.log 2>&1
+17 4 * * * www-data find /var/www/html/data/cron.log -size +5M -delete

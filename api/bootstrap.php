@@ -13,5 +13,6 @@ require_once __DIR__ . '/lib/github.php';
 require_once __DIR__ . '/lib/security.php';
 require_once __DIR__ . '/lib/cron_log.php';
 require_once __DIR__ . '/lib/canonical_ingredients.php';
+require_once __DIR__ . '/lib/taxonomy_review.php';
 require_once __DIR__ . '/logger.php';
 require_once __DIR__ . '/database.php';

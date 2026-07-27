@@ -820,6 +820,9 @@ try {
         case 'product_save':
             saveProduct($db);
             break;
+        case 'product_set_prepared_food':
+            setProductPreparedFood($db);
+            break;
         case 'product_get':
             getProduct($db);
             break;
@@ -2899,12 +2902,17 @@ function saveProduct(PDO $db): void {
     $nutriJson = isset($input['nutriments'])
         ? json_encode($input['nutriments'], JSON_UNESCAPED_UNICODE)
         : ($existing['nutriments_json'] ?? null);
+    // Sticky flag: only changes when explicitly supplied, so ordinary saves never clear it.
+    $preparedFood = array_key_exists('prepared_food', $input)
+        ? (int)filter_var($input['prepared_food'], FILTER_VALIDATE_BOOLEAN)
+        : (int)($existing['prepared_food'] ?? 0);
     $params = [
         $input['name'], $input['brand'] ?? '', $input['category'] ?? '',
         $input['image_url'] ?? '', $input['unit'] ?? 'pz',
         $input['default_quantity'] ?? 1, $input['notes'] ?? '',
         $barcode, $input['package_unit'] ?? '',
         $shoppingName, $nutriJson, $ingredientsText, $ingredientsTagsJson, $offGenericName,
+        $preparedFood,
     ];
     try {
         if ($id) {
@@ -2912,6 +2920,7 @@ function saveProduct(PDO $db): void {
                 UPDATE products SET name=?, brand=?, category=?, image_url=?, unit=?,
                 default_quantity=?, notes=?, barcode=?, package_unit=?, shopping_name=?,
                 nutriments_json=?, ingredients_text=?, ingredients_tags_json=?, off_generic_name=?,
+                prepared_food=?,
                 updated_at=CURRENT_TIMESTAMP WHERE id=?
             ");
             $stmt->execute([...$params, $id]);
@@ -2924,16 +2933,16 @@ function saveProduct(PDO $db): void {
             INSERT INTO products (
                 barcode, name, brand, category, image_url, unit, default_quantity, notes,
                 package_unit, shopping_name, nutriments_json, ingredients_text,
-                ingredients_tags_json, off_generic_name
+                ingredients_tags_json, off_generic_name, prepared_food
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ");
         $stmt->execute([
             $barcode, $input['name'], $input['brand'] ?? '', $input['category'] ?? '',
             $input['image_url'] ?? '', $input['unit'] ?? 'pz',
             $input['default_quantity'] ?? 1, $input['notes'] ?? '',
             $input['package_unit'] ?? '', $shoppingName, $nutriJson,
-            $ingredientsText, $ingredientsTagsJson, $offGenericName,
+            $ingredientsText, $ingredientsTagsJson, $offGenericName, $preparedFood,
         ]);
         $newId = (int)$db->lastInsertId();
         $queue = canonicalIngredientEnqueueProduct($db, $newId, 'product_save_create');
@@ -2954,10 +2963,14 @@ function saveProduct(PDO $db): void {
                 if (!array_key_exists('off_generic_name', $input) && !array_key_exists('generic_name', $input)) {
                     $params[13] = $ownerExisting['off_generic_name'] ?? '';
                 }
+                if (!array_key_exists('prepared_food', $input)) {
+                    $params[14] = (int)($ownerExisting['prepared_food'] ?? 0);
+                }
                 $stmt = $db->prepare("
                     UPDATE products SET name=?, brand=?, category=?, image_url=?, unit=?,
                     default_quantity=?, notes=?, barcode=?, package_unit=?, shopping_name=?,
                     nutriments_json=?, ingredients_text=?, ingredients_tags_json=?, off_generic_name=?,
+                    prepared_food=?,
                     updated_at=CURRENT_TIMESTAMP WHERE id=?
                 ");
                 $stmt->execute([...$params, $owner]);
@@ -2978,12 +2991,54 @@ function saveProduct(PDO $db): void {
     }
 }
 
+/**
+ * Toggle the prepared-food flag on an existing product.
+ *
+ * Separate from product_save because that endpoint rewrites every column from its input,
+ * so a partial payload carrying only the flag would blank out name/brand/category.
+ * Re-queues the product so its taxonomy is regrouped.
+ */
+function setProductPreparedFood(PDO $db): void {
+    $input = json_decode(file_get_contents('php://input'), true) ?: [];
+    $id = (int)($input['id'] ?? $input['product_id'] ?? $_GET['id'] ?? 0);
+    if ($id <= 0) {
+        http_response_code(400);
+        echo json_encode(['success' => false, 'error' => 'missing_product_id']);
+        return;
+    }
+    $exists = $db->prepare("SELECT id FROM products WHERE id = ?");
+    $exists->execute([$id]);
+    if (!$exists->fetchColumn()) {
+        http_response_code(404);
+        echo json_encode(['success' => false, 'error' => 'product_not_found']);
+        return;
+    }
+
+    $prepared = array_key_exists('prepared_food', $input)
+        ? (int)filter_var($input['prepared_food'], FILTER_VALIDATE_BOOLEAN)
+        : 1;
+    $db->prepare("UPDATE products SET prepared_food = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?")
+       ->execute([$prepared, $id]);
+    $queue = canonicalIngredientEnqueueProduct($db, $id, 'product_prepared_food_flag');
+
+    echo json_encode([
+        'success' => true,
+        'id' => $id,
+        'prepared_food' => (bool)$prepared,
+        'canonical_queued' => !empty($queue['queued']),
+        'canonical_queue_status' => $queue['status'] ?? 'pending',
+    ], JSON_UNESCAPED_UNICODE);
+}
+
 function productSaveResponse(PDO $db, int $id, bool $merged, array $queue): array {
     $canonicalRows = canonicalIngredientRowsForProduct($db, $id);
+    $preparedStmt = $db->prepare("SELECT prepared_food FROM products WHERE id = ?");
+    $preparedStmt->execute([$id]);
     return [
         'success' => true,
         'id' => $id,
         'merged' => $merged,
+        'prepared_food' => (bool)$preparedStmt->fetchColumn(),
         'canonical_queued' => !empty($queue['queued']),
         'canonical_queue_id' => (int)($queue['queue_id'] ?? 0),
         'canonical_queue_status' => $queue['status'] ?? 'pending',

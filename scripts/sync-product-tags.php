@@ -5,6 +5,9 @@
  *
  * Usage:
  *   php scripts/sync-product-tags.php [--all] [--limit=N]
+ *
+ * Tag-focused re-sync, so taxonomy AI review stays off: re-deriving placement for the
+ * whole catalog through Gemini is not what this script is for.
  */
 declare(strict_types=1);
 
@@ -29,7 +32,7 @@ $products = $db->query($sql)->fetchAll(PDO::FETCH_ASSOC);
 $processed = 0;
 $tags = 0;
 foreach ($products as $product) {
-    $result = canonicalIngredientSyncProduct($db, (int)$product['id'], $product);
+    $result = canonicalIngredientSyncProduct($db, (int)$product['id'], $product, ['allow_ai' => false]);
     $processed++;
     $tags += count($result['tags'] ?? []);
 }

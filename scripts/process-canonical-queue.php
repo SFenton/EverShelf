@@ -12,7 +12,12 @@
  */
 declare(strict_types=1);
 
+// CRON_MODE keeps index.php from running its HTTP router; it is required here because the
+// Gemini helpers used by the taxonomy review step live in index.php.
+define('CRON_MODE', true);
+
 require_once __DIR__ . '/../api/bootstrap.php';
+require_once __DIR__ . '/../api/index.php';
 
 $limit = (int)env('CANONICAL_QUEUE_CLI_LIMIT', '20');
 $maxAttempts = (int)env('CANONICAL_QUEUE_MAX_ATTEMPTS', '3');
@@ -41,6 +46,9 @@ foreach ($result['items'] as $item) {
     echo '- product #' . $item['product_id'] . ': ' . $item['status'];
     if (isset($item['mapped'])) {
         echo ' (' . $item['mapped'] . ' mappings)';
+    }
+    if (!empty($item['decision'])) {
+        echo ' via ' . $item['decision'];
     }
     if (!empty($item['error'])) {
         echo ' — ' . $item['error'];
