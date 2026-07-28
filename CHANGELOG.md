@@ -11,6 +11,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Recipe scraps tips** — During cooking steps, detect "waste" generated (peels, cores, bones, eggshells, coffee grounds, citrus zest, etc.) and surface AI-powered tips on how to reuse them (compost, natural cleaner, broth, candied peel, etc.). Could be shown as an optional collapsible hint card below the step that generates the scrap.
 
+## [1.8.2] - 2026-07-27
+
+### Fixed
+- **Re-queued products lost their `contains` terms** — history reuse deliberately excludes the product itself when looking for a prior classification, so a product being re-processed fell through to the alias replay. That rebuilds from the taxonomy tree, which stores only the node hierarchy, so the product's own `contains` terms were dropped on every re-queue and never came back. Since `product_save`, `product_set_prepared_food`, and `inventory_set_prepared_food` all re-queue, editing an item quietly stripped its ingredient terms. Taxonomy-aware search matches on every role, so those items stopped matching their ingredients.
+
+  History reuse now replays the product's own mappings when it has classified before under the same name. The alias path still applies to genuinely new products, where contributing only placement is correct — `contains` terms are product-specific and must not be inherited through a shared alias.
+
 ## [1.8.1] - 2026-07-27
 
 ### Added
