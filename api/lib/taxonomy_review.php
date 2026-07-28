@@ -45,13 +45,13 @@ function taxonomyHistoryKey(string $name, string $brand = ''): string {
  * Rebuild the mapping array (the shape canonicalIngredientPut produces) from the terms
  * already stored against a product.
  */
-function taxonomyMappingsFromProduct(PDO $db, int $productId, string $source): array {
+function taxonomyMappingsFromProduct(PDO $db, int $productId, string $source, bool $excludeManual = false): array {
     $stmt = $db->prepare("
         SELECT ci.slug, ci.name, ci.parent_slug, ci.category, ci.external_ids_json,
                pi.role, pi.confidence, pi.evidence
         FROM product_ingredients pi
         JOIN canonical_ingredients ci ON ci.id = pi.ingredient_id
-        WHERE pi.product_id = ?
+        WHERE pi.product_id = ?" . ($excludeManual ? " AND pi.source != 'manual'" : '') . "
         ORDER BY CASE pi.role WHEN 'primary' THEN 0 WHEN 'contains' THEN 1 ELSE 2 END, pi.confidence DESC
     ");
     $stmt->execute([$productId]);
@@ -189,6 +189,18 @@ function taxonomyHistoryMatch(PDO $db, array $product): ?array {
         ");
         $aliasStmt->execute([$treeId, canonicalIngredientNormalizeText($name)]);
         $nodeId = (int)($aliasStmt->fetchColumn() ?: 0);
+
+        // This product classified before under the same name: replay its own terms rather
+        // than rebuilding from the tree. The tree only stores the node hierarchy, so an
+        // alias replay would silently drop this product's `contains` terms every time it
+        // is re-queued. Those terms are product-specific, so they can only come from here.
+        if ($nodeId > 0 && $productId > 0) {
+            $ownMappings = taxonomyMappingsFromProduct($db, $productId, TAXONOMY_HISTORY_SOURCE, true);
+            if (!empty($ownMappings)) {
+                return ['match' => 'self', 'product_id' => $productId, 'mappings' => $ownMappings];
+            }
+        }
+
         if ($nodeId > 0) {
             $mappings = taxonomyMappingsFromNode($db, $treeId, $nodeId, 'previously reviewed alias for "' . $name . '"');
             if (!empty($mappings)) {
