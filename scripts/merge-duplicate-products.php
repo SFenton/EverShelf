@@ -17,6 +17,10 @@ if (!file_exists($dbPath)) {
 
 $db = new PDO('sqlite:' . $dbPath);
 $db->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+$db->exec('PRAGMA foreign_keys=ON');
+
+require_once __DIR__ . '/../api/lib/env.php';
+require_once __DIR__ . '/../api/lib/location_suggestions.php';
 
 function normName(string $name): string {
     return mb_strtolower(trim($name));
@@ -43,7 +47,9 @@ function mergeProducts(PDO $db, int $keepId, int $dropId): void {
     try {
         $db->prepare('UPDATE inventory SET product_id = ? WHERE product_id = ?')->execute([$keepId, $dropId]);
         $db->prepare('UPDATE transactions SET product_id = ? WHERE product_id = ?')->execute([$keepId, $dropId]);
+        $db->prepare('UPDATE product_location_history SET product_id = ? WHERE product_id = ?')->execute([$keepId, $dropId]);
         $db->prepare('DELETE FROM products WHERE id = ?')->execute([$dropId]);
+        refreshProductLastLocation($db, $keepId);
         $db->commit();
     } catch (Throwable $e) {
         if ($db->inTransaction()) {

@@ -1,0 +1,347 @@
+<?php
+/**
+ * EverShelf location history and AI suggestion helpers.
+ */
+
+const EVERSHELF_HISTORY_LOCATIONS = [
+    'dispensa',
+    'frigo',
+    'freezer',
+    'spice_rack',
+    'cabinet',
+    'altro',
+];
+
+const EVERSHELF_AI_LOCATIONS = [
+    'dispensa',
+    'frigo',
+    'freezer',
+    'spice_rack',
+    'cabinet',
+    'unknown',
+];
+
+const LOCATION_SUGGESTION_PROMPT_VERSION = 1;
+const LOCATION_SUGGESTION_VOCABULARY_VERSION = 1;
+const LOCATION_SUGGESTION_CONFIDENCE_FLOOR = 0.65;
+const LOCATION_SUGGESTION_TIMEOUT_SECONDS = 5;
+const LOCATION_SUGGESTION_MAX_ATTEMPTS = 1;
+
+function normalizeLocationSuggestionText(string $value): string {
+    $value = trim($value);
+    if ($value === '') {
+        return '';
+    }
+    if (class_exists('Normalizer')) {
+        $normalized = Normalizer::normalize($value, Normalizer::FORM_C);
+        if (is_string($normalized)) {
+            $value = $normalized;
+        }
+    }
+    return mb_strtolower($value, 'UTF-8');
+}
+
+function validHistoricalLocation($location): ?string {
+    $location = trim((string)$location);
+    return in_array($location, EVERSHELF_HISTORY_LOCATIONS, true) ? $location : null;
+}
+
+function productLocationHistory(PDO $db, int $productId, string $source): ?array {
+    $stmt = $db->prepare("
+        SELECT last_location, last_location_at
+        FROM products
+        WHERE id = ?
+        LIMIT 1
+    ");
+    $stmt->execute([$productId]);
+    $row = $stmt->fetch(PDO::FETCH_ASSOC);
+    $location = validHistoricalLocation($row['last_location'] ?? null);
+    $lastLocationAt = trim((string)($row['last_location_at'] ?? ''));
+    if (!$location || $lastLocationAt === '') {
+        return null;
+    }
+
+    return [
+        'success' => true,
+        'location' => $location,
+        'source' => $source,
+        'confidence' => 1.0,
+        'product_id' => $productId,
+        'last_location_at' => $lastLocationAt,
+    ];
+}
+
+function manualNameLocationHistory(PDO $db, string $name): ?array {
+    $nameKey = normalizeLocationSuggestionText($name);
+    if ($nameKey === '') {
+        return null;
+    }
+
+    $rows = $db->query("
+        SELECT id, name, last_location, last_location_at
+        FROM products
+        WHERE last_location IS NOT NULL
+          AND last_location_at IS NOT NULL
+    ")->fetchAll(PDO::FETCH_ASSOC);
+
+    $best = null;
+    foreach ($rows as $row) {
+        if (normalizeLocationSuggestionText((string)$row['name']) !== $nameKey) {
+            continue;
+        }
+        $location = validHistoricalLocation($row['last_location'] ?? null);
+        $timestamp = strtotime((string)($row['last_location_at'] ?? '')) ?: 0;
+        if (!$location || $timestamp <= 0) {
+            continue;
+        }
+        $productId = (int)$row['id'];
+        if (
+            $best === null
+            || $timestamp > $best['timestamp']
+            || ($timestamp === $best['timestamp'] && $productId > $best['product_id'])
+        ) {
+            $best = [
+                'location' => $location,
+                'timestamp' => $timestamp,
+                'last_location_at' => (string)$row['last_location_at'],
+                'product_id' => $productId,
+            ];
+        }
+    }
+
+    if ($best === null) {
+        return null;
+    }
+
+    return [
+        'success' => true,
+        'location' => $best['location'],
+        'source' => 'history_name',
+        'confidence' => 1.0,
+        'product_id' => $best['product_id'],
+        'last_location_at' => $best['last_location_at'],
+    ];
+}
+
+function rememberProductLocation(PDO $db, int $productId, string $location, ?string $occurredAt = null): void {
+    $location = validHistoricalLocation($location);
+    if (!$location) {
+        throw new InvalidArgumentException('Invalid EverShelf location');
+    }
+
+    if ($occurredAt !== null && trim($occurredAt) !== '') {
+        $stmt = $db->prepare("
+            UPDATE products
+            SET last_location = ?,
+                last_location_at = ?
+            WHERE id = ?
+        ");
+        $stmt->execute([$location, $occurredAt, $productId]);
+        return;
+    }
+
+    $stmt = $db->prepare("
+        UPDATE products
+        SET last_location = ?,
+            last_location_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+    ");
+    $stmt->execute([$location, $productId]);
+}
+
+function recordProductLocation(
+    PDO $db,
+    int $productId,
+    string $location,
+    string $source,
+    ?string $occurredAt = null,
+    ?int $transactionId = null,
+): void {
+    $location = validHistoricalLocation($location);
+    if (!$location) {
+        throw new InvalidArgumentException('Invalid EverShelf location');
+    }
+    $occurredAt = $occurredAt !== null && trim($occurredAt) !== ''
+        ? trim($occurredAt)
+        : gmdate('Y-m-d H:i:s');
+
+    $stmt = $db->prepare("
+        INSERT INTO product_location_history (
+            product_id, location, source, transaction_id, occurred_at, undone
+        )
+        VALUES (?, ?, ?, ?, ?, 0)
+        ON CONFLICT(transaction_id) DO UPDATE SET
+            product_id = excluded.product_id,
+            location = excluded.location,
+            source = excluded.source,
+            occurred_at = excluded.occurred_at,
+            undone = 0
+    ");
+    $stmt->execute([$productId, $location, $source, $transactionId, $occurredAt]);
+    rememberProductLocation($db, $productId, $location, $occurredAt);
+}
+
+function undoProductLocationTransaction(PDO $db, int $transactionId): void {
+    $stmt = $db->prepare("
+        UPDATE product_location_history
+        SET undone = 1
+        WHERE transaction_id = ?
+    ");
+    $stmt->execute([$transactionId]);
+}
+
+/**
+ * Recompute the latest durable location after a ledger rewrite such as undo/merge.
+ * If retained history has no answer, preserve the existing durable value.
+ */
+function refreshProductLastLocation(PDO $db, int $productId): ?array {
+    $stmt = $db->prepare("
+        SELECT location, occurred_at
+        FROM product_location_history
+        WHERE product_id = ?
+          AND undone = 0
+        ORDER BY datetime(occurred_at) DESC, id DESC
+        LIMIT 1
+    ");
+    $stmt->execute([$productId]);
+    $row = $stmt->fetch(PDO::FETCH_ASSOC);
+
+    if (!$row) {
+        $stmt = $db->prepare("
+            SELECT location, updated_at AS occurred_at
+            FROM inventory
+            WHERE product_id = ?
+              AND location IN ('dispensa', 'frigo', 'freezer', 'spice_rack', 'cabinet', 'altro')
+            ORDER BY datetime(updated_at) DESC, id DESC
+            LIMIT 1
+        ");
+        $stmt->execute([$productId]);
+        $row = $stmt->fetch(PDO::FETCH_ASSOC);
+    }
+
+    $location = validHistoricalLocation($row['location'] ?? null);
+    $occurredAt = trim((string)($row['occurred_at'] ?? ''));
+    if (!$location || $occurredAt === '') {
+        return productLocationHistory($db, $productId, 'history_preserved');
+    }
+
+    rememberProductLocation($db, $productId, $location, $occurredAt);
+    return productLocationHistory($db, $productId, 'history_refreshed');
+}
+
+function locationSuggestionModels(): array {
+    $allowed = ['gemini-3.6-flash', 'gemini-3.5-flash-lite'];
+    $primary = env('GEMINI_LOCATION_MODEL', 'gemini-3.6-flash');
+    $fallback = env('GEMINI_LOCATION_FALLBACK_MODEL', 'gemini-3.5-flash-lite');
+    if (!in_array($primary, $allowed, true)) {
+        $primary = 'gemini-3.6-flash';
+    }
+    if (!in_array($fallback, $allowed, true)) {
+        $fallback = 'gemini-3.5-flash-lite';
+    }
+    return array_values(array_unique([$primary, $fallback]));
+}
+
+function locationSuggestionAiEnabled(): bool {
+    $value = mb_strtolower(trim(env('LOCATION_AI_ENABLED', 'true')), 'UTF-8');
+    return !in_array($value, ['0', 'false', 'no', 'off'], true);
+}
+
+function locationSuggestionCacheKey(string $name, string $category, array $models): string {
+    return hash('sha256', json_encode([
+        'prompt_version' => LOCATION_SUGGESTION_PROMPT_VERSION,
+        'vocabulary_version' => LOCATION_SUGGESTION_VOCABULARY_VERSION,
+        'confidence_floor' => LOCATION_SUGGESTION_CONFIDENCE_FLOOR,
+        'models' => array_values($models),
+        'name' => normalizeLocationSuggestionText($name),
+        'category' => normalizeLocationSuggestionText($category),
+    ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES));
+}
+
+function cachedLocationSuggestion(PDO $db, string $cacheKey): ?array {
+    $stmt = $db->prepare("
+        SELECT location, confidence, reason, model, updated_at
+        FROM location_suggestion_cache
+        WHERE cache_key = ?
+        LIMIT 1
+    ");
+    $stmt->execute([$cacheKey]);
+    $row = $stmt->fetch(PDO::FETCH_ASSOC);
+    if (!$row || !in_array($row['location'], EVERSHELF_AI_LOCATIONS, true)) {
+        return null;
+    }
+    return [
+        'success' => true,
+        'location' => $row['location'],
+        'source' => 'gemini_cache',
+        'confidence' => (float)$row['confidence'],
+        'reason' => (string)($row['reason'] ?? ''),
+        'model' => (string)$row['model'],
+        'cached' => true,
+        'cached_at' => (string)$row['updated_at'],
+    ];
+}
+
+function cacheLocationSuggestion(PDO $db, string $cacheKey, array $suggestion): void {
+    $stmt = $db->prepare("
+        INSERT INTO location_suggestion_cache (
+            cache_key, location, confidence, reason, model, created_at, updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+        ON CONFLICT(cache_key) DO UPDATE SET
+            location = excluded.location,
+            confidence = excluded.confidence,
+            reason = excluded.reason,
+            model = excluded.model,
+            updated_at = CURRENT_TIMESTAMP
+    ");
+    $stmt->execute([
+        $cacheKey,
+        $suggestion['location'],
+        $suggestion['confidence'],
+        $suggestion['reason'] ?? '',
+        $suggestion['model'],
+    ]);
+}
+
+function parseLocationSuggestionModelText(string $text): ?array {
+    $text = preg_replace('/^```json\s*/i', '', trim($text)) ?? trim($text);
+    $text = preg_replace('/\s*```$/i', '', $text) ?? $text;
+    $parsed = json_decode(trim($text), true);
+    if (!is_array($parsed)) {
+        return null;
+    }
+
+    $location = trim((string)($parsed['location'] ?? ''));
+    if (!in_array($location, EVERSHELF_AI_LOCATIONS, true)) {
+        return null;
+    }
+    if (!array_key_exists('confidence', $parsed) || !is_numeric($parsed['confidence'])) {
+        return null;
+    }
+    $confidence = max(0.0, min(1.0, (float)$parsed['confidence']));
+    if ($location !== 'unknown' && $confidence < LOCATION_SUGGESTION_CONFIDENCE_FLOOR) {
+        $location = 'unknown';
+    }
+
+    return [
+        'location' => $location,
+        'confidence' => $confidence,
+        'reason' => trim((string)($parsed['reason'] ?? '')),
+    ];
+}
+
+function locationSuggestionPrompt(string $name, string $category): string {
+    return "Classify an unopened grocery product into this home's normal storage location.\n"
+        . "Allowed locations:\n"
+        . "- dispensa: shelf-stable pantry food or drinks\n"
+        . "- frigo: sold and normally stored refrigerated before opening\n"
+        . "- freezer: sold and normally stored frozen\n"
+        . "- spice_rack: dry spices, seeds, or seasoning blends\n"
+        . "- cabinet: cooking liquids such as vinegar or cooking wine kept in a cooking cabinet\n"
+        . "- unknown: the name/category is insufficient or more than one location is plausible\n\n"
+        . "Do not choose frigo only because a shelf-stable condiment is refrigerated after opening. "
+        . "Prefer unknown over guessing.\n\n"
+        . "Product name: {$name}\n"
+        . "Category: " . ($category !== '' ? $category : '(not provided)');
+}

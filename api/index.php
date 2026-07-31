@@ -128,7 +128,13 @@ if (($_GET['action'] ?? '') === 'gemini_usage') {
 
     // ── Cost helper ───────────────────────────────────────────────────────────
     $calcCost = function(int $tokIn, int $tokOut, string $modelHint = '2.5'): float {
-        if (str_contains($modelHint, '3')) {
+        if (str_contains($modelHint, '3.6-flash')) {
+            $inRate = GEMINI_COST_36F_IN;
+            $outRate = GEMINI_COST_36F_OUT;
+        } elseif (str_contains($modelHint, '3.5-flash-lite')) {
+            $inRate = GEMINI_COST_35FL_IN;
+            $outRate = GEMINI_COST_35FL_OUT;
+        } elseif (str_contains($modelHint, '3')) {
             $inRate  = GEMINI_COST_3F_IN;
             $outRate = GEMINI_COST_3F_OUT;
         } elseif (str_contains($modelHint, '2.5')) {
@@ -327,6 +333,8 @@ if (($_GET['action'] ?? '') === 'gemini_usage') {
 
         // Current Gemini pricing (from .env / defaults)
         'pricing' => [
+            '3.6-flash' => ['in' => GEMINI_COST_36F_IN, 'out' => GEMINI_COST_36F_OUT],
+            '3.5-flash-lite' => ['in' => GEMINI_COST_35FL_IN, 'out' => GEMINI_COST_35FL_OUT],
             '3-flash' => ['in' => GEMINI_COST_3F_IN, 'out' => GEMINI_COST_3F_OUT],
             '2.5-flash' => ['in' => GEMINI_COST_25F_IN, 'out' => GEMINI_COST_25F_OUT],
             '2.0-flash' => ['in' => GEMINI_COST_20F_IN, 'out' => GEMINI_COST_20F_OUT],
@@ -673,7 +681,7 @@ function checkRateLimit(string $action): void {
     }
 
     // Determine limit based on action
-    $aiActions = ['gemini_expiry', 'gemini_readExpiry', 'gemini_chat', 'gemini_identify', 'gemini_suggest_shopping', 'chat_to_recipe', 'recipe_from_ingredient', 'gemini_number_ocr', 'gemini_barcode_visual'];
+    $aiActions = ['gemini_expiry', 'gemini_readExpiry', 'gemini_chat', 'gemini_identify', 'gemini_suggest_shopping', 'chat_to_recipe', 'recipe_from_ingredient', 'gemini_number_ocr', 'gemini_barcode_visual', 'location_suggestion_ai'];
     $loginActions = [];
     $recipeActions = ['generate_recipe', 'generate_recipe_stream'];
     $errorActions = ['report_error', 'check_update'];
@@ -756,6 +764,7 @@ $_writeActions = [
     'inventory_delete_one','inventory_update_one','inventory_set_prepared_food',
     'inventory_confirm_finished','inventory_restore_ghost',
     'product_save','product_delete','product_merge','product_set_prepared_food',
+    'location_suggestion',
     'bring_add','bring_remove','bring_sync','bring_set_spec','bring_migrate_names',
     'shopping_add','shopping_remove',
     'dismiss_anomaly','save_settings',
@@ -813,6 +822,9 @@ try {
             break;
         case 'resolve_barcode':
             resolveBarcode($db);
+            break;
+        case 'location_suggestion':
+            suggestLocation($db);
             break;
         case 'stock_for_name':
             stockForName($db);
@@ -2681,7 +2693,12 @@ function resolveBarcode(PDO $db): void {
 
     $local = barcodeFindLocalProduct($db, $barcode);
     if ($local) {
-        echo json_encode(['found' => true, 'source' => 'local', 'product' => $local], JSON_UNESCAPED_UNICODE);
+        $response = ['found' => true, 'source' => 'local', 'product' => $local];
+        $locationSuggestion = productLocationHistory($db, (int)$local['id'], 'history_barcode');
+        if ($locationSuggestion) {
+            $response['location_suggestion'] = $locationSuggestion;
+        }
+        echo json_encode($response, JSON_UNESCAPED_UNICODE);
         return;
     }
 
@@ -2692,6 +2709,176 @@ function resolveBarcode(PDO $db): void {
     }
 
     echo json_encode(['found' => false, 'source' => 'none']);
+}
+
+/**
+ * Return the best location from durable history, cached AI, or a bounded Gemini call.
+ */
+function suggestLocation(PDO $db): void {
+    $startedAt = microtime(true);
+    $input = json_decode(file_get_contents('php://input'), true);
+    if (!is_array($input)) {
+        http_response_code(400);
+        echo json_encode(['success' => false, 'error' => 'invalid_json']);
+        return;
+    }
+
+    $mode = trim((string)($input['mode'] ?? 'manual'));
+    $name = trim((string)($input['name'] ?? ''));
+    $barcode = barcodeNormalizeDigits((string)($input['barcode'] ?? ''));
+    $category = trim((string)($input['category'] ?? ''));
+    if (!in_array($mode, ['barcode', 'manual'], true)) {
+        http_response_code(400);
+        echo json_encode(['success' => false, 'error' => 'invalid_mode']);
+        return;
+    }
+    if ($name === '') {
+        http_response_code(400);
+        echo json_encode(['success' => false, 'error' => 'missing_name']);
+        return;
+    }
+    if ($mode === 'barcode' && $barcode === '') {
+        http_response_code(400);
+        echo json_encode(['success' => false, 'error' => 'missing_barcode']);
+        return;
+    }
+
+    if ($barcode !== '') {
+        $local = barcodeFindLocalProduct($db, $barcode);
+        if ($local) {
+            $history = productLocationHistory($db, (int)$local['id'], 'history_barcode');
+            if ($history) {
+                $history['elapsed_ms'] = (int)round((microtime(true) - $startedAt) * 1000);
+                echo json_encode($history, JSON_UNESCAPED_UNICODE);
+                return;
+            }
+        }
+    }
+
+    if ($mode === 'manual') {
+        $history = manualNameLocationHistory($db, $name);
+        if ($history) {
+            $history['elapsed_ms'] = (int)round((microtime(true) - $startedAt) * 1000);
+            echo json_encode($history, JSON_UNESCAPED_UNICODE);
+            return;
+        }
+    }
+
+    if (!locationSuggestionAiEnabled()) {
+        http_response_code(503);
+        echo json_encode(['success' => false, 'error' => 'location_ai_disabled']);
+        return;
+    }
+
+    $models = locationSuggestionModels();
+    $cacheKey = locationSuggestionCacheKey($name, $category, $models);
+    $cached = cachedLocationSuggestion($db, $cacheKey);
+    if ($cached) {
+        $cached['elapsed_ms'] = (int)round((microtime(true) - $startedAt) * 1000);
+        echo json_encode($cached, JSON_UNESCAPED_UNICODE);
+        return;
+    }
+
+    $apiKey = env('GEMINI_API_KEY');
+    if ($apiKey === '') {
+        http_response_code(503);
+        echo json_encode(['success' => false, 'error' => 'no_api_key']);
+        return;
+    }
+
+    checkRateLimit('location_suggestion_ai');
+    $payload = [
+        'contents' => [['parts' => [['text' => locationSuggestionPrompt($name, $category)]]]],
+        'generationConfig' => [
+            'maxOutputTokens' => 80,
+            'responseMimeType' => 'application/json',
+            'responseJsonSchema' => [
+                'type' => 'object',
+                'properties' => [
+                    'location' => [
+                        'type' => 'string',
+                        'enum' => EVERSHELF_AI_LOCATIONS,
+                    ],
+                    'confidence' => [
+                        'type' => 'number',
+                        'minimum' => 0,
+                        'maximum' => 1,
+                    ],
+                    'reason' => ['type' => 'string'],
+                ],
+                'required' => ['location', 'confidence'],
+                'additionalProperties' => false,
+            ],
+            'thinkingConfig' => ['thinkingLevel' => 'MINIMAL'],
+        ],
+    ];
+    $result = null;
+    $parsed = null;
+    $lastError = 'gemini_unavailable';
+    $transientCodes = [0, 404, 429, 500, 502, 503, 504];
+    foreach ($models as $model) {
+        $candidate = callGeminiWithFallback(
+            $apiKey,
+            $payload,
+            LOCATION_SUGGESTION_TIMEOUT_SECONDS,
+            'location_suggestion',
+            [$model],
+            LOCATION_SUGGESTION_MAX_ATTEMPTS,
+        );
+        $result = $candidate;
+        $httpCode = (int)($candidate['http_code'] ?? 0);
+        if ($httpCode === 200) {
+            $text = (string)($candidate['data']['candidates'][0]['content']['parts'][0]['text'] ?? '');
+            $parsed = parseLocationSuggestionModelText($text);
+            if ($parsed) {
+                break;
+            }
+            $lastError = 'gemini_parse_error';
+            EverLog::warn('location suggestion model output was invalid', ['model' => $model]);
+            continue;
+        }
+        if (!in_array($httpCode, $transientCodes, true)) {
+            break;
+        }
+    }
+
+    if (!$result || !$parsed) {
+        $httpCode = (int)($result['http_code'] ?? 0);
+        $status = in_array($httpCode, [0, 429, 503, 504], true) ? 503 : 502;
+        http_response_code($status);
+        echo json_encode([
+            'success' => false,
+            'error' => $lastError,
+            'http_code' => $httpCode,
+        ]);
+        return;
+    }
+
+    $suggestion = [
+        'success' => true,
+        'location' => $parsed['location'],
+        'source' => 'gemini',
+        'confidence' => $parsed['confidence'],
+        'reason' => $parsed['reason'],
+        'model' => (string)($result['model'] ?? $models[0]),
+        'cached' => false,
+        'thoughts_tokens' => (int)($result['thoughts_tokens'] ?? 0),
+        'elapsed_ms' => (int)round((microtime(true) - $startedAt) * 1000),
+    ];
+    if ($suggestion['thoughts_tokens'] > 64) {
+        EverLog::warn('location suggestion used unexpected thinking tokens', [
+            'model' => $suggestion['model'],
+            'thoughts_tokens' => $suggestion['thoughts_tokens'],
+        ]);
+    }
+    cacheLocationSuggestion($db, $cacheKey, $suggestion);
+    EverLog::info('location suggestion resolved', [
+        'source' => $suggestion['source'],
+        'location' => $suggestion['location'],
+        'model' => $suggestion['model'],
+        'elapsed_ms' => $suggestion['elapsed_ms'],
+    ]);
+    echo json_encode($suggestion, JSON_UNESCAPED_UNICODE);
 }
 
 /**
@@ -3677,6 +3864,14 @@ function addToInventory(PDO $db): void {
     // Log transaction
     $stmt = $db->prepare("INSERT INTO transactions (product_id, type, quantity, location) VALUES (?, 'in', ?, ?)");
     $stmt->execute([$productId, $quantity, $location]);
+    recordProductLocation(
+        $db,
+        $productId,
+        $location,
+        'inventory_add',
+        null,
+        (int)$db->lastInsertId(),
+    );
     
     $bringRemoval = bringRemoveProductFromList($db, $productId);
 
@@ -4236,6 +4431,19 @@ function updateInventory(PDO $db): void {
                 $stmt->execute([$input['package_unit'], $input['package_size'] ?? 0, $input['product_id']]);
             }
 
+            if (
+                isset($input['location'])
+                && $prevRow
+                && (string)$input['location'] !== (string)$prevRow['location']
+            ) {
+                recordProductLocation(
+                    $db,
+                    (int)$prevRow['product_id'],
+                    (string)$input['location'],
+                    'inventory_move',
+                );
+            }
+
             $db->commit();
         } catch (Throwable $e) {
             if ($db->inTransaction()) $db->rollBack();
@@ -4689,11 +4897,50 @@ function mergeProducts(PDO $db, int $keepId, int $dropId): void {
         throw new RuntimeException('One or both products not found');
     }
 
+    $locationRows = $db->prepare("
+        SELECT id, last_location, last_location_at
+        FROM products
+        WHERE id IN (?, ?)
+    ");
+    $locationRows->execute([$keepId, $dropId]);
+    $latestLocation = null;
+    foreach ($locationRows->fetchAll(PDO::FETCH_ASSOC) as $row) {
+        $location = validHistoricalLocation($row['last_location'] ?? null);
+        $timestamp = strtotime((string)($row['last_location_at'] ?? '')) ?: 0;
+        if (
+            $location
+            && $timestamp > 0
+            && (
+                $latestLocation === null
+                || $timestamp > $latestLocation['timestamp']
+                || ($timestamp === $latestLocation['timestamp'] && (int)$row['id'] > $latestLocation['product_id'])
+            )
+        ) {
+            $latestLocation = [
+                'location' => $location,
+                'occurred_at' => (string)$row['last_location_at'],
+                'product_id' => (int)$row['id'],
+                'timestamp' => $timestamp,
+            ];
+        }
+    }
+
     $db->beginTransaction();
     try {
         $db->prepare("UPDATE inventory SET product_id = ? WHERE product_id = ?")->execute([$keepId, $dropId]);
         $db->prepare("UPDATE transactions SET product_id = ? WHERE product_id = ?")->execute([$keepId, $dropId]);
+        $db->prepare("UPDATE product_location_history SET product_id = ? WHERE product_id = ?")->execute([$keepId, $dropId]);
         $db->prepare("DELETE FROM products WHERE id = ?")->execute([$dropId]);
+        $refreshed = refreshProductLastLocation($db, $keepId);
+        $refreshedAt = strtotime((string)($refreshed['last_location_at'] ?? '')) ?: 0;
+        if ($latestLocation && $latestLocation['timestamp'] > $refreshedAt) {
+            rememberProductLocation(
+                $db,
+                $keepId,
+                $latestLocation['location'],
+                $latestLocation['occurred_at'],
+            );
+        }
         $db->commit();
     } catch (Throwable $e) {
         if ($db->inTransaction()) {
@@ -4870,6 +5117,7 @@ function restoreGhostInventory(PDO $db): void {
            ->execute([$productId, $location, $quantity]);
         $invId = (int)$db->lastInsertId();
     }
+    recordProductLocation($db, $productId, $location, 'ghost_restore');
 
     echo json_encode([
         'success'      => true,
@@ -4991,10 +5239,22 @@ function undoTransaction(PDO $db): void {
             }
             // Log counter-transaction
             $db->prepare("INSERT INTO transactions (product_id, type, quantity, location, notes) VALUES (?, 'in', ?, ?, '[Undone]')")->execute([$productId, $quantity, $location]);
+            recordProductLocation(
+                $db,
+                $productId,
+                $location,
+                'undo_restore',
+                null,
+                (int)$db->lastInsertId(),
+            );
         }
 
         // Mark original as undone
         $db->prepare("UPDATE transactions SET undone = 1 WHERE id = ?")->execute([$txId]);
+        if ($type === 'in') {
+            undoProductLocationTransaction($db, $txId);
+        }
+        refreshProductLastLocation($db, $productId);
         $db->commit();
         echo json_encode(['success' => true, 'name' => $tx['name']]);
     } catch (Exception $e) {
@@ -6197,8 +6457,8 @@ function saveSettings(): void {
  *
  * @return array{http_code:int, body:string, data:array|null}
  */
-function callGemini(string $url, array $payload, int $timeout = 60): array {
-    $maxAttempts = 4;
+function callGemini(string $url, array $payload, int $timeout = 60, int $maxAttempts = 4): array {
+    $maxAttempts = max(1, $maxAttempts);
     $lastCode    = 0;
     $lastBody    = '';
     $lastCurlErrno = 0;
@@ -6271,8 +6531,10 @@ function callGemini(string $url, array $payload, int $timeout = 60): array {
     $data = $lastBody ? json_decode($lastBody, true) : null;
     // Extract token counts from Gemini usageMetadata
     $usage = $data['usageMetadata'] ?? [];
-    $tokIn  = (int)($usage['promptTokenCount']     ?? 0);
-    $tokOut = (int)($usage['candidatesTokenCount'] ?? 0);
+    $tokIn = (int)($usage['promptTokenCount'] ?? 0);
+    $candidateTokens = (int)($usage['candidatesTokenCount'] ?? 0);
+    $thoughtsTokens = (int)($usage['thoughtsTokenCount'] ?? 0);
+    $tokOut = $candidateTokens + $thoughtsTokens;
 
     return [
         'http_code'  => $lastCode,
@@ -6280,6 +6542,7 @@ function callGemini(string $url, array $payload, int $timeout = 60): array {
         'data'       => $data,
         'tokens_in'  => $tokIn,
         'tokens_out' => $tokOut,
+        'thoughts_tokens' => $thoughtsTokens,
         'elapsed_s'  => $elapsed,
         'attempts'   => $attempts,
         'timeout_s'  => $timeout,
@@ -6354,6 +6617,7 @@ function _recordAiRequest(array $event): void {
         'output_chars' => (int)($event['output_chars'] ?? 0),
         'tokens_in' => (int)($event['tokens_in'] ?? 0),
         'tokens_out' => (int)($event['tokens_out'] ?? 0),
+        'thoughts_tokens' => (int)($event['thoughts_tokens'] ?? 0),
         'error' => substr($event['error'] ?? ($curlErrno ? "curl {$curlErrno}: {$curlError}" : ''), 0, 180),
     ];
 
@@ -6365,17 +6629,25 @@ function _recordAiRequest(array $event): void {
  * Like callGemini() but tries the preferred model first, then fallback models
  * on quota/rate-limit errors (429/503). Builds the URL from model name + API key.
  */
-function callGeminiWithFallback(string $apiKey, array $payload, int $timeout = 30, string $usageAction = ''): array {
-    $models   = $usageAction === 'expiry_ocr'
+function callGeminiWithFallback(
+    string $apiKey,
+    array $payload,
+    int $timeout = 30,
+    string $usageAction = '',
+    ?array $models = null,
+    int $maxAttempts = 4,
+): array {
+    $models ??= $usageAction === 'expiry_ocr'
         ? ['gemini-3-flash', 'gemini-2.5-flash', 'gemini-2.0-flash']
         : ['gemini-2.5-flash', 'gemini-2.0-flash'];
-    $last     = ['http_code' => 0, 'body' => '', 'data' => null, 'tokens_in' => 0, 'tokens_out' => 0, 'elapsed_s' => 0, 'attempts' => 0, 'timeout_s' => $timeout, 'prompt_chars' => 0, 'output_chars' => 0, 'curl_errno' => 0, 'curl_error' => ''];
+    $last = ['http_code' => 0, 'body' => '', 'data' => null, 'tokens_in' => 0, 'tokens_out' => 0, 'thoughts_tokens' => 0, 'elapsed_s' => 0, 'attempts' => 0, 'timeout_s' => $timeout, 'prompt_chars' => 0, 'output_chars' => 0, 'curl_errno' => 0, 'curl_error' => '', 'model' => ''];
     $promptLen = strlen(json_encode($payload));
     foreach ($models as $idx => $model) {
         $isFallback = $idx > 0;
         EverLog::aiCall($model, $promptLen, $isFallback);
         $url  = "https://generativelanguage.googleapis.com/v1beta/models/{$model}:generateContent?key={$apiKey}";
-        $last = callGemini($url, $payload, $timeout);
+        $last = callGemini($url, $payload, $timeout, $maxAttempts);
+        $last['model'] = $model;
         $ok = $last['http_code'] === 200;
         _recordAiRequest([
             'action' => $usageAction,
@@ -6390,6 +6662,7 @@ function callGeminiWithFallback(string $apiKey, array $payload, int $timeout = 3
             'output_chars' => $last['output_chars'] ?? strlen((string)($last['body'] ?? '')),
             'tokens_in' => $last['tokens_in'] ?? 0,
             'tokens_out' => $last['tokens_out'] ?? 0,
+            'thoughts_tokens' => $last['thoughts_tokens'] ?? 0,
             'curl_errno' => $last['curl_errno'] ?? 0,
             'curl_error' => $last['curl_error'] ?? '',
             'error' => $ok ? '' : ($last['data']['error']['message'] ?? ''),

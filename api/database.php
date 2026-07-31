@@ -129,6 +129,8 @@ function initializeDB(PDO $db): void {
             shopping_name TEXT DEFAULT '',
             nutriments_json TEXT DEFAULT NULL,
             prepared_food INTEGER DEFAULT 0,
+            last_location TEXT DEFAULT NULL,
+            last_location_at DATETIME DEFAULT NULL,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
         );
@@ -167,6 +169,29 @@ function initializeDB(PDO $db): void {
         CREATE INDEX IF NOT EXISTS idx_transactions_type_date ON transactions(type, created_at);
         -- smartShopping(): GROUP BY product_id filtering on type+undone
         CREATE INDEX IF NOT EXISTS idx_transactions_pid_type_undone ON transactions(product_id, type, undone);
+
+        CREATE TABLE IF NOT EXISTS location_suggestion_cache (
+            cache_key TEXT PRIMARY KEY,
+            location TEXT NOT NULL,
+            confidence REAL NOT NULL DEFAULT 0,
+            reason TEXT DEFAULT '',
+            model TEXT NOT NULL,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE IF NOT EXISTS product_location_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            product_id INTEGER NOT NULL,
+            location TEXT NOT NULL,
+            source TEXT NOT NULL,
+            transaction_id INTEGER UNIQUE,
+            occurred_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            undone INTEGER NOT NULL DEFAULT 0,
+            FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_product_location_history_latest
+            ON product_location_history(product_id, undone, occurred_at DESC);
 
         CREATE TABLE IF NOT EXISTS canonical_ingredients (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -367,6 +392,14 @@ function migrateDB(PDO $db): void {
         try { $db->exec("ALTER TABLE products ADD COLUMN prepared_food INTEGER DEFAULT 0"); }
         catch (PDOException $e) { if (strpos($e->getMessage(), 'duplicate column') === false) throw $e; }
     }
+    if (!in_array('last_location', $colNames)) {
+        try { $db->exec("ALTER TABLE products ADD COLUMN last_location TEXT DEFAULT NULL"); }
+        catch (PDOException $e) { if (strpos($e->getMessage(), 'duplicate column') === false) throw $e; }
+    }
+    if (!in_array('last_location_at', $colNames)) {
+        try { $db->exec("ALTER TABLE products ADD COLUMN last_location_at DATETIME DEFAULT NULL"); }
+        catch (PDOException $e) { if (strpos($e->getMessage(), 'duplicate column') === false) throw $e; }
+    }
 
     // Empty barcode strings break UNIQUE (only one '' allowed); normalize to NULL.
     $db->exec("UPDATE products SET barcode = NULL WHERE barcode IS NOT NULL AND TRIM(barcode) = ''");
@@ -429,6 +462,34 @@ function migrateDB(PDO $db): void {
             );
         ");
     }
+
+    $db->exec("
+        CREATE TABLE IF NOT EXISTS location_suggestion_cache (
+            cache_key TEXT PRIMARY KEY,
+            location TEXT NOT NULL,
+            confidence REAL NOT NULL DEFAULT 0,
+            reason TEXT DEFAULT '',
+            model TEXT NOT NULL,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    ");
+    $db->exec("
+        CREATE TABLE IF NOT EXISTS product_location_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            product_id INTEGER NOT NULL,
+            location TEXT NOT NULL,
+            source TEXT NOT NULL,
+            transaction_id INTEGER UNIQUE,
+            occurred_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            undone INTEGER NOT NULL DEFAULT 0,
+            FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE CASCADE
+        )
+    ");
+    $db->exec("
+        CREATE INDEX IF NOT EXISTS idx_product_location_history_latest
+        ON product_location_history(product_id, undone, occurred_at DESC)
+    ");
 
     // recipes: one per meal per day (last wins)
     $tables = $db->query("SELECT name FROM sqlite_master WHERE type='table' AND name='recipes'")->fetchAll();
@@ -700,6 +761,79 @@ function migrateDB(PDO $db): void {
         CREATE INDEX IF NOT EXISTS idx_product_tags_facet_value ON product_tags(facet, value);
         CREATE INDEX IF NOT EXISTS idx_canonical_queue_status ON canonical_processing_queue(status, requested_at);
     ");
+
+    $locationBackfillDone = $db->query("
+        SELECT value
+        FROM app_settings
+        WHERE key = 'migration_product_location_history_v1'
+    ")->fetchColumn();
+    if (!$locationBackfillDone) {
+        dbWithRetry(function () use ($db): void {
+            $db->beginTransaction();
+            try {
+                $db->exec("
+                    INSERT OR IGNORE INTO product_location_history (
+                        product_id, location, source, transaction_id, occurred_at, undone
+                    )
+                    SELECT product_id, location, 'backfill_transaction', id, created_at, 0
+                    FROM transactions
+                    WHERE type = 'in'
+                      AND undone = 0
+                      AND location IN ('dispensa', 'frigo', 'freezer', 'spice_rack', 'cabinet', 'altro')
+                ");
+
+                $inventoryRows = $db->query("
+                    SELECT i.product_id, i.location, i.updated_at
+                    FROM inventory i
+                    JOIN (
+                        SELECT product_id, MAX(datetime(updated_at)) AS latest_at
+                        FROM inventory
+                        WHERE location IN ('dispensa', 'frigo', 'freezer', 'spice_rack', 'cabinet', 'altro')
+                        GROUP BY product_id
+                    ) latest
+                      ON latest.product_id = i.product_id
+                     AND datetime(i.updated_at) = latest.latest_at
+                    WHERE NOT EXISTS (
+                        SELECT 1
+                        FROM product_location_history h
+                        WHERE h.product_id = i.product_id
+                          AND h.undone = 0
+                    )
+                    ORDER BY i.id DESC
+                ")->fetchAll(PDO::FETCH_ASSOC);
+                $seenInventoryProducts = [];
+                foreach ($inventoryRows as $row) {
+                    $productId = (int)$row['product_id'];
+                    if (isset($seenInventoryProducts[$productId])) {
+                        continue;
+                    }
+                    $seenInventoryProducts[$productId] = true;
+                    recordProductLocation(
+                        $db,
+                        $productId,
+                        (string)$row['location'],
+                        'backfill_inventory',
+                        (string)$row['updated_at'],
+                    );
+                }
+
+                $productIds = $db->query("SELECT id FROM products")->fetchAll(PDO::FETCH_COLUMN);
+                foreach ($productIds as $productId) {
+                    refreshProductLastLocation($db, (int)$productId);
+                }
+                $db->exec("
+                    INSERT OR REPLACE INTO app_settings (key, value)
+                    VALUES ('migration_product_location_history_v1', '1')
+                ");
+                $db->commit();
+            } catch (Throwable $e) {
+                if ($db->inTransaction()) {
+                    $db->rollBack();
+                }
+                throw $e;
+            }
+        });
+    }
 }
 
 /**
