@@ -11,6 +11,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Recipe scraps tips** — During cooking steps, detect "waste" generated (peels, cores, bones, eggshells, coffee grounds, citrus zest, etc.) and surface AI-powered tips on how to reuse them (compost, natural cleaner, broth, candied peel, etc.). Could be shown as an optional collapsible hint card below the step that generates the scrap.
 
+## [1.8.3] - 2026-07-31
+
+### Added
+- **Smart storage-location defaults** — EverShelf now remembers the latest location used for each product, backfills existing products from inventory history, and exposes a history-first location suggestion API for Home Assistant and other clients.
+- **Quality-first Gemini fallback** — Genuinely unseen products can be classified by `gemini-3.6-flash`, with `gemini-3.5-flash-lite` as the fast fallback. Structured output can return `unknown`, and decisions are cached.
+
+### Changed
+- **Bounded location AI** — Location classification uses minimal thinking, a five-second model timeout, and no same-model retries so item entry remains responsive during quota or service issues.
+- **Accurate Gemini cost estimates** — Usage telemetry now includes thinking tokens and current Gemini 3.6 Flash / 3.5 Flash-Lite prices.
+
 ## [1.8.2] - 2026-07-27
 
 ### Fixed

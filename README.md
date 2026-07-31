@@ -25,7 +25,7 @@
 [![SQLite](https://img.shields.io/badge/SQLite-3-blue.svg)](https://www.sqlite.org/)
 [![Docker](https://img.shields.io/badge/Docker-Ready-2496ED.svg)](Dockerfile)
 [![i18n](https://img.shields.io/badge/i18n-IT%20%7C%20EN%20%7C%20DE%20%7C%20FR%20%7C%20ES-orange.svg)](translations/)
-[![Version](https://img.shields.io/badge/version-1.7.44-brightgreen.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-1.8.3-brightgreen.svg)](CHANGELOG.md)
 [![GitHub stars](https://img.shields.io/github/stars/dadaloop82/EverShelf?style=social)](https://github.com/dadaloop82/EverShelf/stargazers)
 [![Last commit](https://img.shields.io/github/last-commit/dadaloop82/EverShelf/main)](https://github.com/dadaloop82/EverShelf/commits/main)
 [![Contributors](https://img.shields.io/github/contributors/dadaloop82/EverShelf)](https://github.com/dadaloop82/EverShelf/graphs/contributors)
@@ -40,10 +40,11 @@
 
 ---
 
-### 🆕 Release 1.7.44 (2026-06-26)
+### 🆕 Release 1.8.3 (2026-07-31)
 
-- **Split-safe inventory item edits** — Multi-quantity inventory rows can split one item into a separate row when changing its expiry date.
-- **Single-item inventory delete** — Deleting from a multi-quantity row decrements by one instead of deleting the entire row.
+- **History-first storage defaults** — Previously scanned barcodes and exact product names reuse their latest storage location.
+- **Background Gemini classification** — Unseen products can be classified into a storage location or `unknown` without blocking item entry.
+- **Current Gemini model support** — Location classification uses Gemini 3.6 Flash with Gemini 3.5 Flash-Lite fallback.
 - **Shopping cart quantities** — Internal shopping-list rows store quantity and explicit adds increment existing rows.
 
 See [CHANGELOG.md](CHANGELOG.md) for full details.
@@ -258,6 +259,13 @@ TRANSACTION_RETENTION_DAYS=90   # delete stock transactions older than N days (m
 VACUUM_EXPIRY_EXTENSION_DAYS=30 # extra days before vacuum-sealed items are flagged expired
 
 # Optional: Gemini cost rates (USD per million tokens, for the Info tab cost estimate)
+LOCATION_AI_ENABLED=true
+GEMINI_LOCATION_MODEL=gemini-3.6-flash
+GEMINI_LOCATION_FALLBACK_MODEL=gemini-3.5-flash-lite
+GEMINI_COST_36F_IN=1.50
+GEMINI_COST_36F_OUT=7.50
+GEMINI_COST_35FL_IN=0.30
+GEMINI_COST_35FL_OUT=2.50
 GEMINI_COST_3F_IN=0.50
 GEMINI_COST_3F_OUT=3.00
 GEMINI_COST_25F_IN=0.15
@@ -418,6 +426,7 @@ evershelf-kiosk/            # 📺 Android kiosk app (add-on)
 |----------|--------|--------|-------------|
 | **Products** | `search_barcode` | GET | Find product by barcode |
 | | `lookup_barcode` | GET | Look up barcode on Open Food Facts |
+| | `location_suggestion` | POST | Resolve history-first or AI storage location |
 | | `product_save` | POST | Create or update a product |
 | | `products_list` | GET | List all products |
 | **Inventory** | `inventory_list` | GET | List inventory items |

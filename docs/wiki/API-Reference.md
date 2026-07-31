@@ -266,6 +266,32 @@ Same as `generate_recipe` but streams output via Server-Sent Events.
 ### `gemini_product_hint` — POST
 Get AI storage location + shelf-life hint for a new product.
 
+### `location_suggestion` — POST
+Resolve the default storage location for an item without applying page-specific
+fallbacks. Exact barcode history wins first. In `manual` mode, an exact
+case-insensitive product-name history match is checked next. Unseen products use
+a cached Gemini classification and may return `unknown`.
+
+```json
+{
+  "mode": "manual",
+  "name": "Milk",
+  "barcode": "",
+  "category": "Dairy"
+}
+```
+
+Example response:
+
+```json
+{
+  "success": true,
+  "location": "frigo",
+  "source": "history_name",
+  "confidence": 1
+}
+```
+
 ### `gemini_shopping_enrich` — POST
 Enrich shopping suggestions with practical tips.
 
