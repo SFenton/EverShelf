@@ -1,0 +1,17 @@
+child_slug,parent_slug,rationale
+beef,meat,Beef is meat and never stock
+chili-pepper,chilli-pepper,Legacy spelling node belongs with chilli identity
+pear,fruit,Pear is fruit and never fruit preserve
+soybean,legume,Soybean is a legume and never condiment
+legumes,legume,Plural category is the legume branch and never nuts
+jalapeno-pepper,chilli-pepper,Jalapeño is a chilli and never inherently pickled
+sesame-seeds,seed,Sesame seed is a seed and never seasoning
+coffee-pod,beverage,Prepared coffee pod parent outranks legacy coffee parent
+butter,oil-fat,Butter is a culinary fat and not a generic spread category
+nut-butter,condiment,Nut butter is a prepared condiment and not butter ancestry
+pickle-chips,condiment,Pickle chips are a prepared condiment
+pickles,condiment,Pickles are prepared preserved food rather than raw vegetable identity
+coconut-milk,beverage,Coconut milk is a beverage/prepared liquid branch
+stock,stock-broth,Stock belongs to the stock and broth branch
+stock-paste,stock-broth,Stock paste belongs to the stock and broth branch
+stock-base,stock-broth,Stock base belongs to the stock and broth branch

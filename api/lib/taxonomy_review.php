@@ -23,7 +23,7 @@ const TAXONOMY_HISTORY_SOURCE = 'taxonomy_history';
 const TAXONOMY_PREPARED_SOURCE = 'prepared_food_flag';
 
 function taxonomyReviewEnabled(): bool {
-    return canonicalIngredientEnvBool('TAXONOMY_AI_REVIEW', true);
+    return canonicalIngredientEnvBool('TAXONOMY_AI_REVIEW', false);
 }
 
 function taxonomyReviewCachePath(): string {

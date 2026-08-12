@@ -1,0 +1,10 @@
+child_slug,target_slug,relation,direction,confidence,reviewer,rationale,source_citation
+bacon,pork,derived_from,forward,1,operator-corrective-review-v3,Bacon is derived from pork but is not an is-a subtype for identity satisfaction,corrective-v3.13 culinary derivation review
+breadcrumbs,bread,derived_from,forward,1,operator-corrective-review-v3,Breadcrumbs derive from bread but remain a distinct prepared identity,corrective-v3.13 culinary derivation review
+coconut-milk,coconut,derived_from,forward,1,operator-corrective-review-v3,Coconut milk derives from coconut without satisfying coconut requirements,corrective-v3.13 culinary derivation review
+grits,corn,derived_from,forward,1,operator-corrective-review-v3,Grits derive from corn but remain a distinct prepared cereal identity,corrective-v3.13 culinary derivation review
+lemon-juice,lemon,derived_from,forward,1,operator-corrective-review-v3,Lemon juice derives from lemon without satisfying lemon identity,corrective-v3.13 culinary derivation review
+lime-juice,lime,derived_from,forward,1,operator-corrective-review-v3,Lime juice derives from lime without satisfying lime identity,corrective-v3.13 culinary derivation review
+orange-juice,orange,derived_from,forward,1,operator-corrective-review-v3,Orange juice derives from orange without satisfying orange identity,corrective-v3.13 culinary derivation review
+pear-marmalade,pear,derived_from,forward,1,operator-corrective-review-v3,Pear marmalade derives from pear but remains a distinct fruit preserve identity,corrective-v3.13 culinary derivation review
+pineapple-juice,pineapple,derived_from,forward,1,operator-corrective-review-v3,Pineapple juice derives from pineapple without satisfying pineapple identity,corrective-v3.13 culinary derivation review

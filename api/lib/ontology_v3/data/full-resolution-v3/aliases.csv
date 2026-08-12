@@ -1,0 +1,39 @@
+slug,label,language,attributes_json,required_cohort,required_evidence_kind,required_evidence_key,rationale
+cardamom,cardamom pods,en,"{""form"":""pod""}",,,,Cardamom pods are cardamom with reviewed pod form
+vanilla,vanilla pods,en,"{""form"":""pod""}",,,,Vanilla pods are vanilla with reviewed pod form
+flour,rice flour,en,"{""form"":""flour"",""variety"":""rice""}",,,,Rice flour is flour with reviewed rice variety
+vinegar,rice wine vinegar,en,"{""variety"":""rice""}",,,,Rice wine vinegar is rice vinegar rather than rice identity
+milk-alternative,rice milk,en,"{""variety"":""rice""}",,,,Rice milk is a milk alternative with reviewed rice variety
+noodle,rice vermicelli,en,"{""form"":""noodle"",""variety"":""rice""}",,,,Rice vermicelli is a rice noodle identity
+oil,groundnut oil,en,"{""variety"":""peanut""}",,,,Groundnut is a culinary synonym for peanut oil
+oil,arachis oil,en,"{""variety"":""peanut""}",,,,Arachis is a botanical synonym for peanut oil
+bell-pepper,red capsicum,en,"{""variety"":""red""}",,,,Red capsicum is red bell pepper and never Piper pepper
+milk-alternative,hazelnut milk,en,"{""variety"":""hazelnut""}",,,,Hazelnut milk is a milk alternative with reviewed hazelnut variety
+olive,pitted Kalamata olives,en,"{""preparation"":""pitted"",""variety"":""kalamata""}",,,,Observed English plural Kalamata olive with pitted preparation
+olive,Kalamata olives pitted,en,"{""preparation"":""pitted"",""variety"":""kalamata""}",,,,Observed English postpositive pitted Kalamata wording
+olive,pitted Kalamata olive,en,"{""preparation"":""pitted"",""variety"":""kalamata""}",,,,Observed English singular Kalamata olive with pitted preparation
+olive,d olives Kalamata dénoyautées,fr,"{""preparation"":""pitted"",""variety"":""kalamata""}",,,,Observed French plural pitted Kalamata olives
+olive,d olive Kalamata dénoyautée,fr,"{""preparation"":""pitted"",""variety"":""kalamata""}",,,,Observed French singular pitted Kalamata olive
+olive,olives Kalamata dénoyautées,fr,"{""preparation"":""pitted"",""variety"":""kalamata""}",,,,Observed French pitted Kalamata olives
+olive,Kalamata Oliven entsteint,de,"{""preparation"":""pitted"",""variety"":""kalamata""}",,,,Observed German pitted Kalamata olives
+olive,măsline Kalamata fără sâmburi,ro,"{""preparation"":""pitted"",""variety"":""kalamata""}",,,,Observed Romanian pitted Kalamata olives
+olive,azeitona Kalamata,pt,"{""variety"":""kalamata""}",,,,Observed Portuguese singular unqualified Kalamata olive
+olive,azeitonas Kalamata,pt,"{""variety"":""kalamata""}",,,,Observed Portuguese plural unqualified Kalamata olives
+olive,di oliva Kalamata denocciolata,it,"{""preparation"":""pitted"",""variety"":""kalamata""}",,,,Observed Italian singular pitted Kalamata olive
+olive,di olive Kalamata denocciolate,it,"{""preparation"":""pitted"",""variety"":""kalamata""}",,,,Observed Italian plural pitted Kalamata olives
+olive,Kalamata oliven udstenede,da,"{""preparation"":""pitted"",""variety"":""kalamata""}",,,,Observed Danish pitted Kalamata olives
+olive,oliwek Kalamata bez pestek,pl,"{""preparation"":""pitted"",""variety"":""kalamata""}",,,,Observed Polish pitted Kalamata olives
+olive,d olives Kalamata dénoyautées,und,"{""preparation"":""pitted"",""variety"":""kalamata""}",,,,Unambiguous frozen French wording remains resolvable when source locale is unavailable
+olive,d olive Kalamata dénoyautée,und,"{""preparation"":""pitted"",""variety"":""kalamata""}",,,,Unambiguous frozen French singular remains resolvable when source locale is unavailable
+olive,olives Kalamata dénoyautées,und,"{""preparation"":""pitted"",""variety"":""kalamata""}",,,,Unambiguous frozen French wording remains resolvable when source locale is unavailable
+olive,Kalamata Oliven entsteint,und,"{""preparation"":""pitted"",""variety"":""kalamata""}",,,,Unambiguous frozen German wording remains resolvable when source locale is unavailable
+olive,măsline Kalamata fără sâmburi,und,"{""preparation"":""pitted"",""variety"":""kalamata""}",,,,Unambiguous frozen Romanian wording remains resolvable when source locale is unavailable
+olive,azeitona Kalamata,und,"{""variety"":""kalamata""}",,,,Observed unqualified Portuguese Kalamata olive remains resolvable when source locale is unavailable
+olive,azeitonas Kalamata,und,"{""variety"":""kalamata""}",,,,Observed unqualified Portuguese Kalamata olives remain resolvable when source locale is unavailable
+olive,di oliva Kalamata denocciolata,und,"{""preparation"":""pitted"",""variety"":""kalamata""}",,,,Unambiguous frozen Italian singular remains resolvable when source locale is unavailable
+olive,di olive Kalamata denocciolate,und,"{""preparation"":""pitted"",""variety"":""kalamata""}",,,,Unambiguous frozen Italian wording remains resolvable when source locale is unavailable
+olive,Kalamata oliven udstenede,und,"{""preparation"":""pitted"",""variety"":""kalamata""}",,,,Unambiguous frozen Danish wording remains resolvable when source locale is unavailable
+olive,oliwek Kalamata bez pestek,und,"{""preparation"":""pitted"",""variety"":""kalamata""}",,,,Unambiguous frozen Polish wording remains resolvable when source locale is unavailable
+olive,pitted Kalamata olives,und,"{""preparation"":""pitted"",""variety"":""kalamata""}",,,,Observed English plural remains resolvable when source locale is unavailable
+olive,Kalamata olives pitted,und,"{""preparation"":""pitted"",""variety"":""kalamata""}",,,,Observed English postpositive wording remains resolvable when source locale is unavailable
+olive,pitted Kalamata olive,und,"{""preparation"":""pitted"",""variety"":""kalamata""}",,,,Observed English singular remains resolvable when source locale is unavailable

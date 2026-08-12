@@ -148,8 +148,22 @@ cd evershelf-kiosk
 
 For release:
 ```bash
+export EVERSHELF_SIGNING_STORE_FILE=/secure/path/evershelf-release.jks
+export EVERSHELF_SIGNING_STORE_PASSWORD='...'
+export EVERSHELF_SIGNING_KEY_ALIAS='...'
+export EVERSHELF_SIGNING_KEY_PASSWORD='...'
 ./gradlew assembleRelease
 ```
+
+Release signing material must remain outside the repository. The same values
+can instead be supplied as Gradle properties in a user-level
+`~/.gradle/gradle.properties` file.
+
+GitHub Actions publishes OTA APKs only when these repository secrets are set:
+`EVERSHELF_SIGNING_KEYSTORE_BASE64`,
+`EVERSHELF_SIGNING_STORE_PASSWORD`, `EVERSHELF_SIGNING_KEY_ALIAS`, and
+`EVERSHELF_SIGNING_KEY_PASSWORD`. Debug APKs are validation-only and are never
+published.
 
 ---
 
@@ -164,4 +178,3 @@ For release:
 ## License
 
 MIT — see [LICENSE](../LICENSE)
-

@@ -11,7 +11,14 @@ info:
     - General: 120 requests/minute
     - AI endpoints: 15 requests/minute
     - Login endpoints: 5 requests/minute
-  version: "1.2.0"
+
+    Ingredient ontology v3 is additive and disabled by default.
+    There is no public ontology mutation endpoint. If a validated v3 score
+    revision is manually activated, its nullable ontology version is derived
+    from that single active score revision; legacy revisions return null.
+    V3 explanation rows preserve required/optional/staple state and report
+    optional unmatched ingredients separately when explanations are requested.
+  version: "1.3.0"
   contact:
     name: Stimpfl Daniel
     email: evershelfproject@gmail.com
@@ -559,6 +566,392 @@ paths:
         "200":
           description: Recipe deleted
 
+  /index.php?action=recipe_catalog_search:
+    get:
+      summary: Search the normalized recipe catalog by title and ingredients
+      tags: [Recipes]
+      parameters:
+        - name: q
+          in: query
+          schema: { type: string }
+        - name: mode
+          in: query
+          schema: { type: string, enum: [stocked, expiring], default: stocked }
+        - name: sort
+          in: query
+          schema: { type: string, enum: [availability, expiry, alphabetical] }
+        - name: availability_weight
+          in: query
+          schema: { type: integer, minimum: 0, maximum: 100, default: 100 }
+        - name: expiry_weight
+          in: query
+          schema: { type: integer, minimum: 0, maximum: 100, default: 25 }
+        - name: minimum_coverage
+          in: query
+          schema: { type: integer, minimum: 0, maximum: 100, default: 0 }
+        - name: expiring_within_days
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 3650 }
+        - name: source
+          in: query
+          schema: { type: string }
+        - name: locale
+          in: query
+          schema: { type: string }
+        - name: fields
+          in: query
+          schema: { type: string, enum: [full, card], default: full }
+        - name: cursor
+          in: query
+          schema: { type: string }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+        - name: page
+          in: query
+          schema: { type: integer, minimum: 1, default: 1 }
+        - name: explain
+          in: query
+          schema: { type: boolean, default: true }
+      responses:
+        "200":
+          description: >-
+            Snapshot-bound local FTS results with SQL-backed inventory ranking,
+            stable deduplication, next_cursor, optional compact card projection,
+            and explicit read/preview revision metadata. Preview cursors are
+            accepted only for the configured validated preview revision.
+        "400":
+          description: >-
+            Invalid, mismatched, or expired cursor. A metadata freshness update that
+            changes effective recipe visibility invalidates older browse cursors
+            without dirtying the score revision.
+        "503":
+          description: Recipe score revision is being built
+
+  /index.php?action=recipe_catalog_suggest:
+    get:
+      summary: Rank local recipes against stocked or expiring inventory
+      tags: [Recipes]
+      parameters:
+        - name: mode
+          in: query
+          schema: { type: string, enum: [stocked, expiring], default: stocked }
+        - name: source
+          in: query
+          schema: { type: string }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+        - name: page
+          in: query
+          schema: { type: integer, minimum: 1, default: 1 }
+      responses:
+        "200":
+          description: >-
+            Snapshot-bound inventory-ranked local recipes with explicit
+            read/preview revision metadata
+
+  /index.php?action=recipe_catalog_recommendations:
+    get:
+      summary: Return a responsive Food & Recipes recommendation set
+      tags: [Recipes]
+      parameters:
+        - name: source
+          in: query
+          schema: { type: string }
+        - name: locale
+          in: query
+          schema: { type: string }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 5, maximum: 100, default: 30 }
+      responses:
+        "200":
+          description: >-
+            The requested number of ordered, deduplicated compact cards mixed
+            across availability, expiry, and deterministic fill lanes, with
+            explicit read/preview revision metadata
+        "503":
+          description: Recipe score revision is being built
+
+  /index.php?action=recipe_catalog_get:
+    get:
+      summary: Get a normalized catalog recipe
+      tags: [Recipes]
+      parameters:
+        - name: id
+          in: query
+          required: true
+          schema: { type: integer, minimum: 1 }
+      responses:
+        "200":
+          description: Recipe details, origins, ingredients, and user state
+        "400":
+          description: Recipe ID is missing, malformed, or not a positive canonical integer
+        "404":
+          description: Recipe not found
+
+  /index.php?action=recipe_catalog_detail:
+    get:
+      summary: Get a bounded source-agnostic recipe detail projection
+      tags: [Recipes]
+      parameters:
+        - name: id
+          in: query
+          required: true
+          schema: { type: integer, minimum: 1 }
+      responses:
+        "200":
+          description: Inventory-aware recipe_detail_v1 DTO
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RecipeDetailResponse"
+        "400":
+          description: Recipe ID is missing, malformed, or not a positive canonical integer
+        "404":
+          description: Recipe not found
+
+  /index.php?action=recipe_catalog_grocery_add:
+    post:
+      summary: Idempotently add revalidated missing recipe ingredients
+      description: >-
+        Writes only to EverShelf's internal shopping list. Source display amounts
+        are returned as text but are never used as the internal quantity, and
+        EverShelf never calls Home Assistant. Exact replays are fingerprinted from
+        the recipe ID and normalized selector payload, so stored outcomes can be
+        returned even if recipe metadata later changes. Idempotency records have a
+        30-day retention window; older records may be pruned. Only ingredients
+        revalidated as confirmed missing are eligible; uncertain ingredients are
+        never added.
+      tags: [Recipes]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RecipeGroceryRequest"
+      responses:
+        "200":
+          description: Bounded per-item outcomes
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RecipeGroceryResponse"
+        "400":
+          description: Invalid recipe, idempotency key, or ingredient selection
+        "404":
+          description: Recipe not found
+        "409":
+          description: Idempotency key was already used for another normalized selector payload
+
+  /v1/metadata:
+    post:
+      summary: Cookidoo metadata hydration policy gate
+      description: >-
+        Internal bridge-only route. Current repository policy disables provider
+        detail hydration because the available response co-transports official
+        steps. Valid requests fail locally without a provider call.
+      tags: [Internal Cookidoo Bridge]
+      servers:
+        - url: http://cookidoo-bridge:8081
+          description: Internal Docker network only
+      security:
+        - CookidooBridgeBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CookidooMetadataBatchRequest"
+      responses:
+        "400":
+          description: Invalid request
+        "401":
+          description: Invalid bridge bearer token
+        "429":
+          description: Bridge rate limit exceeded
+        "503":
+          description: metadata_hydration_disabled_policy
+
+  /index.php?action=recipe_catalog_discover:
+    post:
+      summary: Return local results with Cookidoo hydration disabled
+      tags: [Recipes]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                query: { type: string }
+                ingredients:
+                  type: array
+                  items: { type: string }
+                exclude_ingredients:
+                  type: array
+                  items: { type: string }
+                locale:
+                  type: string
+                  description: >-
+                    Retained request field; provider hydration is policy-disabled.
+                tmv: { type: string, enum: [TM31, TM5, TM6, TM7], default: TM6 }
+                limit: { type: integer, minimum: 1, maximum: 20 }
+                page: { type: integer, minimum: 0, maximum: 50, default: 0 }
+                exclude_cached:
+                  type: boolean
+                  description: Skip Cookidoo recipe IDs already stored locally
+                max_pages:
+                  type: integer
+                  minimum: 1
+                  maximum: 50
+                  default: 1
+                crawl_all:
+                  type: boolean
+                  default: false
+                  description: >-
+                    Retained compatibility field; no crawl job is queued.
+                interactive:
+                  type: boolean
+                  default: false
+                  description: Elevate the idempotent search into the interactive queue lane
+                force:
+                  type: boolean
+                  default: false
+                  description: Requeue an equivalent completed search even when still fresh
+      responses:
+        "200":
+          description: >-
+            Local results with job null, detail_hydration false, and
+            unrefreshable_reason provider_detail_policy_disabled.
+
+  /index.php?action=recipe_jobs_status:
+    get:
+      summary: Read recipe discovery/index job status
+      tags: [Recipes]
+      parameters:
+        - name: id
+          in: query
+          schema: { type: integer, minimum: 1 }
+        - name: idempotency_key
+          in: query
+          schema: { type: string }
+        - name: search_id
+          in: query
+          schema: { type: string }
+      responses:
+        "200":
+          description: >-
+            One job, recent jobs, or aggregate hydration progress and compact new
+            items for a search_id. Internal workers may also report bounded
+            recipe_metadata_refresh jobs created by the disabled-by-default
+            direct-ID metadata-v2 backfill CLI. Those job results expose at most
+            20 ordered succeeded/failed recipe and external IDs, bounded
+            permanent error kinds, and per-outcome counts. A committed batch that
+            changes effective stale_at visibility increments only cursor_revision
+            once, invalidating older browse cursors without dirtying score or
+            catalog revisions.
+        "400":
+          description: A supplied job ID is malformed or not a positive canonical integer
+
+  /index.php?action=recipe_connectors:
+    get:
+      summary: List recipe connector capabilities and health
+      tags: [Recipes]
+      responses:
+        "200":
+          description: Connector enabled/configured/circuit state
+
+  /index.php?action=recipe_catalog_save:
+    post:
+      summary: Save or update a normalized recipe
+      tags: [Recipes]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                recipe_id: { type: integer, minimum: 1 }
+                recipe: { type: object }
+                connector: { type: string, default: manual }
+      responses:
+        "200":
+          description: Saved normalized recipe
+        "400":
+          description: Request is not an object or recipe_id is not a positive JSON integer
+
+  /index.php?action=recipe_catalog_delete:
+    post:
+      summary: Delete a normalized recipe
+      tags: [Recipes]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                id: { type: integer, minimum: 1 }
+                recipe_id: { type: integer, minimum: 1 }
+              anyOf:
+                - required: [id]
+                - required: [recipe_id]
+      responses:
+        "200":
+          description: Recipe deleted
+        "400":
+          description: Request is not an object or the recipe ID is malformed/nonpositive
+        "404":
+          description: Recipe not found
+
+  /index.php?action=recipe_catalog_favorite:
+    post:
+      summary: Set or toggle normalized recipe favorite state
+      tags: [Recipes]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [id]
+              properties:
+                id: { type: integer, minimum: 1 }
+                favorite: { type: boolean }
+      responses:
+        "200":
+          description: Updated favorite state
+        "400":
+          description: Request must be a JSON object with a positive integer recipe ID
+
+  /index.php?action=recipe_catalog_refresh:
+    post:
+      summary: Enqueue a local recipe or explicit catalog refresh
+      tags: [Recipes]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                id: { type: integer, minimum: 1 }
+                recipe_id: { type: integer, minimum: 1 }
+                connector: { type: string, default: local }
+      responses:
+        "200":
+          description: Refresh job enqueued; omitting both ID fields explicitly targets the catalog
+        "400":
+          description: >-
+            Request is not a JSON object, an ID is malformed/nonpositive or
+            conflicting, or the connector cannot be refreshed locally
+        "404":
+          description: Supplied recipe ID was not found
+
   /index.php?action=tts_proxy:
     post:
       summary: Proxy TTS request to external endpoint
@@ -591,7 +984,745 @@ paths:
           description: Expiry history entries
 
 components:
+  securitySchemes:
+    CookidooBridgeBearer:
+      type: http
+      scheme: bearer
+      description: Internal token shared only by EverShelf and the bridge
+
   schemas:
+    CookidooMetadataBatchRequest:
+      type: object
+      additionalProperties: false
+      required: [locale, external_ids]
+      properties:
+        locale:
+          type: string
+          maxLength: 16
+          description: Exact supported Cookidoo locale
+        external_ids:
+          type: array
+          minItems: 1
+          maxItems: 20
+          uniqueItems: true
+          items:
+            type: string
+            maxLength: 160
+            pattern: "^[A-Za-z0-9._:-]+$"
+
+    CookidooMetadataBatchResponse:
+      type: object
+      additionalProperties: false
+      required:
+        [outcomes, count, succeeded_count, failed_count, locale, metadata_schema_version]
+      properties:
+        outcomes:
+          type: array
+          minItems: 1
+          maxItems: 20
+          description: Ordered exactly like the requested external_ids
+          items:
+            $ref: "#/components/schemas/CookidooMetadataOutcome"
+        count:
+          type: integer
+          minimum: 1
+          maximum: 20
+        succeeded_count:
+          type: integer
+          minimum: 0
+          maximum: 20
+        failed_count:
+          type: integer
+          minimum: 0
+          maximum: 20
+        locale:
+          type: string
+          maxLength: 16
+          description: Exact effective locale, equal to the requested locale
+        metadata_schema_version:
+          type: string
+          const: ingredient-topology-v1
+
+    CookidooMetadataOutcome:
+      oneOf:
+        - type: object
+          additionalProperties: false
+          required: [external_id, status, recipe]
+          properties:
+            external_id:
+              type: string
+              maxLength: 160
+            status:
+              type: string
+              const: succeeded
+            recipe:
+              $ref: "#/components/schemas/CookidooMetadataRecipe"
+        - type: object
+          additionalProperties: false
+          required: [external_id, status, error_kind]
+          properties:
+            external_id:
+              type: string
+              maxLength: 160
+            status:
+              type: string
+              const: failed
+            error_kind:
+              type: string
+              enum:
+                [invalid_id, invalid_metadata, locale_mismatch, not_found]
+
+    CookidooMetadataRecipe:
+      type: object
+      additionalProperties: false
+      required:
+        [external_id, title, metadata_schema_version, general, ingredients, topology_metrics, image_url, canonical_url, locale]
+      properties:
+        external_id:
+          type: string
+          maxLength: 160
+        title:
+          type: string
+          maxLength: 400
+        metadata_schema_version:
+          type: string
+          const: ingredient-topology-v1
+        general:
+          type: object
+          additionalProperties: false
+          required:
+            [yield_quantity, yield_unit, active_time_seconds, total_time_seconds, difficulty, primary_category, equipment]
+          properties:
+            yield_quantity: { type: [number, "null"], minimum: 0 }
+            yield_unit: { type: [string, "null"], maxLength: 80 }
+            active_time_seconds: { type: [integer, "null"], minimum: 0 }
+            total_time_seconds: { type: [integer, "null"], minimum: 0 }
+            difficulty: { type: [string, "null"], maxLength: 160 }
+            primary_category: { type: [string, "null"], maxLength: 160 }
+            equipment:
+              type: array
+              maxItems: 50
+              items: { type: string, maxLength: 120 }
+        ingredients:
+          type: array
+          maxItems: 200
+          items:
+            type: object
+            additionalProperties: false
+            required:
+              [name, source_quantity, source_quantity_max, source_unit, source_amount_text, source_group_index, source_group_position, source_group_title, source_ingredient_ref, source_default_title, source_unit_ref, source_optional, source_shopping_category_ref]
+            properties:
+              name: { type: string, maxLength: 200 }
+              source_quantity: { type: [number, "null"], minimum: 0 }
+              source_quantity_max: { type: [number, "null"], minimum: 0 }
+              source_unit: { type: [string, "null"], maxLength: 80 }
+              source_amount_text: { type: [string, "null"], maxLength: 160 }
+              source_group_index:
+                type: integer
+                minimum: 0
+                maximum: 199
+                description: Provider group ordinal
+              source_group_position:
+                type: integer
+                minimum: 0
+                maximum: 199
+                description: Ingredient ordinal within its provider group
+              source_group_title:
+                type: [string, "null"]
+                maxLength: 160
+                description: Bounded factual section label; empty titles normalize to null
+              source_ingredient_ref:
+                type: [string, "null"]
+                maxLength: 200
+                pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+              source_default_title:
+                type: [string, "null"]
+                maxLength: 200
+                description: Provider English/default ingredient title
+              source_unit_ref:
+                type: [string, "null"]
+                maxLength: 200
+                pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+              source_optional:
+                type: [boolean, "null"]
+                description: Provider-declared optionality; null means unavailable
+              source_shopping_category_ref:
+                type: [string, "null"]
+                maxLength: 200
+                pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+        topology_metrics:
+          $ref: "#/components/schemas/CookidooTopologyMetrics"
+        image_url:
+          type: string
+          maxLength: 2048
+        canonical_url:
+          type: string
+          format: uri
+          maxLength: 2048
+          description: Cookidoo recipe URL whose path locale exactly matches locale
+        locale:
+          type: string
+          maxLength: 16
+          description: >-
+            Effective localization language. For direct metadata it equals the exact
+            requested locale; discovery fallbacks use the selected localization.
+
+    CookidooTopologyMetrics:
+      type: object
+      additionalProperties: false
+      required:
+        - group_count
+        - group_title_key_count
+        - group_title_nonempty_count
+        - group_title_length_total
+        - group_title_length_max
+        - ingredient_count
+        - ingredient_ref_key_count
+        - ingredient_ref_nonempty_count
+        - default_title_key_count
+        - default_title_nonempty_count
+        - unit_ref_key_count
+        - unit_ref_nonempty_count
+        - optional_key_count
+        - optional_true_count
+        - optional_false_count
+        - optional_null_count
+        - shopping_category_ref_key_count
+        - shopping_category_ref_nonempty_count
+      properties:
+        group_count: { type: integer, minimum: 0, maximum: 40 }
+        group_title_key_count: { type: integer, minimum: 0, maximum: 40 }
+        group_title_nonempty_count: { type: integer, minimum: 0, maximum: 40 }
+        group_title_length_total: { type: integer, minimum: 0, maximum: 6400 }
+        group_title_length_max: { type: integer, minimum: 0, maximum: 160 }
+        ingredient_count: { type: integer, minimum: 0, maximum: 200 }
+        ingredient_ref_key_count: { type: integer, minimum: 0, maximum: 200 }
+        ingredient_ref_nonempty_count: { type: integer, minimum: 0, maximum: 200 }
+        default_title_key_count: { type: integer, minimum: 0, maximum: 200 }
+        default_title_nonempty_count: { type: integer, minimum: 0, maximum: 200 }
+        unit_ref_key_count: { type: integer, minimum: 0, maximum: 200 }
+        unit_ref_nonempty_count: { type: integer, minimum: 0, maximum: 200 }
+        optional_key_count: { type: integer, minimum: 0, maximum: 200 }
+        optional_true_count: { type: integer, minimum: 0, maximum: 200 }
+        optional_false_count: { type: integer, minimum: 0, maximum: 200 }
+        optional_null_count: { type: integer, minimum: 0, maximum: 200 }
+        shopping_category_ref_key_count: { type: integer, minimum: 0, maximum: 200 }
+        shopping_category_ref_nonempty_count: { type: integer, minimum: 0, maximum: 200 }
+
+    RecipeDetailResponse:
+      type: object
+      required: [success, detail]
+      properties:
+        success: { type: boolean, const: true }
+        detail:
+          $ref: "#/components/schemas/RecipeDetail"
+
+    RecipeDetail:
+      type: object
+      required:
+        - schema_version
+        - id
+        - title
+        - source
+        - images
+        - general
+        - ingredients
+        - ingredient_groups
+        - ingredients_truncated
+        - grocery
+        - instructions
+        - user_state
+        - freshness
+        - revision
+        - preview_diagnostics
+        - capabilities
+      properties:
+        schema_version: { type: string, const: recipe_detail_v1 }
+        id: { type: integer, minimum: 1 }
+        title: { type: string, maxLength: 400 }
+        source:
+          type: object
+          required:
+            - connector
+            - label
+            - attribution
+            - external_id
+            - canonical_url
+            - locale
+            - rights_basis
+            - metadata_version
+            - metadata_schema_version
+          properties:
+            connector: { type: string }
+            label: { type: string }
+            attribution: { type: string }
+            external_id: { type: [string, "null"] }
+            canonical_url: { type: [string, "null"], format: uri }
+            locale: { type: [string, "null"] }
+            rights_basis: { type: string }
+            metadata_version:
+              type: [string, "null"]
+              description: Per-origin metadata policy marker, such as metadata-v2
+            metadata_schema_version:
+              type: [string, "null"]
+              description: Factual ingredient topology schema marker
+        images:
+          type: object
+          required: [primary, thumbnail]
+          properties:
+            primary: { type: [string, "null"], format: uri }
+            thumbnail: { type: [string, "null"], format: uri }
+        general:
+          type: object
+          required:
+            - yield
+            - active_time_seconds
+            - total_time_seconds
+            - difficulty
+            - primary_category
+            - equipment
+          properties:
+            yield:
+              type: object
+              required: [quantity, unit]
+              properties:
+                quantity: { type: [number, "null"], minimum: 0 }
+                unit: { type: [string, "null"], maxLength: 80 }
+            active_time_seconds:
+              type: [integer, "null"]
+              minimum: 0
+            total_time_seconds:
+              type: [integer, "null"]
+              minimum: 0
+            difficulty: { type: [string, "null"], maxLength: 80 }
+            primary_category: { type: [string, "null"], maxLength: 160 }
+            equipment:
+              type: array
+              maxItems: 50
+              items: { type: string, maxLength: 120 }
+        ingredients:
+          type: array
+          maxItems: 200
+          items:
+            $ref: "#/components/schemas/RecipeDetailIngredient"
+        ingredient_groups:
+          type: array
+          maxItems: 200
+          description: >-
+            Ordered boundaries derived from source ordinals, with bounded factual
+            provider section labels when present.
+          items:
+            $ref: "#/components/schemas/RecipeIngredientGroup"
+        ingredients_truncated: { type: boolean }
+        grocery:
+          $ref: "#/components/schemas/RecipeGroceryState"
+        instructions:
+          type: object
+          required: [available, reason, steps, fallback_url, truncated]
+          properties:
+            available: { type: boolean }
+            reason:
+              type: [string, "null"]
+              enum: [provider_external_only, not_available, null]
+            steps:
+              type: array
+              maxItems: 100
+              items: { type: string, maxLength: 2000 }
+            groups:
+              type: array
+              maxItems: 50
+              description: >-
+                Optional local/manual/generated grouping. This property is
+                omitted for Cookidoo provider-external instructions.
+              items:
+                $ref: "#/components/schemas/RecipeInstructionGroup"
+            fallback_url: { type: [string, "null"], format: uri }
+            truncated: { type: boolean }
+        user_state:
+          type: object
+          required: [favorite, hidden, rating, note, cooked_count, last_cooked]
+          properties:
+            favorite: { type: boolean }
+            hidden: { type: boolean }
+            rating: { type: [integer, "null"] }
+            note: { type: string }
+            cooked_count: { type: integer, minimum: 0 }
+            last_cooked: { type: [string, "null"] }
+        freshness:
+          type: object
+          required: [retrieved_at, stale_at, updated_at, is_stale]
+          properties:
+            retrieved_at: { type: [string, "null"] }
+            stale_at: { type: [string, "null"] }
+            updated_at: { type: string }
+            is_stale: { type: boolean }
+        revision:
+          type: object
+          required:
+            - inventory
+            - ranking
+            - catalog
+            - ontology
+            - preview
+            - active_ranking
+            - preview_ranking
+            - preview_ontology
+          properties:
+            inventory: { type: integer, minimum: 0 }
+            ranking: { type: [integer, "null"], minimum: 1 }
+            catalog: { type: integer, minimum: 0 }
+            ontology:
+              type: [integer, "null"]
+              minimum: 1
+              description: >-
+                Effective faceted ontology version derived from the validated
+                read revision. Null for legacy v2 reads.
+            preview: { type: boolean }
+            active_ranking: { type: [integer, "null"], minimum: 1 }
+            preview_ranking:
+              type: [integer, "null"]
+              minimum: 1
+              description: Explicit validated preview score revision, when active
+            preview_ontology:
+              type: [integer, "null"]
+              minimum: 1
+              description: Ontology version attached to the active preview
+        preview_diagnostics:
+          type: array
+          maxItems: 8
+          description: >-
+            Bounded fail-closed diagnostic codes when a configured development
+            preview cannot be used.
+          items: { type: string, maxLength: 80 }
+        capabilities:
+          type: object
+          required:
+            - general
+            - ingredients
+            - instructions
+            - quantities
+            - grocery_add
+            - score_preview
+          properties:
+            general: { type: string, enum: [full, partial, none] }
+            ingredients: { type: string, enum: [checklist, names_only, none] }
+            instructions: { type: string, enum: [local, external_link, none] }
+            quantities: { type: string, enum: [known, display_only, unknown] }
+            grocery_add:
+              type: boolean
+              description: >-
+                Backend feature support for a complete nonempty ingredient list;
+                independent of the current missing count
+            score_preview:
+              type: object
+              required:
+                - requested
+                - active
+                - status
+                - configured_revision_id
+                - diagnostics
+              properties:
+                requested: { type: boolean }
+                active: { type: boolean }
+                status:
+                  type: string
+                  enum: [disabled, ready, invalid]
+                configured_revision_id:
+                  type: [integer, "null"]
+                  minimum: 1
+                diagnostics:
+                  type: array
+                  maxItems: 8
+                  items: { type: string, maxLength: 80 }
+
+    RecipeIngredientGroup:
+      type: object
+      required:
+        [key, index, order, label, ingredient_keys, ingredient_positions]
+      properties:
+        key:
+          type: string
+          pattern: "^rig:[0-9]+:[a-f0-9]{16}$"
+        index: { type: integer, minimum: 0, maximum: 199 }
+        order: { type: integer, minimum: 0, maximum: 199 }
+        label:
+          type: [string, "null"]
+          maxLength: 160
+          description: Bounded provider/local section label; empty labels normalize to null
+        ingredient_keys:
+          type: array
+          maxItems: 200
+          items:
+            type: string
+            pattern: "^ri:[0-9]+:[a-f0-9]{16}$"
+        ingredient_positions:
+          type: array
+          maxItems: 200
+          items: { type: integer, minimum: 0, maximum: 199 }
+
+    RecipeInstructionGroup:
+      type: object
+      required: [key, index, order, label, step_positions]
+      properties:
+        key:
+          type: string
+          pattern: "^ig:[0-9]+:[a-f0-9]{16}$"
+        index: { type: integer, minimum: 0, maximum: 49 }
+        order: { type: integer, minimum: 0, maximum: 49 }
+        label: { type: [string, "null"], maxLength: 160 }
+        step_positions:
+          type: array
+          minItems: 1
+          maxItems: 100
+          items: { type: integer, minimum: 0, maximum: 99 }
+
+    RecipeDetailIngredient:
+      type: object
+      required:
+        - key
+        - position
+        - source_text
+        - display_name
+        - name
+        - amount
+        - provider
+        - inventory
+        - mapping
+      properties:
+        key:
+          type: string
+          pattern: "^ri:[0-9]+:[a-f0-9]{16}$"
+        position: { type: integer, minimum: 0 }
+        source_text:
+          type: string
+          minLength: 1
+          maxLength: 200
+          description: Bounded provider/source name or ranking raw text
+        display_name:
+          type: string
+          minLength: 1
+          maxLength: 200
+          description: Deterministically cleaned/cased source label
+        name:
+          type: string
+          minLength: 1
+          maxLength: 200
+          description: Legacy alias of display_name
+        amount:
+          type: object
+          required: [quantity, quantity_max, unit, text]
+          properties:
+            quantity: { type: [number, "null"], minimum: 0 }
+            quantity_max: { type: [number, "null"], minimum: 0 }
+            unit: { type: [string, "null"], maxLength: 80 }
+            text: { type: [string, "null"], maxLength: 160 }
+        provider:
+          type: object
+          required:
+            [ingredient_ref, default_title, unit_ref, optional, shopping_category_ref]
+          properties:
+            ingredient_ref:
+              type: [string, "null"]
+              maxLength: 200
+              pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+            default_title:
+              type: [string, "null"]
+              maxLength: 200
+              description: Provider English/default ingredient title
+            unit_ref:
+              type: [string, "null"]
+              maxLength: 200
+              pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+            optional:
+              type: [boolean, "null"]
+              description: Provider-declared optionality; null remains assumed required
+            shopping_category_ref:
+              type: [string, "null"]
+              maxLength: 200
+              pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+        inventory:
+          type: object
+          required:
+            - state
+            - relation
+            - confidence
+            - matched_product
+            - quantity_state
+            - quantity_sufficiency
+          properties:
+            state: { type: string, enum: [in_stock, missing, uncertain, staple] }
+            relation: { type: [string, "null"] }
+            confidence: { type: number, minimum: 0, maximum: 1 }
+            matched_product:
+              anyOf:
+                - type: "null"
+                - type: object
+                  required: [id, name]
+                  properties:
+                    id: { type: integer, minimum: 1 }
+                    name: { type: string }
+            quantity_state: { type: string, enum: [known, display_only, unknown] }
+            quantity_sufficiency:
+              type: string
+              enum: [sufficient, insufficient, unknown]
+        mapping:
+          $ref: "#/components/schemas/RecipeIngredientMapping"
+        closest_match:
+          $ref: "#/components/schemas/RecipeIngredientClosestMatch"
+
+    RecipeIngredientMapping:
+      type: object
+      required: [source, confidence, canonical, taxonomy]
+      properties:
+        source: { type: string, maxLength: 80 }
+        confidence: { type: number, minimum: 0, maximum: 1 }
+        canonical:
+          anyOf:
+            - type: "null"
+            - type: object
+              required: [id, label]
+              properties:
+                id: { type: integer, minimum: 1 }
+                label: { type: [string, "null"], maxLength: 200 }
+        taxonomy:
+          anyOf:
+            - type: "null"
+            - type: object
+              required: [id, label]
+              properties:
+                id: { type: integer, minimum: 1 }
+                label: { type: [string, "null"], maxLength: 200 }
+
+    RecipeIngredientClosestMatch:
+      type: object
+      required:
+        - label
+        - canonical_ingredient_id
+        - taxonomy_node_id
+        - mapping_source
+        - confidence
+      description: >-
+        Optional secondary identity hint, emitted only for taxonomy_alias,
+        taxonomy_slug, or canonical_slug mappings. taxonomy_rule mappings are
+        omitted regardless of confidence.
+      properties:
+        label: { type: string, minLength: 1, maxLength: 200 }
+        canonical_ingredient_id: { type: [integer, "null"], minimum: 1 }
+        taxonomy_node_id: { type: [integer, "null"], minimum: 1 }
+        mapping_source:
+          type: string
+          enum: [taxonomy_alias, taxonomy_slug, canonical_slug]
+        confidence: { type: number, minimum: 0, maximum: 1 }
+
+    RecipeGroceryState:
+      type: object
+      required:
+        - missing_count
+        - uncertain_count
+        - in_stock_count
+        - staple_count
+        - eligible_count
+        - max_selections
+        - blocked_reason
+      properties:
+        missing_count: { type: integer, minimum: 0, maximum: 200 }
+        uncertain_count: { type: integer, minimum: 0, maximum: 200 }
+        in_stock_count: { type: integer, minimum: 0, maximum: 200 }
+        staple_count: { type: integer, minimum: 0, maximum: 200 }
+        eligible_count:
+          type: integer
+          minimum: 0
+          maximum: 200
+          description: Confirmed missing selections eligible for mutation
+        max_selections: { type: integer, const: 100 }
+        blocked_reason:
+          type: [string, "null"]
+          enum: [ingredients_truncated, no_ingredients, null]
+
+    RecipeGroceryRequest:
+      type: object
+      required: [recipe_id, idempotency_key]
+      anyOf:
+        - required: [selections]
+        - required: [ingredient_keys]
+        - required: [positions]
+      properties:
+        recipe_id: { type: integer, minimum: 1 }
+        idempotency_key:
+          type: string
+          minLength: 1
+          maxLength: 128
+          pattern: "^[A-Za-z0-9._:-]+$"
+          description: >-
+            Replays require the same normalized selector payload. Keys are retained
+            for 30 days from the original command; older records may be pruned.
+        selections:
+          type: array
+          minItems: 1
+          maxItems: 100
+          items:
+            type: object
+            properties:
+              key:
+                type: string
+                pattern: "^ri:[0-9]+:[a-f0-9]{16}$"
+              position: { type: integer, minimum: 0 }
+        ingredient_keys:
+          type: array
+          minItems: 1
+          maxItems: 100
+          items:
+            type: string
+            pattern: "^ri:[0-9]+:[a-f0-9]{16}$"
+        positions:
+          type: array
+          minItems: 1
+          maxItems: 100
+          items: { type: integer, minimum: 0 }
+
+    RecipeGroceryResponse:
+      type: object
+      required:
+        - success
+        - recipe_id
+        - idempotency_key
+        - replayed
+        - outcomes
+        - summary
+      properties:
+        success: { type: boolean, const: true }
+        recipe_id: { type: integer, minimum: 1 }
+        idempotency_key: { type: string }
+        replayed: { type: boolean }
+        outcomes:
+          type: array
+          maxItems: 100
+          items:
+            $ref: "#/components/schemas/RecipeGroceryOutcome"
+        summary:
+          type: object
+          required: [added, already_listed, now_in_stock, unresolved, failed]
+          properties:
+            added: { type: integer, minimum: 0 }
+            already_listed: { type: integer, minimum: 0 }
+            now_in_stock: { type: integer, minimum: 0 }
+            unresolved: { type: integer, minimum: 0 }
+            failed: { type: integer, minimum: 0 }
+
+    RecipeGroceryOutcome:
+      type: object
+      required: [key, position, outcome, normalized_name, amount_text]
+      properties:
+        key:
+          type: string
+          pattern: "^ri:[0-9]+:[a-f0-9]{16}$"
+        position: { type: integer, minimum: 0 }
+        outcome:
+          type: string
+          enum: [added, already_listed, now_in_stock, unresolved, failed]
+        normalized_name: { type: string, maxLength: 200 }
+        amount_text: { type: [string, "null"], maxLength: 160 }
+
     Product:
       type: object
       properties:

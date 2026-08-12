@@ -122,6 +122,38 @@ try {
         echo '[' . date('Y-m-d H:i:s') . '] Canonical queue warning: ' . $qe->getMessage() . "\n";
     }
 
+    // ── Recipe discovery/index queue ───────────────────────────────────────
+    // Local jobs run every cycle; the experimental Cookidoo connector has its
+    // own bounded cadence and still executes only inside cron/CLI workers.
+    try {
+        $recipeQueueLimit = max(0, (int)env('RECIPE_QUEUE_CRON_LIMIT', '10'));
+        $recipeMaxAttempts = max(1, (int)env('RECIPE_QUEUE_MAX_ATTEMPTS', '3'));
+        $allowCookidoo = recipeCookidooQueueCadenceDue();
+        if ($allowCookidoo) {
+            $periodicRefresh = recipeCookidooEnqueuePeriodicRefreshes($db);
+            if (($periodicRefresh['queued'] ?? 0) > 0) {
+                echo '[' . date('Y-m-d H:i:s') . '] Cookidoo refresh — queued: '
+                    . $periodicRefresh['queued'] . "\n";
+            }
+        }
+        $recipeQueue = recipeJobProcessQueue(
+            $db,
+            $recipeQueueLimit,
+            $recipeMaxAttempts,
+            false
+        );
+        if (!empty($recipeQueue['lock_skipped'])) {
+            echo '[' . date('Y-m-d H:i:s') . "] Recipe queue — skipped (already running)\n";
+        } elseif (($recipeQueue['processed'] ?? 0) > 0) {
+            echo '[' . date('Y-m-d H:i:s') . '] Recipe queue — processed: ' . ($recipeQueue['processed'] ?? 0)
+                . ', ok: ' . ($recipeQueue['succeeded'] ?? 0)
+                . ', skipped: ' . ($recipeQueue['skipped'] ?? 0)
+                . ', failed: ' . ($recipeQueue['failed'] ?? 0) . "\n";
+        }
+    } catch (Throwable $re) {
+        echo '[' . date('Y-m-d H:i:s') . '] Recipe queue warning: ' . $re->getMessage() . "\n";
+    }
+
     // ── DB cleanup (retention policy) ────────────────────────────────────
     // Delete old recipes and transactions based on .env retention settings.
     try {

@@ -11,6 +11,162 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Recipe scraps tips** — During cooking steps, detect "waste" generated (peels, cores, bones, eggshells, coffee grounds, citrus zest, etc.) and surface AI-powered tips on how to reuse them (compost, natural cleaner, broth, candied peel, etc.). Could be shown as an optional collapsible hint card below the step that generates the scrap.
 
+### Added
+- **Manual production ontology activation profile** — Added an exact frozen
+  production corpus profile and explicit `manual_review` activation policy for
+  regular faceted-v3 score revisions. Requirement/source-aware revisions remain
+  shadow-only; activation still requires every integrity, gold, source, exact
+  ID/value materialization, and explicit CLI confirmation gate.
+- **Evidence-bound recipe quantity parser** — Added deterministic multilingual
+  amount, range, fraction, package, qualifier, and unit parsing for non-Cookidoo
+  ingredient text; strict structured Cookidoo passthrough; exact numeric source
+  spans; advisory parse persistence; and a no-API, review-only model proposal
+  workflow with closed-schema validation.
+- **Faceted ingredient ontology v3 shadow stack** — Added versioned entity/label/
+  relation/facet schemas, complete product and recipe-row mapping assertions,
+  quarantined legacy Gemini aliases, deterministic multilingual staple seeding,
+  exhaustive JSON/human audits, a strict attribute-aware matcher, staged proposal
+  change sets, full materialized shadow score revisions, diff reports, frozen
+  synthetic gold/benchmark fixtures, and guarded validate/activate/rollback CLI
+  commands. Everything is additive and disabled by default.
+- **One-pointer ontology activation** — Score revisions may reference an ontology
+  version; the effective ontology is derived only from the active score revision.
+  Explicit activation/rollback updates the score pointer and cursor revision
+  atomically while retaining prior ready revisions.
+- **Local recipe discovery catalog** — Durable normalized recipe variants, title/ingredient FTS5 search, source provenance, favorites, taxonomy-aware pantry matching, quantity checks, and expiration-weighted suggestions.
+- **Asynchronous recipe jobs** — Inventory and taxonomy changes enqueue bounded recipe indexing/discovery work without adding remote calls to scan or product-save requests.
+- **Experimental Cookidoo metadata bridge** — Optional isolated Python service caches only operator-approved factual `metadata-v2` General/Ingredients fields, remote image/canonical URLs, locale, and timestamps. Credentials/cookies stay outside the EverShelf container.
+- **Progressive Cookidoo corpus crawling** — Stocked taxonomy terms and their eligible ancestors now seed stable one-page jobs for ingredient-filtered and text-only lanes, with cached-only page advancement, page-zero refresh chaining, and a repeatable inventory backfill CLI.
+- **Recipe discovery UI** — Search by title or ingredient, switch between stocked and expiring-soon ranking, filter sources, inspect match explanations, and hydrate Cookidoo results without blocking local results.
+- **Dashboard recipe contracts** — Compact 50-card catalog pages, a deterministic mixed recommendation endpoint, snapshot cursors, coverage/expiry filters, independent ranking weights, and aggregate hydration status.
+- **Responsive recommendation totals** — Carousel clients may request 5–100 deterministic cards while preserving the availability/expiry/fill mix.
+- **Recipe detail contract** — Added the bounded `recipe_detail_v1` projection with source/freshness/revision metadata, General facts, ordered inventory-aware ingredients, local-or-external instruction capability, and explicit display-only quantity semantics.
+- **Idempotent missing groceries** — Added `recipe_catalog_grocery_add` to revalidate selected ingredient positions, canonicalize equivalents, and add only genuine missing items to EverShelf's internal shopping list without calling Home Assistant.
+- **Cookidoo metadata-v2** — Approved factual yield/unit, active/total seconds, difficulty, primary category, equipment nouns, and ordered ingredient source amounts now populate through normal discovery while existing metadata-v1 rows remain nullable.
+- **Disabled direct-ID metadata backfill** — Added authenticated 1–20 ID bridge batches, per-origin metadata versioning, resumable `recipe_metadata_refresh` jobs, and a status/dry-run/enqueue CLI guarded by `COOKIDOO_METADATA_BACKFILL_ENABLED=false`.
+- **Complete factual ingredient topology** — Source ingredients retain bounded named group/within-group topology, provider ingredient/default-title/unit references, provider-declared optionality, and shopping-category references. Recipe detail exposes named groups and additive provider metadata without changing the flat compatibility list.
+- **Versioned source mapping/remap** — Source mappings record the active `legacy-v1` mapper and can be remapped in bounded local jobs when a future resolver is registered, without another provider fetch; ontology v3 remains inactive.
+- **Authorized instruction groups** — Local/manual/generated recipes may persist bounded group labels and step-position references, while Cookidoo detail is structurally fixed to external-only instructions with no groups.
+
+### Changed
+- **Cookidoo detail hydration policy-disabled** — Because the available provider detail response co-transports official steps, production bridge search/direct metadata routes now return `503 metadata_hydration_disabled_policy` without provider requests. EverShelf refuses discovery/backfill enqueue, skips legacy queued jobs locally without connector accounting, and keeps existing cached catalog rows readable.
+- **AI ontology proposals are staging-only** — Gemini 3.5 Flash is the frozen
+  default proposal model. Closed candidate IDs, facet enums, exact evidence,
+  relation direction, retail alias bans, deterministic hard/soft attributes, and
+  human review prevent model output from writing ontology data directly. Legacy
+  v2 immediate-write review is now opt-in (`TAXONOMY_AI_REVIEW=false` by default).
+- **Cookidoo crawl safety** — Full-corpus jobs remain rate/concurrency bounded, hydrate at most one 20-hit page per job, and expose only scalar page progress alongside allowlisted metadata.
+- **Cookidoo policy boundary** — Source amounts are display-only and isolated from ranking quantity/unit fields. Official steps, notes/tips, nutrition, descriptions, tags, ingredient preparation text, raw payloads, image bytes, and Guided Cooking content remain categorically excluded; the bridge never accesses `preparation`.
+- **Recipe ranking at scale** — Inventory matching is materialized into atomically activated score revisions, so broad and empty searches paginate in SQLite instead of hydrating the full catalog in PHP.
+- **Interactive discovery scheduling** — One of the two per-minute connector slots is reserved for an interactive search when present while background crawling continues in the other slot.
+- **Source-first ingredient identity** — Detail and grocery labels now use deterministic conservative cleaning/casing of bounded source text. Complete approved amount-plus-unit prefixes are also detected directly in legacy source text, while unsafe grocery dedupe preserves the remaining source identity. Canonical/taxonomy joins remain secondary metadata, and `closest_match` is restricted to identity-safe alias/slug mappings.
+- **Grocery capability semantics** — `grocery_add` now reports feature support for complete nonempty ingredient lists independently of missing count, with separate bounded grocery state counts and blockers.
+- **Direct metadata batch contract** — `/v1/metadata` now requires an exact supported locale and returns ordered per-ID success or bounded failure outcomes. Job status reports bounded succeeded/failed counts and IDs; transient/authentication/rate failures remain whole-batch retries.
+- **Backfill failure reconsideration and pilot telemetry** — Invalid IDs/locales remain blocked until origin change/reset, while not-found/parser failures use bounded probes and parser-version reconsideration. Status/jobs expose safe group/unit/null/range, byte/latency, failure-kind, mapping-version, and revision-invariant metrics; the documented pilot ladder is 1→5→10→20→≤200 with concurrency one and ~2-minute jittered jobs.
+- **Topology schema gating** — The metadata policy remains `metadata-v2`, while the separate `ingredient-topology-v1` marker prevents partial/older source rows from being treated as current. Pilot metrics count topology key presence, bounded group-title lengths, reference/default-title/unit fill, and optional true/false/null rates without logging values.
+
+### Fixed
+- **Production activation and migration safety** — Ontology schema v3.17
+  version-gates protection-trigger migrations, requires a validated rollback
+  baseline for manual activation, and preserves retained shadow matches as
+  historical owner records when recipe ingredients are removed.
+- **Inventory recipe invalidation atomicity** — Inventory mutations now commit
+  recipe-score invalidation and queue work in the same transaction. Product
+  unit conversion rebuilds history baselines for every positive inventory lot,
+  while no-op edit forms omit unchanged unit/package metadata.
+- **Deployment secret and maintenance hardening** — Removed the tracked Android
+  signing key and inline credentials, externalized release signing, excluded
+  kiosk/Playwright artifacts from web images, and denied all HTTP access to
+  maintenance scripts.
+- **Recipe queue leases and API IDs** — Stale exhausted leases now terminate
+  with stable `lease_exhausted` state while only nonexhausted leases retry.
+  When provider detail policy is disabled, every pending/retry/leased Cookidoo
+  discovery, crawl, metadata-refresh, or network-refresh job atomically becomes
+  `skipped` with `provider_detail_policy_disabled` regardless of cadence-worker
+  allowance, without connector accounting.
+  Recipe detail/job query IDs and save/delete/favorite/refresh JSON IDs reject
+  malformed values; refresh distinguishes an omitted ID from an invalid one and
+  requires an object body.
+- **Policy-disabled crawl CLI reported successful enqueue** — Non-dry `backfill-cookidoo-crawls.php` now returns `provider_detail_policy_disabled` with `success:false` and exit code 3 before opening the database. Dry-run remains a zero-write disabled-status report.
+- **Cookidoo discovery leaked internal request flags** — Bridge search calls now use an explicit SearchRequest-only payload; interactive, force, local-result, cache, and crawl controls remain local.
+- **Missing ingredient groups erased stored source rows** — Raw/public detail adapters and PHP bridge normalization now require structural evidence for a complete nonempty ingredient list. Missing, null, or empty groups fail as invalid metadata instead of producing an authoritative empty replacement; the parser marker advances for reconsideration.
+- **Deleted metadata targets retried and tripped connector health** — Queued targets deleted or changed after enqueue now terminate as local stale/skipped outcomes without bridge traffic, retries, or connector failure/circuit accounting.
+- **Discovery acquired flock after SQLite write lock** — Discovery now takes the reentrant catalog flock before opening its write transaction and releases it on every path, matching standalone catalog saves.
+- **Cookidoo exclusion sets reused the wrong discovery job** — Search and idempotency identities now include a SHA-256 digest plus count of sorted unique bounded `exclude_ids`, making equivalent sets order-insensitive and different sets distinct without embedding IDs in keys.
+- **Public Cookidoo amount prose crossed the metadata boundary** — Ambiguous fallback descriptions now pass only a closed numeric exact/range and safe unit/count grammar. PHP independently rejects prose and structured amount text that disagrees with quantity/range/unit fields.
+- **Malformed source ranges persisted orphan maxima** — Raw Cookidoo quantities now accept only a pure exact value or a complete ordered range; partial/mixed objects fail as invalid metadata. PHP persistence also rejects `source_quantity_max` without `source_quantity` for Cookidoo and generic sources. The parser marker advances for reconsideration.
+- **Quantity parser review hardening** — Restricted implicit piece counts to a
+  conservative countable-noun grammar, added explicit regional decimal/group
+  profiles, included bounded source text and effective parse locale in exact
+  non-Cookidoo identity, preserved locale-only parse roundtrips, rejected invalid
+  UTF-8 and nonpositive/nonfinite/oversized ranking quantities, blocked contextual
+  identifier numbers, overlapping model evidence, inconsistent unit/raw pairs,
+  and implausible amount layouts, parsed terminal qualifiers after amounts,
+  validated canonical structured source amount text, made detail joins and stale
+  full-text reparsing deterministic, rejected conflicting recipe identifiers and
+  non-integer API IDs, kept unsafe grocery source identities distinct, and bound
+  persisted deterministic parses to current source text, locale, version,
+  provenance, and reproducible evidence without enabling ranking quantities.
+- **Long curing recipes exceeded mismatched duration bounds** — Bridge and PHP normalization now share a named 366-day ceiling while remaining nonnegative, integer-only, and fail-closed above the bound. The parser marker advances for affected pilot outcomes.
+- **Repeated Cookidoo catalog IDs failed valid recipes** — Duplicate provider ingredient IDs now coalesce when nonempty bounded default titles agree. Missing/empty plus present title deterministically keeps the present title; conflicting nonempty titles still fail closed. The parser marker advances for affected pilot outcomes.
+- **Legitimate Cookidoo asset lists exceeded the adapter cap** — Recipe detail parsing now permits up to 100 bounded descriptive-asset descriptors while still returning only the first allowlisted image URL and failing closed above the limit. The parser marker advances so affected pilot failures are reconsidered.
+- **Cookidoo row IDs rejected valid ingredient references** — The raw detail adapter now prioritizes `ingredient_ref`, then `localId`; generic row `id` is ignored unless it matches the bounded ingredient catalog. The parser marker advances so affected `invalid_metadata` pilot outcomes are reconsidered.
+- **Ontology v3 activation and scoring review fixes** — Scheduled rebuilds now
+  preserve the active ontology model/version, activation rechecks mutable inputs
+  under a write reservation, source/content hashes exclude mutable mapping
+  outputs, quantity/expiry aggregate every compatible lot, original requiredness
+  survives legacy staple prefixes, rollback requires ancestry, proposal lifecycle
+  is audited, frozen-gold policy is non-vacuous, and optional unmatched
+  explanations no longer become required blockers.
+- **Ontology v3 follow-up correctness** — Stale active v3 scores are served without
+  request-path rebuild storms; rollback restores stale retained ancestors while
+  wrong-parent siblings and legacy non-ancestors fail closed; mapping hashes ignore
+  package/legacy-cleared fields and no-op source refreshes preserve row IDs;
+  committed activation survives prune warnings; v3 revision/materialization
+  retention is bounded to an eight-ancestor rollback window plus small history;
+  unapplied proposal sets can be auditedly reverted; blocker counters and
+  explanations share one outcome classifier; and write reservation plus reject-all
+  recall have direct regressions.
+- **Ontology v3 source freshness and closure** — Scheduled freshness now verifies
+  current owner, corpus, content, and version hashes and returns `ontology_stale`
+  without moving the active pointer when source owners need a new candidate/remap.
+  Provider source-text/reference/optionality changes dirty only active-v3 catalog
+  state, while identical refreshes and active-v2 inventory/catalog state remain
+  unchanged. Shared-lock recovery terminalizes every old legacy/v3 build before
+  replacement or pruning, and frozen-gold attributes are closed to the selected
+  facet/value map.
+- **Ontology v3 copied-database migration order** — Mutating operator CLI commands
+  now migrate the selected copy's current recipe schema before ontology v3, so
+  pre-v3 `recipe_ingredients` tables gain and backfill source requiredness columns
+  before candidate and shadow builders query them.
+- **Prefix staples and broad ingredient identity** — Ontology v3 recognizes only
+  exact multilingual staple aliases, so pepper jack/sauce, salt cod/pork, and
+  water chestnuts/spinach are not staples. Required matches no longer succeed from
+  broad ancestry, components, derivation, rule/model/lexical evidence, or
+  conflicting/unknown defining attributes.
+- **Cookidoo fallback locale persistence** — Language-only discovery now stores the
+  selected effective regional/script localization and requires the canonical URL
+  locale to match. Exact direct-ID refresh remains strict, while legacy language-only
+  origins are reported invalid/unrefreshable instead of being mapped to a market.
+- **Metadata sibling retry loops** — Successful direct-ID recipes and blocked outcomes commit in one bounded job transaction, failure state is recorded for checkpoint skipping/reconsideration, and resumed jobs omit currently terminal siblings.
+- **Ingredient amount-prefix cleanup** — Display and grocery names remove a complete approved quantity-plus-unit prefix directly from legacy source text even when parsed quantity columns are null. The bounded vocabulary covers common package, culinary, mass, volume, and piece units with ranges/fractions, while names such as `7 Up` and `1000 Island dressing` remain intact.
+- **Failed grocery write dedupe** — Equivalent selections are marked seen only after an existing row is confirmed or an insert succeeds, so later selections report their real write outcome.
+- **Prepared meals leaked into ingredient recipes** — Row-level prepared-food inventory is excluded from recipe generation and matching; mixed raw/prepared products keep raw ingredient taxonomy until every positive row is prepared.
+- **Required recipe ingredients matched broad stock** — Metadata-v2 source ingredients now default to required, so contains and broad relations remain uncertain while exact, descendant, and normalized-name matches retain existing behavior.
+- **Bounded inventory detail false-missing states** — Expiration filtering now happens before safe SQL bounds where possible, and pre-filter truncation conservatively produces uncertain rather than grocery-eligible missing states.
+- **Grocery replay drift** — Grocery commands persist a stable request fingerprint and replay stored outcomes before mutable ingredient validation; legacy selection hashes are upgraded on their next valid replay.
+- **Unbounded grocery idempotency history** — Grocery request records now have indexed, bounded pruning with a documented 30-day retention window.
+- **Metadata refresh score churn** — Existing Cookidoo metadata updates use a
+  dedicated bounded batch transaction that atomically replaces source ingredients
+  while preserving title/image, ranking ingredients, search/FTS, clusters, score
+  rows, inventory revision, and the active pointer. Only ontology-relevant provider
+  identity/optionality drift marks an active-v3 catalog revision stale; active v2
+  and no-op refreshes remain unchanged.
+- **Flat ingredient-group corruption** — The direct detail adapter now rejects malformed/shopping-list group shapes instead of silently flattening them, while the public parser fallback emits one ordered group.
+- **Metadata freshness cursor safety** — A metadata batch that changes actual search visibility across `stale_at` now increments only `cursor_revision`, exactly once per transaction. Fresh-to-fresh, still-invisible, favorited, and hidden transitions do not invalidate cursors; pre-transition browse cursors are rejected after a real visibility change.
+- **Home Assistant recipe suggestions always failed** — Gemini fallback responses are read from their actual `data.candidates` wrapper.
+- **Favorite recipe plans were purged** — Legacy retention now preserves favorites.
+
 ## [1.8.3] - 2026-07-31
 
 ### Added

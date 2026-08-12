@@ -1,0 +1,17 @@
+child_slug,expected_parent_slug,forbidden_parent_slug,expected_secondary_relation,expected_secondary_target_slug,rationale
+bacon,meat,pork,derived_from,pork,Prepared bacon must not use pork derivation as is-a ancestry
+breadcrumbs,bakery,bread,derived_from,bread,Prepared breadcrumbs must not use bread derivation as is-a ancestry
+chili-pepper,,chilli-pepper,,,Spelling equivalence must not be encoded as an is-a edge
+coconut-milk,milk-alternative,beverage,derived_from,coconut,Coconut milk uses the specific milk-alternative branch
+coffee-creamer,creamer,beverage,,,Coffee creamer preserves its specific creamer parent
+coffee-pod,coffee,beverage,,,Coffee pod preserves its reviewed coffee parent
+duck,poultry,meat,,,Duck is reviewed under poultry
+foie-gras,prepared-food,duck,,,Generic foie gras must not assert duck-only ancestry
+grits,cereal,corn,derived_from,corn,Grits use cereal ancestry and non-satisfying corn derivation
+half-and-half,,cream,,,Inactive cream-class duplicate has no primary edge
+lime-juice,juice,beverage,derived_from,lime,Lime juice uses juice ancestry and non-satisfying fruit derivation
+nut-butter,spread,butter,,,Nut butter is a spread and not a lexical butter subtype
+pear-marmalade,fruit-preserve,pear,derived_from,pear,Pear marmalade uses preserve ancestry and non-satisfying pear derivation
+soy-sauce,sauce,condiment,,,Soy sauce uses the specific sauce branch
+stock-paste,stock-base,stock-broth,,,Stock paste is a concentrated stock base
+white-chocolate,,chocolate,,,Inactive chocolate-class duplicate has no primary edge

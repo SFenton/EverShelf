@@ -7,6 +7,8 @@
  * @license MIT
  */
 
+require_once __DIR__ . '/lib/recipes/schema.php';
+
 define('DB_PATH', __DIR__ . '/../data/evershelf.db');
 
 /**
@@ -150,9 +152,17 @@ function initializeDB(PDO $db): void {
         CREATE TABLE IF NOT EXISTS transactions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             product_id INTEGER NOT NULL,
+            inventory_id INTEGER DEFAULT NULL,
             type TEXT NOT NULL CHECK(type IN ('in', 'out', 'waste')),
             quantity REAL NOT NULL,
             location TEXT NOT NULL DEFAULT 'dispensa',
+            prepared_food INTEGER DEFAULT NULL,
+            inventory_expiry_date DATE DEFAULT NULL,
+            inventory_expiry_user_set INTEGER DEFAULT NULL,
+            inventory_vacuum_sealed INTEGER DEFAULT NULL,
+            inventory_opened_at DATETIME DEFAULT NULL,
+            accounting_only INTEGER NOT NULL DEFAULT 0,
+            undo_safe INTEGER NOT NULL DEFAULT 1,
             notes TEXT DEFAULT '',
             undone INTEGER DEFAULT 0,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -352,6 +362,118 @@ function initializeDB(PDO $db): void {
         CREATE INDEX IF NOT EXISTS idx_product_tags_facet_value ON product_tags(facet, value);
         CREATE INDEX IF NOT EXISTS idx_canonical_queue_status ON canonical_processing_queue(status, requested_at);
     ");
+
+    recipeSchemaMigrate($db);
+}
+
+/**
+ * Replace the legacy "any prepared row" aggregate with "all positive rows".
+ * Products without positive inventory retain an explicit product-level choice.
+ */
+function migratePreparedFoodAggregateSemantics(PDO $db): void {
+    $done = $db->prepare("
+        SELECT value FROM app_settings
+        WHERE key = 'migration_prepared_food_all_positive_v1'
+    ");
+    $done->execute();
+    if ($done->fetchColumn()) {
+        return;
+    }
+
+    $changedIds = $db->query("
+        SELECT p.id
+        FROM products p
+        WHERE EXISTS (
+            SELECT 1 FROM inventory i
+            WHERE i.product_id = p.id AND i.quantity > 0
+        )
+          AND COALESCE(p.prepared_food, 0) != CASE
+              WHEN NOT EXISTS (
+                  SELECT 1 FROM inventory i
+                  WHERE i.product_id = p.id
+                    AND i.quantity > 0
+                    AND COALESCE(i.prepared_food, 0) = 0
+              )
+              THEN 1 ELSE 0
+          END
+        ORDER BY p.id
+    ")->fetchAll(PDO::FETCH_COLUMN);
+
+    $ownsTransaction = !$db->inTransaction();
+    if ($ownsTransaction) {
+        $db->beginTransaction();
+    }
+    try {
+        $db->exec("
+            UPDATE products
+            SET prepared_food = CASE
+                    WHEN NOT EXISTS (
+                        SELECT 1 FROM inventory i
+                        WHERE i.product_id = products.id
+                          AND i.quantity > 0
+                          AND COALESCE(i.prepared_food, 0) = 0
+                    )
+                    THEN 1 ELSE 0
+                END,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE EXISTS (
+                SELECT 1 FROM inventory i
+                WHERE i.product_id = products.id AND i.quantity > 0
+            )
+        ");
+
+        foreach ($changedIds as $productId) {
+            $productId = (int)$productId;
+            if (function_exists('canonicalIngredientEnqueueProduct')) {
+                canonicalIngredientEnqueueProduct($db, $productId, 'prepared_food_aggregate_migration');
+            } else {
+                $db->prepare("
+                    INSERT INTO canonical_processing_queue (
+                        product_id, reason, status, attempts, last_error,
+                        requested_at, started_at, processed_at, updated_at
+                    )
+                    VALUES (?, 'prepared_food_aggregate_migration', 'pending', 0, '',
+                            CURRENT_TIMESTAMP, NULL, NULL, CURRENT_TIMESTAMP)
+                    ON CONFLICT(product_id) DO UPDATE SET
+                        reason = excluded.reason, status = 'pending', attempts = 0,
+                        last_error = '', requested_at = CURRENT_TIMESTAMP,
+                        started_at = NULL, processed_at = NULL, updated_at = CURRENT_TIMESTAMP
+                ")->execute([$productId]);
+            }
+            if (function_exists('recipeJobEnqueueInventoryChanged')) {
+                recipeJobEnqueueInventoryChanged($db, $productId, 'prepared_food_aggregate_migration');
+            } else {
+                $db->prepare("
+                    INSERT INTO recipe_jobs (
+                        idempotency_key, job_type, scope, connector, product_id,
+                        payload_json, status, attempts, max_attempts, updated_at
+                    )
+                    VALUES (?, 'inventory_changed', ?, 'local', ?,
+                            '{\"reason\":\"prepared_food_aggregate_migration\"}',
+                            'pending', 0, 3, CURRENT_TIMESTAMP)
+                    ON CONFLICT(idempotency_key) DO UPDATE SET
+                        status = 'pending', attempts = 0, next_retry_at = NULL,
+                        last_error = '', finished_at = NULL, updated_at = CURRENT_TIMESTAMP
+                ")->execute([
+                    'inventory_changed:product:' . $productId,
+                    'product:' . $productId,
+                    $productId,
+                ]);
+            }
+        }
+        $db->exec("
+            INSERT OR REPLACE INTO app_settings (key, value, updated_at)
+            VALUES ('migration_prepared_food_all_positive_v1', '1', CURRENT_TIMESTAMP)
+        ");
+        if ($ownsTransaction) {
+            $db->commit();
+        }
+    } catch (Throwable $e) {
+        if ($ownsTransaction && $db->inTransaction()) {
+            $db->rollBack();
+        }
+        throw $e;
+    }
 }
 
 function migrateDB(PDO $db): void {
@@ -500,6 +622,7 @@ function migrateDB(PDO $db): void {
                 date TEXT NOT NULL,
                 meal TEXT NOT NULL,
                 recipe_json TEXT NOT NULL,
+                catalog_recipe_id INTEGER DEFAULT NULL,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(date, meal)
             );
@@ -560,6 +683,30 @@ function migrateDB(PDO $db): void {
     if (!in_array('undone', $txColNames)) {
         $db->exec("ALTER TABLE transactions ADD COLUMN undone INTEGER DEFAULT 0");
     }
+    if (!in_array('inventory_id', $txColNames, true)) {
+        $db->exec("ALTER TABLE transactions ADD COLUMN inventory_id INTEGER DEFAULT NULL");
+    }
+    if (!in_array('prepared_food', $txColNames, true)) {
+        $db->exec("ALTER TABLE transactions ADD COLUMN prepared_food INTEGER DEFAULT NULL");
+    }
+    if (!in_array('inventory_expiry_date', $txColNames, true)) {
+        $db->exec("ALTER TABLE transactions ADD COLUMN inventory_expiry_date DATE DEFAULT NULL");
+    }
+    if (!in_array('inventory_expiry_user_set', $txColNames, true)) {
+        $db->exec("ALTER TABLE transactions ADD COLUMN inventory_expiry_user_set INTEGER DEFAULT NULL");
+    }
+    if (!in_array('inventory_vacuum_sealed', $txColNames, true)) {
+        $db->exec("ALTER TABLE transactions ADD COLUMN inventory_vacuum_sealed INTEGER DEFAULT NULL");
+    }
+    if (!in_array('inventory_opened_at', $txColNames, true)) {
+        $db->exec("ALTER TABLE transactions ADD COLUMN inventory_opened_at DATETIME DEFAULT NULL");
+    }
+    if (!in_array('accounting_only', $txColNames, true)) {
+        $db->exec("ALTER TABLE transactions ADD COLUMN accounting_only INTEGER NOT NULL DEFAULT 0");
+    }
+    if (!in_array('undo_safe', $txColNames, true)) {
+        $db->exec("ALTER TABLE transactions ADD COLUMN undo_safe INTEGER NOT NULL DEFAULT 1");
+    }
 
     // Ensure composite indexes exist (added in v1.7.5 for performance)
     $db->exec("CREATE INDEX IF NOT EXISTS idx_transactions_type_date ON transactions(type, created_at)");
@@ -575,6 +722,7 @@ function migrateDB(PDO $db): void {
                 raw_name      TEXT NOT NULL DEFAULT '',
                 specification TEXT NOT NULL DEFAULT '',
                 quantity      REAL NOT NULL DEFAULT 1,
+                canonical_key TEXT DEFAULT NULL,
                 added_at      INTEGER DEFAULT (strftime('%s','now')),
                 sort_order    INTEGER DEFAULT 0
             )
@@ -585,6 +733,14 @@ function migrateDB(PDO $db): void {
     if (!in_array('quantity', $shopCols, true)) {
         $db->exec("ALTER TABLE shopping_list ADD COLUMN quantity REAL NOT NULL DEFAULT 1");
     }
+    if (!in_array('canonical_key', $shopCols, true)) {
+        $db->exec("ALTER TABLE shopping_list ADD COLUMN canonical_key TEXT DEFAULT NULL");
+    }
+    $db->exec("
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_shopping_list_canonical_key
+        ON shopping_list(canonical_key)
+        WHERE canonical_key IS NOT NULL AND TRIM(canonical_key) <> ''
+    ");
     $db->exec("UPDATE shopping_list SET quantity = 1 WHERE quantity IS NULL OR quantity <= 0");
 
     // Add is_favorite column to recipes if missing (#124)
@@ -593,6 +749,11 @@ function migrateDB(PDO $db): void {
         try { $db->exec("ALTER TABLE recipes ADD COLUMN is_favorite INTEGER NOT NULL DEFAULT 0"); }
         catch (PDOException $e) { if (strpos($e->getMessage(), 'duplicate column') === false) throw $e; }
     }
+    if (!in_array('catalog_recipe_id', $recCols, true)) {
+        try { $db->exec("ALTER TABLE recipes ADD COLUMN catalog_recipe_id INTEGER DEFAULT NULL"); }
+        catch (PDOException $e) { if (strpos($e->getMessage(), 'duplicate column') === false) throw $e; }
+    }
+    $db->exec("CREATE INDEX IF NOT EXISTS idx_recipes_catalog_recipe ON recipes(catalog_recipe_id)");
 
     // Add nutriments_json column to products if missing (#118)
     $prodCols2 = array_column($db->query("PRAGMA table_info(products)")->fetchAll(), 'name');
@@ -834,6 +995,9 @@ function migrateDB(PDO $db): void {
             }
         });
     }
+
+    recipeSchemaMigrate($db);
+    migratePreparedFoodAggregateSemantics($db);
 }
 
 /**

@@ -1,0 +1,2 @@
+normalized_label,language,required_cohort,disposition_code,meaning_json,reviewer,review_batch,rationale,source_citation
+pimenta,pt,pt,D4,"{""interpretations"":[""Piper pepper"",""Capsicum pepper""]}",operator-corrective-review-v3,full-ontology-resolution-v3,Bare Portuguese pimenta is explicitly reviewed as a Piper/Capsicum ambiguity,corrective-v3.13 Portuguese homograph adjudication

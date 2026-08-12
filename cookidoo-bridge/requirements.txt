@@ -1,0 +1,2 @@
+aiohttp==3.13.2
+cookidoo-api @ https://github.com/miaucl/cookidoo-api/archive/49a4f214b5798f43573ee31fa4bb67512180b9a9.tar.gz

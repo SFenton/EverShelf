@@ -127,11 +127,11 @@ class KioskActivity : AppCompatActivity() {
         private const val KEY_SETUP_COMPLETE = "setup_complete"
         private const val KEY_HAS_SCALE = "has_scale"
         private const val KEY_SCREENSAVER = "screensaver_enabled"
-        private const val KIOSK_DOWNLOAD_URL = "https://github.com/dadaloop82/EverShelf/releases/download/kiosk-latest/evershelf-kiosk.apk"
+        private const val KIOSK_DOWNLOAD_URL = "https://github.com/SFenton/EverShelf/releases/download/kiosk-latest/evershelf-kiosk.apk"
         private const val SPLASH_DURATION = 1500L
         // Use the kiosk-specific rolling release tag so version comparison is always
         // against the KIOSK version, not the webapp version (they diverge).
-        private const val GITHUB_RELEASES_API = "https://api.github.com/repos/dadaloop82/EverShelf/releases/tags/kiosk-latest"
+        private const val GITHUB_RELEASES_API = "https://api.github.com/repos/SFenton/EverShelf/releases/tags/kiosk-latest"
         // Keys for persisting a pending update across restarts
         private const val KEY_PENDING_UPDATE_VERSION = "pending_update_version"
         private const val KEY_PENDING_UPDATE_URL     = "pending_update_url"

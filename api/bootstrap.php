@@ -2,6 +2,11 @@
 /**
  * EverShelf API bootstrap — shared by HTTP router and cron.
  */
+if (defined('CRON_MODE') && CRON_MODE && PHP_SAPI !== 'cli') {
+    http_response_code(404);
+    exit;
+}
+
 // Never emit HTML notices before JSON API responses (breaks fetch().json() in the PWA).
 if (!defined('CRON_MODE') && (getenv('DISPLAY_ERRORS') ?: '') !== '1') {
     ini_set('display_errors', '0');
@@ -15,5 +20,6 @@ require_once __DIR__ . '/lib/cron_log.php';
 require_once __DIR__ . '/lib/location_suggestions.php';
 require_once __DIR__ . '/lib/canonical_ingredients.php';
 require_once __DIR__ . '/lib/taxonomy_review.php';
+require_once __DIR__ . '/lib/recipes/bootstrap.php';
 require_once __DIR__ . '/logger.php';
 require_once __DIR__ . '/database.php';

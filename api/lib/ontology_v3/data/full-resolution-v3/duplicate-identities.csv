@@ -1,0 +1,4 @@
+duplicate_slug,canonical_slug,attributes_json,rationale
+chili-pepper,chilli-pepper,{},US and Commonwealth spelling variants are one Capsicum identity
+half-and-half,cream,"{""cream_class"":""half_and_half""}",Half and half is cream with a defining cream class
+white-chocolate,chocolate,"{""chocolate_class"":""white""}",White chocolate is chocolate with a defining chocolate class

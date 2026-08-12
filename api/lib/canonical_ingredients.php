@@ -1277,6 +1277,9 @@ function canonicalIngredientProcessQueueBatch(PDO $db, int $limit, int $maxAttem
         try {
             $result = canonicalIngredientSyncProduct($db, $productId);
             $mapped = (int)($result['mapped'] ?? 0);
+            if (function_exists('recipeJobEnqueueTaxonomyReady')) {
+                recipeJobEnqueueTaxonomyReady($db, $productId);
+            }
             $db->prepare("
                 UPDATE canonical_processing_queue
                 SET status = 'done', processed_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP, last_error = ''

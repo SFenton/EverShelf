@@ -1,0 +1,29 @@
+duplicate_slug,canonical_slug,attributes_json,rationale
+arborio-rice,rice,"{""variety"":""arborio""}",Arborio rice is rice with a defining variety
+beans,bean,{},Singular and plural are one identity
+beef-stock,stock,"{""variety"":""beef""}",Beef stock is stock with a defining variety
+black-pepper,piper-pepper,"{""variety"":""black""}",Black Piper pepper is not Capsicum
+blueberries,blueberry,{},Singular and plural are one identity
+bread-crumbs,breadcrumbs,{},Breadcrumb spelling variants are one identity
+brown-sugar,sugar,"{""refinement"":""brown""}",Brown sugar is sugar with a defining refinement
+chicken-breast,chicken,"{""cut"":""breast"",""species"":""chicken""}",Chicken breast is chicken with a defining cut
+chicken-stock,stock,"{""variety"":""chicken""}",Chicken stock is stock with a defining variety
+chicken-stock-base,stock,"{""variety"":""chicken""}",Chicken stock base remains stock evidence; no component identity
+corn-starch,cornstarch,{},Spelling variants are one identity
+egg-whites,egg-white,"{""egg_part"":""white""}",Singular and plural are one identity
+garlic-cloves,garlic,"{""form"":""clove""}",Garlic clove is a defining form of garlic
+heavy-cream,cream,"{""fat_content"":""heavy""}",Heavy cream is cream with a defining fat class
+jasmine-rice,rice,"{""variety"":""jasmine""}",Jasmine rice is rice with a defining variety
+legumes,legume,{},Plural category duplicate; category remains identity-ineligible
+lemons,lemon,{},Singular and plural are one identity
+olives,olive,{},Singular and plural are one identity
+peanuts,peanut,{},Singular and plural are one identity
+pepper,piper-pepper,{},Legacy conflated pepper node is retired; bare pepper remains contextual
+peppercorn,piper-pepper,"{""form"":""whole""}",Peppercorn is whole Piper pepper
+pickled-jalapeno-peppers,jalapeno-pepper,"{""processing"":""pickled"",""variety"":""jalapeno""}",Pickled jalapeño is the same base with preservation
+sesame-oil,oil,"{""variety"":""sesame""}",Sesame oil is oil with a defining variety
+sesame-seeds,sesame-seed,{},Sesame seed singular/plural identities are canonicalized
+sun-dried-tomatoes,tomato,"{""processing"":""dried""}",Sun-dried tomato is tomato with processing
+tomatoes,tomato,{},Singular and plural are one identity
+walnuts,walnut,{},Singular and plural are one identity
+white-pepper,piper-pepper,"{""variety"":""white""}",White Piper pepper is not Capsicum

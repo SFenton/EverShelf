@@ -88,6 +88,10 @@ Connect your pantry to your smart home in minutes — no YAML, no manual sensor 
 - **Queued enrichment** — Product saves return immediately; canonical/FoodOn/USDA post-processing runs from cron or the CLI worker so Home Assistant/API additions stay responsive
 - **Taxonomy history reuse** — Re-adding a known item replays the placement it was given before (matched by barcode, name+brand, name, or a recorded alias) without calling the model
 - **AI taxonomy review** — Genuinely new items have their heuristic placement checked by Gemini against the whole taxonomy tree, which confirms or corrects the term and may add new nodes; it can never rename, move, or delete existing nodes
+- **Faceted ingredient ontology v3 (shadow only)** — Versioned base entities,
+  reviewed typed relations, closed defining facets, complete product/recipe mapping
+  assertions, staged proposals, exhaustive audits, and materialized shadow scores
+  coexist with the active v2 matcher until an explicit validated activation
 - **Prepared food items** — Finished dishes can be flagged as prepared at add time so they group under the existing prepared meal term instead of being classified by ingredient
 - **AI identification** — Take a photo and let Google Gemini identify the product, with suggestions from your existing inventory; gracefully shows a friendly message when AI quota is exhausted instead of a raw API error
 - **Smart locations** — Track items across Pantry, Fridge, Freezer, and custom locations
@@ -102,6 +106,12 @@ Connect your pantry to your smart home in minutes — no YAML, no manual sensor 
 - **Existing product matching** — AI scan shows matching products already in your pantry before suggesting new ones
 - **Storage & shelf-life hint** — When adding a new product, Gemini suggests the optimal storage location and shelf-life in the background; shown as an inline AI badge next to the expiry estimate
 - **Recipe generation** — Get personalized recipes based on what's in your pantry; streams live via Server-Sent Events so results appear as they are generated
+- **Local recipe catalog** — Generated and saved recipes accumulate in a durable SQLite catalog with title/ingredient FTS5 search, source provenance, favorites, and offline local lookup
+- **Taxonomy-aware suggestions** — Recipe ingredients match exact pantry terms and progressively broader taxonomy ancestors; suggestions rank pantry coverage and soon-to-expire stock deterministically
+- **Scan-driven discovery** — When a newly stocked product already has taxonomy—or once its queued taxonomy enrichment completes—EverShelf automatically queues both ingredient-filtered and text-only recipe discovery for the canonical ingredient and its full ancestor chain
+- **Cookidoo metadata discovery (experimental)** — The operator-approved `metadata-v2` bridge caches bounded factual General metadata, ordered ingredient names and display-only source amounts, remote image/canonical URLs, locale, and timestamps; official instructions and Guided Cooking data remain on Cookidoo
+- **Recipe detail and missing groceries API** — A source-agnostic detail projection uses deterministic source-derived ingredient labels, reports separate grocery capability/state counts, and keeps Cookidoo instructions external-only; an idempotent action adds only revalidated missing ingredients to EverShelf's internal shopping list
+- **Scalable recipe browse and recommendations** — Materialized inventory score revisions power compact 50-card pages, coverage/expiry filtering, independent weights, snapshot cursors, and a deterministic responsive recommendation carousel without loading the full catalog into PHP
 - **Recipe stock hints** — Each pantry ingredient shows how much you have and what remains after use; when the leftover would be less than 5% of the full sealed package (10% for an already-opened partial pack), the recipe automatically uses everything on hand to avoid waste
 - **Smart chat assistant** — Ask questions about your inventory, get cooking tips
 - **Shopping suggestions with tips** — AI-powered purchase recommendations, each enriched with a short practical buying/storing tip
@@ -146,7 +156,7 @@ Connect your pantry to your smart home in minutes — no YAML, no manual sensor 
 - **Global settings tab** — A dedicated **⚙️ General** tab groups all system-wide settings (language, currency, theme, screensaver, zero-waste tips, export) at the top of the Settings panel
 
 ### �️ Database Maintenance
-- **Automatic cleanup** — Recipes older than `RECIPE_RETENTION_DAYS` (default 7) and transactions older than `TRANSACTION_RETENTION_DAYS` (default 7) are deleted automatically on every cron cycle; SQLite `VACUUM` runs after each cleanup to keep the file compact
+- **Automatic cleanup** — Non-favorite legacy meal plans older than `RECIPE_RETENTION_DAYS` and transactions older than `TRANSACTION_RETENTION_DAYS` are deleted automatically; the normalized recipe catalog is retained until the user deletes a recipe
 - **Manual cleanup** — Trigger immediately via `GET /api/?action=db_cleanup`
 - **Compact by default** — Fresh installs stay small; large accumulated databases shrink back to a few hundred KB within one cron cycle
 
@@ -252,8 +262,31 @@ TTS_TOKEN=your_long_lived_token
 TTS_ENABLED=true
 
 # Optional: DB retention and cleanup (applied automatically each cron cycle)
-RECIPE_RETENTION_DAYS=7        # delete recipe plans older than N days
+RECIPE_RETENTION_DAYS=7        # delete non-favorite legacy meal plans older than N days
 TRANSACTION_RETENTION_DAYS=90   # delete stock transactions older than N days (min 30 enforced)
+
+# Optional: normalized recipe discovery/index queue
+RECIPE_QUEUE_CRON_LIMIT=10
+RECIPE_QUEUE_CLI_LIMIT=50
+RECIPE_QUEUE_MAX_ATTEMPTS=3
+RECIPE_QUEUE_LEASE_MINUTES=15
+
+# Optional/experimental: metadata-only Cookidoo connector
+# Account credentials never go in this file; they belong only in cookidoo-bridge/.env.
+COOKIDOO_CONNECTOR_ENABLED=false
+COOKIDOO_BRIDGE_URL=http://cookidoo-bridge:8081
+COOKIDOO_BRIDGE_TOKEN=
+COOKIDOO_BRIDGE_TIMEOUT_SECONDS=50
+COOKIDOO_RESULT_LIMIT=20
+COOKIDOO_METADATA_REFRESH_DAYS=14
+COOKIDOO_METADATA_BACKFILL_ENABLED=false
+COOKIDOO_METADATA_BACKFILL_BATCH_SIZE=20
+COOKIDOO_METADATA_BACKFILL_INTERVAL_SECONDS=120
+COOKIDOO_METADATA_BACKFILL_JITTER_SECONDS=20
+COOKIDOO_QUEUE_CADENCE_MINUTES=1
+COOKIDOO_DISCOVERY_LOCALE=en-US
+COOKIDOO_REFRESH_ENQUEUE_LIMIT=2
+# Historical compatibility settings; provider hydration is policy-disabled.
 
 # Optional: Vacuum-sealed expiry grace period
 VACUUM_EXPIRY_EXTENSION_DAYS=30 # extra days before vacuum-sealed items are flagged expired
@@ -274,7 +307,7 @@ GEMINI_COST_20F_IN=0.10
 GEMINI_COST_20F_OUT=0.40
 
 # Optional: Security — protect all API endpoints
-# Set a strong random string; clients send it as X-API-Token header (or ?api_token= for HA)
+# Set a strong random string; clients send it as the X-API-Token header
 API_TOKEN=
 
 # Optional: Legacy alias for API_TOKEN (settings save only)
@@ -290,6 +323,253 @@ LOG_LEVEL=INFO
 LOG_ROTATE_HOURS=24   # hours before opening a new log file (default: 24)
 LOG_MAX_FILES=14      # maximum number of rotated files to keep (default: 14)
 ```
+
+### Optional Cookidoo Metadata Bridge
+
+The connector uses the unofficial, reverse-engineered
+[`miaucl/cookidoo-api`](https://github.com/miaucl/cookidoo-api). It is disabled by
+default and may break when Cookidoo changes authentication or private endpoints.
+
+**Current policy status:** Cookidoo card/detail hydration is disabled. The available
+provider detail response co-transports official steps, so bridge `/v1/search` and
+`/v1/metadata` return `503 metadata_hydration_disabled_policy` before any provider
+request. EverShelf does not enqueue discovery or metadata backfill jobs. Existing
+cached catalog rows and completed isolated pilot artifacts remain readable.
+
+Policy `metadata-v2` stores only bounded factual metadata: title, remote image and
+canonical URLs/ID, locale/timestamps, yield quantity plus unit, active/total seconds,
+difficulty, one primary category label, provider-listed equipment nouns, and ordered
+ingredient names with exact/range/unit/amount display facts. Ingredient group and
+within-group order, short group titles, provider ingredient/default-title/unit
+references, provider-declared optional booleans, and shopping-category references
+are retained as bounded factual topology. Source amounts live in a separate
+display-only table and never feed ranking quantity/unit, coverage, cookable status,
+or internal shopping quantities.
+
+Historical isolated imports persisted the selected effective regional/script locale
+and a matching canonical URL. This describes existing cached data, not an active
+discovery path.
+
+Official Cookidoo instructions remain external-only. The bridge and EverShelf do
+**not** expose or persist steps, notes/tips, category or collection descriptions,
+nutrition, tags, ingredient preparation text/prose, Guided Cooking content, image
+bytes, or raw API responses. The bridge never accesses ingredient `preparation`.
+Opening a card loads its remote image directly from Cookidoo's image host and
+therefore contacts that host.
+
+`GET api/index.php?action=recipe_catalog_detail&id=<positive-id>` returns the bounded
+`recipe_detail_v1` projection. `POST api/index.php?action=recipe_catalog_grocery_add`
+accepts selected ingredient keys/positions plus a client idempotency key, rechecks
+inventory, and adds only genuine missing items to EverShelf's internal shopping list.
+EverShelf never calls Home Assistant; HA clients may mirror the returned normalized
+names and amount text.
+
+The detail DTO keeps the compatibility `ingredients` array and adds
+`ingredient_groups` containing stable local keys, group/order ordinals, ingredient
+keys/positions, and bounded provider/local labels. Ingredient entries add a
+source-preserving `provider` object for ingredient reference, English/default title,
+unit reference, optionality, and shopping-category reference. The compatibility
+flat list and source-derived display name remain unchanged. Optional instruction
+groups may reference authorized local/manual/generated step positions; Cookidoo
+omits the instruction-group property and emits external-link-only instructions.
+
+Ingredient `display_name`/legacy `name` is always derived from bounded source text,
+never from a broad canonical or taxonomy label. Complete approved amount-plus-unit
+prefixes in legacy source text are removed as one unit; a bare number is never
+stripped from an unknown following word. Grocery names use the cleaned label and
+unsafe source-name dedupe removes the same prefix while retaining source descriptors.
+Stable mapping IDs and labels remain secondary read-time metadata. `closest_match`
+is emitted only for identity-safe alias/slug mappings; taxonomy-rule matches are
+suppressed regardless of confidence. `capabilities.grocery_add` means the complete
+nonempty list is supported, while the sibling `grocery` object reports missing,
+uncertain, in-stock, staple, eligible, and blocking state.
+
+Do not configure Cookidoo credentials or start the provider-facing bridge profile
+while detail hydration is policy-disabled. Local recipe search and existing cached
+Cookidoo catalog reads remain available.
+
+Full-corpus crawls, taxonomy-triggered discovery, periodic refresh, and direct
+metadata hydration are policy-disabled. Existing queued jobs terminate as local
+`skipped` outcomes; do not run the crawl/backfill commands retained in the source
+tree.
+
+`COOKIDOO_METADATA_BACKFILL_ENABLED` remains false and cannot override this policy
+gate. Status reports `provider_detail_policy_disabled`; enqueue refuses. No full
+backfill is authorized. A future step-free provider endpoint would require a new
+repository-policy review before hydration could be re-enabled.
+
+### Ingredient ontology v3 shadow workflow
+
+Ontology v3 is additive, disabled by default, not deployed, and not activated in
+this release. It uses a strict primary `is_a` spine plus reviewed
+`equivalent_to`, `variant_of`, `substitutes_for`, `derived_from`, and
+`component_of` relations. Identity is the same base entity with compatible
+defining facets such as form, processing, cut, bone, skin, refinement, variety,
+state, and species. Ancestry, components, derivation, lexical containment,
+taxonomy rules, aliases quarantined from Gemini, and model confidence are evidence
+only and never make a required ingredient sufficient.
+
+Schema v3.15 adds one connected `food` backbone, orthogonal entity
+`identity_role`, closed entity/facet policy, fingerprint-bound evidence
+manifests, recipe-cohort/provider-cluster evidence, reviewed primary-edge diffs,
+and immutable terminal dispositions D1-D9. Structural categories cannot satisfy
+identity. Provider refs never directly supply identity, and cohorts are context
+gates only. Completion means every product, recipe/source ingredient row, and
+provider term has a terminal reviewed disposition; it does not require accepting
+an identity.
+
+Corrective v3.15 uses a hash-bound overlay on the frozen v3.12 base. Review
+inputs explicitly cover all 304 entity roles and
+primary-edge decisions, all prior accepted-label transitions, all 174 products,
+all 646 provider terms, and the reviewed owner-scoped provider frontier.
+Unmanifested recipe labels terminate D9. D3 requires an exact context review;
+recipe D4-D6 require exact semantic review rows. Former candidate targets,
+facets, relations, confidence, source, and denied provenance are retained in
+immutable assertion history.
+
+The v3.15 gates account for every prior-accepted owner outcome, require exact
+reviewed transition facets or narrow waivers, compare all accepted provider
+term signatures, and digest every common legacy owner across copies. Dedicated
+publication guards prevent direct building-to-ready ontology, score, or
+requirement updates; approved builders publish only after complete hashes and
+materializations are present.
+
+The v3.15 integrity pass additionally isolates all grocery/mutation decisions
+to the true active revision, seals a monotonic owner-source revision/hash,
+preserves complete score-revision schemas during legacy FK migration, restores
+nested guards after failures, enforces nonproduction preview environments,
+verifies mapping-attribute companion rows and versions, and accounts for all
+465 prior gold cases as exactly retained, superseded, or explicitly retired.
+
+Candidate builds must explicitly select `--corpus-profile=eval` or
+`--corpus-profile=provider`. Each profile recomputes its pinned frozen source
+hash and exact owner counts; product and provider-term review sets use exact
+set equality. The selected profile, activation policy/reason, reviewed subject
+universe, pinned matcher fixture hash, ordered matcher case IDs, and count all
+participate in the immutable ontology seal. Activation reruns full revision,
+gold, source-universe, ID-set, and materialization integrity before and under
+the write reservation.
+
+Development and test instances may set one explicit
+`RECIPE_SCORE_PREVIEW_REVISION_ID` only when `EVERSHELF_ENV` is
+`development` or `test`. Read-only recipe search, suggestions,
+recommendations, detail matching, and cursors then use that validated regular
+v3 shadow revision while the true active pointer and all mutation/rebuild logic
+remain unchanged. Blank/`0` disables preview; invalid, stale, requirement-shadow,
+or unsealed revisions fail closed to the active revision with bounded
+diagnostics. Production must leave the setting blank.
+
+The Kalamata review adds closed `variety=kalamata` and
+`preparation=pitted` facets, fingerprint-bound product and multilingual
+full-span aliases, plus gold boundaries that keep garlic identities separate.
+Recipe detail responses never publish a matched product, relation, or candidate
+confidence for non-satisfying uncertain ancestry/facet candidates; internal
+scoring state is unchanged.
+
+Run the operator CLI only against a database copy:
+
+```bash
+php scripts/ingredient-ontology-v3.php build-candidate \
+  --db=.ontology-v3-work/evershelf-copy.sqlite \
+  --corpus-profile=eval --write
+php scripts/ingredient-ontology-v3.php audit --db=.ontology-v3-work/evershelf-copy.sqlite \
+  --version-id=1 --json-out=.ontology-v3-work/audit.json
+php scripts/ingredient-ontology-v3.php disposition-audit \
+  --db=.ontology-v3-work/evershelf-copy.sqlite --version-id=1
+php scripts/ingredient-ontology-v3.php export-dispositions \
+  --db=.ontology-v3-work/evershelf-copy.sqlite --version-id=1 \
+  --csv-out=.ontology-v3-work/dispositions.csv
+php scripts/ingredient-ontology-v3.php export-provider-workbook \
+  --db=.ontology-v3-work/evershelf-copy.sqlite --version-id=1 \
+  --csv-out=.ontology-v3-work/provider.csv
+php scripts/ingredient-ontology-v3.php build-shadow \
+  --db=.ontology-v3-work/evershelf-copy.sqlite --version-id=1 --write
+php scripts/ingredient-ontology-v3.php report --db=.ontology-v3-work/evershelf-copy.sqlite \
+  --revision-id=2 --json-out=.ontology-v3-work/shadow.json
+php scripts/ingredient-ontology-v3.php validate \
+  --db=.ontology-v3-work/evershelf-copy.sqlite --revision-id=2
+```
+
+Workbook imports require `--write`, `--reviewer`, and `--batch`, refuse the
+active database, validate current fingerprints, and create immutable staging
+rows only. They never rewrite a ready terminal disposition.
+
+`activate` and `rollback` require explicit write and confirmation flags. Activation
+revalidates inventory, catalog, source-owner, ontology-content, model/prompt/schema,
+materialization, blocker, active-pointer, and current-date inputs under SQLite
+`BEGIN IMMEDIATE`, then changes only `recipe_score_state.active_score_revision_id`
+plus `cursor_revision`. Manual production activation additionally requires a
+complete retained parent score revision; build and activate a legacy baseline
+before the first v3 shadow. The ontology version is derived from that score
+revision and has no independent active pointer. Rollback defaults to the immediate parent
+and directly accepts one of the eight retained, cycle-safe proven ancestors even
+when its inventory, catalog, or score date is stale. A non-ancestor must be a v3
+child of the current active revision and pass the normal activation gates;
+non-ancestor legacy targets are rejected. Pruning keeps the active revision, its
+eight most recent ancestors, its immediate parent, the latest same-parent
+idempotency candidate, four recent ready-v3 revisions, and two recent legacy
+revisions. The oldest retained ancestor has its parent cleared to mark the
+documented rollback boundary.
+
+Full-resolution v3.16 data under ontology schema v3.17 carries
+`activation_policy=manual_review`; validation still requires the exact frozen
+corpus and reviewed subjects, pinned gold, complete integrity and materialized
+ID/value gates, a validated rollback baseline, plus explicit CLI confirmation
+before moving the active score pointer. Requirement-projection and source-aware revisions remain blocked. The
+activation machinery remains deliberately manual, and the prior ready revision
+is retained for rollback.
+
+Ready versions reject inserts, updates, deletes, and reseals across ontology,
+score, match, requirement, member, and recipe-state materializations. Validation
+recomputes canonical row/content/seal and materialized-value hashes, checks
+bidirectional recipe/ingredient/requirement ID equality, and compares portable
+terminal-disposition and legacy-owner outcome digests across eval/pilot copies.
+The retained 60-positive / 50-critical-negative adjudicated gold base is
+code-pinned, frozen-source and owner/product fingerprint-bound, structurally
+validated, and supersession-audited. Maintainer review metadata records its
+scope and confidence limits; code does not claim or infer model independence.
+Generated accepted-row snapshots are conformance artifacts, not gold.
+
+The minute score rebuild detects an active v3 score revision and rebuilds only
+against that exact ontology version under the shared score lock. It never falls
+back to legacy v2. Before a fresh return or replacement it verifies current source
+owner fingerprints and version/corpus/content hashes; drift returns
+`ontology_stale` and leaves the previous pointer intact for a new candidate/remap.
+Exclusive lock acquisition fails every pre-existing `building` revision before
+reuse/build decisions, so partial legacy/v3 rows become prunable while same-input
+recovery creates one replacement. Request handling serves the prior pointer as
+stale instead of forcing another rebuild. A committed activation remains
+successful if bounded post-activation pruning reports a `cleanup_warning`.
+Compatible quantity aggregation always unions distinct inventory rows/lots and
+uses their earliest non-null expiry. `INGREDIENT_ONTOLOGY_V3_QUANTITY_SUFFICIENCY_GATE`
+controls only whether insufficient quantity blocks an otherwise valid identity
+match and defaults to `false`.
+Each v3 score revision stores a deterministic `scoring_config_hash` over the
+scoring model/version and quantity-gate state. Changing the gate makes the active
+revision stale and prevents incompatible reuse, activation, or v3 rollback.
+
+Staged proposal sets can be terminalized through the audited `reject`, `dispose`,
+and `revert` CLI commands. Revert transactionally withdraws unapplied pending or
+approved sets and children; applied sets still fail closed because inverse
+provenance is not represented. Already-reverted sets append an idempotent audit
+event. Terminal rejected/reverted sets do not block activation; pending, approved,
+or applicable invalid sets do.
+
+Resolution gold contains at least 300 label-to-resolution positives and 150
+critical negatives, alongside the matcher fixture and generated assertions for
+every accepted manifest alias. Frozen-gold validation requires a bounded, unique,
+fully resolved fixture with nonzero expected/predicted positives, expected
+negatives, and critical negatives;
+precision and recall must be at least `0.99`, with zero false negatives and zero
+critical false positives. Assertion attributes are closed to the selected
+ontology version's facet/value map. Reports include bounded error cases and 95%
+Wilson intervals.
+
+Gemini 3.5 Flash is the frozen proposal default. The benchmark found missing
+facets/inconsistent entities from Pro and one Gemini 3.6 Flash run that marked all
+hard attributes non-defining. Model JSON is therefore fenced, bounded, closed-set,
+staged only, and never auto-applied. Reduced coverage and cookability are expected
+when broad false-positive matches are removed.
 
 ### Web Server Configuration
 
@@ -348,14 +628,21 @@ The Docker image runs this on its own via `docker/evershelf-cron`, so no host se
 needed. Configure it manually only for non-Docker installs:
 
 ```bash
-# Run every 5 minutes
+# Canonical taxonomy and smart shopping, every 5 minutes
 */5 * * * * php /path/to/evershelf/api/cron_smart_shopping.php >> /path/to/evershelf/data/cron.log 2>&1
+
+# Materialized inventory-to-recipe scores, every minute
+* * * * * php /path/to/evershelf/scripts/rebuild-recipe-scores.php >> /path/to/evershelf/data/cron.log 2>&1
+
+# Local recipe jobs and cadence-limited Cookidoo discovery, every minute
+* * * * * php /path/to/evershelf/scripts/process-recipe-queue.php --limit=2 --max-attempts=3 --respect-cookidoo-cadence >> /path/to/evershelf/data/cron.log 2>&1
 ```
 
-This job is **not optional**: besides smart shopping predictions it drains the canonical
-ingredient/taxonomy queue. Without it, product saves keep enqueueing work that is never
-processed and new items silently never receive taxonomy terms. Overlapping runs are safe —
-the worker takes an exclusive lock and a second run yields instead of competing for writes.
+These jobs are **not optional** when their features are enabled. The first drains canonical
+ingredient/taxonomy work, the second keeps recipe browse scores current, and the third
+processes local recipe jobs plus remote metadata discovery. Without them, new products
+never receive taxonomy terms, large recipe catalogs remain temporarily unavailable, and
+remote hydration stays queued. Overlapping score and queue runs use locks/retries safely.
 
 ### Backup (Optional)
 
@@ -453,7 +740,7 @@ evershelf-kiosk/            # 📺 Android kiosk app (add-on)
 - **Credentials** are stored in `.env` (server-side, never committed to Git)
 - **Database** stays local — never pushed to remote repositories
 - **Apache/Nginx hardening** — `.env`, `data/`, and `logs/` are blocked from direct HTTP access
-- **API token** — set `API_TOKEN` in `.env` to require `X-API-Token` on all API calls (Home Assistant: `?api_token=`)
+- **API token** — set `API_TOKEN` in `.env` to require the `X-API-Token` header on all API calls, including Home Assistant. The legacy `?api_token=` form is deprecated because URLs can be written to browser history and access logs.
 - **API keys are never exposed to the browser** — `get_settings` returns only boolean flags (`gemini_key_set`, `ha_token_set`, …)
 - **GitHub Issues token** — stored encrypted as `GH_ISSUE_TOKEN_ENC` + `GH_ISSUE_TOKEN_KEY` (see `scripts/encrypt-gh-token.php`)
 - **Settings write protection** — `save_settings` requires the same API token when configured; validated with `hash_equals`

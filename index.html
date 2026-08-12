@@ -11,7 +11,7 @@
     <title>EverShelf</title>
     <link rel="manifest" href="manifest.json">
     <link rel="icon" type="image/png" href="assets/img/logo/logo_icon.png">
-    <link rel="stylesheet" href="assets/css/style.css?v=20260606m">
+    <link rel="stylesheet" href="assets/css/style.css?v=20260803a">
     <!-- Core modules (auth, DOM helpers) -->
     <script src="assets/js/core/dom.js?v=20260603a"></script>
     <script src="assets/js/core/auth.js?v=20260603b"></script>
@@ -734,10 +734,108 @@
             <h2 data-i18n="recipes.title">🍳 Ricette</h2>
         </div>
         <div class="recipe-page-container">
-            <button class="btn btn-large btn-success full-width recipe-generate-btn" onclick="openRecipeDialog()" data-i18n="recipes.generate">
-                ✨ Genera nuova ricetta
-            </button>
-            <div id="recipe-archive" class="recipe-archive"></div>
+            <section class="recipe-catalog" aria-labelledby="recipe-catalog-heading">
+                <div class="recipe-catalog-intro">
+                    <p class="recipe-catalog-eyebrow" data-i18n="recipes.catalog.eyebrow">Scopri ricette</p>
+                    <h3 id="recipe-catalog-heading" data-i18n="recipes.catalog.heading">Cosa posso cucinare?</h3>
+                    <p data-i18n="recipes.catalog.intro">Cerca per titolo o ingrediente e confronta le ricette con ciò che hai.</p>
+                    <div class="recipe-catalog-quick-actions">
+                        <button type="button" class="btn btn-success" onclick="openRecipeDialog()" data-i18n="recipes.catalog.generate_short">Genera ricetta</button>
+                        <button type="button" class="btn btn-secondary" onclick="scrollToRecipeArchive()" data-i18n="recipes.catalog.jump_archive">Ricette salvate</button>
+                    </div>
+                </div>
+
+                <form id="recipe-catalog-search-form" class="recipe-catalog-search" onsubmit="submitRecipeCatalogSearch(event)">
+                    <label for="recipe-catalog-query" data-i18n="recipes.catalog.search_label">Cerca ricette</label>
+                    <div class="recipe-catalog-search-row">
+                        <input
+                            type="search"
+                            id="recipe-catalog-query"
+                            autocomplete="off"
+                            enterkeyhint="search"
+                            maxlength="240"
+                            data-i18n-placeholder="recipes.catalog.search_placeholder"
+                            placeholder="Cerca per titolo o ingrediente"
+                        >
+                        <button type="submit" class="btn btn-primary" data-i18n="recipes.catalog.search_button">Cerca</button>
+                    </div>
+                </form>
+
+                <fieldset class="recipe-catalog-mode-group">
+                    <legend data-i18n="recipes.catalog.mode_label">Ordina i suggerimenti</legend>
+                    <div class="recipe-catalog-mode-buttons">
+                        <button
+                            type="button"
+                            id="recipe-catalog-mode-stocked"
+                            class="recipe-catalog-mode active"
+                            aria-pressed="true"
+                            aria-controls="recipe-catalog-results"
+                            onclick="setRecipeCatalogMode('stocked')"
+                            data-i18n="recipes.catalog.mode_stocked"
+                        >Quello che ho</button>
+                        <button
+                            type="button"
+                            id="recipe-catalog-mode-expiring"
+                            class="recipe-catalog-mode"
+                            aria-pressed="false"
+                            aria-controls="recipe-catalog-results"
+                            onclick="setRecipeCatalogMode('expiring')"
+                            data-i18n="recipes.catalog.mode_expiring"
+                        >In scadenza</button>
+                    </div>
+                </fieldset>
+
+                <div class="recipe-catalog-filter-row">
+                    <label class="recipe-catalog-source-label" for="recipe-catalog-source">
+                        <span data-i18n="recipes.catalog.source_label">Fonte</span>
+                        <select id="recipe-catalog-source" onchange="changeRecipeCatalogSource(this.value)">
+                            <option value="" data-i18n="recipes.catalog.source_all">Tutte le fonti</option>
+                            <option value="non_cookidoo" data-i18n="recipes.catalog.source_non_cookidoo">Tutte tranne Cookidoo</option>
+                            <option value="local" data-i18n="recipes.catalog.source_local">Catalogo locale</option>
+                            <option value="generated" data-i18n="recipes.catalog.source_generated">Generate</option>
+                            <option value="manual" data-i18n="recipes.catalog.source_manual">Manuali</option>
+                            <option value="cookidoo" id="recipe-catalog-source-cookidoo" hidden disabled>Cookidoo</option>
+                        </select>
+                    </label>
+                    <button
+                        type="button"
+                        id="recipe-catalog-discover"
+                        class="btn recipe-catalog-discover-btn"
+                        hidden
+                        onclick="discoverRecipeCatalogRemote()"
+                        data-i18n="recipes.catalog.discover_button"
+                    >Cerca su Cookidoo</button>
+                </div>
+
+                <p id="recipe-catalog-remote-hint" class="recipe-catalog-remote-hint" hidden></p>
+                <div
+                    id="recipe-catalog-status"
+                    class="recipe-catalog-status"
+                    role="status"
+                    aria-live="polite"
+                    aria-atomic="true"
+                    hidden
+                ></div>
+
+                <div class="recipe-catalog-results-header">
+                    <h4 id="recipe-catalog-results-title" data-i18n="recipes.catalog.suggestions_title">Suggerimenti per la tua dispensa</h4>
+                    <span id="recipe-catalog-results-summary"></span>
+                </div>
+                <div
+                    id="recipe-catalog-results"
+                    class="recipe-catalog-results"
+                    aria-live="polite"
+                    aria-busy="false"
+                ></div>
+            </section>
+
+            <section id="recipe-legacy-section" class="recipe-legacy-section" aria-labelledby="recipe-archive-heading">
+                <button class="btn btn-large btn-success full-width recipe-generate-btn" onclick="openRecipeDialog()" data-i18n="recipes.generate">
+                    ✨ Genera nuova ricetta
+                </button>
+                <h3 id="recipe-archive-heading" class="recipe-archive-heading" data-i18n="recipes.catalog.archive_title">Archivio ricette salvate</h3>
+                <div id="recipe-archive" class="recipe-archive"></div>
+            </section>
         </div>
     </section>
 
@@ -1515,7 +1613,7 @@
                         <div id="kiosk-needs-update-notice" style="display:none;margin-top:10px;padding:8px 12px;background:rgba(245,158,11,0.1);border:1px solid rgba(245,158,11,0.35);border-radius:8px;font-size:0.83rem">
                             <span data-i18n="settings.kiosk.needs_update">⚠️ Il kiosk installato non supporta questa funzione.
                             Aggiorna l'app kiosk per abilitarla.</span>
-                            <a href="https://github.com/dadaloop82/EverShelf/releases/download/kiosk-latest/evershelf-kiosk.apk" target="_blank" rel="noopener noreferrer" style="display:block;margin-top:6px;color:#d97706;font-weight:600;text-decoration:none" data-i18n="settings.kiosk.download_btn">📥 Scarica aggiornamento kiosk</a>
+                            <a href="https://github.com/SFenton/EverShelf/releases/download/kiosk-latest/evershelf-kiosk.apk" target="_blank" rel="noopener noreferrer" style="display:block;margin-top:6px;color:#d97706;font-weight:600;text-decoration:none" data-i18n="settings.kiosk.download_btn">📥 Scarica aggiornamento kiosk</a>
                         </div>
                     </div>
 
@@ -1715,7 +1813,7 @@
                     <p class="settings-hint" style="margin:2px 0 0" data-i18n="settings.kiosk.hint">Trasforma un tablet Android in un pannello EverShelf sempre acceso, con bilancia BLE integrata.</p>
                 </div>
             </div>
-            <a href="https://github.com/dadaloop82/EverShelf/releases/download/kiosk-latest/evershelf-kiosk.apk" target="_blank" rel="noopener noreferrer" class="btn btn-large btn-accent full-width" style="text-decoration:none;display:block;text-align:center;background:linear-gradient(135deg,#059669,#10b981);color:#fff" data-i18n="settings.kiosk.download_btn">📥 Scarica EverShelf Kiosk (APK)</a>
+            <a href="https://github.com/SFenton/EverShelf/releases/download/kiosk-latest/evershelf-kiosk.apk" target="_blank" rel="noopener noreferrer" class="btn btn-large btn-accent full-width" style="text-decoration:none;display:block;text-align:center;background:linear-gradient(135deg,#059669,#10b981);color:#fff" data-i18n="settings.kiosk.download_btn">📥 Scarica EverShelf Kiosk (APK)</a>
             <p class="settings-hint" style="margin-top:8px" data-i18n="settings.kiosk.download_sub">Modalità kiosk full-screen + gateway bilancia integrato. Sorgente: <code>evershelf-kiosk/</code></p>
         </div>
 
@@ -1838,9 +1936,9 @@
 
 <!-- Recipe Dialog -->
 <div class="modal-overlay" id="recipe-overlay" style="display:none" onclick="closeRecipeDialog()">
-    <div class="modal-content recipe-dialog" onclick="event.stopPropagation()">
+    <div class="modal-content recipe-dialog" role="dialog" aria-modal="true" tabindex="-1" onclick="event.stopPropagation()">
         <div id="recipe-mealplan-banner" class="recipe-mealplan-banner" style="display:none"></div>
-        <div id="recipe-ask" class="recipe-ask">
+        <div id="recipe-ask" class="recipe-ask" tabindex="-1">
             <h3 id="recipe-meal-title" data-i18n="recipes.dialog_title">🍳 Ricetta</h3>
             <p class="recipe-desc" data-i18n="recipes.dialog_desc">Genero una ricetta sana con gli ingredienti in dispensa, dando priorità a quelli in scadenza.</p>
             <div class="form-group" style="text-align:left">
@@ -1876,11 +1974,11 @@
                 Annulla
             </button>
         </div>
-        <div id="recipe-loading" style="display:none" class="recipe-loading">
+        <div id="recipe-loading" style="display:none" class="recipe-loading" tabindex="-1">
             <div class="loading-spinner"></div>
             <p id="recipe-loading-msg" data-i18n="recipes.loading_msg">Sto preparando la ricetta...</p>
         </div>
-        <div id="recipe-result" style="display:none" class="recipe-result">
+        <div id="recipe-result" style="display:none" class="recipe-result" tabindex="-1">
             <div id="recipe-content"></div>
             <button id="recipe-regen-btn" class="btn btn-large btn-secondary full-width mt-2" onclick="showRegenChoice()" data-i18n="recipes.regenerate">
                 🔄 Generane un'altra
@@ -1924,7 +2022,7 @@
 
 <!-- Modal for product details from inventory -->
 <div class="modal-overlay" id="modal-overlay" style="display:none" onclick="closeModal()">
-    <div class="modal-content" id="modal-content" onclick="event.stopPropagation()"></div>
+    <div class="modal-content" id="modal-content" role="dialog" aria-modal="true" tabindex="-1" onclick="event.stopPropagation()"></div>
 </div>
 
 <!-- Screensaver Overlay -->
@@ -1999,6 +2097,6 @@
     </div>
 </div>
 
-<script src="assets/js/app.js?v=20260704b"></script>
+<script src="assets/js/app.js?v=20260803a"></script>
 </body>
 </html>

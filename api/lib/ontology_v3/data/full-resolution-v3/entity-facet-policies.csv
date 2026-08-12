@@ -1,0 +1,6 @@
+entity_slug,facet_key,allowed,defining,reviewer,review_batch,rationale
+flour,variety,1,1,operator-corrective-review-v3,full-ontology-resolution-v3,Reviewed flour varieties such as almond are identity-defining
+mozzarella,moisture,1,1,operator-corrective-review-v3,full-ontology-resolution-v3,Low-moisture mozzarella is a defining reviewed dairy class
+olive,variety,1,1,operator-corrective-review-v3,full-ontology-resolution-v3,Kalamata is a defining reviewed olive variety
+rice,refinement,1,1,operator-corrective-review-v3,full-ontology-resolution-v3,White rice refinement is defining for exact matching
+vinegar,seasoning,1,1,operator-corrective-review-v3,full-ontology-resolution-v3,Seasoned and unseasoned vinegar are defining reviewed variants

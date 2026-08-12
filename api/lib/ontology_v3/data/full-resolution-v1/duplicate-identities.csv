@@ -1,0 +1,28 @@
+duplicate_slug,canonical_slug,attributes_json,rationale
+beans,bean,{},Singular and plural are one identity
+corn-starch,cornstarch,{},Spelling variants are one identity
+garlic-cloves,garlic,"{""form"":""clove""}",Garlic clove is a defining form of garlic
+tomatoes,tomato,{},Singular and plural are one identity
+lemons,lemon,{},Singular and plural are one identity
+walnuts,walnut,{},Singular and plural are one identity
+blueberries,blueberry,{},Singular and plural are one identity
+peanuts,peanut,{},Singular and plural are one identity
+bread-crumbs,breadcrumbs,{},Breadcrumb spelling variants are one identity
+egg-whites,egg-white,"{""egg_part"":""white""}",Singular and plural are one identity
+chicken-stock,stock,"{""variety"":""chicken""}",Chicken stock is stock with a defining variety
+chicken-stock-base,stock,"{""variety"":""chicken""}",Chicken stock base remains stock evidence; no component identity
+beef-stock,stock,"{""variety"":""beef""}",Beef stock is stock with a defining variety
+black-pepper,piper-pepper,"{""variety"":""black""}",Black Piper pepper is not Capsicum
+white-pepper,piper-pepper,"{""variety"":""white""}",White Piper pepper is not Capsicum
+peppercorn,piper-pepper,"{""form"":""whole""}",Peppercorn is whole Piper pepper
+pepper,piper-pepper,{},Legacy conflated pepper node is retired; bare pepper remains contextual
+legumes,legume,{},Plural category duplicate; category remains identity-ineligible
+olives,olive,{},Singular and plural are one identity
+brown-sugar,sugar,"{""refinement"":""brown""}",Brown sugar is sugar with a defining refinement
+heavy-cream,cream,"{""fat_content"":""heavy""}",Heavy cream is cream with a defining fat class
+sun-dried-tomatoes,tomato,"{""processing"":""dried""}",Sun-dried tomato is tomato with processing
+sesame-oil,oil,"{""variety"":""sesame""}",Sesame oil is oil with a defining variety
+chicken-breast,chicken,"{""cut"":""breast"",""species"":""chicken""}",Chicken breast is chicken with a defining cut
+jasmine-rice,rice,"{""variety"":""jasmine""}",Jasmine rice is rice with a defining variety
+arborio-rice,rice,"{""variety"":""arborio""}",Arborio rice is rice with a defining variety
+pickled-jalapeno-peppers,jalapeno-pepper,"{""processing"":""pickled"",""variety"":""jalapeno""}",Pickled jalapeño is the same base with preservation

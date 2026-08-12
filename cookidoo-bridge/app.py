@@ -1,0 +1,1681 @@
+#!/usr/bin/env python3
+"""Authenticated, metadata-only Cookidoo bridge."""
+
+from __future__ import annotations
+
+import asyncio
+from collections import deque
+from collections.abc import Awaitable, Callable, Mapping, Sequence
+from dataclasses import dataclass, field
+import hmac
+import json
+import logging
+import math
+import os
+from pathlib import Path
+import re
+import stat
+import time
+from types import SimpleNamespace
+from typing import Any
+import unicodedata
+from urllib.parse import urlparse
+
+import aiohttp
+from aiohttp import web
+from cookidoo_api import Cookidoo
+from cookidoo_api.const import RECIPE_PATH
+from cookidoo_api.exceptions import (
+    CookidooAuthException,
+    CookidooConfigException,
+    CookidooException,
+    CookidooParseException,
+    CookidooResponseException,
+)
+from cookidoo_api.helpers import get_localization_options
+from cookidoo_api.types import CookidooConfig, CookidooLocalizationConfig
+from yarl import URL
+
+LOGGER = logging.getLogger("cookidoo_bridge")
+logging.getLogger("cookidoo_api").setLevel(logging.WARNING)
+
+MAX_BODY_BYTES = 2 * 1024 * 1024
+MAX_RESPONSE_BYTES = 1_000_000
+MAX_RESPONSE_RECIPES = 20
+MAX_INGREDIENT_FILTERS = 25
+MAX_RECIPE_INGREDIENTS = 200
+MAX_RECIPE_INGREDIENT_GROUPS = 40
+MAX_RECIPE_DESCRIPTIVE_ASSETS = 100
+MAX_GROUP_TITLE_TEXT = 160
+MAX_PROVIDER_REFERENCE_TEXT = 200
+MAX_DEFAULT_TITLE_TEXT = 200
+MAX_RECIPE_EQUIPMENT = 50
+MAX_SOURCE_AMOUNT_TEXT = 160
+MAX_SOURCE_UNIT_TEXT = 80
+MAX_GENERAL_TEXT = 160
+MAX_RECIPE_SECONDS = 366 * 24 * 60 * 60
+MAX_SOURCE_NUMBER = 1_000_000_000
+MAX_EXCLUDED_RECIPE_IDS = 100000
+METADATA_SCHEMA_VERSION = "ingredient-topology-v1"
+DETAIL_HYDRATION_POLICY_VERSION = "metadata-v2-detail-disabled"
+DETAIL_HYDRATION_POLICY_REASON = "provider_detail_policy_disabled"
+ALLOWED_TMV = frozenset({"TM31", "TM5", "TM6", "TM7"})
+PROVIDER_REFERENCE_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]*")
+PUBLIC_AMOUNT_NUMBER_PATTERN = (
+    r"(?:"
+    r"\d+\s+\d+\s*/\s*\d+"
+    r"|\d+\s*[¼½¾⅐⅑⅒⅓⅔⅕⅖⅗⅘⅙⅚⅛⅜⅝⅞]"
+    r"|\d+\s*/\s*\d+"
+    r"|\d+(?:[.,]\d+)?"
+    r"|[¼½¾⅐⅑⅒⅓⅔⅕⅖⅗⅘⅙⅚⅛⅜⅝⅞]"
+    r")"
+)
+PUBLIC_AMOUNT_UNIT_ALIASES = (
+    "mg", "milligram", "milligrams",
+    "g", "gr", "gram", "grams",
+    "kg", "kilogram", "kilograms",
+    "ml", "milliliter", "milliliters", "millilitre", "millilitres",
+    "cl", "centiliter", "centiliters", "centilitre", "centilitres",
+    "dl", "deciliter", "deciliters", "decilitre", "decilitres",
+    "l", "liter", "liters", "litre", "litres",
+    "tsp", "teaspoon", "teaspoons",
+    "tbsp", "tablespoon", "tablespoons",
+    "cup", "cups",
+    "oz", "ounce", "ounces",
+    "lb", "lbs", "pound", "pounds",
+    "piece", "pieces", "pc", "pcs",
+    "clove", "cloves", "bunch", "bunches",
+    "pinch", "pinches", "sprig", "sprigs",
+    "handful", "handfuls",
+    "can", "cans", "tin", "tins",
+    "jar", "jars", "bottle", "bottles",
+    "package", "packages", "pack", "packs",
+    "packet", "packets", "pkg",
+    "fluid ounce", "fluid ounces", "fl oz",
+)
+PUBLIC_AMOUNT_UNIT_PATTERN = "(?:" + "|".join(
+    re.escape(alias).replace(r"\ ", r"\s+")
+    for alias in sorted(
+        PUBLIC_AMOUNT_UNIT_ALIASES,
+        key=len,
+        reverse=True,
+    )
+) + ")"
+COOKIDOO_HOSTS = frozenset(
+    {
+        "cookidoo.at",
+        "cookidoo.be",
+        "cookidoo.ca",
+        "cookidoo.ch",
+        "cookidoo.co.uk",
+        "cookidoo.com.au",
+        "cookidoo.com.cn",
+        "cookidoo.com.tr",
+        "cookidoo.cz",
+        "cookidoo.de",
+        "cookidoo.es",
+        "cookidoo.fr",
+        "cookidoo.international",
+        "cookidoo.it",
+        "cookidoo.mx",
+        "cookidoo.pl",
+        "cookidoo.pt",
+        "cookidoo.thermomix.com",
+    }
+)
+SEARCH_FIELDS = frozenset(
+    {
+        "query", "ingredients", "exclude_ingredients", "locale", "tmv",
+        "limit", "page", "exclude_ids", "max_pages",
+    }
+)
+METADATA_FIELDS = frozenset({"locale", "external_ids"})
+METADATA_FAILURE_KINDS = frozenset(
+    {"invalid_id", "invalid_metadata", "locale_mismatch", "not_found"}
+)
+
+
+class BridgeError(Exception):
+    """An error safe to expose as a bounded JSON response."""
+
+    def __init__(self, status: int, code: str, message: str) -> None:
+        super().__init__(code)
+        self.status = status
+        self.code = code
+        self.message = message
+
+
+class GatewayConfigurationError(BridgeError):
+    """Bridge or account configuration is incomplete."""
+
+    def __init__(self, message: str = "Cookidoo bridge is not configured") -> None:
+        super().__init__(503, "bridge_not_configured", message)
+
+
+class GatewayPolicyDisabledError(BridgeError):
+    """Repository policy disables detail-bearing provider requests."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            503,
+            "metadata_hydration_disabled_policy",
+            "Cookidoo metadata hydration is disabled by repository policy",
+        )
+
+
+class GatewayResponseError(BridgeError):
+    """The upstream client returned an invalid normalized object."""
+
+    def __init__(self) -> None:
+        super().__init__(502, "invalid_upstream_response", "Cookidoo returned invalid metadata")
+
+
+class GatewayMetadataItemError(Exception):
+    """A bounded permanent failure for one direct-ID metadata item."""
+
+    def __init__(self, kind: str) -> None:
+        if kind not in METADATA_FAILURE_KINDS:
+            raise ValueError("invalid metadata failure kind")
+        super().__init__(kind)
+        self.kind = kind
+
+
+def _env_int(name: str, default: int, minimum: int, maximum: int) -> int:
+    raw = os.getenv(name, str(default)).strip()
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise GatewayConfigurationError(f"{name} must be an integer") from exc
+    if value < minimum or value > maximum:
+        raise GatewayConfigurationError(
+            f"{name} must be between {minimum} and {maximum}"
+        )
+    return value
+
+
+@dataclass(frozen=True)
+class BridgeConfig:
+    """Runtime limits and non-account bridge configuration."""
+
+    bridge_token: str = field(repr=False)
+    default_locale: str
+    cookie_path: Path
+    request_timeout_seconds: int
+    upstream_timeout_seconds: int
+    rate_limit_per_minute: int
+    max_concurrency: int
+    detail_concurrency: int
+    max_results: int
+
+    @classmethod
+    def from_env(cls) -> BridgeConfig:
+        return cls(
+            bridge_token=os.getenv("COOKIDOO_BRIDGE_TOKEN", "").strip(),
+            default_locale=_normalize_locale(
+                os.getenv("COOKIDOO_DEFAULT_LOCALE", "en-GB")
+            ),
+            cookie_path=Path(
+                os.getenv("COOKIDOO_COOKIE_PATH", "/data/cookies.json")
+            ),
+            request_timeout_seconds=_env_int(
+                "COOKIDOO_REQUEST_TIMEOUT_SECONDS", 45, 5, 120
+            ),
+            upstream_timeout_seconds=_env_int(
+                "COOKIDOO_UPSTREAM_TIMEOUT_SECONDS", 12, 3, 60
+            ),
+            rate_limit_per_minute=_env_int(
+                "COOKIDOO_RATE_LIMIT_PER_MINUTE", 10, 1, 60
+            ),
+            max_concurrency=_env_int("COOKIDOO_MAX_CONCURRENCY", 1, 1, 4),
+            detail_concurrency=_env_int(
+                "COOKIDOO_DETAIL_CONCURRENCY", 1, 1, 4
+            ),
+            max_results=_env_int("COOKIDOO_MAX_RESULTS", 20, 1, 20),
+        )
+
+
+def _clean_text(value: object, field_name: str, maximum: int, required: bool) -> str:
+    if not isinstance(value, str):
+        raise BridgeError(400, "invalid_request", f"{field_name} must be a string")
+    value = " ".join(value.split())
+    if required and not value:
+        raise BridgeError(400, "invalid_request", f"{field_name} is required")
+    if len(value) > maximum:
+        raise BridgeError(400, "invalid_request", f"{field_name} is too long")
+    if any(unicodedata.category(character).startswith("C") for character in value):
+        raise BridgeError(
+            400, "invalid_request", f"{field_name} contains control characters"
+        )
+    return value
+
+
+def _normalize_locale(value: object) -> str:
+    locale = _clean_text(value, "locale", 16, True).replace("_", "-")
+    match = re.fullmatch(
+        r"([A-Za-z]{2,3})(?:-([A-Za-z]{4}))?(?:-([A-Za-z]{2}|[0-9]{3}))?",
+        locale,
+    )
+    if match is None:
+        raise BridgeError(400, "invalid_request", "locale is invalid")
+    language, script, region = match.groups()
+    normalized = language.lower()
+    if script:
+        normalized += f"-{script.title()}"
+    if region:
+        normalized += f"-{region if region.isdigit() else region.upper()}"
+    return normalized
+
+
+def _normalize_names(value: object, field_name: str, maximum_items: int) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if isinstance(value, str) or not isinstance(value, Sequence):
+        raise BridgeError(400, "invalid_request", f"{field_name} must be an array")
+    if len(value) > maximum_items:
+        raise BridgeError(400, "invalid_request", f"{field_name} has too many entries")
+    names: dict[str, str] = {}
+    for item in value:
+        name = _clean_text(item, field_name, 200, True)
+        names.setdefault(name.casefold(), name)
+    return tuple(names[key] for key in sorted(names))
+
+def _normalize_recipe_ids(value: object) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if isinstance(value, str) or not isinstance(value, Sequence):
+        raise BridgeError(400, "invalid_request", "exclude_ids must be an array")
+    if len(value) > MAX_EXCLUDED_RECIPE_IDS:
+        raise BridgeError(400, "invalid_request", "exclude_ids has too many entries")
+    ids: set[str] = set()
+    for item in value:
+        recipe_id = _clean_text(item, "exclude_ids", 160, True)
+        if not re.fullmatch(r"[A-Za-z0-9._:-]+", recipe_id):
+            raise BridgeError(400, "invalid_request", "exclude_ids contains an invalid ID")
+        ids.add(recipe_id)
+    return tuple(sorted(ids))
+
+
+@dataclass(frozen=True)
+class SearchRequest:
+    """Validated metadata search parameters."""
+
+    query: str
+    ingredients: tuple[str, ...]
+    exclude_ingredients: tuple[str, ...]
+    locale: str
+    tmv: str
+    limit: int
+    page: int
+    exclude_ids: tuple[str, ...]
+    max_pages: int
+
+    @classmethod
+    def from_payload(
+        cls, payload: object, config: BridgeConfig
+    ) -> SearchRequest:
+        if not isinstance(payload, Mapping):
+            raise BridgeError(400, "invalid_request", "JSON body must be an object")
+        unexpected = sorted(set(payload) - SEARCH_FIELDS)
+        if unexpected:
+            raise BridgeError(
+                400,
+                "invalid_request",
+                "Unexpected request fields: " + ", ".join(unexpected),
+            )
+
+        query_value = payload.get("query", "")
+        query = _clean_text(query_value, "query", 240, False)
+        ingredients = _normalize_names(
+            payload.get("ingredients", ()), "ingredients", MAX_INGREDIENT_FILTERS
+        )
+        excluded = _normalize_names(
+            payload.get("exclude_ingredients", ()),
+            "exclude_ingredients",
+            MAX_INGREDIENT_FILTERS,
+        )
+        if not query and not ingredients:
+            raise BridgeError(
+                400, "invalid_request", "query or ingredients must be provided"
+            )
+        overlap = {name.casefold() for name in ingredients} & {
+            name.casefold() for name in excluded
+        }
+        if overlap:
+            raise BridgeError(
+                400,
+                "invalid_request",
+                "ingredients and exclude_ingredients must not overlap",
+            )
+
+        locale = _normalize_locale(payload.get("locale", config.default_locale))
+        tmv_raw = payload.get("tmv", "TM6")
+        tmv = _clean_text(tmv_raw, "tmv", 8, True).upper()
+        if tmv not in ALLOWED_TMV:
+            raise BridgeError(400, "invalid_request", "tmv is unsupported")
+
+        limit_raw = payload.get("limit", min(5, config.max_results))
+        if isinstance(limit_raw, bool) or not isinstance(limit_raw, int):
+            raise BridgeError(400, "invalid_request", "limit must be an integer")
+        if limit_raw < 1 or limit_raw > min(MAX_RESPONSE_RECIPES, config.max_results):
+            raise BridgeError(
+                400,
+                "invalid_request",
+                f"limit must be between 1 and {min(MAX_RESPONSE_RECIPES, config.max_results)}",
+            )
+        page_raw = payload.get("page", 0)
+        if isinstance(page_raw, bool) or not isinstance(page_raw, int):
+            raise BridgeError(400, "invalid_request", "page must be an integer")
+        if page_raw < 0 or page_raw > 50:
+            raise BridgeError(400, "invalid_request", "page must be between 0 and 50")
+        exclude_ids = _normalize_recipe_ids(payload.get("exclude_ids", ()))
+        max_pages_raw = payload.get("max_pages", 1)
+        if isinstance(max_pages_raw, bool) or not isinstance(max_pages_raw, int):
+            raise BridgeError(400, "invalid_request", "max_pages must be an integer")
+        if max_pages_raw < 1 or max_pages_raw > 50:
+            raise BridgeError(400, "invalid_request", "max_pages must be between 1 and 50")
+        return cls(
+            query,
+            ingredients,
+            excluded,
+            locale,
+            tmv,
+            limit_raw,
+            page_raw,
+            exclude_ids,
+            max_pages_raw,
+        )
+
+
+@dataclass(frozen=True)
+class MetadataRequest:
+    """Validated direct-ID metadata request."""
+
+    locale: str
+    external_ids: tuple[str, ...]
+
+    @classmethod
+    def from_payload(
+        cls, payload: object, config: BridgeConfig
+    ) -> MetadataRequest:
+        if not isinstance(payload, Mapping):
+            raise BridgeError(400, "invalid_request", "JSON body must be an object")
+        unexpected = sorted(set(payload) - METADATA_FIELDS)
+        if unexpected:
+            raise BridgeError(
+                400,
+                "invalid_request",
+                "Unexpected request fields: " + ", ".join(unexpected),
+            )
+        if "locale" not in payload:
+            raise BridgeError(400, "invalid_request", "locale is required")
+        locale = _normalize_locale(payload["locale"])
+        value = payload.get("external_ids")
+        if isinstance(value, str) or not isinstance(value, Sequence):
+            raise BridgeError(
+                400, "invalid_request", "external_ids must be an array"
+            )
+        if len(value) < 1 or len(value) > MAX_RESPONSE_RECIPES:
+            raise BridgeError(
+                400,
+                "invalid_request",
+                f"external_ids must contain between 1 and {MAX_RESPONSE_RECIPES} IDs",
+            )
+        external_ids: list[str] = []
+        seen: set[str] = set()
+        for item in value:
+            recipe_id = _clean_text(item, "external_ids", 160, True)
+            if not re.fullmatch(r"[A-Za-z0-9._:-]+", recipe_id):
+                raise BridgeError(
+                    400,
+                    "invalid_request",
+                    "external_ids contains an invalid ID",
+                )
+            if recipe_id in seen:
+                raise BridgeError(
+                    400,
+                    "invalid_request",
+                    "external_ids must be unique",
+                )
+            seen.add(recipe_id)
+            external_ids.append(recipe_id)
+        return cls(locale=locale, external_ids=tuple(external_ids))
+
+
+@dataclass(frozen=True)
+class GatewaySearchResult:
+    """Allowlisted recipes and bounded page progress."""
+
+    recipes: list[dict[str, object]]
+    pages_scanned: int
+    last_page: int
+    next_page: int
+    last_page_had_raw_hits: bool
+
+
+@dataclass(frozen=True)
+class GatewayMetadataResult:
+    """Ordered direct-ID metadata outcomes."""
+
+    outcomes: list[dict[str, object]]
+    locale: str
+
+
+@dataclass(frozen=True)
+class SafeIngredientMetadata:
+    """Bounded factual ingredient metadata safe to leave the bridge."""
+
+    name: str
+    source_quantity: float | None
+    source_quantity_max: float | None
+    source_unit: str | None
+    source_amount_text: str | None
+    source_group_index: int
+    source_group_position: int
+    source_group_title: str | None
+    source_ingredient_ref: str | None
+    source_default_title: str | None
+    source_unit_ref: str | None
+    source_optional: bool | None
+    source_shopping_category_ref: str | None
+
+
+@dataclass(frozen=True)
+class SafeRecipeMetadata:
+    """Allowlisted recipe detail fields with prohibited content omitted."""
+
+    id: str
+    name: str
+    ingredients: tuple[SafeIngredientMetadata, ...]
+    image: str
+    url: str
+    yield_quantity: float | None
+    yield_unit: str | None
+    active_time_seconds: int | None
+    total_time_seconds: int | None
+    difficulty: str | None
+    primary_category: str | None
+    equipment: tuple[str, ...]
+    topology_metrics: dict[str, int]
+
+
+class SlidingWindowRateLimiter:
+    """Small in-memory limiter for the single internal bridge credential."""
+
+    def __init__(self, maximum: int, window_seconds: float = 60.0) -> None:
+        self._maximum = maximum
+        self._window_seconds = window_seconds
+        self._events: deque[float] = deque()
+        self._lock = asyncio.Lock()
+
+    async def allow(self) -> bool:
+        now = time.monotonic()
+        async with self._lock:
+            cutoff = now - self._window_seconds
+            while self._events and self._events[0] <= cutoff:
+                self._events.popleft()
+            if len(self._events) >= self._maximum:
+                return False
+            self._events.append(now)
+            return True
+
+
+def _safe_https_url(value: object, field_name: str, cookidoo_only: bool) -> str:
+    if value is None or value == "":
+        return ""
+    url = _upstream_text(value, field_name, 2048, True)
+    parsed = urlparse(url)
+    if (
+        parsed.scheme.lower() != "https"
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+    ):
+        raise GatewayResponseError()
+    host = parsed.hostname.lower()
+    if cookidoo_only and host not in COOKIDOO_HOSTS:
+        raise GatewayResponseError()
+    return url
+
+
+def _safe_image_url(value: object) -> str:
+    url = _safe_https_url(value, "image_url", False)
+    if not url:
+        return ""
+    host = urlparse(url).hostname
+    if host is None or not (
+        host.lower() == "assets.tmecosys.com"
+        or host.lower().endswith(".tmecosys.com")
+    ):
+        raise GatewayResponseError()
+    return url
+
+
+def _validate_upstream_url(url: URL) -> None:
+    host = (url.host or "").lower()
+    if (
+        url.scheme.lower() != "https"
+        or not host
+        or url.user is not None
+        or url.password is not None
+        or not (
+            host in COOKIDOO_HOSTS
+            or host == "vorwerk-digital.com"
+            or host.endswith(".vorwerk-digital.com")
+            or host == "login.vorwerk.com"
+            or host.endswith(".login.vorwerk.com")
+        )
+    ):
+        raise GatewayResponseError()
+
+
+async def _validate_redirect(
+    _session: aiohttp.ClientSession,
+    _trace_config_ctx: object,
+    params: aiohttp.TraceRequestRedirectParams,
+) -> None:
+    location = params.response.headers.get("Location", "")
+    if not location:
+        raise GatewayResponseError()
+    _validate_upstream_url(params.url.join(URL(location)))
+
+
+def _upstream_text(
+    value: object, field_name: str, maximum: int, required: bool
+) -> str:
+    try:
+        return _clean_text(value, field_name, maximum, required)
+    except BridgeError as exc:
+        raise GatewayResponseError() from exc
+
+
+def _optional_upstream_text(
+    value: object, field_name: str, maximum: int
+) -> str | None:
+    if value is None or value == "":
+        return None
+    text = _upstream_text(value, field_name, maximum, False)
+    return text or None
+
+
+def _optional_upstream_bool(
+    mapping: Mapping[str, object],
+    key: str,
+) -> tuple[bool | None, bool]:
+    if key not in mapping:
+        return (None, False)
+    value = mapping.get(key)
+    if value is None:
+        return (None, True)
+    if not isinstance(value, bool):
+        raise GatewayResponseError()
+    return (value, True)
+
+
+def _optional_provider_reference(
+    mapping: Mapping[str, object],
+    key: str,
+) -> tuple[str | None, bool]:
+    if key not in mapping:
+        return (None, False)
+    value = mapping.get(key)
+    if value is None or value == "":
+        return (None, True)
+    reference = _upstream_text(
+        value,
+        key,
+        MAX_PROVIDER_REFERENCE_TEXT,
+        True,
+    )
+    if PROVIDER_REFERENCE_PATTERN.fullmatch(reference) is None:
+        raise GatewayResponseError()
+    return (reference, True)
+
+
+def _raw_ingredient_catalog(
+    raw: Mapping[str, object],
+) -> dict[str, tuple[str | None, bool]]:
+    value = raw.get("ingredients")
+    if value is None:
+        return {}
+    entries: list[tuple[object | None, object]]
+    if isinstance(value, Mapping):
+        if len(value) > MAX_RECIPE_INGREDIENTS:
+            raise GatewayResponseError()
+        entries = list(value.items())
+    elif not isinstance(value, str) and isinstance(value, Sequence):
+        if len(value) > MAX_RECIPE_INGREDIENTS:
+            raise GatewayResponseError()
+        entries = [(None, item) for item in value]
+    else:
+        raise GatewayResponseError()
+
+    catalog: dict[str, tuple[str | None, bool]] = {}
+    for map_key, entry_value in entries:
+        entry = _upstream_mapping(entry_value)
+        entry_id, id_present = _optional_provider_reference(entry, "id")
+        if map_key is not None:
+            if not isinstance(map_key, str):
+                raise GatewayResponseError()
+            keyed_id = _upstream_text(
+                map_key,
+                "ingredient_catalog_id",
+                MAX_PROVIDER_REFERENCE_TEXT,
+                True,
+            )
+            if PROVIDER_REFERENCE_PATTERN.fullmatch(keyed_id) is None:
+                raise GatewayResponseError()
+            if entry_id is not None and entry_id != keyed_id:
+                raise GatewayResponseError()
+            entry_id = keyed_id
+            id_present = True
+        if not id_present or entry_id is None:
+            raise GatewayResponseError()
+
+        default_title_present = "defaultTitle" in entry
+        default_title = (
+            _optional_upstream_text(
+                entry.get("defaultTitle"),
+                "source_default_title",
+                MAX_DEFAULT_TITLE_TEXT,
+            )
+            if default_title_present
+            else None
+        )
+        if entry_id in catalog:
+            # Repeated catalog rows are valid when they add no conflicting title.
+            stored_title, stored_title_present = catalog[entry_id]
+            if (
+                stored_title is not None
+                and default_title is not None
+                and stored_title != default_title
+            ):
+                raise GatewayResponseError()
+            catalog[entry_id] = (
+                stored_title or default_title,
+                stored_title_present or default_title_present,
+            )
+            continue
+        catalog[entry_id] = (default_title, default_title_present)
+    return catalog
+
+
+def _catalog_matched_row_reference(
+    ingredient: Mapping[str, object],
+    catalog: Mapping[str, object],
+) -> str | None:
+    if "id" not in ingredient:
+        return None
+    value = ingredient.get("id")
+    if not isinstance(value, str):
+        return None
+    candidate = value.strip()
+    if (
+        not candidate
+        or len(candidate) > MAX_PROVIDER_REFERENCE_TEXT
+        or PROVIDER_REFERENCE_PATTERN.fullmatch(candidate) is None
+        or candidate not in catalog
+    ):
+        return None
+    return candidate
+
+
+def _empty_topology_metrics() -> dict[str, int]:
+    return {
+        "group_count": 0,
+        "group_title_key_count": 0,
+        "group_title_nonempty_count": 0,
+        "group_title_length_total": 0,
+        "group_title_length_max": 0,
+        "ingredient_count": 0,
+        "ingredient_ref_key_count": 0,
+        "ingredient_ref_nonempty_count": 0,
+        "default_title_key_count": 0,
+        "default_title_nonempty_count": 0,
+        "unit_ref_key_count": 0,
+        "unit_ref_nonempty_count": 0,
+        "optional_key_count": 0,
+        "optional_true_count": 0,
+        "optional_false_count": 0,
+        "optional_null_count": 0,
+        "shopping_category_ref_key_count": 0,
+        "shopping_category_ref_nonempty_count": 0,
+    }
+
+
+def _upstream_number(value: object) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise GatewayResponseError()
+    number = float(value)
+    if not math.isfinite(number) or number < 0 or number > MAX_SOURCE_NUMBER:
+        raise GatewayResponseError()
+    return number
+
+
+def _upstream_seconds(value: object) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise GatewayResponseError()
+    if value < 0 or value > MAX_RECIPE_SECONDS:
+        raise GatewayResponseError()
+    return value
+
+
+def _upstream_sequence(
+    value: object, maximum: int, *, optional: bool = False
+) -> Sequence[object]:
+    if value is None and optional:
+        return ()
+    if isinstance(value, str) or not isinstance(value, Sequence):
+        raise GatewayResponseError()
+    if len(value) > maximum:
+        raise GatewayResponseError()
+    return value
+
+
+def _upstream_mapping(value: object, *, optional: bool = False) -> Mapping[str, object]:
+    if value is None and optional:
+        return {}
+    if not isinstance(value, Mapping):
+        raise GatewayResponseError()
+    return value
+
+
+def _format_source_number(value: float) -> str:
+    if value.is_integer():
+        return str(int(value))
+    return format(value, ".12g")
+
+
+def _source_amount_text(
+    quantity: float | None,
+    quantity_max: float | None,
+    unit: str | None,
+) -> str | None:
+    if quantity is None:
+        return None
+    amount = _format_source_number(quantity)
+    if quantity_max is not None:
+        amount += " - " + _format_source_number(quantity_max)
+    if unit:
+        amount += " " + unit
+    if len(amount) > MAX_SOURCE_AMOUNT_TEXT:
+        raise GatewayResponseError()
+    return amount
+
+
+def _public_amount_text(value: object) -> str | None:
+    text = _optional_upstream_text(
+        value,
+        "source_amount_text",
+        MAX_SOURCE_AMOUNT_TEXT,
+    )
+    if text is None:
+        return None
+    if re.fullmatch(
+        PUBLIC_AMOUNT_NUMBER_PATTERN
+        + r"(?:\s*(?:-|–|—)\s*"
+        + PUBLIC_AMOUNT_NUMBER_PATTERN
+        + r")?(?:\s*"
+        + PUBLIC_AMOUNT_UNIT_PATTERN
+        + r")?",
+        text,
+        flags=re.IGNORECASE | re.UNICODE,
+    ) is None:
+        return None
+    return text
+
+
+def _raw_quantity(value: object) -> tuple[float | None, float | None]:
+    if value is None:
+        return (None, None)
+    quantity = _upstream_mapping(value)
+    exact = _upstream_number(quantity.get("value"))
+    quantity_from = _upstream_number(quantity.get("from"))
+    quantity_to = _upstream_number(quantity.get("to"))
+    if exact is not None:
+        if quantity_from is not None or quantity_to is not None:
+            raise GatewayResponseError()
+        return (exact, None)
+    if quantity_from is None and quantity_to is None:
+        raise GatewayResponseError()
+    if quantity_from is None or quantity_to is None:
+        raise GatewayResponseError()
+    if quantity_to < quantity_from:
+        raise GatewayResponseError()
+    return (quantity_from, quantity_to)
+
+
+def _raw_image_url(raw: Mapping[str, object]) -> str:
+    assets = _upstream_sequence(
+        raw.get("descriptiveAssets"),
+        MAX_RECIPE_DESCRIPTIVE_ASSETS,
+        optional=True,
+    )
+    for asset_value in assets:
+        asset = _upstream_mapping(asset_value)
+        for variant in ("square", "portrait", "landscape"):
+            value = asset.get(variant)
+            if value is None or value == "":
+                continue
+            template = _upstream_text(value, "image_url", 2048, True)
+            return template.replace(
+                "{transformation}", "t_web_rdp_recipe_584x480_1_5x"
+            )
+    return ""
+
+
+def _safe_recipe_from_raw(
+    raw: Mapping[str, object],
+    canonical_url: str,
+) -> SafeRecipeMetadata:
+    ingredients: list[SafeIngredientMetadata] = []
+    catalog = _raw_ingredient_catalog(raw)
+    topology_metrics = _empty_topology_metrics()
+    if "recipeIngredientGroups" not in raw:
+        raise GatewayResponseError()
+    groups = _upstream_sequence(
+        raw["recipeIngredientGroups"],
+        MAX_RECIPE_INGREDIENT_GROUPS,
+    )
+    if not groups:
+        raise GatewayResponseError()
+    output_group_index = 0
+    for group_value in groups:
+        group = _upstream_mapping(group_value)
+        if "recipeIngredients" not in group:
+            raise GatewayResponseError()
+        group_title_present = "title" in group
+        group_title = (
+            _optional_upstream_text(
+                group.get("title"),
+                "source_group_title",
+                MAX_GROUP_TITLE_TEXT,
+            )
+            if group_title_present
+            else None
+        )
+        group_ingredients = _upstream_sequence(
+            group["recipeIngredients"],
+            MAX_RECIPE_INGREDIENTS - len(ingredients),
+        )
+        if not group_ingredients:
+            continue
+        topology_metrics["group_count"] += 1
+        if group_title_present:
+            topology_metrics["group_title_key_count"] += 1
+        if group_title is not None:
+            title_length = len(group_title)
+            topology_metrics["group_title_nonempty_count"] += 1
+            topology_metrics["group_title_length_total"] += title_length
+            topology_metrics["group_title_length_max"] = max(
+                topology_metrics["group_title_length_max"],
+                title_length,
+            )
+        for group_position, ingredient_value in enumerate(group_ingredients):
+            ingredient = _upstream_mapping(ingredient_value)
+            quantity, quantity_max = _raw_quantity(ingredient.get("quantity"))
+            unit = _optional_upstream_text(
+                ingredient.get("unitNotation"),
+                "source_unit",
+                MAX_SOURCE_UNIT_TEXT,
+            )
+            ingredient_ref, ingredient_ref_present = (
+                _optional_provider_reference(ingredient, "ingredient_ref")
+            )
+            local_id, local_id_present = _optional_provider_reference(
+                ingredient, "localId"
+            )
+            if (
+                ingredient_ref is not None
+                and local_id is not None
+                and ingredient_ref != local_id
+            ):
+                raise GatewayResponseError()
+            ingredient_ref = ingredient_ref or local_id
+            ingredient_ref_present = (
+                ingredient_ref_present or local_id_present
+            )
+            if ingredient_ref is None:
+                ingredient_ref = _catalog_matched_row_reference(
+                    ingredient,
+                    catalog,
+                )
+                ingredient_ref_present = ingredient_ref is not None
+            catalog_entry = (
+                catalog.get(ingredient_ref)
+                if ingredient_ref is not None
+                else None
+            )
+            default_title = catalog_entry[0] if catalog_entry else None
+            default_title_present = bool(
+                catalog_entry is not None and catalog_entry[1]
+            )
+            unit_ref, unit_ref_present = _optional_provider_reference(
+                ingredient, "unit_ref"
+            )
+            source_optional, optional_present = _optional_upstream_bool(
+                ingredient, "optional"
+            )
+            shopping_category_ref, shopping_category_ref_present = (
+                _optional_provider_reference(
+                    ingredient,
+                    "shoppingCategory_ref",
+                )
+            )
+            ingredients.append(
+                SafeIngredientMetadata(
+                    name=_upstream_text(
+                        ingredient.get("ingredientNotation"),
+                        "ingredient_name",
+                        200,
+                        True,
+                    ),
+                    source_quantity=quantity,
+                    source_quantity_max=quantity_max,
+                    source_unit=unit,
+                    source_amount_text=_source_amount_text(
+                        quantity, quantity_max, unit
+                    ),
+                    source_group_index=output_group_index,
+                    source_group_position=group_position,
+                    source_group_title=group_title,
+                    source_ingredient_ref=ingredient_ref,
+                    source_default_title=default_title,
+                    source_unit_ref=unit_ref,
+                    source_optional=source_optional,
+                    source_shopping_category_ref=shopping_category_ref,
+                )
+            )
+            topology_metrics["ingredient_count"] += 1
+            if ingredient_ref_present:
+                topology_metrics["ingredient_ref_key_count"] += 1
+            if ingredient_ref is not None:
+                topology_metrics["ingredient_ref_nonempty_count"] += 1
+            if default_title_present:
+                topology_metrics["default_title_key_count"] += 1
+            if default_title is not None:
+                topology_metrics["default_title_nonempty_count"] += 1
+            if unit_ref_present:
+                topology_metrics["unit_ref_key_count"] += 1
+            if unit_ref is not None:
+                topology_metrics["unit_ref_nonempty_count"] += 1
+            if optional_present:
+                topology_metrics["optional_key_count"] += 1
+            if source_optional is True:
+                topology_metrics["optional_true_count"] += 1
+            elif source_optional is False:
+                topology_metrics["optional_false_count"] += 1
+            else:
+                topology_metrics["optional_null_count"] += 1
+            if shopping_category_ref_present:
+                topology_metrics[
+                    "shopping_category_ref_key_count"
+                ] += 1
+            if shopping_category_ref is not None:
+                topology_metrics[
+                    "shopping_category_ref_nonempty_count"
+                ] += 1
+            if len(ingredients) > MAX_RECIPE_INGREDIENTS:
+                raise GatewayResponseError()
+        output_group_index += 1
+    if not ingredients:
+        raise GatewayResponseError()
+
+    serving = _upstream_mapping(raw.get("servingSize"), optional=True)
+    serving_quantity, serving_quantity_max = _raw_quantity(serving.get("quantity"))
+    serving_unit = _optional_upstream_text(
+        serving.get("unitNotation"), "yield_unit", MAX_SOURCE_UNIT_TEXT
+    )
+    if (
+        serving_quantity is None
+        or serving_quantity <= 0
+        or serving_quantity_max is not None
+        or serving_unit is None
+    ):
+        serving_quantity = None
+        serving_unit = None
+
+    active_time: int | None = None
+    total_time: int | None = None
+    for time_value in _upstream_sequence(raw.get("times"), 20, optional=True):
+        time_item = _upstream_mapping(time_value)
+        time_type = _optional_upstream_text(time_item.get("type"), "time_type", 80)
+        if time_type not in {"activeTime", "totalTime"}:
+            continue
+        value, value_max = _raw_quantity(time_item.get("quantity"))
+        if value is None or value_max is not None or not value.is_integer():
+            continue
+        seconds = _upstream_seconds(int(value))
+        if time_type == "activeTime" and active_time is None:
+            active_time = seconds
+        if time_type == "totalTime" and total_time is None:
+            total_time = seconds
+
+    primary_category: str | None = None
+    categories = _upstream_sequence(raw.get("categories"), 100, optional=True)
+    if categories:
+        primary_category = _optional_upstream_text(
+            _upstream_mapping(categories[0]).get("title"),
+            "primary_category",
+            MAX_GENERAL_TEXT,
+        )
+
+    equipment: list[str] = []
+    for utensil_value in _upstream_sequence(
+        raw.get("recipeUtensils"), MAX_RECIPE_EQUIPMENT, optional=True
+    ):
+        utensil = _upstream_mapping(utensil_value)
+        name = _optional_upstream_text(
+            utensil.get("utensilNotation"), "equipment", 120
+        )
+        if name is not None:
+            equipment.append(name)
+
+    return SafeRecipeMetadata(
+        id=_upstream_text(raw.get("id"), "external_id", 160, True),
+        name=_upstream_text(raw.get("title"), "title", 400, True),
+        ingredients=tuple(ingredients),
+        image=_raw_image_url(raw),
+        url=canonical_url,
+        yield_quantity=serving_quantity,
+        yield_unit=serving_unit,
+        active_time_seconds=active_time,
+        total_time_seconds=total_time,
+        difficulty=_optional_upstream_text(
+            raw.get("difficulty"), "difficulty", 80
+        ),
+        primary_category=primary_category,
+        equipment=tuple(equipment),
+        topology_metrics=topology_metrics,
+    )
+
+
+def _safe_recipe_from_public(details: object) -> SafeRecipeMetadata:
+    ingredients: list[SafeIngredientMetadata] = []
+    public_ingredients = _upstream_sequence(
+        getattr(details, "ingredients", None),
+        MAX_RECIPE_INGREDIENTS,
+    )
+    if not public_ingredients:
+        raise GatewayResponseError()
+    for group_position, ingredient in enumerate(public_ingredients):
+        amount_text = _public_amount_text(getattr(ingredient, "description", None))
+        ingredients.append(
+            SafeIngredientMetadata(
+                name=_upstream_text(
+                    getattr(ingredient, "name", ""),
+                    "ingredient_name",
+                    200,
+                    True,
+                ),
+                source_quantity=None,
+                source_quantity_max=None,
+                source_unit=None,
+                source_amount_text=amount_text,
+                source_group_index=0,
+                source_group_position=group_position,
+                source_group_title=None,
+                source_ingredient_ref=None,
+                source_default_title=None,
+                source_unit_ref=None,
+                source_optional=None,
+                source_shopping_category_ref=None,
+            )
+        )
+
+    primary_category: str | None = None
+    categories = _upstream_sequence(
+        getattr(details, "categories", None), 100, optional=True
+    )
+    if categories:
+        primary_category = _optional_upstream_text(
+            getattr(categories[0], "name", None),
+            "primary_category",
+            MAX_GENERAL_TEXT,
+        )
+
+    equipment = tuple(
+        _upstream_text(item, "equipment", 120, True)
+        for item in _upstream_sequence(
+            getattr(details, "utensils", None),
+            MAX_RECIPE_EQUIPMENT,
+            optional=True,
+        )
+    )
+    topology_metrics = _empty_topology_metrics()
+    topology_metrics["group_count"] = 1 if ingredients else 0
+    topology_metrics["ingredient_count"] = len(ingredients)
+    topology_metrics["optional_null_count"] = len(ingredients)
+    return SafeRecipeMetadata(
+        id=_upstream_text(getattr(details, "id", ""), "external_id", 160, True),
+        name=_upstream_text(getattr(details, "name", ""), "title", 400, True),
+        ingredients=tuple(ingredients),
+        image=_optional_upstream_text(
+            getattr(details, "image", None), "image_url", 2048
+        )
+        or "",
+        url=_upstream_text(
+            getattr(details, "url", ""), "canonical_url", 2048, True
+        ),
+        yield_quantity=None,
+        yield_unit=None,
+        active_time_seconds=_upstream_seconds(
+            getattr(details, "active_time", None)
+        ),
+        total_time_seconds=_upstream_seconds(
+            getattr(details, "total_time", None)
+        ),
+        difficulty=_optional_upstream_text(
+            getattr(details, "difficulty", None), "difficulty", 80
+        ),
+        primary_category=primary_category,
+        equipment=equipment,
+        topology_metrics=topology_metrics,
+    )
+
+
+async def _load_safe_recipe_metadata(client: Any, recipe_id: str) -> SafeRecipeMetadata:
+    """Synthetic adapter-test helper; production routes must never call this."""
+    if not re.fullmatch(r"[A-Za-z0-9._:-]+", recipe_id):
+        raise GatewayResponseError()
+    raw_request = getattr(client, "_request_json", None)
+    api_endpoint = getattr(client, "api_endpoint", None)
+    localization = getattr(client, "localization", None)
+    if (
+        callable(raw_request)
+        and isinstance(api_endpoint, URL)
+        and localization is not None
+        and isinstance(getattr(localization, "language", None), str)
+    ):
+        url = api_endpoint / RECIPE_PATH.format(
+            language=localization.language,
+            id=recipe_id,
+        )
+        _validate_upstream_url(url)
+        raw = await raw_request("get", url, "loading recipe metadata")
+        if not isinstance(raw, Mapping):
+            raise GatewayResponseError()
+        return _safe_recipe_from_raw(raw, str(url))
+
+    details = await client.get_recipe_details(recipe_id)
+    return _safe_recipe_from_public(details)
+
+
+def _allowlisted_recipe(
+    hit: object, details: SafeRecipeMetadata, locale: str
+) -> dict[str, object]:
+    external_id = _upstream_text(
+        details.id or getattr(hit, "id", ""),
+        "external_id",
+        160,
+        True,
+    )
+    hit_id = _upstream_text(getattr(hit, "id", ""), "external_id", 160, True)
+    if external_id != hit_id:
+        raise GatewayResponseError()
+    title = _upstream_text(
+        details.name or getattr(hit, "name", ""),
+        "title",
+        400,
+        True,
+    )
+
+    image_url = _safe_image_url(
+        details.image or getattr(hit, "image", None)
+    )
+    canonical_url = _safe_https_url(
+        details.url or getattr(hit, "url", None),
+        "canonical_url",
+        True,
+    )
+    if not canonical_url:
+        raise GatewayResponseError()
+
+    return {
+        "external_id": external_id,
+        "title": title,
+        "metadata_schema_version": METADATA_SCHEMA_VERSION,
+        "general": {
+            "yield_quantity": details.yield_quantity,
+            "yield_unit": details.yield_unit,
+            "active_time_seconds": details.active_time_seconds,
+            "total_time_seconds": details.total_time_seconds,
+            "difficulty": details.difficulty,
+            "primary_category": details.primary_category,
+            "equipment": list(details.equipment),
+        },
+        "ingredients": [
+            {
+                "name": ingredient.name,
+                "source_quantity": ingredient.source_quantity,
+                "source_quantity_max": ingredient.source_quantity_max,
+                "source_unit": ingredient.source_unit,
+                "source_amount_text": ingredient.source_amount_text,
+                "source_group_index": ingredient.source_group_index,
+                "source_group_position": ingredient.source_group_position,
+                "source_group_title": ingredient.source_group_title,
+                "source_ingredient_ref": ingredient.source_ingredient_ref,
+                "source_default_title": ingredient.source_default_title,
+                "source_unit_ref": ingredient.source_unit_ref,
+                "source_optional": ingredient.source_optional,
+                "source_shopping_category_ref": (
+                    ingredient.source_shopping_category_ref
+                ),
+            }
+            for ingredient in details.ingredients
+        ],
+        "topology_metrics": dict(details.topology_metrics),
+        "image_url": image_url,
+        "canonical_url": canonical_url,
+        "locale": locale,
+    }
+
+
+def _canonical_recipe_locale(canonical_url: str) -> str:
+    path = urlparse(canonical_url).path
+    match = re.fullmatch(r"/recipes/recipe/([^/]+)/[^/]+/?", path)
+    if match is None:
+        raise ValueError("canonical recipe URL is invalid")
+    try:
+        return _normalize_locale(match.group(1))
+    except BridgeError as exc:
+        raise ValueError("canonical recipe locale is invalid") from exc
+
+
+def _require_canonical_recipe_locale(canonical_url: str, locale: str) -> None:
+    if re.fullmatch(
+        r"/recipes/recipe/([^/]+)/[^/]+/?",
+        urlparse(canonical_url).path,
+    ) is None:
+        raise GatewayMetadataItemError("invalid_metadata")
+    try:
+        canonical_locale = _canonical_recipe_locale(canonical_url)
+    except ValueError as exc:
+        raise GatewayMetadataItemError("locale_mismatch") from exc
+    if canonical_locale.casefold() != locale.casefold():
+        raise GatewayMetadataItemError("locale_mismatch")
+
+
+def _metadata_exception_status(exc: BaseException) -> int | None:
+    current: BaseException | None = exc
+    seen: set[int] = set()
+    for _ in range(8):
+        if current is None or id(current) in seen:
+            break
+        seen.add(id(current))
+        if isinstance(current, aiohttp.ClientResponseError):
+            return int(current.status)
+        cause = current.__cause__
+        current = cause if isinstance(cause, BaseException) else current.__context__
+    return None
+
+
+def _metadata_failure_kind(exc: BaseException) -> str | None:
+    if isinstance(exc, GatewayMetadataItemError):
+        return exc.kind
+    status = _metadata_exception_status(exc)
+    if status in {404, 410}:
+        return "not_found"
+    if status in {400, 422}:
+        return "invalid_id"
+    if isinstance(
+        exc,
+        (GatewayResponseError, CookidooParseException, CookidooResponseException),
+    ):
+        return "invalid_metadata"
+    return None
+
+
+ClientFactory = Callable[[aiohttp.ClientSession, CookidooConfig], Any]
+
+
+class CookidooGateway:
+    """Owns the upstream session, lazy login, cookies, and allowlisting."""
+
+    def __init__(
+        self,
+        session: aiohttp.ClientSession,
+        config: BridgeConfig,
+        localizations: Sequence[CookidooLocalizationConfig],
+        client_factory: ClientFactory = Cookidoo,
+    ) -> None:
+        if not localizations:
+            raise GatewayConfigurationError("No Cookidoo localizations are available")
+        self._session = session
+        self._config = config
+        self._localizations = tuple(localizations)
+        self._client_factory = client_factory
+        self._clients: dict[str, Any] = {}
+        self._cookies_loaded = False
+        self._cookie_available = False
+        self._authenticated: set[str] = set()
+        self._login_lock = asyncio.Lock()
+        self._detail_semaphore = asyncio.Semaphore(config.detail_concurrency)
+        config.cookie_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.chmod(config.cookie_path.parent, 0o700)
+
+    @classmethod
+    async def create(cls, config: BridgeConfig) -> CookidooGateway:
+        timeout = aiohttp.ClientTimeout(
+            total=config.upstream_timeout_seconds,
+            connect=min(5, config.upstream_timeout_seconds),
+        )
+        trace_config = aiohttp.TraceConfig()
+        trace_config.on_request_redirect.append(_validate_redirect)
+        session = aiohttp.ClientSession(
+            cookie_jar=aiohttp.CookieJar(unsafe=True),
+            timeout=timeout,
+            trust_env=False,
+            trace_configs=[trace_config],
+        )
+        try:
+            localizations = await get_localization_options()
+            return cls(session, config, localizations)
+        except BaseException:
+            await session.close()
+            raise
+
+    async def close(self) -> None:
+        await self._session.close()
+
+    def _select_localization(
+        self, locale: str, *, exact: bool = False
+    ) -> CookidooLocalizationConfig:
+        locale_lower = locale.lower()
+        exact_matches = [
+            item
+            for item in self._localizations
+            if item.language.lower() == locale_lower
+        ]
+        if exact_matches:
+            return sorted(
+                exact_matches, key=lambda item: (item.country_code, item.url)
+            )[0]
+        if exact:
+            raise BridgeError(400, "unsupported_locale", "locale is unsupported")
+
+        language = locale_lower.split("-", 1)[0]
+        candidates = [
+            item
+            for item in self._localizations
+            if item.language.lower().split("-", 1)[0] == language
+        ]
+        if not candidates:
+            raise BridgeError(400, "unsupported_locale", "locale is unsupported")
+
+        default_lower = self._config.default_locale.lower()
+        for item in candidates:
+            if item.language.lower() == default_lower:
+                return item
+        return sorted(
+            candidates, key=lambda item: (item.language, item.country_code, item.url)
+        )[0]
+
+    def _client_for(self, localization: CookidooLocalizationConfig) -> Any:
+        key = f"{localization.language}|{localization.url}"
+        client = self._clients.get(key)
+        if client is None:
+            client = self._client_factory(
+                self._session,
+                CookidooConfig(
+                    email=os.getenv("COOKIDOO_EMAIL", ""),
+                    password=os.getenv("COOKIDOO_PASSWORD", ""),
+                    localization=localization,
+                ),
+            )
+            self._clients[key] = client
+        return client
+
+    async def _load_cookies_once(self, client: Any) -> None:
+        if self._cookies_loaded:
+            return
+        self._cookies_loaded = True
+        if not self._config.cookie_path.is_file():
+            return
+        try:
+            client.load_cookies(self._config.cookie_path)
+        except CookidooConfigException:
+            LOGGER.warning("stored_cookie_invalid login_required=true")
+            self._config.cookie_path.unlink(missing_ok=True)
+            return
+        self._cookie_available = True
+
+    def _save_cookies(self, client: Any) -> None:
+        old_umask = os.umask(0o077)
+        try:
+            client.save_cookies(self._config.cookie_path)
+        finally:
+            os.umask(old_umask)
+        os.chmod(self._config.cookie_path, stat.S_IRUSR | stat.S_IWUSR)
+        self._cookie_available = True
+
+    async def _login(self, client: Any, key: str, force: bool) -> None:
+        async with self._login_lock:
+            if not force and key in self._authenticated:
+                return
+            if not os.getenv("COOKIDOO_EMAIL", "").strip() or not os.getenv(
+                "COOKIDOO_PASSWORD", ""
+            ).strip():
+                raise GatewayConfigurationError(
+                    "Cookidoo credentials are required for login"
+                )
+            await client.login()
+            self._save_cookies(client)
+            self._authenticated.add(key)
+
+    async def _with_lazy_login(
+        self,
+        client: Any,
+        key: str,
+        operation: Callable[[], Awaitable[Any]],
+    ) -> Any:
+        await self._load_cookies_once(client)
+        logged_in_now = False
+        if not self._cookie_available and key not in self._authenticated:
+            await self._login(client, key, force=False)
+            logged_in_now = True
+        try:
+            return await operation()
+        except CookidooAuthException:
+            if logged_in_now:
+                raise
+            await self._login(client, key, force=True)
+            return await operation()
+
+    async def search(self, request: SearchRequest) -> GatewaySearchResult:
+        raise GatewayPolicyDisabledError()
+
+    async def metadata(self, request: MetadataRequest) -> GatewayMetadataResult:
+        raise GatewayPolicyDisabledError()
+
+
+CONFIG_KEY = web.AppKey("config", BridgeConfig)
+RATE_LIMITER_KEY = web.AppKey("rate_limiter", SlidingWindowRateLimiter)
+REQUEST_SEMAPHORE_KEY = web.AppKey("request_semaphore", asyncio.Semaphore)
+GATEWAY_KEY = web.AppKey("gateway", CookidooGateway)
+
+
+@web.middleware
+async def error_middleware(
+    request: web.Request, handler: Callable[[web.Request], Awaitable[web.StreamResponse]]
+) -> web.StreamResponse:
+    try:
+        return await handler(request)
+    except BridgeError as exc:
+        LOGGER.warning("request_rejected code=%s status=%s", exc.code, exc.status)
+        return web.json_response(
+            {"error": exc.code, "message": exc.message}, status=exc.status
+        )
+    except TimeoutError:
+        LOGGER.warning("request_failed code=upstream_timeout")
+        return web.json_response(
+            {"error": "upstream_timeout", "message": "Cookidoo request timed out"},
+            status=504,
+        )
+    except CookidooAuthException:
+        LOGGER.warning("request_failed code=cookidoo_auth_failed")
+        return web.json_response(
+            {
+                "error": "cookidoo_auth_failed",
+                "message": "Cookidoo authentication failed",
+            },
+            status=502,
+        )
+    except CookidooException as exc:
+        upstream_status = _metadata_exception_status(exc)
+        if upstream_status in {403, 429}:
+            code = (
+                "cookidoo_upstream_forbidden"
+                if upstream_status == 403
+                else "cookidoo_upstream_rate_limited"
+            )
+            LOGGER.warning("request_failed code=%s", code)
+            return web.json_response(
+                {
+                    "error": code,
+                    "message": "Cookidoo pilot circuit break required",
+                },
+                status=upstream_status,
+            )
+        LOGGER.warning(
+            "request_failed code=cookidoo_request_failed type=%s",
+            type(exc).__name__,
+        )
+        return web.json_response(
+            {
+                "error": "cookidoo_request_failed",
+                "message": "Cookidoo request failed",
+            },
+            status=502,
+        )
+    except web.HTTPRequestEntityTooLarge:
+        return web.json_response(
+            {"error": "body_too_large", "message": "Request body is too large"},
+            status=413,
+        )
+    except web.HTTPException as exc:
+        return web.json_response(
+            {"error": "http_error", "message": "Invalid HTTP request"},
+            status=exc.status,
+        )
+    except Exception as exc:
+        LOGGER.error("request_failed code=internal_error type=%s", type(exc).__name__)
+        return web.json_response(
+            {"error": "internal_error", "message": "Internal bridge error"},
+            status=500,
+        )
+
+
+def _policy_capabilities() -> dict[str, object]:
+    return {
+        "detail_hydration": False,
+        "metadata_hydration": False,
+        "ingredient_aware_discovery": False,
+        "reason": DETAIL_HYDRATION_POLICY_REASON,
+        "policy_version": DETAIL_HYDRATION_POLICY_VERSION,
+    }
+
+
+async def health_handler(_request: web.Request) -> web.Response:
+    return web.json_response(
+        {
+            "status": "ok",
+            "service": "cookidoo-bridge",
+            "capabilities": _policy_capabilities(),
+        }
+    )
+
+
+async def capabilities_handler(_request: web.Request) -> web.Response:
+    return web.json_response(_policy_capabilities())
+
+
+def _authorize(request: web.Request, config: BridgeConfig) -> None:
+    if not config.bridge_token:
+        raise GatewayConfigurationError("COOKIDOO_BRIDGE_TOKEN is required")
+    header = request.headers.get("Authorization", "")
+    prefix = "Bearer "
+    if not header.startswith(prefix) or not hmac.compare_digest(
+        header[len(prefix) :], config.bridge_token
+    ):
+        raise BridgeError(401, "unauthorized", "Bearer token is invalid")
+
+
+async def search_handler(request: web.Request) -> web.Response:
+    config = request.app[CONFIG_KEY]
+    _authorize(request, config)
+    limiter = request.app[RATE_LIMITER_KEY]
+    if not await limiter.allow():
+        raise BridgeError(429, "rate_limited", "Bridge rate limit exceeded")
+    if not request.content_type == "application/json":
+        raise BridgeError(415, "unsupported_media_type", "Content-Type must be application/json")
+    try:
+        payload = await request.json(loads=json.loads)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        raise BridgeError(400, "invalid_json", "Request body is not valid JSON") from None
+    SearchRequest.from_payload(payload, config)
+    raise GatewayPolicyDisabledError()
+
+
+async def metadata_handler(request: web.Request) -> web.Response:
+    config = request.app[CONFIG_KEY]
+    _authorize(request, config)
+    limiter = request.app[RATE_LIMITER_KEY]
+    if not await limiter.allow():
+        raise BridgeError(429, "rate_limited", "Bridge rate limit exceeded")
+    if not request.content_type == "application/json":
+        raise BridgeError(
+            415,
+            "unsupported_media_type",
+            "Content-Type must be application/json",
+        )
+    try:
+        payload = await request.json(loads=json.loads)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        raise BridgeError(
+            400, "invalid_json", "Request body is not valid JSON"
+        ) from None
+    MetadataRequest.from_payload(payload, config)
+    raise GatewayPolicyDisabledError()
+
+
+def create_app(
+    config: BridgeConfig | None = None, gateway: CookidooGateway | None = None
+) -> web.Application:
+    config = config or BridgeConfig.from_env()
+    app = web.Application(client_max_size=MAX_BODY_BYTES, middlewares=[error_middleware])
+    app[CONFIG_KEY] = config
+    app[RATE_LIMITER_KEY] = SlidingWindowRateLimiter(config.rate_limit_per_minute)
+    app[REQUEST_SEMAPHORE_KEY] = asyncio.Semaphore(config.max_concurrency)
+
+    if gateway is not None:
+        app[GATEWAY_KEY] = gateway
+
+    app.router.add_get("/health", health_handler)
+    app.router.add_get("/v1/capabilities", capabilities_handler)
+    app.router.add_post("/v1/search", search_handler)
+    app.router.add_post("/v1/metadata", metadata_handler)
+    return app
+
+
+def main() -> None:
+    level_name = os.getenv("LOG_LEVEL", "INFO").upper()
+    level = getattr(logging, level_name, logging.INFO)
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    )
+    config = BridgeConfig.from_env()
+    web.run_app(
+        create_app(config),
+        host=os.getenv("BRIDGE_HOST", "0.0.0.0"),
+        port=_env_int("BRIDGE_PORT", 8081, 1, 65535),
+        access_log=LOGGER,
+    )
+
+
+if __name__ == "__main__":
+    main()

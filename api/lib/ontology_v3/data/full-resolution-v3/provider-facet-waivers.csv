@@ -1,0 +1,12 @@
+review_key,source,facet_key,value_key,rationale,reviewer
+e4e8ea11463a6d65edf2f188a033573bd6768dea4973be5bca7ca6de284647f1,provider_title,wine_color,white,White color is already encoded by the reviewed white_wine vinegar variety and is not a second independent vinegar facet,operator-corrective-review-v3
+80a0dba2162bfc1e8ebf7d67238a35d9841bb22dedab937edd2e76dc20ff25d1,provider_title,wine_color,white,White color is already encoded by the reviewed white_wine vinegar variety and is not a second independent vinegar facet,operator-corrective-review-v3
+4ecad52a2308dbd37e1425e489c9473f0b1238ac398ecaf3fe00b0fc92668f86,provider_title,wine_color,red,Red color is already encoded by the reviewed red_wine vinegar variety and is not a second independent vinegar facet,operator-corrective-review-v3
+3dc505f6b0ba33f8ea04da4fdfcba9315d024c8373f3b51b5b1eccf4180b4789,provider_title,wine_color,red,Red color is already encoded by the reviewed red_wine vinegar variety and is not a second independent vinegar facet,operator-corrective-review-v3
+2a5d02a3ff729790e0d8ab4c01ef84352e516634eab5041ffa23565144c0e70b,provider_title,variety,coconut,Coconut is inherent in the coconut-milk base identity and is not duplicated as a variety facet,operator-corrective-review-v3
+238685cc5fcd188792bd7aa8d983dcdc0160a2dee277ad6bcfbc73b72d5a7c81,provider_title,variety,tomato,Tomato is inherent in the tomato base identity and is not duplicated as a variety facet,operator-corrective-review-v3
+b209964155ff9ab925c5819746bdc116432477e6d0badbb4a7a828bf25a83240,provider_title,variety,tomato,Tomato is inherent in the tomato base identity while fresh state is preserved explicitly,operator-corrective-review-v3
+44609e97be9dd7c8375cfc728ad81c2a5f8ed00e6a58a392613cece8a2076d9d,provider_title,variety,tomato,Tomato is inherent in the tomato base identity and is not duplicated as a variety facet,operator-corrective-review-v3
+56363b0dbd2adaa44079c00461081096a1dd290e528bab65185f4968b1fb9dde,local_label,variety,tomato,Tomato is inherent in the ketchup prepared identity and is not duplicated as a variety facet,operator-corrective-review-v3
+d3719bd88c3bcd217f2c5ae60531f245bc14ea5ec14a8e7a9738fb61128a6d76,local_label,variety,rice,Rice is inherent in the rice base identity while white refinement is preserved explicitly,operator-corrective-review-v3
+d3719bd88c3bcd217f2c5ae60531f245bc14ea5ec14a8e7a9738fb61128a6d76,provider_title,variety,rice,Rice is inherent in the rice base identity while white refinement is preserved explicitly,operator-corrective-review-v3

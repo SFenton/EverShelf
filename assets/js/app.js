@@ -990,7 +990,7 @@ function _scaleShowReadingModal(targetInputId, unit) {
             <p class="settings-hint" style="margin-top:12px">${t('scale.waiting_stable')}</p>
         </div>
     `;
-    document.getElementById('modal-overlay').style.display = 'flex';
+    showGenericModal();
 }
 
 /**
@@ -1068,6 +1068,18 @@ function testScaleConnection() {
         });
 }
 
+function _setRecipeDialogSuspended(suspended) {
+    const overlay = document.getElementById('recipe-overlay');
+    const dialog = overlay?.querySelector('.recipe-dialog');
+    if (!dialog || overlay.style.display === 'none') return;
+    dialog.inert = suspended;
+    if (suspended) {
+        dialog.setAttribute('aria-hidden', 'true');
+    } else {
+        dialog.removeAttribute('aria-hidden');
+    }
+}
+
 async function discoverScaleGateway() {
     const btn    = document.getElementById('btn-scale-discover');
     const status = document.getElementById('scale-discover-status');
@@ -1110,7 +1122,7 @@ async function discoverScaleGateway() {
 }
 
 // ===== i18n TRANSLATION SYSTEM =====
-const _I18N_VERSION = '20260704b'; // bump when translations change
+const _I18N_VERSION = '20260803a'; // bump when translations change
 let _i18nStrings = null;   // current language translations (flat)
 let _i18nFallback = null;  // Italian fallback (flat)
 let _i18nLoadedVersion = null;
@@ -1330,7 +1342,7 @@ function _showExportModal() {
             </button>
         </div>`;
     document.getElementById('modal-content').innerHTML = html;
-    document.getElementById('modal-overlay').style.display = 'flex';
+    showGenericModal();
 }
 
 const LOCATIONS = {
@@ -3617,7 +3629,7 @@ function _kioskCheckForUpdates() {
             status.innerHTML = t('kiosk.too_old');
         }
         // Pre-set the pending URL and show the install button (installUpdate works in old APKs too)
-        _kioskPendingApkUrl = 'https://github.com/dadaloop82/EverShelf/releases/download/kiosk-latest/evershelf-kiosk.apk';
+        _kioskPendingApkUrl = 'https://github.com/SFenton/EverShelf/releases/download/kiosk-latest/evershelf-kiosk.apk';
         if (installBtn) installBtn.style.display = '';
         return;
     }
@@ -3646,7 +3658,7 @@ function _kioskInstallUpdate() {
             status.style.border = '1px solid rgba(239,68,68,0.3)';
             status.innerHTML = t('kiosk.manual_install') +
                 `<br><code style="font-size:0.75rem;word-break:break-all">
-https://github.com/dadaloop82/EverShelf/releases/download/kiosk-latest/evershelf-kiosk.apk
+https://github.com/SFenton/EverShelf/releases/download/kiosk-latest/evershelf-kiosk.apk
                 </code>`;
         }
         return;
@@ -4159,11 +4171,12 @@ async function api(action, params = {}, method = 'GET', body = null, extraHeader
     }
     const opts = { method, cache: 'no-store' };
     const authHdrs = typeof apiAuthHeaders === 'function' ? apiAuthHeaders() : {};
+    const csrfHeaders = method === 'POST' ? { 'X-EverShelf-Request': '1' } : {};
     if (body) {
-        opts.headers = { 'Content-Type': 'application/json', 'X-EverShelf-Request': '1', ...authHdrs, ...extraHeaders };
+        opts.headers = { 'Content-Type': 'application/json', ...csrfHeaders, ...authHdrs, ...extraHeaders };
         opts.body = JSON.stringify(body);
     } else {
-        opts.headers = { ...authHdrs, ...extraHeaders };
+        opts.headers = { ...csrfHeaders, ...authHdrs, ...extraHeaders };
     }
     let res;
     try {
@@ -4249,7 +4262,7 @@ function refreshCurrentPage() {
             loadShoppingList();
             break;
         case 'products': loadAllProducts(); break;
-        case 'recipe':   loadRecipeArchive(); break;
+        case 'recipe':   loadRecipePage(); break;
         case 'log':      loadLog(); break;
         // scan/ai/settings/chat: nessun dato live da ricaricare
     }
@@ -4266,6 +4279,9 @@ function showPage(pageId, param = null, options = {}) {
         }
     }
 
+    if (pageId !== 'recipe') {
+        cancelRecipeCatalogActivity();
+    }
     _currentPageId = pageId;
     _currentPageParam = param;
     // Hide all pages
@@ -4308,7 +4324,7 @@ function showPage(pageId, param = null, options = {}) {
             _shoppingInventoryCache = null; // invalidate so hints use fresh data
             loadShoppingList();
             break;
-        case 'recipe': loadRecipeArchive(); break;
+        case 'recipe': loadRecipePage(); break;
         case 'log': loadLog(); break;
         case 'ai': initAICamera(); break;
         case 'settings': loadSettingsUI(); break;
@@ -6796,7 +6812,13 @@ function showItemDetail(inventoryId, productId) {
     document.getElementById('modal-overlay').style.display = 'flex';
 }
 
-function closeModal() {
+function _completeLowStockPrompt() {
+    const cb = window._lowStockAfterCallback;
+    window._lowStockAfterCallback = null;
+    if (cb) cb();
+}
+
+function closeModal(completeLowStockPrompt = true) {
     document.getElementById('modal-overlay').style.display = 'none';
     clearMoveModalTimer();
     _cancelScaleAutoConfirm(false);
@@ -6804,6 +6826,13 @@ function closeModal() {
     _scaleUserDismissed = false;
     _scaleWeightCallback = null;
     _bannerEditPending = false;
+    _setRecipeDialogSuspended(false);
+    if (document.getElementById('recipe-overlay')?.style.display !== 'none') {
+        focusActiveRecipeDialogPanel();
+    }
+    if (completeLowStockPrompt) {
+        _completeLowStockPrompt();
+    }
 }
 
 async function quickUse(productId, location) {
@@ -7031,6 +7060,8 @@ function editInventoryItem(id) {
         _prevUnit: item.unit || 'pz',
         default_quantity: item.default_quantity,
         package_unit: item.package_unit || '',
+        _initialConfSize: confSizeVal,
+        _initialConfUnit: confUnitVal,
     };
     
     // Rebuild modal content for editing (don't close and reopen - just replace content)
@@ -7100,7 +7131,7 @@ function editInventoryItem(id) {
             <button type="submit" class="btn btn-large btn-primary full-width">${t('btn.save')}</button>
         </form>
     `;
-    document.getElementById('modal-overlay').style.display = 'flex';
+    showGenericModal();
     _initExpiryManualTracking('edit-expiry', item);
     setQtyInputUnitLabel('edit-qty', item.unit || 'pz');
 }
@@ -7153,16 +7184,32 @@ async function submitEditInventory(e, id, productId) {
         if (!confirm(t('edit.confirm_large_qty').replace('{qty}', qty).replace('{unit}', unit))) return;
     }
 
-    const payload = { id, quantity: qty, location: loc, expiry_date: expiry, unit, product_id: productId,
+    const editingProduct = window._editingProduct || {};
+    const previousUnit = editingProduct._prevUnit || 'pz';
+    const unitChanged = unit !== previousUnit;
+    const payload = { id, quantity: qty, location: loc, expiry_date: expiry, product_id: productId,
         vacuum_sealed: document.getElementById('edit-vacuum')?.checked ? 1 : 0,
         expiry_user_set: _expiryUserSetPayload('edit-expiry') };
-    
-    // Add package info if conf
+    if (unitChanged) {
+        payload.unit = unit;
+    }
+
+    const packageUnit = document.getElementById('edit-conf-unit')?.value || '';
+    const packageSize = parseFloat(
+        document.getElementById('edit-conf-size')?.value
+    ) || 0;
+    const initialPackageUnit = editingProduct._initialConfUnit || '';
+    const initialPackageSize =
+        parseFloat(editingProduct._initialConfSize) || 0;
+    const packageChanged = packageUnit !== initialPackageUnit
+        || Math.abs(packageSize - initialPackageSize) > 0.001;
+
     if (unit === 'conf') {
-        payload.package_unit = document.getElementById('edit-conf-unit')?.value || '';
-        payload.package_size = parseFloat(document.getElementById('edit-conf-size')?.value) || 0;
-    } else {
-        // Clear package info if not conf
+        if (unitChanged || packageChanged) {
+            payload.package_unit = packageUnit;
+            payload.package_size = packageSize;
+        }
+    } else if (unitChanged && previousUnit === 'conf') {
         payload.package_unit = '';
         payload.package_size = 0;
     }
@@ -8985,7 +9032,7 @@ function openInventoryEdit() {
             }).join('')}
         </div>
     `;
-    document.getElementById('modal-overlay').style.display = 'flex';
+    showGenericModal();
 }
 
 function editActionInventoryItem(inventoryId) {
@@ -10295,7 +10342,8 @@ async function loadUseInventoryInfo() {
 
         const unit = items[0].unit || 'pz';
         const pkgSize = parseFloat(items[0].default_quantity) || 0;
-        const pkgUnit = items[0].package_unit || '';
+        const rawPkgUnit = String(items[0].package_unit || '').toLowerCase();
+        const pkgUnit = ['g', 'ml', 'pz'].includes(rawPkgUnit) ? rawPkgUnit : '';
         const isConf = unit === 'conf' && pkgSize > 0 && pkgUnit;
 
         if (isConf) {
@@ -10753,9 +10801,11 @@ function showLowStockBringPrompt(result, afterCallback) {
     
     // Format remaining for display
     let remainLabel = '';
-    if (unit === 'conf' && result.product_package_unit) {
+    const rawPackageUnit = String(result.product_package_unit || '').toLowerCase();
+    const packageUnit = ['g', 'ml', 'pz'].includes(rawPackageUnit) ? rawPackageUnit : '';
+    if (unit === 'conf' && packageUnit) {
         const subTotal = Math.round(totalRemaining * defaultQty);
-        remainLabel = `${subTotal}${result.product_package_unit}`;
+        remainLabel = `${subTotal}${packageUnit}`;
     } else {
         const unitLabels = { pz: 'pz', g: 'g', ml: 'ml', conf: 'conf' };
         remainLabel = `${Number.isInteger(totalRemaining) ? totalRemaining : totalRemaining.toFixed(1)} ${unitLabels[unit] || unit}`;
@@ -10800,7 +10850,7 @@ function showLowStockBringPrompt(result, afterCallback) {
             <button class="modal-close" onclick="closeLowStockPrompt()">✕</button>
         </div>
         <div style="padding:0 16px 16px">
-            <p style="margin-bottom:12px">${t('lowstock.message').replace('{name}', `<strong>${escapeHtml(name)}</strong>`).replace('{qty}', `<strong>${remainLabel}</strong>`)}</p>
+            <p style="margin-bottom:12px">${t('lowstock.message').replace('{name}', `<strong>${escapeHtml(name)}</strong>`).replace('{qty}', `<strong>${escapeHtml(remainLabel)}</strong>`)}</p>
             ${smartNote}
             <p style="margin-bottom:16px">${t('lowstock.question')}</p>
             <button type="button" class="btn btn-large btn-success full-width" onclick="addLowStockToBring()">
@@ -10811,11 +10861,11 @@ function showLowStockBringPrompt(result, afterCallback) {
             </button>
         </div>
     `;
-    document.getElementById('modal-overlay').style.display = 'flex';
+    showGenericModal();
 }
 
 async function addLowStockToBring() {
-    closeModal();
+    closeModal(false);
     try {
         // Use the generic shopping name (e.g. "Affettato") set by showLowStockBringPrompt.
         // _lowStockSpec holds the specific product name (e.g. "Mortadella IGP · Marca").
@@ -10840,16 +10890,11 @@ async function addLowStockToBring() {
     } catch (e) {
         showToast(t('error.bring_add'), 'error');
     }
-    const cb = window._lowStockAfterCallback;
-    window._lowStockAfterCallback = null;
-    if (cb) cb();
+    _completeLowStockPrompt();
 }
 
 function closeLowStockPrompt() {
     closeModal();
-    const cb = window._lowStockAfterCallback;
-    window._lowStockAfterCallback = null;
-    if (cb) cb();
 }
 
 let _moveModalTimer = null;
@@ -14387,6 +14432,1050 @@ function getSelectedMealType() {
     return checked ? checked.value : getMealType();
 }
 
+// ===== RECIPE DISCOVERY CATALOG =====
+const _RECIPE_CATALOG_LIMIT = 24;
+const _RECIPE_CATALOG_POLL_LIMIT = 72;
+const _RECIPE_CATALOG_POLL_INTERVAL = 5000;
+const _RECIPE_CATALOG_SOURCES = new Set([
+    '', 'non_cookidoo', 'local', 'generated', 'manual', 'cookidoo'
+]);
+
+let _recipeCatalogState = { query: '', mode: 'stocked', source: '' };
+let _recipeCatalogResults = [];
+let _recipeCatalogConnector = null;
+let _recipeCatalogRequestSeq = 0;
+let _recipeCatalogConnectorSeq = 0;
+let _recipeCatalogDiscoverySeq = 0;
+let _recipeCatalogDiscoveryPending = false;
+let _recipeCatalogNextDiscoveryQuery = '';
+let _recipeCatalogPollToken = 0;
+let _recipeCatalogPollTimer = null;
+let _recipeCatalogPollActive = false;
+let _recipeDialogOpenSeq = 0;
+let _recipeDialogReturnFocus = null;
+
+function recipeCatalogSafeHttpsUrl(value, cookidooOnly = false) {
+    if (typeof value !== 'string' || value.trim() === '') return '';
+    try {
+        const url = new URL(value.trim());
+        if (url.protocol !== 'https:' || url.username || url.password || !url.hostname) return '';
+        const rawHost = url.hostname.toLowerCase();
+        if (
+            !rawHost.includes('.')
+            || rawHost === 'localhost'
+            || rawHost.endsWith('.localhost')
+            || rawHost.endsWith('.local')
+            || /^\d{1,3}(?:\.\d{1,3}){3}$/.test(rawHost)
+            || rawHost.startsWith('[')
+        ) {
+            return '';
+        }
+        if (cookidooOnly) {
+            const host = rawHost.replace(/^www\./, '');
+            const allowedHosts = new Set([
+                'cookidoo.at', 'cookidoo.be', 'cookidoo.ca', 'cookidoo.ch',
+                'cookidoo.co.uk', 'cookidoo.com.au', 'cookidoo.com.cn',
+                'cookidoo.com.tr', 'cookidoo.cz', 'cookidoo.de', 'cookidoo.es',
+                'cookidoo.fr', 'cookidoo.international', 'cookidoo.it',
+                'cookidoo.mx', 'cookidoo.pl', 'cookidoo.pt',
+                'cookidoo.thermomix.com',
+            ]);
+            if (!allowedHosts.has(host)) return '';
+        }
+        return url.href;
+    } catch (_) {
+        return '';
+    }
+}
+
+function recipeCatalogSafeCookidooImageUrl(value) {
+    const url = recipeCatalogSafeHttpsUrl(value);
+    if (!url) return '';
+    try {
+        const host = new URL(url).hostname.toLowerCase();
+        return host === 'assets.tmecosys.com' || host.endsWith('.tmecosys.com')
+            ? url
+            : '';
+    } catch (_) {
+        return '';
+    }
+}
+
+function recipeCatalogDiscoveryLocale(language) {
+    return {
+        en: 'en-GB',
+        it: 'it-IT',
+        de: 'de-DE',
+        fr: 'fr-FR',
+        es: 'es-ES',
+    }[String(language || '').toLowerCase()] || '';
+}
+
+function recipeCatalogCoverage(result) {
+    const recipe = result && result.recipe ? result.recipe : {};
+    const ranking = result?.ranking && typeof result.ranking === 'object' ? result.ranking : result;
+    const explain = result?.explain || ranking?.explain || {};
+    const components = result?.components || ranking?.components || {};
+    const matches = Array.isArray(explain?.ingredient_matches)
+        ? explain.ingredient_matches
+        : [];
+    const requiredMatches = matches.filter(match => match && match.required);
+    let total = requiredMatches.length;
+    let matched = requiredMatches.filter(match => match.matched).length;
+
+    if (total === 0 && Array.isArray(recipe.ingredients)) {
+        const requiredIngredients = recipe.ingredients.filter(ingredient =>
+            ingredient && !ingredient.is_optional && !ingredient.is_staple
+        );
+        total = requiredIngredients.length;
+        const componentCoverage = Number(components?.coverage);
+        if (total > 0 && Number.isFinite(componentCoverage)) {
+            matched = Math.round(Math.max(0, Math.min(1, componentCoverage)) * total);
+        }
+    }
+
+    const componentCoverage = Number(components?.coverage);
+    const ratio = Number.isFinite(componentCoverage)
+        ? Math.max(0, Math.min(1, componentCoverage))
+        : (total > 0 ? matched / total : 0);
+    return { matched, total, ratio };
+}
+
+function _recipeCatalogElement(tag, className = '', text = '') {
+    const element = document.createElement(tag);
+    if (className) element.className = className;
+    if (text !== '') element.textContent = text;
+    return element;
+}
+
+function _recipeCatalogSetStatus(key, type = 'info', params = null) {
+    const status = document.getElementById('recipe-catalog-status');
+    if (!status) return;
+    if (!key) {
+        status.textContent = '';
+        status.className = 'recipe-catalog-status';
+        status.hidden = true;
+        return;
+    }
+    status.textContent = t(key, params || undefined);
+    status.className = `recipe-catalog-status ${type}`;
+    status.hidden = false;
+}
+
+function _recipeCatalogSetBusy(busy) {
+    const results = document.getElementById('recipe-catalog-results');
+    if (results) results.setAttribute('aria-busy', busy ? 'true' : 'false');
+}
+
+function _recipeCatalogSyncControls() {
+    const stocked = document.getElementById('recipe-catalog-mode-stocked');
+    const expiring = document.getElementById('recipe-catalog-mode-expiring');
+    const isExpiring = _recipeCatalogState.mode === 'expiring';
+    if (stocked) {
+        stocked.classList.toggle('active', !isExpiring);
+        stocked.setAttribute('aria-pressed', isExpiring ? 'false' : 'true');
+    }
+    if (expiring) {
+        expiring.classList.toggle('active', isExpiring);
+        expiring.setAttribute('aria-pressed', isExpiring ? 'true' : 'false');
+    }
+    const source = document.getElementById('recipe-catalog-source');
+    if (source && [...source.options].some(option => option.value === _recipeCatalogState.source && !option.disabled)) {
+        source.value = _recipeCatalogState.source;
+    }
+}
+
+function _recipeCatalogConnectorAvailable() {
+    const connector = _recipeCatalogConnector;
+    return !!(
+        connector
+        && connector.state
+        && connector.state.enabled
+        && connector.health
+        && connector.health.configured
+    );
+}
+
+function _recipeCatalogRenderConnectorState() {
+    const option = document.getElementById('recipe-catalog-source-cookidoo');
+    const button = document.getElementById('recipe-catalog-discover');
+    const hint = document.getElementById('recipe-catalog-remote-hint');
+    const connector = _recipeCatalogConnector;
+    const exists = !!connector;
+    const available = _recipeCatalogConnectorAvailable();
+
+    if (option) {
+        option.hidden = !exists;
+        option.disabled = !exists;
+    }
+    if (button) button.hidden = !available;
+    if (!hint) return;
+
+    if (!exists) {
+        hint.hidden = true;
+        hint.textContent = '';
+        if (_recipeCatalogState.source === 'cookidoo') {
+            _recipeCatalogState.source = '';
+            _recipeCatalogSyncControls();
+        }
+        return;
+    }
+
+    const health = connector.health?.status || '';
+    if (available && (health === 'circuit_open' || health === 'error')) {
+        hint.textContent = t('recipes.catalog.connector_degraded');
+        hint.className = 'recipe-catalog-remote-hint warning';
+    } else if (available) {
+        hint.textContent = t('recipes.catalog.discover_hint');
+        hint.className = 'recipe-catalog-remote-hint';
+    } else if (connector.health && !connector.health.configured) {
+        hint.textContent = t('recipes.catalog.connector_config_required');
+        hint.className = 'recipe-catalog-remote-hint warning';
+    } else {
+        hint.textContent = t('recipes.catalog.connector_unavailable');
+        hint.className = 'recipe-catalog-remote-hint warning';
+    }
+    hint.hidden = false;
+}
+
+async function loadRecipeCatalogConnectors() {
+    const seq = ++_recipeCatalogConnectorSeq;
+    try {
+        const response = await api('recipe_connectors');
+        if (seq !== _recipeCatalogConnectorSeq) return;
+        if (!response || response.success === false || !Array.isArray(response.connectors)) {
+            throw new Error(response?.error || 'recipe_connectors_load_failed');
+        }
+        const connectors = response.connectors;
+        _recipeCatalogConnector = connectors.find(connector => connector?.connector === 'cookidoo') || null;
+    } catch (error) {
+        if (seq !== _recipeCatalogConnectorSeq) return;
+        console.warn('Failed to load recipe connectors:', error);
+        if (_recipeCatalogConnector) {
+            _recipeCatalogConnector = {
+                ..._recipeCatalogConnector,
+                health: { ...(_recipeCatalogConnector.health || {}), status: 'error' },
+            };
+        }
+    }
+    _recipeCatalogRenderConnectorState();
+}
+
+function loadRecipePage() {
+    _recipeCatalogSyncControls();
+    return Promise.allSettled([
+        loadRecipeCatalog(),
+        loadRecipeArchive(),
+        loadRecipeCatalogConnectors(),
+    ]);
+}
+
+function setRecipeCatalogMode(mode) {
+    const normalized = mode === 'expiring' ? 'expiring' : 'stocked';
+    const inputQuery = (document.getElementById('recipe-catalog-query')?.value || '').trim();
+    if (_recipeCatalogState.mode === normalized && _recipeCatalogState.query === inputQuery) return;
+    _recipeCatalogState.mode = normalized;
+    _recipeCatalogState.query = inputQuery;
+    _recipeCatalogSyncControls();
+    loadRecipeCatalog();
+}
+
+function changeRecipeCatalogSource(source) {
+    const normalized = _RECIPE_CATALOG_SOURCES.has(source) ? source : '';
+    _recipeCatalogState.query = (document.getElementById('recipe-catalog-query')?.value || '').trim();
+    if (normalized === 'cookidoo' && !_recipeCatalogConnector) {
+        _recipeCatalogState.source = '';
+    } else {
+        _recipeCatalogState.source = normalized;
+    }
+    _recipeCatalogSyncControls();
+    loadRecipeCatalog();
+}
+
+async function submitRecipeCatalogSearch(event) {
+    if (event) event.preventDefault();
+    const input = document.getElementById('recipe-catalog-query');
+    _recipeCatalogState.query = (input?.value || '').trim();
+    const wantsRemote = !!(
+        _recipeCatalogState.query
+        && (_recipeCatalogState.source === '' || _recipeCatalogState.source === 'cookidoo')
+    );
+    if (wantsRemote) _cancelRecipeCatalogPoll();
+    await loadRecipeCatalog();
+    if (wantsRemote && !_recipeCatalogConnector) {
+        await loadRecipeCatalogConnectors();
+    }
+    if (wantsRemote && _recipeCatalogConnectorAvailable() && _currentPageId === 'recipe') {
+        await _queueRecipeCatalogDiscovery();
+    }
+}
+
+async function discoverRecipeCatalogRemote() {
+    const input = document.getElementById('recipe-catalog-query');
+    const query = (input?.value || '').trim();
+    if (!query) {
+        _recipeCatalogSetStatus('recipes.catalog.discover_query_required', 'warning');
+        input?.focus();
+        return;
+    }
+    if (!_recipeCatalogConnectorAvailable()) {
+        _recipeCatalogSetStatus('recipes.catalog.connector_unavailable', 'warning');
+        return;
+    }
+    _recipeCatalogState.query = query;
+    if (_recipeCatalogState.source !== 'cookidoo') {
+        _recipeCatalogState.source = '';
+    }
+    _recipeCatalogSyncControls();
+    _cancelRecipeCatalogPoll();
+    await loadRecipeCatalog();
+    await _queueRecipeCatalogDiscovery();
+}
+
+async function loadRecipeCatalog(options = {}) {
+    const resultsContainer = document.getElementById('recipe-catalog-results');
+    if (!resultsContainer) return false;
+
+    const seq = ++_recipeCatalogRequestSeq;
+    const snapshot = { ..._recipeCatalogState };
+    const action = snapshot.query ? 'recipe_catalog_search' : 'recipe_catalog_suggest';
+    const params = {
+        mode: snapshot.mode,
+        source: snapshot.source,
+        limit: _RECIPE_CATALOG_LIMIT,
+        page: 1,
+        explain: 1,
+    };
+    if (snapshot.query) params.q = snapshot.query;
+
+    _recipeCatalogSetBusy(true);
+    if (!options.keepStatus && !_recipeCatalogPollActive) {
+        _recipeCatalogSetStatus(
+            snapshot.query ? 'recipes.catalog.status_searching' : 'recipes.catalog.status_loading',
+            'loading'
+        );
+    }
+
+    try {
+        const response = await api(action, params);
+        if (seq !== _recipeCatalogRequestSeq) return false;
+        if (!response || response.success === false || !Array.isArray(response.results)) {
+            throw new Error(response?.error || 'recipe_catalog_load_failed');
+        }
+        _recipeCatalogResults = response.results;
+        _renderRecipeCatalogResults(response, snapshot);
+        if (!options.keepStatus && !_recipeCatalogPollActive) {
+            _recipeCatalogSetStatus('');
+        }
+        return true;
+    } catch (error) {
+        if (seq !== _recipeCatalogRequestSeq) return false;
+        console.warn('Failed to load recipe catalog:', error);
+        if (_recipeCatalogResults.length === 0) {
+            _renderRecipeCatalogEmpty('recipes.catalog.load_error');
+        }
+        _recipeCatalogSetStatus('recipes.catalog.load_error', 'error');
+        return false;
+    } finally {
+        if (seq === _recipeCatalogRequestSeq) _recipeCatalogSetBusy(false);
+    }
+}
+
+function _renderRecipeCatalogEmpty(key) {
+    const container = document.getElementById('recipe-catalog-results');
+    if (!container) return;
+    const empty = _recipeCatalogElement('div', 'recipe-catalog-empty');
+    empty.appendChild(_recipeCatalogElement('span', 'recipe-catalog-empty-icon', '🍽️'));
+    empty.appendChild(_recipeCatalogElement('p', '', t(key)));
+    container.replaceChildren(empty);
+    const summary = document.getElementById('recipe-catalog-results-summary');
+    if (summary) summary.textContent = '';
+}
+
+function _renderRecipeCatalogResults(response, snapshot) {
+    const container = document.getElementById('recipe-catalog-results');
+    const title = document.getElementById('recipe-catalog-results-title');
+    const summary = document.getElementById('recipe-catalog-results-summary');
+    if (!container) return;
+
+    if (title) {
+        title.textContent = snapshot.query
+            ? t('recipes.catalog.search_results_title', { query: snapshot.query })
+            : t('recipes.catalog.suggestions_title');
+    }
+    if (summary) {
+        const total = Number.isFinite(Number(response.total))
+            ? Number(response.total)
+            : response.results.length;
+        summary.textContent = t('recipes.catalog.results_count', { count: total });
+    }
+
+    const cards = response.results
+        .filter(result => result && result.recipe && result.recipe.id)
+        .map(result => _recipeCatalogCreateCard(result));
+    if (cards.length === 0) {
+        _renderRecipeCatalogEmpty('recipes.catalog.no_results');
+        return;
+    }
+    container.replaceChildren(...cards);
+}
+
+function _recipeCatalogSource(recipe) {
+    const source = String(recipe?.primary_connector || '').toLowerCase();
+    return ['local', 'generated', 'manual', 'cookidoo'].includes(source) ? source : 'local';
+}
+
+function _recipeCatalogSourceLabel(source) {
+    if (source === 'cookidoo') return 'Cookidoo';
+    return t(`recipes.catalog.source_${source}_badge`);
+}
+
+function _recipeCatalogIsMetadataOnly(recipe) {
+    return recipe?.storage_policy === 'metadata_only' || _recipeCatalogSource(recipe) === 'cookidoo';
+}
+
+function _recipeCatalogCookidooUrl(recipe) {
+    const origins = Array.isArray(recipe?.origins) ? recipe.origins : [];
+    const origin = origins.find(item => item?.connector === 'cookidoo')
+        || origins.find(item => item?.canonical_url);
+    return recipeCatalogSafeHttpsUrl(
+        origin?.canonical_url || recipe?.canonical_url || recipe?.url || '',
+        true
+    );
+}
+
+function _recipeCatalogImage(recipe, title) {
+    const media = _recipeCatalogElement('div', 'recipe-catalog-media');
+    const fallback = _recipeCatalogElement('div', 'recipe-catalog-image-fallback', '🍽️');
+    fallback.setAttribute('role', 'img');
+    fallback.setAttribute('aria-label', t('recipes.catalog.image_unavailable'));
+    media.appendChild(fallback);
+
+    const imageUrl = recipeCatalogSafeCookidooImageUrl(recipe?.image_url || '');
+    if (!imageUrl) return media;
+
+    const image = document.createElement('img');
+    image.src = imageUrl;
+    image.alt = t('recipes.catalog.image_alt', { title });
+    image.loading = 'lazy';
+    image.decoding = 'async';
+    image.referrerPolicy = 'no-referrer';
+    fallback.hidden = true;
+    image.addEventListener('error', () => {
+        image.remove();
+        fallback.hidden = false;
+    }, { once: true });
+    media.prepend(image);
+    return media;
+}
+
+function _recipeCatalogExplanationLines(result) {
+    const ranking = result?.ranking && typeof result.ranking === 'object' ? result.ranking : result;
+    const explain = result?.explain || ranking?.explain || {};
+    const matches = Array.isArray(explain?.ingredient_matches)
+        ? explain.ingredient_matches
+        : [];
+    const lines = [];
+    const seen = new Set();
+    const relationKeys = {
+        exact: 'recipes.catalog.match_exact',
+        pantry_descendant: 'recipes.catalog.match_specific',
+        pantry_ancestor: 'recipes.catalog.match_broader',
+        normalized_name: 'recipes.catalog.match_name',
+        name_contains: 'recipes.catalog.match_name',
+    };
+    const priority = ['exact', 'pantry_descendant', 'pantry_ancestor', 'normalized_name', 'name_contains'];
+
+    for (const relation of priority) {
+        for (const match of matches) {
+            if (!match?.matched || match.relation !== relation || !relationKeys[relation]) continue;
+            const ingredient = String(match.ingredient || '');
+            const product = String(match.product_name || match.ingredient || '');
+            const line = t(relationKeys[relation], { ingredient, product });
+            if (!seen.has(line)) {
+                seen.add(line);
+                lines.push(line);
+            }
+            if (lines.length >= 2) break;
+        }
+        if (lines.length >= 2) break;
+    }
+
+    const expiring = matches
+        .filter(match =>
+            match?.matched
+            && match.days_remaining !== null
+            && match.days_remaining !== ''
+            && Number.isFinite(Number(match.days_remaining))
+            && Number(match.days_remaining) <= 14
+        )
+        .sort((a, b) => Number(a.days_remaining) - Number(b.days_remaining));
+    for (const match of expiring.slice(0, 2)) {
+        const days = Math.max(0, Math.round(Number(match.days_remaining)));
+        const product = String(match.product_name || match.ingredient || '');
+        const key = days === 0
+            ? 'recipes.catalog.expires_today'
+            : (days === 1 ? 'recipes.catalog.expires_tomorrow' : 'recipes.catalog.expires_in');
+        const line = t(key, { product, days });
+        if (!seen.has(line)) {
+            seen.add(line);
+            lines.push(line);
+        }
+    }
+
+    const missing = Array.isArray(explain?.missing_required)
+        ? explain.missing_required.map(item => item?.name).filter(Boolean).slice(0, 3)
+        : [];
+    if (missing.length > 0) {
+        lines.push(t('recipes.catalog.missing_list', { ingredients: missing.join(', ') }));
+    }
+    return lines.slice(0, 5);
+}
+
+function _recipeCatalogCreateCard(result) {
+    const recipe = result.recipe;
+    const ranking = result?.ranking && typeof result.ranking === 'object' ? result.ranking : result;
+    const explain = result?.explain || ranking?.explain || {};
+    const source = _recipeCatalogSource(recipe);
+    const metadataOnly = _recipeCatalogIsMetadataOnly(recipe);
+    const title = String(recipe.title || t('recipes.catalog.untitled'));
+    const card = _recipeCatalogElement(
+        'article',
+        `recipe-catalog-card recipe-catalog-source-${source}${recipe.is_stale ? ' is-stale' : ''}`
+    );
+
+    if (metadataOnly) card.appendChild(_recipeCatalogImage(recipe, title));
+    const body = _recipeCatalogElement('div', 'recipe-catalog-card-body');
+    card.appendChild(body);
+
+    const top = _recipeCatalogElement('div', 'recipe-catalog-card-top');
+    const badges = _recipeCatalogElement('div', 'recipe-catalog-badges');
+    badges.appendChild(_recipeCatalogElement(
+        'span',
+        `recipe-catalog-source-badge source-${source}`,
+        _recipeCatalogSourceLabel(source)
+    ));
+    if (metadataOnly) {
+        badges.appendChild(_recipeCatalogElement('span', 'recipe-catalog-badge metadata', t('recipes.catalog.metadata_badge')));
+    }
+    if (recipe.is_stale) {
+        badges.appendChild(_recipeCatalogElement('span', 'recipe-catalog-badge stale', t('recipes.catalog.stale_badge')));
+    }
+    top.appendChild(badges);
+
+    const favorite = document.createElement('button');
+    favorite.type = 'button';
+    favorite.className = `recipe-catalog-favorite${recipe.favorite ? ' active' : ''}`;
+    favorite.textContent = recipe.favorite ? '★' : '☆';
+    favorite.setAttribute('aria-pressed', recipe.favorite ? 'true' : 'false');
+    const favoriteLabel = recipe.favorite
+        ? t('recipes.catalog.unfavorite')
+        : t('recipes.catalog.favorite');
+    favorite.setAttribute('aria-label', favoriteLabel);
+    favorite.title = favoriteLabel;
+    favorite.addEventListener('click', () => toggleRecipeCatalogFavorite(recipe, favorite));
+    top.appendChild(favorite);
+    body.appendChild(top);
+
+    body.appendChild(_recipeCatalogElement('h5', 'recipe-catalog-card-title', title));
+    if (recipe.description) {
+        body.appendChild(_recipeCatalogElement('p', 'recipe-catalog-card-description', String(recipe.description)));
+    }
+
+    const meta = _recipeCatalogElement('div', 'recipe-catalog-card-meta');
+    if (recipe.prep_time) meta.appendChild(_recipeCatalogElement('span', '', `🔪 ${recipe.prep_time}`));
+    if (recipe.cook_time) meta.appendChild(_recipeCatalogElement('span', '', `🔥 ${recipe.cook_time}`));
+    if (recipe.total_time && !recipe.prep_time && !recipe.cook_time) {
+        meta.appendChild(_recipeCatalogElement('span', '', `⏱️ ${recipe.total_time}`));
+    }
+    if (recipe.servings) meta.appendChild(_recipeCatalogElement('span', '', `👥 ${recipe.servings}`));
+    if (meta.childElementCount > 0) body.appendChild(meta);
+
+    const scoreValue = Number(result.score ?? ranking?.score ?? result.suggestion_score ?? 0);
+    const score = Number.isFinite(scoreValue) ? Math.max(0, Math.min(1, scoreValue)) : 0;
+    const percent = Math.round(score * 100);
+    const missingCount = Math.max(
+        0,
+        Number(
+            result.missing_required_count
+            ?? ranking?.missing_required_count
+            ?? (Array.isArray(explain.missing_required) ? explain.missing_required.length : 0)
+        ) || 0
+    );
+    const cookable = !!(result.cookable ?? ranking?.cookable);
+    const scoreRow = _recipeCatalogElement('div', 'recipe-catalog-score-row');
+    scoreRow.appendChild(_recipeCatalogElement(
+        'span',
+        'recipe-catalog-score',
+        t('recipes.catalog.score', { percent })
+    ));
+    const cookabilityKey = cookable
+        ? (metadataOnly ? 'recipes.catalog.cookable_metadata' : 'recipes.catalog.cookable')
+        : 'recipes.catalog.missing';
+    scoreRow.appendChild(_recipeCatalogElement(
+        'span',
+        `recipe-catalog-cookable ${cookable ? 'yes' : 'no'}`,
+        t(cookabilityKey, { count: missingCount })
+    ));
+    body.appendChild(scoreRow);
+
+    const coverage = recipeCatalogCoverage(result);
+    const coverageBlock = _recipeCatalogElement('div', 'recipe-catalog-coverage');
+    const coverageText = coverage.total > 0
+        ? t('recipes.catalog.coverage', { matched: coverage.matched, total: coverage.total })
+        : t('recipes.catalog.coverage_unknown');
+    coverageBlock.appendChild(_recipeCatalogElement('span', '', coverageText));
+    if (coverage.total > 0) {
+        const progress = document.createElement('progress');
+        progress.max = 100;
+        progress.value = Math.round(coverage.ratio * 100);
+        progress.setAttribute('aria-label', coverageText);
+        coverageBlock.appendChild(progress);
+    }
+    body.appendChild(coverageBlock);
+
+    const explanationLines = _recipeCatalogExplanationLines(result);
+    if (explanationLines.length > 0) {
+        const explanation = _recipeCatalogElement('ul', 'recipe-catalog-explanation');
+        explanationLines.forEach(line => explanation.appendChild(_recipeCatalogElement('li', '', line)));
+        body.appendChild(explanation);
+    }
+
+    if (metadataOnly) {
+        body.appendChild(_recipeCatalogElement('p', 'recipe-catalog-metadata-note', t('recipes.catalog.metadata_notice')));
+    }
+
+    const actions = _recipeCatalogElement('div', 'recipe-catalog-card-actions');
+    if (metadataOnly) {
+        const url = _recipeCatalogCookidooUrl(recipe);
+        if (url) {
+            const link = _recipeCatalogElement('a', 'btn btn-primary recipe-catalog-card-action', t('recipes.catalog.open_cookidoo'));
+            link.href = url;
+            link.target = '_blank';
+            link.rel = 'noopener noreferrer nofollow';
+            actions.appendChild(link);
+        } else {
+            const unavailable = _recipeCatalogElement(
+                'span',
+                'btn recipe-catalog-card-action disabled',
+                t('recipes.catalog.link_unavailable')
+            );
+            unavailable.setAttribute('aria-disabled', 'true');
+            actions.appendChild(unavailable);
+        }
+    } else {
+        const open = _recipeCatalogElement('button', 'btn btn-primary recipe-catalog-card-action', t('recipes.catalog.view_recipe'));
+        open.type = 'button';
+        open.addEventListener('click', () => openRecipeCatalogItem(recipe.id));
+        actions.appendChild(open);
+    }
+    body.appendChild(actions);
+    return card;
+}
+
+async function toggleRecipeCatalogFavorite(recipe, button) {
+    const recipeId = Number(recipe?.id);
+    if (!Number.isInteger(recipeId) || recipeId <= 0 || button.disabled) return;
+    const desired = !recipe.favorite;
+    button.disabled = true;
+    try {
+        const response = await api('recipe_catalog_favorite', {}, 'POST', {
+            id: recipeId,
+            favorite: desired,
+        });
+        if (!response || response.success !== true) {
+            throw new Error(response?.error || 'recipe_favorite_failed');
+        }
+        const value = !!response.favorite;
+        recipe.favorite = value;
+        _recipeCatalogResults.forEach(result => {
+            if (Number(result?.recipe?.id) === recipeId) result.recipe.favorite = value;
+        });
+        button.classList.toggle('active', value);
+        button.textContent = value ? '★' : '☆';
+        button.setAttribute('aria-pressed', value ? 'true' : 'false');
+        const label = value ? t('recipes.catalog.unfavorite') : t('recipes.catalog.favorite');
+        button.setAttribute('aria-label', label);
+        button.title = label;
+        _recipeArchiveCache = null;
+        loadRecipeArchive();
+        await loadRecipeCatalog({ keepStatus: true });
+    } catch (error) {
+        console.warn('Failed to update catalog favorite:', error);
+        _recipeCatalogSetStatus('recipes.catalog.favorite_error', 'error');
+    } finally {
+        button.disabled = false;
+    }
+}
+
+function _recipeCatalogLegacyIngredient(ingredient) {
+    if (!ingredient || typeof ingredient !== 'object') {
+        return { name: String(ingredient || ''), qty: '' };
+    }
+    const name = ingredient.name
+        || ingredient.ingredient
+        || ingredient.canonical_name
+        || ingredient.raw_text
+        || ingredient.normalized_name
+        || '';
+    let qty = ingredient.qty || ingredient.quantity_text || '';
+    if (!qty && ingredient.quantity != null) {
+        qty = `${ingredient.quantity}${ingredient.unit ? ` ${ingredient.unit}` : ''}`;
+    }
+    const allowedLocations = new Set(['dispensa', 'frigo', 'freezer', 'spice_rack', 'cabinet', 'altro']);
+    const productId = Number(ingredient.product_id);
+    const quantityNumber = Number(ingredient.qty_number);
+    const availableQuantity = Number(ingredient.available_qty);
+    const defaultQuantity = Number(ingredient.default_quantity);
+    const expiryDate = /^\d{4}-\d{2}-\d{2}$/.test(String(ingredient.expiry_date || ''))
+        ? String(ingredient.expiry_date)
+        : '';
+    return {
+        name: _recipeCatalogPlainText(name, 240),
+        qty: _recipeCatalogPlainText(qty, 120).replace(/['"\\]/g, ''),
+        brand: _recipeCatalogPlainText(ingredient.brand, 160),
+        unit: _recipeCatalogPlainText(ingredient.unit, 24),
+        package_unit: _recipeCatalogPlainText(ingredient.package_unit, 24),
+        location: allowedLocations.has(ingredient.location) ? ingredient.location : 'dispensa',
+        expiry_date: expiryDate,
+        product_id: Number.isInteger(productId) && productId > 0 ? productId : null,
+        qty_number: Number.isFinite(quantityNumber) ? quantityNumber : 0,
+        available_qty: Number.isFinite(availableQuantity) ? availableQuantity : null,
+        default_quantity: Number.isFinite(defaultQuantity) ? defaultQuantity : null,
+        from_pantry: ingredient.from_pantry === true && Number.isInteger(productId) && productId > 0,
+        vacuum_sealed: ingredient.vacuum_sealed === true || ingredient.vacuum_sealed === 1,
+        use_all_suggested: ingredient.use_all_suggested === true,
+        used: ingredient.used === true,
+    };
+}
+
+function _recipeCatalogPlainText(value, maximum = 2000) {
+    if (value === null || value === undefined) return '';
+    return String(value)
+        .replace(/[\u0000-\u001F\u007F]/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .slice(0, maximum);
+}
+
+function _recipeHtmlAttribute(value) {
+    return String(value ?? '').replace(/[&<>"']/g, character => ({
+        '&': '&amp;',
+        '<': '&lt;',
+        '>': '&gt;',
+        '"': '&quot;',
+        "'": '&#39;',
+    })[character]);
+}
+
+function _recipeCatalogStringArray(value, maximumItems = 100) {
+    if (!Array.isArray(value)) return [];
+    return value
+        .slice(0, maximumItems)
+        .map(item => {
+            if (item && typeof item === 'object') {
+                const text = item.instruction ?? item.text ?? item.description ?? item.step ?? '';
+                return _recipeCatalogPlainText(text, 4000);
+            }
+            return _recipeCatalogPlainText(item, 4000);
+        })
+        .filter(Boolean);
+}
+
+function _recipeCatalogNutrition(value) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+    const out = {};
+    for (const key of ['kcal', 'protein_g', 'carbs_g', 'fat_g']) {
+        const number = Number(value[key]);
+        if (Number.isFinite(number)) out[key] = number;
+    }
+    return Object.keys(out).length > 0 ? out : null;
+}
+
+function _recipeCatalogStorage(value) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+    const days = Number(value.days);
+    const storage = {
+        where: _recipeCatalogPlainText(value.where, 160),
+        tips: _recipeCatalogPlainText(value.tips, 1000),
+        days: Number.isFinite(days) ? Math.max(0, Math.round(days)) : 0,
+    };
+    return storage.where || storage.tips ? storage : null;
+}
+
+function _recipeCatalogToLegacyRecipe(recipe) {
+    const sourcePayload = recipe?.source_payload
+        && typeof recipe.source_payload === 'object'
+        && !Array.isArray(recipe.source_payload)
+        ? recipe.source_payload
+        : {};
+    const payloadIngredients = Array.isArray(sourcePayload.ingredients)
+        ? sourcePayload.ingredients
+        : [];
+    const normalizedIngredients = Array.isArray(recipe?.ingredients)
+        ? recipe.ingredients
+        : [];
+    const instructions = Array.isArray(sourcePayload.steps) && sourcePayload.steps.length > 0
+        ? sourcePayload.steps
+        : (Array.isArray(sourcePayload.instructions) && sourcePayload.instructions.length > 0
+            ? sourcePayload.instructions
+            : (Array.isArray(recipe?.instructions) ? recipe.instructions : []));
+    const mealCandidate = sourcePayload.meal || recipe?.category || '';
+    const normalizedMeal = _normalizeMealId(mealCandidate);
+    const knownMeals = new Set(getMealTypes().map(meal => meal.id));
+    const personsValue = Number(recipe?.servings || sourcePayload.persons || sourcePayload.servings || 1);
+    const shoppingSuggestions = Array.isArray(sourcePayload.shopping_suggestions)
+        ? sourcePayload.shopping_suggestions.slice(0, 50).map(item => ({
+            name: _recipeCatalogPlainText(item?.name, 240),
+            qty: _recipeCatalogPlainText(item?.qty, 120),
+        })).filter(item => item.name)
+        : [];
+
+    return {
+        title: _recipeCatalogPlainText(recipe?.title || sourcePayload.title, 400),
+        description: _recipeCatalogPlainText(recipe?.description || sourcePayload.description, 2000),
+        meal: knownMeals.has(normalizedMeal) ? normalizedMeal : '',
+        persons: Number.isFinite(personsValue) && personsValue > 0 ? Math.round(personsValue) : 1,
+        prep_time: _recipeCatalogPlainText(recipe?.prep_time || sourcePayload.prep_time, 120),
+        cook_time: _recipeCatalogPlainText(recipe?.cook_time || sourcePayload.cook_time, 120),
+        total_time: _recipeCatalogPlainText(recipe?.total_time || sourcePayload.total_time, 120),
+        tags: _recipeCatalogStringArray(
+            Array.isArray(recipe?.keywords) ? recipe.keywords : sourcePayload.tags,
+            30
+        ),
+        ingredients: (payloadIngredients.length > 0 ? payloadIngredients : normalizedIngredients)
+            .map(_recipeCatalogLegacyIngredient),
+        steps: _recipeCatalogStringArray(instructions, 200),
+        tools_needed: _recipeCatalogStringArray(sourcePayload.tools_needed, 30),
+        shopping_suggestions: shoppingSuggestions,
+        expiry_note: _recipeCatalogPlainText(sourcePayload.expiry_note, 1000),
+        nutrition_note: _recipeCatalogPlainText(sourcePayload.nutrition_note, 1000),
+        nutrition: _recipeCatalogNutrition(
+            recipe?.nutrition && Object.keys(recipe.nutrition).length > 0
+                ? recipe.nutrition
+                : sourcePayload.nutrition
+        ),
+        storage: _recipeCatalogStorage(sourcePayload.storage),
+    };
+}
+
+async function openRecipeCatalogItem(recipeId) {
+    const id = Number(recipeId);
+    if (!Number.isInteger(id) || id <= 0) return;
+    const seq = ++_recipeDialogOpenSeq;
+    const opener = document.activeElement;
+    const openingStatus = t('recipes.catalog.status_opening');
+    if (!_recipeCatalogPollActive) {
+        _recipeCatalogSetStatus('recipes.catalog.status_opening', 'loading');
+    }
+    try {
+        const response = await api('recipe_catalog_get', { id });
+        if (!response || response.success === false || !response.recipe) {
+            throw new Error(response?.error || 'recipe_catalog_get_failed');
+        }
+        if (_recipeCatalogIsMetadataOnly(response.recipe)) {
+            throw new Error('metadata_only_recipe');
+        }
+        const legacyRecipe = _recipeCatalogToLegacyRecipe(response.recipe);
+        if (seq !== _recipeDialogOpenSeq || _currentPageId !== 'recipe') return;
+        const pendingCachedRecipe = {
+            meal: legacyRecipe.meal,
+            recipe: legacyRecipe,
+            catalog_preview: true,
+        };
+        const rendered = await renderRecipe(legacyRecipe, {
+            cachedRecipe: pendingCachedRecipe,
+            isCurrent: () => seq === _recipeDialogOpenSeq && _currentPageId === 'recipe',
+        });
+        if (!rendered || seq !== _recipeDialogOpenSeq || _currentPageId !== 'recipe') return;
+        _cachedRecipe = pendingCachedRecipe;
+        const regenButton = document.getElementById('recipe-regen-btn');
+        const regenChoice = document.getElementById('recipe-regen-choice');
+        if (regenButton) regenButton.style.display = 'none';
+        if (regenChoice) regenChoice.style.display = 'none';
+        activateRecipeDialog(opener);
+        document.getElementById('recipe-ask').style.display = 'none';
+        document.getElementById('recipe-loading').style.display = 'none';
+        document.getElementById('recipe-result').style.display = '';
+        const status = document.getElementById('recipe-catalog-status');
+        if (status?.textContent === openingStatus) {
+            _recipeCatalogSetStatus('');
+        }
+    } catch (error) {
+        console.warn('Failed to open catalog recipe:', error);
+        _recipeCatalogSetStatus('recipes.catalog.open_error', 'error');
+    }
+}
+
+async function _queueRecipeCatalogDiscovery(queryOverride = '') {
+    if (!_recipeCatalogConnectorAvailable()) return;
+    const query = (queryOverride || _recipeCatalogState.query).trim();
+    if (!query) return;
+    if (_recipeCatalogDiscoveryPending) {
+        _recipeCatalogNextDiscoveryQuery = query;
+        return;
+    }
+
+    _cancelRecipeCatalogPoll();
+    const seq = ++_recipeCatalogDiscoverySeq;
+    _recipeCatalogDiscoveryPending = true;
+    const button = document.getElementById('recipe-catalog-discover');
+    if (button) {
+        button.disabled = true;
+        button.setAttribute('aria-busy', 'true');
+    }
+    _recipeCatalogSetStatus('recipes.catalog.status_discovering', 'loading');
+
+    try {
+        const response = await api('recipe_catalog_discover', {}, 'POST', {
+            query,
+            ingredients: [],
+            exclude_ingredients: [],
+            locale: recipeCatalogDiscoveryLocale(_currentLang),
+            tmv: 'TM6',
+            exclude_cached: true,
+            max_pages: 10,
+        });
+        if (seq !== _recipeCatalogDiscoverySeq || _currentPageId !== 'recipe') return;
+        if (!response || response.success !== true) {
+            throw new Error(response?.error || 'recipe_catalog_discover_failed');
+        }
+        if (!response.connector_enabled) {
+            _recipeCatalogSetStatus('recipes.catalog.connector_unavailable', 'warning');
+            return;
+        }
+        if (!response.job || !response.job.id) {
+            _recipeCatalogSetStatus('recipes.catalog.status_skipped', 'warning');
+            return;
+        }
+        _startRecipeCatalogJobPoll(response.job);
+    } catch (error) {
+        if (seq !== _recipeCatalogDiscoverySeq) return;
+        console.warn('Failed to queue Cookidoo discovery:', error);
+        _recipeCatalogSetStatus('recipes.catalog.status_error', 'error');
+    } finally {
+        if (seq === _recipeCatalogDiscoverySeq) {
+            _recipeCatalogDiscoveryPending = false;
+            if (button) {
+                button.disabled = false;
+                button.removeAttribute('aria-busy');
+            }
+            const nextQuery = _recipeCatalogNextDiscoveryQuery;
+            _recipeCatalogNextDiscoveryQuery = '';
+            if (
+                nextQuery
+                && nextQuery !== query
+                && _currentPageId === 'recipe'
+                && _recipeCatalogConnectorAvailable()
+            ) {
+                _queueRecipeCatalogDiscovery(nextQuery);
+            }
+        }
+    }
+}
+
+function _cancelRecipeCatalogPoll() {
+    _recipeCatalogPollToken++;
+    _recipeCatalogPollActive = false;
+    if (_recipeCatalogPollTimer) {
+        clearTimeout(_recipeCatalogPollTimer);
+        _recipeCatalogPollTimer = null;
+    }
+}
+
+function cancelRecipeCatalogActivity() {
+    _recipeCatalogRequestSeq++;
+    _recipeCatalogConnectorSeq++;
+    _recipeCatalogDiscoverySeq++;
+    _recipeCatalogDiscoveryPending = false;
+    _recipeDialogOpenSeq++;
+    _recipeCatalogNextDiscoveryQuery = '';
+    const discoverButton = document.getElementById('recipe-catalog-discover');
+    if (discoverButton) {
+        discoverButton.disabled = false;
+        discoverButton.removeAttribute('aria-busy');
+    }
+    _cancelRecipeCatalogPoll();
+}
+
+function _startRecipeCatalogJobPoll(job) {
+    _cancelRecipeCatalogPoll();
+    const token = _recipeCatalogPollToken;
+    const jobId = Number(job.id);
+    if (!Number.isInteger(jobId) || jobId <= 0) {
+        _recipeCatalogSetStatus('recipes.catalog.status_error', 'error');
+        return;
+    }
+    _recipeCatalogPollActive = true;
+    _recipeCatalogSetStatus('recipes.catalog.status_queued', 'info');
+    _recipeCatalogPollTimer = setTimeout(
+        () => _pollRecipeCatalogJob(jobId, token, 0),
+        1400
+    );
+}
+
+async function _pollRecipeCatalogJob(jobId, token, attempt) {
+    if (token !== _recipeCatalogPollToken || !_recipeCatalogPollActive) return;
+    try {
+        const response = await api('recipe_jobs_status', { id: jobId });
+        if (token !== _recipeCatalogPollToken || !_recipeCatalogPollActive) return;
+        if (!response || response.success === false || !response.job) {
+            throw new Error(response?.error || 'recipe_job_status_failed');
+        }
+        const job = response.job;
+        const status = String(job.status || '').toLowerCase();
+        if (status === 'done') {
+            _recipeCatalogPollActive = false;
+            _recipeCatalogPollTimer = null;
+            _recipeCatalogSetStatus('recipes.catalog.status_done', 'success');
+            await loadRecipeCatalog({ keepStatus: true });
+            return;
+        }
+        if (status === 'retry') {
+            _recipeCatalogPollActive = false;
+            _recipeCatalogPollTimer = null;
+            const reason = job.result?.reason;
+            _recipeCatalogSetStatus(
+                reason === 'circuit_open'
+                    ? 'recipes.catalog.status_circuit'
+                    : 'recipes.catalog.status_retry',
+                'warning'
+            );
+            return;
+        }
+        if (status === 'skipped') {
+            _recipeCatalogPollActive = false;
+            _recipeCatalogPollTimer = null;
+            _recipeCatalogSetStatus('recipes.catalog.status_skipped', 'warning');
+            return;
+        }
+        if (status === 'failed' || status === 'error') {
+            _recipeCatalogPollActive = false;
+            _recipeCatalogPollTimer = null;
+            _recipeCatalogSetStatus('recipes.catalog.status_error', 'error');
+            return;
+        }
+    } catch (error) {
+        if (token !== _recipeCatalogPollToken) return;
+        console.warn('Failed to poll recipe discovery job:', error);
+        _recipeCatalogPollActive = false;
+        _recipeCatalogPollTimer = null;
+        _recipeCatalogSetStatus('recipes.catalog.status_error', 'error');
+        return;
+    }
+
+    if (attempt + 1 >= _RECIPE_CATALOG_POLL_LIMIT) {
+        _recipeCatalogPollActive = false;
+        _recipeCatalogPollTimer = null;
+        _recipeCatalogSetStatus('recipes.catalog.status_timeout', 'info');
+        return;
+    }
+    _recipeCatalogPollTimer = setTimeout(
+        () => _pollRecipeCatalogJob(jobId, token, attempt + 1),
+        _RECIPE_CATALOG_POLL_INTERVAL
+    );
+}
+
 // ===== RECIPE ARCHIVE (DB-backed) =====
 let _recipeArchiveCache = null;
 
@@ -14402,14 +15491,27 @@ async function getRecipeArchive() {
     return [];
 }
 
-async function saveRecipeToArchive(recipe) {
+async function saveRecipeToArchive(recipe, archiveContext = null) {
     const today = new Date().toISOString().slice(0, 10);
+    const date = archiveContext?.date || today;
+    const meal = archiveContext?.meal || recipe.meal;
     try {
-        await api('recipes_save', {}, 'POST', { date: today, meal: recipe.meal, recipe });
+        const response = await api('recipes_save', {}, 'POST', {
+            date,
+            meal,
+            recipe,
+        });
+        if (response?.success !== true) {
+            throw new Error(response?.error || 'recipe_archive_save_failed');
+        }
         // Invalidate cache and refresh the archive list
         _recipeArchiveCache = null;
         loadRecipeArchive();
-    } catch(e) { console.error('Failed to save recipe:', e); }
+        return true;
+    } catch(e) {
+        console.error('Failed to save recipe:', e);
+        return false;
+    }
 }
 
 async function getTodayRecipeTitles() {
@@ -14457,21 +15559,21 @@ async function loadRecipeArchive() {
         for (const entry of entries) {
             const r = entry.recipe;
             const mealIcon = _mealLabel(r.meal || entry.meal);
-            const tags = (r.tags || []).slice(0, 3).join(', ');
+            const tags = Array.isArray(r.tags) ? r.tags.slice(0, 3).join(', ') : '';
             // Find this entry's index in the flat archive array
             const archiveIdx = archive.indexOf(entry);
             const favBadge = entry.is_favorite ? `<span class="recipe-fav-badge" title="${t('recipes.favorite')}">★</span>` : '';
             html += `<div class="recipe-archive-card${entry.is_favorite ? ' recipe-archive-card-fav' : ''}" onclick="viewArchivedRecipe(${archiveIdx})">`;
             html += `<div class="recipe-archive-card-header">`;
-            html += `<span class="recipe-archive-meal">${mealIcon}</span>`;
+            html += `<span class="recipe-archive-meal">${escapeHtml(mealIcon)}</span>`;
             html += `<span class="recipe-archive-title">${escapeHtml(r.title)}</span>`;
             html += favBadge;
             html += `</div>`;
             html += `<div class="recipe-archive-card-meta">`;
-            if (r.prep_time) html += `<span>🔪 ${r.prep_time}</span>`;
-            if (r.cook_time) html += `<span>🔥 ${r.cook_time}</span>`;
-            html += `<span>👥 ${r.persons}</span>`;
-            if (tags) html += `<span>${tags}</span>`;
+            if (r.prep_time) html += `<span>🔪 ${escapeHtml(String(r.prep_time))}</span>`;
+            if (r.cook_time) html += `<span>🔥 ${escapeHtml(String(r.cook_time))}</span>`;
+            html += `<span>👥 ${escapeHtml(String(r.persons || 1))}</span>`;
+            if (tags) html += `<span>${escapeHtml(tags)}</span>`;
             html += `</div></div>`;
             flatIdx++;
         }
@@ -14481,20 +15583,40 @@ async function loadRecipeArchive() {
     container.innerHTML = html;
 }
 
-function viewArchivedRecipe(idx) {
+async function viewArchivedRecipe(idx) {
     const pick = _recipeArchiveEntries[idx];
     if (!pick) return;
+    const seq = ++_recipeDialogOpenSeq;
+    const opener = document.activeElement;
     _recipeArchiveCache = null;
-    getRecipeArchive().then(archive => {
+    try {
+        const archive = await getRecipeArchive();
+        if (seq !== _recipeDialogOpenSeq) return;
         const entry = archive.find(e => e.id === pick.id) || pick;
-        _cachedRecipe = { meal: _normalizeMealId(entry.meal), recipe: entry.recipe, id: entry.id, is_favorite: !!entry.is_favorite };
-        return renderRecipe(entry.recipe);
-    }).then(() => {
-        document.getElementById('recipe-overlay').style.display = 'flex';
+        const pendingCachedRecipe = {
+            meal: _normalizeMealId(entry.meal),
+            recipe: entry.recipe,
+            id: entry.id,
+            date: entry.date,
+            catalog_recipe_id: entry.catalog_recipe_id || null,
+            is_favorite: !!entry.is_favorite,
+        };
+        const rendered = await renderRecipe(entry.recipe, {
+            cachedRecipe: pendingCachedRecipe,
+            isCurrent: () => seq === _recipeDialogOpenSeq,
+        });
+        if (!rendered || seq !== _recipeDialogOpenSeq) return;
+        _cachedRecipe = pendingCachedRecipe;
+        activateRecipeDialog(opener);
         document.getElementById('recipe-ask').style.display = 'none';
         document.getElementById('recipe-loading').style.display = 'none';
         document.getElementById('recipe-result').style.display = '';
-    });
+    } catch (error) {
+        if (seq === _recipeDialogOpenSeq) {
+            console.warn('Failed to open archived recipe:', error);
+            _recipeCatalogSetStatus('recipes.catalog.open_error', 'error');
+        }
+    }
 }
 
 let _cachedRecipe = null;
@@ -14505,9 +15627,10 @@ let _rejectedRecipeIngredients = []; // ingredient names from previously rejecte
 
 function openRecipeDialog() {
     if (!_requireGemini()) return;
+    const seq = ++_recipeDialogOpenSeq;
     const meal = getMealType();
     const settings = getSettings();
-    document.getElementById('recipe-overlay').style.display = 'flex';
+    activateRecipeDialog(document.activeElement);
 
     // Build meal selector radios
     const mealGrid = document.getElementById('recipe-meal-grid');
@@ -14523,11 +15646,17 @@ function openRecipeDialog() {
     _renderMealPlanHint(meal);
 
     // Check for cached recipe matching current meal type
-    if (_cachedRecipe && _cachedRecipe.meal === meal && _cachedRecipe.recipe) {
+    if (_cachedRecipe && !_cachedRecipe.catalog_preview && _cachedRecipe.meal === meal && _cachedRecipe.recipe) {
         document.getElementById('recipe-ask').style.display = 'none';
         document.getElementById('recipe-loading').style.display = 'none';
-        renderRecipe(_cachedRecipe.recipe);
-        document.getElementById('recipe-result').style.display = '';
+        renderRecipe(_cachedRecipe.recipe, {
+            cachedRecipe: _cachedRecipe,
+            isCurrent: () => seq === _recipeDialogOpenSeq,
+        }).then(rendered => {
+            if (rendered && seq === _recipeDialogOpenSeq) {
+                document.getElementById('recipe-result').style.display = '';
+            }
+        });
         return;
     }
 
@@ -14559,7 +15688,155 @@ function toggleRecipeOption(btn) {
 }
 
 function closeRecipeDialog() {
-    document.getElementById('recipe-overlay').style.display = 'none';
+    _recipeDialogOpenSeq++;
+    _setRecipeDialogSuspended(false);
+    const overlay = document.getElementById('recipe-overlay');
+    if (overlay) overlay.style.display = 'none';
+    const returnFocus = _recipeDialogReturnFocus;
+    _recipeDialogReturnFocus = null;
+    if (returnFocus && document.contains(returnFocus)) {
+        setTimeout(() => returnFocus.focus(), 0);
+    }
+}
+
+function activateRecipeDialog(opener = document.activeElement) {
+    const overlay = document.getElementById('recipe-overlay');
+    const dialog = overlay?.querySelector('.recipe-dialog');
+    if (!overlay || !dialog) return;
+    _bindRecipeDialogAccessibility();
+    if (opener instanceof HTMLElement && !overlay.contains(opener)) {
+        _recipeDialogReturnFocus = opener;
+    }
+    overlay.style.display = 'flex';
+    dialog.setAttribute('aria-label', t('recipes.dialog_title'));
+    setTimeout(() => {
+        const first = [...dialog.querySelectorAll(
+            'button:not([disabled]), a[href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+        )].find(element => element.offsetParent !== null);
+        (first || dialog).focus();
+    }, 0);
+}
+
+function _recipeHigherOverlayVisible() {
+    return ['modal-overlay', 'cooking-overlay', 'network-error-overlay', '_kiosk_overlay'].some(id => {
+        const element = document.getElementById(id);
+        return element && getComputedStyle(element).display !== 'none';
+    });
+}
+
+function _bindGenericModalAccessibility() {
+    const overlay = document.getElementById('modal-overlay');
+    const dialog = document.getElementById('modal-content');
+    if (!overlay || !dialog || dialog.dataset.a11yBound === '1') return;
+    dialog.dataset.a11yBound = '1';
+    dialog.addEventListener('keydown', event => {
+        if (event.key === 'Escape') {
+            event.preventDefault();
+            closeModal();
+            return;
+        }
+        if (event.key !== 'Tab') return;
+        const focusable = [...dialog.querySelectorAll(
+            'button:not([disabled]), a[href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+        )].filter(element => element.offsetParent !== null);
+        if (focusable.length === 0) {
+            event.preventDefault();
+            dialog.focus();
+            return;
+        }
+        const first = focusable[0];
+        const last = focusable[focusable.length - 1];
+        if (event.shiftKey && (document.activeElement === first || document.activeElement === dialog)) {
+            event.preventDefault();
+            last.focus();
+        } else if (!event.shiftKey && document.activeElement === last) {
+            event.preventDefault();
+            first.focus();
+        }
+    });
+}
+
+function showGenericModal() {
+    const overlay = document.getElementById('modal-overlay');
+    const dialog = document.getElementById('modal-content');
+    if (!overlay || !dialog) return;
+    _bindGenericModalAccessibility();
+    _setRecipeDialogSuspended(true);
+    overlay.style.display = 'flex';
+    dialog.tabIndex = -1;
+    setTimeout(() => {
+        const first = [...dialog.querySelectorAll(
+            'button:not([disabled]), a[href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+        )].find(element => element.offsetParent !== null);
+        (first || dialog).focus();
+    }, 0);
+}
+
+function _bindRecipeDialogAccessibility() {
+    const overlay = document.getElementById('recipe-overlay');
+    const dialog = overlay?.querySelector('.recipe-dialog');
+    if (!overlay || !dialog || dialog.dataset.a11yBound === '1') return;
+    dialog.dataset.a11yBound = '1';
+    dialog.addEventListener('keydown', event => {
+        if (_recipeHigherOverlayVisible()) {
+            return;
+        }
+        if (event.key === 'Escape') {
+            event.preventDefault();
+            closeRecipeDialog();
+            return;
+        }
+        if (event.key !== 'Tab') return;
+        const focusable = [...dialog.querySelectorAll(
+            'button:not([disabled]), a[href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+        )].filter(element => element.offsetParent !== null);
+        if (focusable.length === 0) {
+            event.preventDefault();
+            dialog.focus();
+            return;
+        }
+        const first = focusable[0];
+        const last = focusable[focusable.length - 1];
+        if (event.shiftKey && (document.activeElement === first || document.activeElement === dialog)) {
+            event.preventDefault();
+            last.focus();
+        } else if (!event.shiftKey && document.activeElement === last) {
+            event.preventDefault();
+            first.focus();
+        }
+    });
+    document.addEventListener('focusin', event => {
+        if (
+            overlay.style.display !== 'none'
+            && !_recipeHigherOverlayVisible()
+            && !dialog.contains(event.target)
+        ) {
+            dialog.focus();
+        }
+    });
+}
+
+function focusRecipeDialogPanel(id) {
+    const target = document.getElementById(id);
+    const dialog = document.querySelector('#recipe-overlay .recipe-dialog');
+    setTimeout(() => (target || dialog)?.focus(), 0);
+}
+
+function focusActiveRecipeDialogPanel() {
+    const activeId = ['recipe-result', 'recipe-loading', 'recipe-ask'].find(id => {
+        const element = document.getElementById(id);
+        return element && getComputedStyle(element).display !== 'none';
+    });
+    if (activeId) {
+        focusRecipeDialogPanel(activeId);
+    }
+}
+
+function scrollToRecipeArchive() {
+    document.getElementById('recipe-legacy-section')?.scrollIntoView({
+        behavior: 'smooth',
+        block: 'start',
+    });
 }
 
 function adjustRecipePersons(delta) {
@@ -14596,7 +15873,7 @@ function _normalizeRecipeIngQtyNumber(ing) {
     const unit = ing.inventory_unit || 'pz';
     const pkgSize = parseFloat(ing.default_quantity) || 0;
     const pkgUnit = (ing.package_unit || '').toLowerCase();
-    const isConfSub = unit === 'conf' && pkgSize > 0 && (pkgUnit === 'g' || pkgUnit === 'ml');
+    const isConfSub = unit === 'conf' && pkgSize > 0 && ['g', 'ml', 'pz'].includes(pkgUnit);
     let useQty = parseFloat(ing.qty_number) || 0;
     const stockPieces = parseFloat(ing.inventory_qty_total ?? ing.inventory_qty) || 0;
 
@@ -14723,7 +16000,7 @@ function _computeRecipeIngStockHint(ing, totalStockQty) {
     const unit = ing.inventory_unit || 'pz';
     const pkgSize = parseFloat(ing.default_quantity) || 0;
     const pkgUnit = (ing.package_unit || '').toLowerCase();
-    const isConfSub = unit === 'conf' && pkgSize > 0 && (pkgUnit === 'g' || pkgUnit === 'ml');
+    const isConfSub = unit === 'conf' && pkgSize > 0 && ['g', 'ml', 'pz'].includes(pkgUnit);
     let useQty = parseFloat(ing.qty_number) || 0;
     let stockDisp, useDisp, dispUnit;
 
@@ -14768,6 +16045,9 @@ function _formatRecipeStockQty(n, dispUnit, ing) {
     if (dispUnit === 'g' || dispUnit === 'ml') {
         const rounded = n < 10 ? Math.round(n * 10) / 10 : Math.round(n);
         return rounded + ' ' + dispUnit;
+    }
+    if (dispUnit === 'pz') {
+        return _recipeFormatPieceQtyLabel(Number(n) || 0);
     }
     return stripHtml(formatQuantity(n, ing.inventory_unit || 'pz', ing.default_quantity, ing.package_unit));
 }
@@ -14826,7 +16106,7 @@ function _updateRecipeStockHintsAfterScale(ratio) {
         const unit = ing.inventory_unit || 'pz';
         const pkgSize = parseFloat(ing.default_quantity) || 0;
         const pkgUnit = (ing.package_unit || '').toLowerCase();
-        const isConfSub = unit === 'conf' && pkgSize > 0 && (pkgUnit === 'g' || pkgUnit === 'ml');
+        const isConfSub = unit === 'conf' && pkgSize > 0 && ['g', 'ml', 'pz'].includes(pkgUnit);
         const stockDisp = ing.stock_have;
         let useDisp = baseUse * ratio;
         let remainDisp = Math.max(0, stockDisp - useDisp);
@@ -14849,8 +16129,11 @@ function _updateRecipeStockHintsAfterScale(ratio) {
 async function useRecipeIngredient(idx, productId, location, qtyNumber, btn, recipeQty) {
     if (btn.disabled) return;
     if (!qtyNumber || qtyNumber <= 0) qtyNumber = 1;
+    const dialogSeq = _recipeDialogOpenSeq;
+    const cachedRecipe = _cachedRecipe;
     
     _recipeUseContext = { idx, productId, btn, qtyNumber, recipeQty };
+    const useContext = _recipeUseContext;
     _recipeUseConfMode = null;
 
     // Reset scale state: set the current weight as baseline so only a *change*
@@ -14865,6 +16148,14 @@ async function useRecipeIngredient(idx, productId, location, qtyNumber, btn, rec
     // Fetch inventory to build the modal
     try {
         const data = await api('inventory_list');
+        if (
+            dialogSeq !== _recipeDialogOpenSeq
+            || _cachedRecipe !== cachedRecipe
+            || _recipeUseContext !== useContext
+        ) {
+            if (_recipeUseContext === useContext) _recipeUseContext = null;
+            return;
+        }
         const items = (data.inventory || []).filter(i => i.product_id == productId);
         _recipeUseContext.items = items; // cache for "use all" quantity lookup
         
@@ -14873,9 +16164,11 @@ async function useRecipeIngredient(idx, productId, location, qtyNumber, btn, rec
             return;
         }
         
-        const unit = items[0].unit || 'pz';
+        const rawUnit = String(items[0].unit || 'pz').toLowerCase();
+        const unit = ['pz', 'g', 'ml', 'conf'].includes(rawUnit) ? rawUnit : 'pz';
         const pkgSize = parseFloat(items[0].default_quantity) || 0;
-        const pkgUnit = items[0].package_unit || '';
+        const rawPkgUnit = String(items[0].package_unit || '').toLowerCase();
+        const pkgUnit = ['g', 'ml', 'pz'].includes(rawPkgUnit) ? rawPkgUnit : '';
         const isConf = unit === 'conf' && pkgSize > 0 && pkgUnit;
         
         // Find opened package location
@@ -14892,7 +16185,7 @@ async function useRecipeIngredient(idx, productId, location, qtyNumber, btn, rec
             const openedBadge = _locationHasOpenedPackage(items, loc)
                 ? ` <span class="loc-opened-badge">🔓 ${t('use.opened_badge')}</span>`
                 : '';
-            return `<button type="button" class="loc-btn ${loc === defaultLoc ? 'active' : ''}${openedBadge ? ' loc-btn-opened' : ''}" onclick="selectRecipeUseLoc(this, '${loc}')">${locInfo.icon} ${locInfo.label}${openedBadge}<br><small>${qtyLabel}</small></button>`;
+            return `<button type="button" class="loc-btn ${loc === defaultLoc ? 'active' : ''}${openedBadge ? ' loc-btn-opened' : ''}" data-location="${_recipeHtmlAttribute(loc)}">${escapeHtml(locInfo.icon)} ${escapeHtml(locInfo.label)}${openedBadge}<br><small>${escapeHtml(qtyLabel)}</small></button>`;
         }).join('');
         
         // Build quantity controls
@@ -14908,14 +16201,16 @@ async function useRecipeIngredient(idx, productId, location, qtyNumber, btn, rec
             
             // qtyNumber from recipe is in sub-units (g, ml)
             const step = getSubUnitStep(pkgUnit);
-            defaultQtyValue = (pkgUnit === 'g' || pkgUnit === 'ml') ? Math.round(qtyNumber) : Math.round(qtyNumber * 10) / 10;
+            defaultQtyValue = ['g', 'ml', 'pz'].includes(pkgUnit)
+                ? Math.round(qtyNumber)
+                : Math.round(qtyNumber * 10) / 10;
             
             qtySection = `
                 <div class="use-unit-switch" style="display:flex;margin-bottom:8px">
-                    <button type="button" class="use-unit-btn active" id="ruse-unit-sub" onclick="switchRecipeUseUnit('sub')">${subLabel}</button>
-                    <button type="button" class="use-unit-btn" id="ruse-unit-conf" onclick="switchRecipeUseUnit('conf')">${t('recipes.packs_label')}</button>
+                    <button type="button" class="use-unit-btn active" id="ruse-unit-sub" onclick="switchRecipeUseUnit('sub')">${escapeHtml(subLabel)}</button>
+                    <button type="button" class="use-unit-btn" id="ruse-unit-conf" onclick="switchRecipeUseUnit('conf')">${escapeHtml(t('recipes.packs_label'))}</button>
                 </div>
-                <p id="ruse-hint" style="font-size:0.85rem;color:var(--text-muted);margin-bottom:8px">${t('recipes.quantity_in_total').replace('{unit}', subLabel).replace('{total}', Math.round(totalSub) + subLabel)}</p>
+                <p id="ruse-hint" style="font-size:0.85rem;color:var(--text-muted);margin-bottom:8px">${escapeHtml(t('recipes.quantity_in_total').replace('{unit}', subLabel).replace('{total}', Math.round(totalSub) + subLabel))}</p>
                 <div class="qty-control-with-unit">
                     <div class="qty-control">
                         <button type="button" class="qty-btn" onclick="adjustRecipeUseQty(-1)">−</button>
@@ -14975,12 +16270,12 @@ async function useRecipeIngredient(idx, productId, location, qtyNumber, btn, rec
             <div style="padding:0 16px 16px">
                 <p style="margin-bottom:4px;font-weight:600">${escapeHtml(items[0].name)}</p>
                 ${recipeQty ? `<p style="margin-bottom:8px;background:var(--bg-elevated,rgba(124,58,237,0.12));border-left:3px solid var(--color-accent,#7c3aed);border-radius:6px;padding:6px 10px;font-size:0.9rem">📋 ${t('recipes.recipe_qty_label')}: <strong>${escapeHtml(recipeQty)}</strong></p>` : ''}
-                <p style="font-size:0.82rem;color:var(--text-muted);margin-bottom:12px">📦 ${availInfo}</p>
+                <p style="font-size:0.82rem;color:var(--text-muted);margin-bottom:12px">📦 ${escapeHtml(availInfo)}</p>
                 ${scaleLiveSection}
                 <div class="form-group">
                     <label>📍 ${t('recipes.from_where_label')}</label>
                     <div class="location-selector">${locButtons}</div>
-                    <input type="hidden" id="ruse-location" value="${defaultLoc}">
+                    <input type="hidden" id="ruse-location" value="${_recipeHtmlAttribute(defaultLoc)}">
                 </div>
                 <div class="form-group">
                     <label>${t('recipes.amount_label')}?</label>
@@ -14995,7 +16290,12 @@ async function useRecipeIngredient(idx, productId, location, qtyNumber, btn, rec
                 </button>
             </div>
         `;
-        document.getElementById('modal-overlay').style.display = 'flex';
+        showGenericModal();
+        document.querySelectorAll('#modal-content .loc-btn[data-location]').forEach(button => {
+            button.addEventListener('click', () => {
+                selectRecipeUseLoc(button, button.dataset.location || 'dispensa');
+            });
+        });
         syncRecipeUseQtyUnitBadge();
         
     } catch (err) {
@@ -15060,8 +16360,17 @@ function adjustRecipeUseQty(direction) {
 
 async function submitRecipeUse(useAll) {
     if (!_recipeUseContext) return;
-    const { idx, productId, btn } = _recipeUseContext;
+    const useContext = _recipeUseContext;
+    const cachedRecipe = _cachedRecipe;
+    const dialogSeq = _recipeDialogOpenSeq;
+    const { idx, productId, btn } = useContext;
     const location = document.getElementById('ruse-location').value;
+    let deferContextCleanup = false;
+    const clearUseContext = () => {
+        if (_recipeUseContext === useContext) {
+            _recipeUseContext = null;
+        }
+    };
     
     let qty;
     if (useAll) {
@@ -15069,7 +16378,7 @@ async function submitRecipeUse(useAll) {
         // to the API, because that would permanently DELETE the inventory row without a
         // confirmation step. Instead send the precise quantity so the row is set to qty=0
         // and the normal "finished items" banner can handle the reconciliation.
-        const cachedItems = _recipeUseContext.items || [];
+        const cachedItems = useContext.items || [];
         const locItems = cachedItems.filter(i => i.location === location && parseFloat(i.quantity) > 0);
         qty = locItems.reduce((s, i) => s + parseFloat(i.quantity || 0), 0) || 0;
         if (qty <= 0) {
@@ -15088,7 +16397,7 @@ async function submitRecipeUse(useAll) {
     btn.textContent = '⏳...';
     
     try {
-        const recipeTitle = _cachedRecipe?.recipe?.title || '';
+        const recipeTitle = cachedRecipe?.recipe?.title || '';
         const result = await api('inventory_use', {}, 'POST', {
             product_id: productId,
             quantity: qty,
@@ -15097,16 +16406,32 @@ async function submitRecipeUse(useAll) {
         });
         
         if (result.success) {
+            if (cachedRecipe && cachedRecipe.recipe && cachedRecipe.recipe.ingredients && cachedRecipe.recipe.ingredients[idx]) {
+                cachedRecipe.recipe.ingredients[idx].used = true;
+                // Persist used state to DB
+                if (!cachedRecipe.catalog_preview) {
+                    const usedStateSaved = await saveRecipeToArchive(
+                        cachedRecipe.recipe,
+                        cachedRecipe
+                    );
+                    if (!usedStateSaved) {
+                        showToast(t('recipes.catalog.open_error'), 'error');
+                    }
+                }
+            }
+            const stillCurrent = () => (
+                dialogSeq === _recipeDialogOpenSeq
+                && _cachedRecipe === cachedRecipe
+                && _recipeUseContext === useContext
+            );
+            if (!stillCurrent()) {
+                if (_recipeUseContext === useContext) _recipeUseContext = null;
+                return;
+            }
             const li = document.getElementById(`recipe-ing-${idx}`);
             if (li) li.classList.add('recipe-ing-used');
             btn.textContent = t('cooking.ingredient_used');
             btn.classList.add('btn-used');
-            
-            if (_cachedRecipe && _cachedRecipe.recipe && _cachedRecipe.recipe.ingredients && _cachedRecipe.recipe.ingredients[idx]) {
-                _cachedRecipe.recipe.ingredients[idx].used = true;
-                // Persist used state to DB
-                saveRecipeToArchive(_cachedRecipe.recipe);
-            }
             
             showToast(t('recipes.ingredient_scaled_toast'), 'success');
             if (result.added_to_bring) {
@@ -15116,14 +16441,26 @@ async function submitRecipeUse(useAll) {
             // Check low stock → shopping prompt, then offer move
             const moveCallback = result.remaining > 0
                 ? () => setTimeout(() => {
+                    if (!stillCurrent()) {
+                        clearUseContext();
+                        return;
+                    }
                     // Get vacuum state from the actual inventory item at this location
-                    const cachedItems = _recipeUseContext?.items || [];
+                    const cachedItems = useContext.items || [];
                     const itemAtLoc = cachedItems.find(i => i.location === location);
                     const wasVacuum = !!(itemAtLoc?.vacuum_sealed);
                     showRecipeMoveModal(productId, location, result.remaining, result.opened_id, wasVacuum);
+                    clearUseContext();
                   }, 300)
-                : null;
-            setTimeout(() => showLowStockBringPrompt(result, moveCallback), 300);
+                : clearUseContext;
+            deferContextCleanup = true;
+            setTimeout(() => {
+                if (stillCurrent()) {
+                    showLowStockBringPrompt(result, moveCallback);
+                } else {
+                    clearUseContext();
+                }
+            }, 300);
         } else {
             btn.disabled = false;
             btn.textContent = t('cooking.ingredient_use_btn');
@@ -15135,7 +16472,9 @@ async function submitRecipeUse(useAll) {
         btn.textContent = t('cooking.ingredient_use_btn');
         showToast(t('error.connection'), 'error');
     }
-    _recipeUseContext = null;
+    if (!deferContextCleanup) {
+        clearUseContext();
+    }
 }
 
 function showRecipeMoveModal(productId, fromLoc, remaining, openedId, wasVacuum) {
@@ -15156,7 +16495,7 @@ function showRecipeMoveModal(productId, fromLoc, remaining, openedId, wasVacuum)
 
     const otherLocs = Object.entries(LOCATIONS).filter(([k]) => k !== fromLoc);
     const locButtons = otherLocs.map(([k, v]) =>
-        `<button type="button" class="loc-btn" onclick="clearMoveModalTimer();confirmRecipeMove(${productId}, '${fromLoc}', '${k}', ${openedId || 0})">${v.icon} ${v.label}</button>`
+        `<button type="button" class="loc-btn recipe-move-location" data-location="${_recipeHtmlAttribute(k)}">${escapeHtml(v.icon)} ${escapeHtml(v.label)}</button>`
     ).join('');
     const vacuumRow = `
         <label style="display:flex;align-items:center;gap:8px;margin-top:12px;cursor:pointer">
@@ -15172,10 +16511,25 @@ function showRecipeMoveModal(productId, fromLoc, remaining, openedId, wasVacuum)
             <p style="margin-bottom:12px">${t('move.question_short').replace('{thing}', openedId ? t('move.thing_opened') : t('move.thing_rest'))}</p>
             <div class="location-selector">${locButtons}</div>
             ${vacuumRow}
-            <button type="button" id="btn-move-stay" class="btn btn-secondary full-width move-countdown-btn" style="margin-top:12px" onclick="clearMoveModalTimer();_recipeMoveCancelStay(${productId}, '${fromLoc}', ${openedId || 0})">${t('move.stay_btn').replace('{location}', LOCATIONS[fromLoc]?.label || fromLoc)}</button>
+            <button type="button" id="btn-move-stay" class="btn btn-secondary full-width move-countdown-btn" style="margin-top:12px">${escapeHtml(t('move.stay_btn').replace('{location}', LOCATIONS[fromLoc]?.label || fromLoc))}</button>
         </div>
     `;
-    document.getElementById('modal-overlay').style.display = 'flex';
+    showGenericModal();
+    document.querySelectorAll('#modal-content .recipe-move-location[data-location]').forEach(button => {
+        button.addEventListener('click', () => {
+            clearMoveModalTimer();
+            confirmRecipeMove(
+                Number(productId),
+                fromLoc,
+                button.dataset.location || 'dispensa',
+                Number(openedId || 0)
+            );
+        });
+    });
+    document.getElementById('btn-move-stay')?.addEventListener('click', () => {
+        clearMoveModalTimer();
+        _recipeMoveCancelStay(Number(productId), fromLoc, Number(openedId || 0));
+    });
     startMoveModalCountdown('btn-move-stay', () => { _recipeMoveCancelStay(productId, fromLoc, openedId || 0); });
 }
 
@@ -15271,14 +16625,30 @@ let _recipeCurrentPersons = 1;
  */
 async function toggleRecipeFavorite(btn) {
     if (!_cachedRecipe || !_cachedRecipe.id) return;
+    const cachedRecipe = _cachedRecipe;
+    const dialogSeq = _recipeDialogOpenSeq;
     const res = await api('recipes_toggle_favorite', {}, 'POST', { id: _cachedRecipe.id });
     if (!res.success) return;
-    _cachedRecipe.is_favorite = res.is_favorite;
+    cachedRecipe.is_favorite = res.is_favorite;
+    if (_cachedRecipe !== cachedRecipe || _recipeDialogOpenSeq !== dialogSeq) {
+        _recipeArchiveCache = null;
+        loadRecipeArchive();
+        loadRecipeCatalog({ keepStatus: true });
+        return;
+    }
     btn.classList.toggle('active', res.is_favorite);
     btn.textContent = res.is_favorite ? '★' : '☆';
     btn.title = res.is_favorite ? t('recipes.unfavorite') : t('recipes.favorite');
     // Invalidate archive cache so the star shows on next open
     _recipeArchiveCache = null;
+    if (_cachedRecipe.catalog_recipe_id) {
+        _recipeCatalogResults.forEach(result => {
+            if (Number(result?.recipe?.id) === Number(_cachedRecipe.catalog_recipe_id)) {
+                result.recipe.favorite = !!res.is_favorite;
+            }
+        });
+        loadRecipeCatalog({ keepStatus: true });
+    }
 }
 
 /**
@@ -15337,8 +16707,11 @@ async function addRecipeShoppingSuggestions() {
     }
 }
 
-async function renderRecipe(r) {
+async function renderRecipe(r, options = {}) {
     await enrichRecipeIngredientsStock(r);
+    if (typeof options.isCurrent === 'function' && !options.isCurrent()) {
+        return false;
+    }
     // Reset regen choice panel (hide choice, show button)
     const regenChoice = document.getElementById('recipe-regen-choice');
     const regenBtn = document.getElementById('recipe-regen-btn');
@@ -15349,23 +16722,24 @@ async function renderRecipe(r) {
     _recipeBasePersons = r.persons || 1;
     _recipeCurrentPersons = _recipeBasePersons;
 
-    const isFav = !!(_cachedRecipe && _cachedRecipe.is_favorite);
+    const renderCachedRecipe = options.cachedRecipe || _cachedRecipe;
+    const isFav = !!(renderCachedRecipe && renderCachedRecipe.is_favorite);
 
     let html = `<h2>${escapeHtml(r.title)}</h2>`;
 
     // Meta tags + star (#124) + persons rescaler (#123)
     html += '<div class="recipe-meta">';
-    if (r.meal) html += `<span class="recipe-tag">${_mealLabel(r.meal)}</span>`;
+    if (r.meal) html += `<span class="recipe-tag">${escapeHtml(_mealLabel(r.meal))}</span>`;
     html += `<span class="recipe-tag recipe-persons-ctrl">
         <button class="btn-persons-adj" onclick="scaleRecipePersons(-1)">−</button>
-        <span id="recipe-persons-display">👥 ${r.persons} ${t('recipes.persons_short')}</span>
+        <span id="recipe-persons-display">👥 ${escapeHtml(String(r.persons || 1))} ${escapeHtml(t('recipes.persons_short'))}</span>
         <button class="btn-persons-adj" onclick="scaleRecipePersons(+1)">+</button>
     </span>`;
-    if (r.prep_time) html += `<span class="recipe-tag">🔪 ${r.prep_time}</span>`;
-    if (r.cook_time) html += `<span class="recipe-tag">🔥 ${r.cook_time}</span>`;
-    if (r.tags) r.tags.forEach(tag => { html += `<span class="recipe-tag">${escapeHtml(tag)}</span>`; });
+    if (r.prep_time) html += `<span class="recipe-tag">🔪 ${escapeHtml(String(r.prep_time))}</span>`;
+    if (r.cook_time) html += `<span class="recipe-tag">🔥 ${escapeHtml(String(r.cook_time))}</span>`;
+    if (Array.isArray(r.tags)) r.tags.forEach(tag => { html += `<span class="recipe-tag">${escapeHtml(tag)}</span>`; });
     // Favorite star button (#124) — visible only for archived recipes (have an id)
-    if (_cachedRecipe && _cachedRecipe.id) {
+    if (renderCachedRecipe && renderCachedRecipe.id) {
         html += `<button class="btn-recipe-fav${isFav ? ' active' : ''}" onclick="toggleRecipeFavorite(this)" title="${isFav ? t('recipes.unfavorite') : t('recipes.favorite')}">${isFav ? '★' : '☆'}</button>`;
     }
     html += '</div>';
@@ -15376,15 +16750,16 @@ async function renderRecipe(r) {
     }
 
     // Tools/appliances banner (shown only when specific equipment is needed)
-    const tools = (r.tools_needed && r.tools_needed.length > 0)
-        ? r.tools_needed.filter(t => t && t.trim())
-        : _extractToolsFromSteps(r.steps);
+    const recipeSteps = Array.isArray(r.steps) ? r.steps : [];
+    const tools = (Array.isArray(r.tools_needed) && r.tools_needed.length > 0)
+        ? r.tools_needed.filter(t => typeof t === 'string' && t.trim())
+        : _extractToolsFromSteps(recipeSteps);
     if (tools.length > 0) {
         html += `<div class="recipe-tools-banner">🔧 <strong>${escapeHtml(t('recipes.tools_title'))}:</strong> ${tools.map(tool => `<span class="recipe-tool-chip">${escapeHtml(tool)}</span>`).join('')}</div>`;
     }
 
     // Optional shopping suggestions (ingredients removed because not in pantry)
-    const shopSug = r.shopping_suggestions || [];
+    const shopSug = Array.isArray(r.shopping_suggestions) ? r.shopping_suggestions : [];
     if (shopSug.length > 0) {
         const items = shopSug.map(s => `<li><strong>${escapeHtml(s.name)}</strong>${s.qty ? ': ' + escapeHtml(s.qty) : ''}</li>`).join('');
         html += `<div class="recipe-shopping-suggestions" id="recipe-shopping-suggestions">
@@ -15399,13 +16774,16 @@ async function renderRecipe(r) {
 
     // Ingredients
     html += `<h3>${t('recipes.ingredients_title')}</h3><ul class="recipe-ingredients">`;
-    (r.ingredients || []).forEach((ing, idx) => {
+    (Array.isArray(r.ingredients) ? r.ingredients : []).forEach((ing, idx) => {
         if (ing.from_pantry && ing.product_id) {
-            const loc = (ing.location || 'dispensa').replace(/'/g, "\\'");
+            const loc = ing.location || 'dispensa';
             const alreadyUsed = ing.used === true;
-            const qtyNum = Math.round((ing.qty_number || 0) * 10) / 10;
-            html += `<li class="recipe-ingredient${alreadyUsed ? ' recipe-ing-used' : ''}" id="recipe-ing-${idx}" data-ing-idx="${idx}" data-base-qty="${ing.qty_number || 0}" data-base-qty-str="${escapeHtml(ing.qty || '')}">`;
-            html += `<span class="recipe-ing-text"><strong class="recipe-ing-name" onclick="openIngredientDetail(${ing.product_id}, '${loc}')" title="${escapeHtml(t('btn.edit'))}">${escapeHtml(ing.name)}</strong>${ing.brand ? ' <em>(' + escapeHtml(ing.brand) + ')</em>' : ''}: <span class="recipe-ing-qty">${escapeHtml(ing.qty)}</span>${ing.use_all_suggested ? ' ♻️' : ''} ✅`;
+            const qtyNumber = Number(ing.qty_number);
+            const qtyNum = Number.isFinite(qtyNumber) ? Math.round(qtyNumber * 10) / 10 : 0;
+            const productId = Number(ing.product_id);
+            const safeProductId = Number.isInteger(productId) && productId > 0 ? productId : 0;
+            html += `<li class="recipe-ingredient${alreadyUsed ? ' recipe-ing-used' : ''}" id="recipe-ing-${idx}" data-ing-idx="${idx}" data-base-qty="${qtyNum}" data-base-qty-str="${_recipeHtmlAttribute(ing.qty || '')}">`;
+            html += `<span class="recipe-ing-text"><strong class="recipe-ing-name" role="button" tabindex="0" data-product-id="${safeProductId}" data-location="${_recipeHtmlAttribute(loc)}" title="${_recipeHtmlAttribute(t('btn.edit'))}">${escapeHtml(ing.name)}</strong>${ing.brand ? ' <em>(' + escapeHtml(ing.brand) + ')</em>' : ''}: <span class="recipe-ing-qty">${escapeHtml(ing.qty)}</span>${ing.use_all_suggested ? ' ♻️' : ''} ✅`;
             // Detail line: location + expiry
             let details = [];
             const ingredientLocLabels = Object.fromEntries(Object.entries(LOCATIONS).map(([k,v]) => [k, `${v.icon} ${v.label}`]));
@@ -15422,18 +16800,26 @@ async function renderRecipe(r) {
                 else if (diffDays <= 7) details.push(t('expiry.badge_expires_yellow').replace('{n}', diffDays));
                 else details.push('📅 ' + exp.toLocaleDateString(_currentLang === 'de' ? 'de-DE' : _currentLang === 'en' ? 'en-GB' : 'it-IT'));
             }
-            if (details.length) html += `<br><small class="recipe-ing-detail">${details.join(' · ')}</small>`;
+            if (details.length) html += `<br><small class="recipe-ing-detail">${escapeHtml(details.join(' · '))}</small>`;
             const stockLine = _recipeIngStockHintHtml(ing);
             if (stockLine) html += `<br><small class="recipe-ing-stock">${escapeHtml(stockLine)}</small>`;
             html += `</span>`;
             if (alreadyUsed) {
-                html += `<button class="btn-use-ingredient btn-used" disabled>${t('cooking.ingredient_used')}</button>`;
+                html += `<button class="btn-use-ingredient btn-used" disabled>${escapeHtml(t('cooking.ingredient_used'))}</button>`;
             } else {
-                html += `<button class="btn-use-ingredient" onclick="useRecipeIngredient(${idx}, ${ing.product_id}, '${loc}', ${qtyNum}, this, '${(ing.qty || '').replace(/'/g, "&apos;")}')" title="${t('cooking.ingredient_deduct_title')}">${t('cooking.ingredient_use_btn')}</button>`;
+                html += `<button class="btn-use-ingredient" data-recipe-use="1" data-ing-idx="${idx}" data-product-id="${safeProductId}" data-location="${_recipeHtmlAttribute(loc)}" data-qty-number="${qtyNum}" data-qty="${_recipeHtmlAttribute(ing.qty || '')}" title="${_recipeHtmlAttribute(t('cooking.ingredient_deduct_title'))}">${escapeHtml(t('cooking.ingredient_use_btn'))}</button>`;
             }
             html += `</li>`;
+        } else {
+            const readOnlyName = ing.name || ing.ingredient || ing.normalized_name || ing.canonical_name || ing.raw_text || '';
+            let readOnlyQty = ing.qty || ing.quantity_text || '';
+            if (!readOnlyQty && ing.quantity != null) {
+                readOnlyQty = `${ing.quantity}${ing.unit ? ` ${ing.unit}` : ''}`;
+            }
+            if (readOnlyName) {
+                html += `<li class="recipe-ingredient recipe-ingredient-readonly"><span class="recipe-ing-text"><strong>${escapeHtml(readOnlyName)}</strong>${readOnlyQty ? `: ${escapeHtml(readOnlyQty)}` : ''}</span></li>`;
+            }
         }
-        // Non-pantry ingredients are stripped server-side; nothing to render here.
     });
     html += '</ul>';
 
@@ -15442,7 +16828,7 @@ async function renderRecipe(r) {
 
     // Steps
     html += `<h3>${t('recipes.steps_title')}</h3><ol>`;
-    (r.steps || []).forEach(step => {
+    recipeSteps.forEach(step => {
         const appliance = _stepAppliance(step);
         html += `<li>${escapeHtml(_stepStr(step))}${appliance ? ` <span class="recipe-step-appliance">${escapeHtml(appliance)}</span>` : ''}</li>`;
     });
@@ -15456,22 +16842,22 @@ async function renderRecipe(r) {
             <div class="recipe-nutrition-grid">
                 <div class="recipe-nutrition-item">
                     <span class="recipe-nutrition-icon">🔥</span>
-                    <span class="recipe-nutrition-value">${n.kcal ?? '—'}</span>
+                    <span class="recipe-nutrition-value">${escapeHtml(String(n.kcal ?? '—'))}</span>
                     <span class="recipe-nutrition-label">${t('recipes.nutrition_kcal')}</span>
                 </div>
                 <div class="recipe-nutrition-item">
                     <span class="recipe-nutrition-icon">🥩</span>
-                    <span class="recipe-nutrition-value">${n.protein_g ?? '—'} g</span>
+                    <span class="recipe-nutrition-value">${escapeHtml(String(n.protein_g ?? '—'))} g</span>
                     <span class="recipe-nutrition-label">${t('recipes.nutrition_protein')}</span>
                 </div>
                 <div class="recipe-nutrition-item">
                     <span class="recipe-nutrition-icon">🍞</span>
-                    <span class="recipe-nutrition-value">${n.carbs_g ?? '—'} g</span>
+                    <span class="recipe-nutrition-value">${escapeHtml(String(n.carbs_g ?? '—'))} g</span>
                     <span class="recipe-nutrition-label">${t('recipes.nutrition_carbs')}</span>
                 </div>
                 <div class="recipe-nutrition-item">
                     <span class="recipe-nutrition-icon">🫒</span>
-                    <span class="recipe-nutrition-value">${n.fat_g ?? '—'} g</span>
+                    <span class="recipe-nutrition-value">${escapeHtml(String(n.fat_g ?? '—'))} g</span>
                     <span class="recipe-nutrition-label">${t('recipes.nutrition_fat')}</span>
                 </div>
             </div>
@@ -15501,6 +16887,30 @@ async function renderRecipe(r) {
     }
 
     document.getElementById('recipe-content').innerHTML = html;
+    document.querySelectorAll('#recipe-content .recipe-ing-name[data-product-id]').forEach(element => {
+        const open = () => openIngredientDetail(
+            Number(element.dataset.productId),
+            element.dataset.location || 'dispensa'
+        );
+        element.addEventListener('click', open);
+        element.addEventListener('keydown', event => {
+            if (event.key === 'Enter' || event.key === ' ') {
+                event.preventDefault();
+                open();
+            }
+        });
+    });
+    document.querySelectorAll('#recipe-content .btn-use-ingredient[data-recipe-use]').forEach(button => {
+        button.addEventListener('click', () => useRecipeIngredient(
+            Number(button.dataset.ingIdx),
+            Number(button.dataset.productId),
+            button.dataset.location || 'dispensa',
+            Number(button.dataset.qtyNumber || 0),
+            button,
+            button.dataset.qty || ''
+        ));
+    });
+    return true;
 }
 
 // ===== COOKING MODE =====
@@ -15613,11 +17023,14 @@ function startCookingMode() {
     // Tools bar
     const toolsBar = document.getElementById('cooking-tools-bar');
     if (toolsBar) {
-        const tools = (_cookingRecipe.tools_needed && _cookingRecipe.tools_needed.length > 0)
-            ? _cookingRecipe.tools_needed.filter(t => t && t.trim())
+        const tools = (Array.isArray(_cookingRecipe.tools_needed) && _cookingRecipe.tools_needed.length > 0)
+            ? _cookingRecipe.tools_needed.filter(t => typeof t === 'string' && t.trim())
             : _extractToolsFromSteps(_cookingRecipe.steps);
         if (tools.length > 0) {
-            toolsBar.innerHTML = '🔧 ' + tools.map(t => `<span class="cooking-tool-chip">${t}</span>`).join('');
+            toolsBar.replaceChildren(document.createTextNode('🔧 '));
+            tools.forEach(tool => {
+                toolsBar.appendChild(_recipeCatalogElement('span', 'cooking-tool-chip', tool));
+            });
             toolsBar.style.display = '';
         } else {
             toolsBar.style.display = 'none';
@@ -15625,6 +17038,7 @@ function startCookingMode() {
         }
     }
     document.getElementById('cooking-overlay').style.display = 'flex';
+    _setRecipeDialogSuspended(true);
     document.body.classList.add('cooking-mode-active');
     // Hide kiosk overlay — it lives outside <body> with z-index:2147483647 and would overlap cooking UI
     const _kioskOvl = document.getElementById('_kiosk_overlay');
@@ -15642,12 +17056,16 @@ function startCookingMode() {
 function closeCookingMode() {
     document.getElementById('cooking-overlay').style.display = 'none';
     document.body.classList.remove('cooking-mode-active');
+    _setRecipeDialogSuspended(false);
     // Restore kiosk overlay
     const _kioskOvl = document.getElementById('_kiosk_overlay');
     if (_kioskOvl) _kioskOvl.style.display = 'flex';
     // NOTE: intentionally keep _cookingRecipe, _cookingStep, _cookingVisited
     // so the user can resume from the same step when they reopen
     try { screen.orientation?.unlock().catch(() => {}); } catch (_) { /* ignore */ }
+    if (document.getElementById('recipe-overlay')?.style.display !== 'none') {
+        focusActiveRecipeDialogPanel();
+    }
 }
 
 function restartCookingMode() {
@@ -17060,8 +18478,14 @@ function doRegenerateReplace() {
 }
 
 async function doRegenerateSave() {
+    const dialogSeq = _recipeDialogOpenSeq;
+    const recipe = _cachedRecipe?.recipe;
     if (_cachedRecipe && _cachedRecipe.recipe) {
-        await saveRecipeToArchive(_cachedRecipe.recipe);
+        const saved = await saveRecipeToArchive(recipe);
+        if (!saved || dialogSeq !== _recipeDialogOpenSeq || _cachedRecipe?.recipe !== recipe) {
+            showToast(t('recipes.catalog.open_error'), 'error');
+            return;
+        }
     }
     cancelRegenChoice();
     _doRegenerate();
@@ -17081,6 +18505,7 @@ function _doRegenerate() {
     document.getElementById('recipe-result').style.display = 'none';
     document.getElementById('recipe-loading').style.display = 'none';
     document.getElementById('recipe-ask').style.display = '';
+    focusRecipeDialogPanel('recipe-ask');
 }
 
 function regenerateRecipe() {
@@ -17089,6 +18514,7 @@ function regenerateRecipe() {
 
 async function generateRecipe() {
     if (!_requireGemini()) return;
+    const dialogSeq = ++_recipeDialogOpenSeq;
     const meal = getSelectedMealType();
     const persons = parseInt(document.getElementById('recipe-persons').value) || 1;
     const settings = getSettings();
@@ -17125,6 +18551,7 @@ async function generateRecipe() {
     document.getElementById('recipe-ask').style.display = 'none';
     document.getElementById('recipe-loading').style.display = '';
     document.getElementById('recipe-result').style.display = 'none';
+    focusRecipeDialogPanel('recipe-loading');
     const loadingMsg = document.getElementById('recipe-loading-msg');
 
     try {
@@ -17151,6 +18578,7 @@ async function generateRecipe() {
             },
             body: JSON.stringify(payload)
         });
+        if (dialogSeq !== _recipeDialogOpenSeq) return;
 
         if (!response.ok) {
             const data = await response.json().catch(() => ({}));
@@ -17184,7 +18612,11 @@ async function generateRecipe() {
                 if (!line.startsWith('data: ')) continue;
                 try {
                     const event = JSON.parse(line.slice(6));
-                    if (event.type === 'status' && loadingMsg) {
+                    if (
+                        event.type === 'status'
+                        && loadingMsg
+                        && dialogSeq === _recipeDialogOpenSeq
+                    ) {
                         loadingMsg.textContent = event.message;
                     } else if (event.type === 'recipe') {
                         recipe = event.recipe;
@@ -17196,13 +18628,25 @@ async function generateRecipe() {
         }
 
         if (recipe) {
-            await renderRecipe(recipe);
+            if (dialogSeq !== _recipeDialogOpenSeq) return;
             if (recipe.title) _generatedTodayTitles.push(recipe.title);
-            await saveRecipeToArchive(recipe);
-            _cachedRecipe = { meal, recipe };
+            const saved = await saveRecipeToArchive(recipe);
+            if (dialogSeq !== _recipeDialogOpenSeq) return;
+            const pendingCachedRecipe = { meal, recipe, unsaved: !saved };
+            const rendered = await renderRecipe(recipe, {
+                cachedRecipe: pendingCachedRecipe,
+                isCurrent: () => dialogSeq === _recipeDialogOpenSeq,
+            });
+            if (!rendered || dialogSeq !== _recipeDialogOpenSeq) return;
+            _cachedRecipe = pendingCachedRecipe;
             document.getElementById('recipe-loading').style.display = 'none';
             document.getElementById('recipe-result').style.display = '';
+            focusRecipeDialogPanel('recipe-result');
+            if (!saved) {
+                showToast(t('recipes.generate_error'), 'error');
+            }
         } else {
+            if (dialogSeq !== _recipeDialogOpenSeq) return;
             document.getElementById('recipe-loading').style.display = 'none';
             document.getElementById('recipe-ask').style.display = '';
             if (errorEvent) {
@@ -17219,6 +18663,7 @@ async function generateRecipe() {
         }
 
     } catch (err) {
+        if (dialogSeq !== _recipeDialogOpenSeq) return;
         console.error('Recipe error:', err);
         document.getElementById('recipe-loading').style.display = 'none';
         document.getElementById('recipe-ask').style.display = '';
@@ -17296,14 +18741,24 @@ async function chatTransferToRecipes(btn, replyText) {
         // renderRecipe expects `persons`; Gemini might return `servings`
         if (!recipe.persons && recipe.servings) recipe.persons = recipe.servings;
         if (!recipe.persons) recipe.persons = 2;
-        await saveRecipeToArchive(recipe);
-        _cachedRecipe = { meal: recipe.meal || '', recipe };
-        await renderRecipe(recipe);
+        if (!await saveRecipeToArchive(recipe)) {
+            resetBtn();
+            showToast(t('recipes.catalog.open_error'), 'error');
+            return;
+        }
+        const transferredRecipe = { meal: recipe.meal || '', recipe };
         // Transform the transfer button into "Apri la ricetta"
         btn.disabled = false;
         btn.textContent = '📖 ' + (t('chat.open_recipe') || 'Apri la ricetta');
-        btn.onclick = () => {
-            document.getElementById('recipe-overlay').style.display = 'flex';
+        btn.onclick = async () => {
+            const seq = ++_recipeDialogOpenSeq;
+            const rendered = await renderRecipe(recipe, {
+                cachedRecipe: transferredRecipe,
+                isCurrent: () => seq === _recipeDialogOpenSeq,
+            });
+            if (!rendered || seq !== _recipeDialogOpenSeq) return;
+            _cachedRecipe = transferredRecipe;
+            activateRecipeDialog(btn);
             document.getElementById('recipe-ask').style.display = 'none';
             document.getElementById('recipe-loading').style.display = 'none';
             document.getElementById('recipe-result').style.display = '';
@@ -17333,30 +18788,49 @@ async function openIngredientDetail(productId, location) {
 
 async function generateRecipeForIngredient(ingredientName) {
     if (!_requireGemini()) return;
-    document.getElementById('recipe-overlay').style.display = 'flex';
+    const seq = ++_recipeDialogOpenSeq;
+    const activeElement = document.activeElement;
+    const opener = activeElement instanceof HTMLElement && activeElement.offsetParent !== null
+        ? activeElement
+        : document.querySelector('.nav-btn[data-page="recipe"]');
+    activateRecipeDialog(opener);
     document.getElementById('recipe-ask').style.display = 'none';
     document.getElementById('recipe-loading').style.display = '';
     document.getElementById('recipe-result').style.display = 'none';
+    focusRecipeDialogPanel('recipe-loading');
     const loadingMsg = document.getElementById('recipe-loading-msg');
     if (loadingMsg) loadingMsg.textContent = '👨‍🍳 ' + (t('recipes.loading_msg') || 'Sto preparando la ricetta...');
     try {
         const result = await api('recipe_from_ingredient', {}, 'POST', { ingredient: ingredientName, lang: _currentLang });
         if (!result || !result.success || !result.recipe) {
-            document.getElementById('recipe-overlay').style.display = 'none';
+            if (seq !== _recipeDialogOpenSeq) return;
+            closeRecipeDialog();
             showToast('⚠️ ' + (result?.error || t('error.generic') || t('error.generic')), 'error');
             return;
         }
         const recipe = result.recipe;
         if (!recipe.persons && recipe.servings) recipe.persons = recipe.servings;
         if (!recipe.persons) recipe.persons = 2;
-        await saveRecipeToArchive(recipe);
-        _cachedRecipe = { meal: recipe.meal || '', recipe };
-        await renderRecipe(recipe);
+        if (seq !== _recipeDialogOpenSeq) return;
+        const saved = await saveRecipeToArchive(recipe);
+        if (seq !== _recipeDialogOpenSeq) return;
+        const pendingCachedRecipe = { meal: recipe.meal || '', recipe, unsaved: !saved };
+        const rendered = await renderRecipe(recipe, {
+            cachedRecipe: pendingCachedRecipe,
+            isCurrent: () => seq === _recipeDialogOpenSeq,
+        });
+        if (!rendered || seq !== _recipeDialogOpenSeq) return;
+        _cachedRecipe = pendingCachedRecipe;
         document.getElementById('recipe-loading').style.display = 'none';
         document.getElementById('recipe-result').style.display = '';
+        focusRecipeDialogPanel('recipe-result');
+        if (!saved) {
+            showToast(t('recipes.catalog.open_error'), 'error');
+        }
     } catch (err) {
+        if (seq !== _recipeDialogOpenSeq) return;
         console.error('[generateRecipeForIngredient]', err);
-        document.getElementById('recipe-overlay').style.display = 'none';
+        closeRecipeDialog();
         showToast('⚠️ ' + t('error.connection'), 'error');
     }
 }

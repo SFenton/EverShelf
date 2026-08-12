@@ -42,19 +42,53 @@ jobs:
           echo "code=$VCODE" >> "$GITHUB_OUTPUT"
           echo "Kiosk version: $VERSION (versionCode $VCODE)"
 
-      - name: Build debug APK
+      - name: Build debug validation APK
         run: gradle assembleDebug --no-daemon
         working-directory: evershelf-kiosk
 
-      - name: Rename APK
+      - name: Check release signing configuration
+        id: signing
+        env:
+          KEYSTORE_BASE64: ${{ secrets.EVERSHELF_SIGNING_KEYSTORE_BASE64 }}
+          STORE_PASSWORD: ${{ secrets.EVERSHELF_SIGNING_STORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.EVERSHELF_SIGNING_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.EVERSHELF_SIGNING_KEY_PASSWORD }}
+        run: |
+          if [[ -n "$KEYSTORE_BASE64" && -n "$STORE_PASSWORD" \
+                && -n "$KEY_ALIAS" && -n "$KEY_PASSWORD" ]]; then
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::Signed kiosk publishing is disabled until all EVERSHELF_SIGNING_* secrets are configured."
+          fi
+
+      - name: Decode release keystore
+        if: steps.signing.outputs.configured == 'true'
+        env:
+          KEYSTORE_BASE64: ${{ secrets.EVERSHELF_SIGNING_KEYSTORE_BASE64 }}
+        run: printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "${RUNNER_TEMP}/evershelf-release.jks"
+
+      - name: Build signed release APK
+        if: steps.signing.outputs.configured == 'true'
+        env:
+          EVERSHELF_SIGNING_STORE_FILE: ${{ runner.temp }}/evershelf-release.jks
+          EVERSHELF_SIGNING_STORE_PASSWORD: ${{ secrets.EVERSHELF_SIGNING_STORE_PASSWORD }}
+          EVERSHELF_SIGNING_KEY_ALIAS: ${{ secrets.EVERSHELF_SIGNING_KEY_ALIAS }}
+          EVERSHELF_SIGNING_KEY_PASSWORD: ${{ secrets.EVERSHELF_SIGNING_KEY_PASSWORD }}
+        run: gradle assembleRelease --no-daemon
+        working-directory: evershelf-kiosk
+
+      - name: Rename signed APK
+        if: steps.signing.outputs.configured == 'true'
         run: |
           mkdir -p artifacts
-          cp evershelf-kiosk/app/build/outputs/apk/debug/app-debug.apk artifacts/evershelf-kiosk.apk
+          cp evershelf-kiosk/app/build/outputs/apk/release/app-release.apk artifacts/evershelf-kiosk.apk
 
       # Publish with a semver-compatible tag so the in-app update check can
       # compare versions numerically (tag "kiosk-1.7.0" → norm → "1.7.0").
       # Also update the "kiosk-latest" tag so the hardcoded download URL still works.
       - name: Create versioned release
+        if: steps.signing.outputs.configured == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -69,6 +103,7 @@ jobs:
             artifacts/evershelf-kiosk.apk
 
       - name: Update kiosk-latest tag (for hardcoded download URL)
+        if: steps.signing.outputs.configured == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -82,6 +117,7 @@ jobs:
             artifacts/evershelf-kiosk.apk
 
       - name: Publish APK to releases/ for LAN OTA
+        if: steps.signing.outputs.configured == 'true'
         env:
           GH_TOKEN: ${{ secrets.WORKFLOW_PAT || secrets.GITHUB_TOKEN }}
         run: |
@@ -94,4 +130,3 @@ jobs:
           git add releases/evershelf-kiosk.apk releases/kiosk-version.json
           git diff --staged --quiet || git commit -m "chore(kiosk): publish APK v${{ steps.version.outputs.name }} for LAN OTA"
           git push origin HEAD:${{ github.ref_name }}
-

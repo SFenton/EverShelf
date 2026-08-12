@@ -1,0 +1,3698 @@
+{
+    "schema_version": "ingredient-ontology-v3-resolution-gold-v1",
+    "generated_from": {
+        "ontology_version_id": 1,
+        "ontology_content_hash": "3d8de5036fafdbf459daa70bda3f3ccbfcd39e958ef6b48610673872dbcc0718",
+        "generator": "generate-ontology-resolution-gold.php"
+    },
+    "positive_cases": [
+        {
+            "label": "gemahlener schwarzer Pfeffer",
+            "language": "de",
+            "entity_slug": "piper-pepper",
+            "attributes": {
+                "form": "ground",
+                "variety": "black"
+            },
+            "context": []
+        },
+        {
+            "label": "Gemahlener weißer Pfeffer",
+            "language": "de",
+            "entity_slug": "piper-pepper",
+            "attributes": {
+                "form": "ground",
+                "variety": "white"
+            },
+            "context": []
+        },
+        {
+            "label": "rote paprika",
+            "language": "de",
+            "entity_slug": "bell-pepper",
+            "attributes": {
+                "variety": "red"
+            },
+            "context": {
+                "cohort": "de",
+                "evidence_kind": "provider_ref_cluster",
+                "evidence_key": "provider-ref:com.vorwerk.ingredients.Ingredient-rpf-43"
+            }
+        },
+        {
+            "label": "schwarzer Pfeffer",
+            "language": "de",
+            "entity_slug": "piper-pepper",
+            "attributes": {
+                "variety": "black"
+            },
+            "context": []
+        },
+        {
+            "label": "speisestärke",
+            "language": "de",
+            "entity_slug": "starch",
+            "attributes": [],
+            "context": {
+                "cohort": "de"
+            }
+        },
+        {
+            "label": "almond oil",
+            "language": "en",
+            "entity_slug": "oil",
+            "attributes": {
+                "variety": "almond"
+            },
+            "context": []
+        },
+        {
+            "label": "apple juice",
+            "language": "en",
+            "entity_slug": "apple-juice",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "arborio rice",
+            "language": "en",
+            "entity_slug": "rice",
+            "attributes": {
+                "variety": "arborio"
+            },
+            "context": []
+        },
+        {
+            "label": "basmati rice",
+            "language": "en",
+            "entity_slug": "rice",
+            "attributes": {
+                "variety": "basmati"
+            },
+            "context": []
+        },
+        {
+            "label": "bittersweet chocolate",
+            "language": "en",
+            "entity_slug": "chocolate",
+            "attributes": {
+                "chocolate_class": "bittersweet"
+            },
+            "context": []
+        },
+        {
+            "label": "black pepper",
+            "language": "en",
+            "entity_slug": "piper-pepper",
+            "attributes": {
+                "variety": "black"
+            },
+            "context": []
+        },
+        {
+            "label": "black peppercorns",
+            "language": "en",
+            "entity_slug": "piper-pepper",
+            "attributes": {
+                "form": "whole",
+                "variety": "black"
+            },
+            "context": []
+        },
+        {
+            "label": "blueberries",
+            "language": "en",
+            "entity_slug": "blueberry",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "boiling water",
+            "language": "en",
+            "entity_slug": "water",
+            "attributes": {
+                "preparation": "boiling"
+            },
+            "context": []
+        },
+        {
+            "label": "broccoli florets",
+            "language": "en",
+            "entity_slug": "broccoli",
+            "attributes": {
+                "form": "florets"
+            },
+            "context": []
+        },
+        {
+            "label": "canned chopped tomatoes",
+            "language": "en",
+            "entity_slug": "tomato",
+            "attributes": {
+                "form": "chopped",
+                "preservation": "canned"
+            },
+            "context": []
+        },
+        {
+            "label": "canola oil",
+            "language": "en",
+            "entity_slug": "oil",
+            "attributes": {
+                "variety": "canola"
+            },
+            "context": []
+        },
+        {
+            "label": "capsicum",
+            "language": "en",
+            "entity_slug": "capsicum",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "celery",
+            "language": "en",
+            "entity_slug": "celery",
+            "attributes": [],
+            "context": {
+                "evidence_kind": "provider_ref_cluster",
+                "evidence_key": "provider-ref:com.vorwerk.ingredients.Ingredient-rpf-2632"
+            }
+        },
+        {
+            "label": "cherry tomatoes",
+            "language": "en",
+            "entity_slug": "tomato",
+            "attributes": {
+                "variety": "cherry"
+            },
+            "context": []
+        },
+        {
+            "label": "chili pepper",
+            "language": "en",
+            "entity_slug": "chilli-pepper",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "chilli pepper",
+            "language": "en",
+            "entity_slug": "chilli-pepper",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "clarified butter ghee",
+            "language": "en",
+            "entity_slug": "ghee",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "coconut oil",
+            "language": "en",
+            "entity_slug": "oil",
+            "attributes": {
+                "variety": "coconut"
+            },
+            "context": []
+        },
+        {
+            "label": "cooking spray",
+            "language": "en",
+            "entity_slug": "cooking-spray",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "corn starch",
+            "language": "en",
+            "entity_slug": "cornstarch",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "creme fraiche",
+            "language": "en",
+            "entity_slug": "creme-fraiche",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "curry powder",
+            "language": "en",
+            "entity_slug": "curry-powder",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "dark chocolate",
+            "language": "en",
+            "entity_slug": "chocolate",
+            "attributes": {
+                "chocolate_class": "dark"
+            },
+            "context": []
+        },
+        {
+            "label": "dessert wine",
+            "language": "en",
+            "entity_slug": "wine",
+            "attributes": {
+                "wine_sweetness": "sweet"
+            },
+            "context": []
+        },
+        {
+            "label": "dried bay leaf",
+            "language": "en",
+            "entity_slug": "bay-leaf",
+            "attributes": {
+                "processing": "dried"
+            },
+            "context": []
+        },
+        {
+            "label": "dried bay leaves",
+            "language": "en",
+            "entity_slug": "bay-leaf",
+            "attributes": {
+                "processing": "dried"
+            },
+            "context": []
+        },
+        {
+            "label": "dry white wine",
+            "language": "en",
+            "entity_slug": "wine",
+            "attributes": {
+                "wine_color": "white",
+                "wine_sweetness": "dry"
+            },
+            "context": []
+        },
+        {
+            "label": "fine sea salt",
+            "language": "en",
+            "entity_slug": "salt",
+            "attributes": {
+                "form": "fine",
+                "salt_class": "sea"
+            },
+            "context": []
+        },
+        {
+            "label": "food coloring",
+            "language": "en",
+            "entity_slug": "food-coloring",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "food colouring",
+            "language": "en",
+            "entity_slug": "food-coloring",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "fresh root ginger",
+            "language": "en",
+            "entity_slug": "ginger",
+            "attributes": {
+                "plant_part": "root",
+                "state": "fresh"
+            },
+            "context": {
+                "evidence_kind": "provider_ref_cluster",
+                "evidence_key": "provider-ref:com.vorwerk.ingredients.Ingredient-rpf-11"
+            }
+        },
+        {
+            "label": "freshly ground black pepper",
+            "language": "en",
+            "entity_slug": "piper-pepper",
+            "attributes": {
+                "form": "ground",
+                "variety": "black"
+            },
+            "context": []
+        },
+        {
+            "label": "garam masala",
+            "language": "en",
+            "entity_slug": "garam-masala",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "grapeseed oil",
+            "language": "en",
+            "entity_slug": "oil",
+            "attributes": {
+                "variety": "grapeseed"
+            },
+            "context": []
+        },
+        {
+            "label": "green bell pepper",
+            "language": "en",
+            "entity_slug": "bell-pepper",
+            "attributes": {
+                "variety": "green"
+            },
+            "context": []
+        },
+        {
+            "label": "ground black pepper",
+            "language": "en",
+            "entity_slug": "piper-pepper",
+            "attributes": {
+                "form": "ground",
+                "variety": "black"
+            },
+            "context": []
+        },
+        {
+            "label": "ground cayenne pepper",
+            "language": "en",
+            "entity_slug": "cayenne-pepper",
+            "attributes": {
+                "form": "ground"
+            },
+            "context": []
+        },
+        {
+            "label": "ground cloves",
+            "language": "en",
+            "entity_slug": "clove-spice",
+            "attributes": {
+                "form": "ground"
+            },
+            "context": []
+        },
+        {
+            "label": "ground white pepper",
+            "language": "en",
+            "entity_slug": "piper-pepper",
+            "attributes": {
+                "form": "ground",
+                "variety": "white"
+            },
+            "context": []
+        },
+        {
+            "label": "ice cubes",
+            "language": "en",
+            "entity_slug": "water",
+            "attributes": {
+                "form": "cubes",
+                "processing": "frozen"
+            },
+            "context": {
+                "evidence_kind": "provider_ref_cluster",
+                "evidence_key": "provider-ref:com.vorwerk.ingredients.Ingredient-rpf-37"
+            }
+        },
+        {
+            "label": "jalapeño pepper",
+            "language": "en",
+            "entity_slug": "jalapeno-pepper",
+            "attributes": {
+                "variety": "jalapeno"
+            },
+            "context": []
+        },
+        {
+            "label": "jasmine rice",
+            "language": "en",
+            "entity_slug": "rice",
+            "attributes": {
+                "variety": "jasmine"
+            },
+            "context": []
+        },
+        {
+            "label": "kosher salt",
+            "language": "en",
+            "entity_slug": "salt",
+            "attributes": {
+                "salt_class": "kosher"
+            },
+            "context": []
+        },
+        {
+            "label": "mascarpone",
+            "language": "en",
+            "entity_slug": "mascarpone",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "milk chocolate",
+            "language": "en",
+            "entity_slug": "chocolate",
+            "attributes": {
+                "chocolate_class": "milk"
+            },
+            "context": []
+        },
+        {
+            "label": "orange juice",
+            "language": "en",
+            "entity_slug": "orange-juice",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "peanut oil",
+            "language": "en",
+            "entity_slug": "oil",
+            "attributes": {
+                "variety": "peanut"
+            },
+            "context": []
+        },
+        {
+            "label": "pine nuts",
+            "language": "en",
+            "entity_slug": "pine-nut",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "pineapple juice",
+            "language": "en",
+            "entity_slug": "pineapple-juice",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "plum tomatoes",
+            "language": "en",
+            "entity_slug": "tomato",
+            "attributes": {
+                "variety": "plum"
+            },
+            "context": []
+        },
+        {
+            "label": "quinoa",
+            "language": "en",
+            "entity_slug": "quinoa",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "rapeseed oil",
+            "language": "en",
+            "entity_slug": "oil",
+            "attributes": {
+                "variety": "rapeseed"
+            },
+            "context": []
+        },
+        {
+            "label": "red bell pepper",
+            "language": "en",
+            "entity_slug": "bell-pepper",
+            "attributes": {
+                "variety": "red"
+            },
+            "context": []
+        },
+        {
+            "label": "red wine",
+            "language": "en",
+            "entity_slug": "wine",
+            "attributes": {
+                "wine_color": "red"
+            },
+            "context": []
+        },
+        {
+            "label": "sea salt",
+            "language": "en",
+            "entity_slug": "salt",
+            "attributes": {
+                "salt_class": "sea"
+            },
+            "context": []
+        },
+        {
+            "label": "sesame seeds",
+            "language": "en",
+            "entity_slug": "sesame-seed",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "smoked paprika",
+            "language": "en",
+            "entity_slug": "paprika",
+            "attributes": {
+                "processing": "smoked"
+            },
+            "context": []
+        },
+        {
+            "label": "strawberries",
+            "language": "en",
+            "entity_slug": "strawberry",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "sun-dried tomatoes in oil",
+            "language": "en",
+            "entity_slug": "tomato",
+            "attributes": {
+                "preservation": "in_oil",
+                "processing": "dried"
+            },
+            "context": []
+        },
+        {
+            "label": "sunflower oil",
+            "language": "en",
+            "entity_slug": "oil",
+            "attributes": {
+                "variety": "sunflower"
+            },
+            "context": []
+        },
+        {
+            "label": "sunflower seeds",
+            "language": "en",
+            "entity_slug": "sunflower-seed",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "sweet potatoes",
+            "language": "en",
+            "entity_slug": "sweet-potato",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "tahini",
+            "language": "en",
+            "entity_slug": "tahini",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "tomato passata",
+            "language": "en",
+            "entity_slug": "passata",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "walnut oil",
+            "language": "en",
+            "entity_slug": "oil",
+            "attributes": {
+                "variety": "walnut"
+            },
+            "context": []
+        },
+        {
+            "label": "white chocolate",
+            "language": "en",
+            "entity_slug": "chocolate",
+            "attributes": {
+                "chocolate_class": "white"
+            },
+            "context": []
+        },
+        {
+            "label": "white pepper",
+            "language": "en",
+            "entity_slug": "piper-pepper",
+            "attributes": {
+                "variety": "white"
+            },
+            "context": []
+        },
+        {
+            "label": "white wine",
+            "language": "en",
+            "entity_slug": "wine",
+            "attributes": {
+                "wine_color": "white"
+            },
+            "context": []
+        },
+        {
+            "label": "whole cloves",
+            "language": "en",
+            "entity_slug": "clove-spice",
+            "attributes": {
+                "form": "whole"
+            },
+            "context": []
+        },
+        {
+            "label": "yellow bell pepper",
+            "language": "en",
+            "entity_slug": "bell-pepper",
+            "attributes": {
+                "variety": "yellow"
+            },
+            "context": []
+        },
+        {
+            "label": "yoghurt",
+            "language": "en",
+            "entity_slug": "yogurt",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "Pimienta blanca molida",
+            "language": "es",
+            "entity_slug": "piper-pepper",
+            "attributes": {
+                "form": "ground",
+                "variety": "white"
+            },
+            "context": []
+        },
+        {
+            "label": "pimienta negra molida",
+            "language": "es",
+            "entity_slug": "piper-pepper",
+            "attributes": {
+                "form": "ground",
+                "variety": "black"
+            },
+            "context": []
+        },
+        {
+            "label": "crème fraîche",
+            "language": "fr",
+            "entity_slug": "creme-fraiche",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "De poivre moulu",
+            "language": "fr",
+            "entity_slug": "piper-pepper",
+            "attributes": {
+                "form": "ground"
+            },
+            "context": []
+        },
+        {
+            "label": "Du poivre moulu",
+            "language": "fr",
+            "entity_slug": "piper-pepper",
+            "attributes": {
+                "form": "ground"
+            },
+            "context": []
+        },
+        {
+            "label": "Poivre blanc moulu",
+            "language": "fr",
+            "entity_slug": "piper-pepper",
+            "attributes": {
+                "form": "ground",
+                "variety": "white"
+            },
+            "context": []
+        },
+        {
+            "label": "Poivre moulu",
+            "language": "fr",
+            "entity_slug": "piper-pepper",
+            "attributes": {
+                "form": "ground"
+            },
+            "context": []
+        },
+        {
+            "label": "poivre noir moulu",
+            "language": "fr",
+            "entity_slug": "piper-pepper",
+            "attributes": {
+                "form": "ground",
+                "variety": "black"
+            },
+            "context": []
+        },
+        {
+            "label": "Di pepe nero macinato",
+            "language": "it",
+            "entity_slug": "piper-pepper",
+            "attributes": {
+                "form": "ground",
+                "variety": "black"
+            },
+            "context": []
+        },
+        {
+            "label": "Pepe bianco macinato",
+            "language": "it",
+            "entity_slug": "piper-pepper",
+            "attributes": {
+                "form": "ground",
+                "variety": "white"
+            },
+            "context": []
+        },
+        {
+            "label": "Pepe nero",
+            "language": "it",
+            "entity_slug": "piper-pepper",
+            "attributes": {
+                "variety": "black"
+            },
+            "context": []
+        },
+        {
+            "label": "Pepe nero macinato",
+            "language": "it",
+            "entity_slug": "piper-pepper",
+            "attributes": {
+                "form": "ground",
+                "variety": "black"
+            },
+            "context": []
+        },
+        {
+            "label": "cukru",
+            "language": "pl",
+            "entity_slug": "sugar",
+            "attributes": [],
+            "context": {
+                "cohort": "pl",
+                "evidence_kind": "provider_ref_cluster",
+                "evidence_key": "provider-ref:com.vorwerk.ingredients.Ingredient-rpf-9"
+            }
+        },
+        {
+            "label": "Mielony biały pieprz",
+            "language": "pl",
+            "entity_slug": "piper-pepper",
+            "attributes": {
+                "form": "ground",
+                "variety": "white"
+            },
+            "context": []
+        },
+        {
+            "label": "mielony czarny pieprz",
+            "language": "pl",
+            "entity_slug": "piper-pepper",
+            "attributes": {
+                "form": "ground",
+                "variety": "black"
+            },
+            "context": []
+        },
+        {
+            "label": "ząbki czosnku",
+            "language": "pl",
+            "entity_slug": "garlic",
+            "attributes": {
+                "form": "clove"
+            },
+            "context": {
+                "cohort": "pl",
+                "evidence_kind": "provider_ref_cluster",
+                "evidence_key": "provider-ref:com.vorwerk.ingredients.Ingredient-rpf-352"
+            }
+        },
+        {
+            "label": "alho",
+            "language": "pt",
+            "entity_slug": "garlic",
+            "attributes": {
+                "form": "clove"
+            },
+            "context": {
+                "cohort": "pt",
+                "evidence_kind": "provider_ref_cluster",
+                "evidence_key": "provider-ref:com.vorwerk.ingredients.Ingredient-rpf-352"
+            }
+        },
+        {
+            "label": "Pimenta branca moída",
+            "language": "pt",
+            "entity_slug": "piper-pepper",
+            "attributes": {
+                "form": "ground",
+                "variety": "white"
+            },
+            "context": []
+        },
+        {
+            "label": "pimenta preta moída",
+            "language": "pt",
+            "entity_slug": "piper-pepper",
+            "attributes": {
+                "form": "ground",
+                "variety": "black"
+            },
+            "context": []
+        },
+        {
+            "label": "salsa",
+            "language": "pt",
+            "entity_slug": "parsley",
+            "attributes": {
+                "state": "fresh"
+            },
+            "context": {
+                "cohort": "pt",
+                "evidence_kind": "provider_ref_cluster",
+                "evidence_key": "provider-ref:com.vorwerk.ingredients.Ingredient-rpf-33"
+            }
+        },
+        {
+            "label": "Almond",
+            "language": "und",
+            "entity_slug": "almond",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "Apple Juice",
+            "language": "und",
+            "entity_slug": "apple-juice",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "Banana",
+            "language": "und",
+            "entity_slug": "banana",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "Bay Leaf",
+            "language": "und",
+            "entity_slug": "bay-leaf",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "Bean",
+            "language": "und",
+            "entity_slug": "bean",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "Bell Pepper",
+            "language": "und",
+            "entity_slug": "bell-pepper",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "Black Bean",
+            "language": "und",
+            "entity_slug": "black-bean",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "Blueberry",
+            "language": "und",
+            "entity_slug": "blueberry",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "Broccoli",
+            "language": "und",
+            "entity_slug": "broccoli",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "Buttermilk",
+            "language": "und",
+            "entity_slug": "buttermilk",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "Capsicum",
+            "language": "und",
+            "entity_slug": "capsicum",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "Cayenne Pepper",
+            "language": "und",
+            "entity_slug": "cayenne-pepper",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "Chilli Pepper",
+            "language": "und",
+            "entity_slug": "chilli-pepper",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "Chocolate",
+            "language": "und",
+            "entity_slug": "chocolate",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "Coffee",
+            "language": "und",
+            "entity_slug": "coffee",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "Coffee Pod",
+            "language": "und",
+            "entity_slug": "coffee-pod",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "Cooking Spray",
+            "language": "und",
+            "entity_slug": "cooking-spray",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "Cornstarch",
+            "language": "und",
+            "entity_slug": "cornstarch",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "Crème Fraîche",
+            "language": "und",
+            "entity_slug": "creme-fraiche",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "Curry Powder",
+            "language": "und",
+            "entity_slug": "curry-powder",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "Egg",
+            "language": "und",
+            "entity_slug": "egg",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "Egg White",
+            "language": "und",
+            "entity_slug": "egg-white",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "Egg Yolk",
+            "language": "und",
+            "entity_slug": "egg-yolk",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "Flour",
+            "language": "und",
+            "entity_slug": "flour",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "Food Coloring",
+            "language": "und",
+            "entity_slug": "food-coloring",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "Garam Masala",
+            "language": "und",
+            "entity_slug": "garam-masala",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "Ghee",
+            "language": "und",
+            "entity_slug": "ghee",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "Hazelnut",
+            "language": "und",
+            "entity_slug": "hazelnut",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "Jalapeño Pepper",
+            "language": "und",
+            "entity_slug": "jalapeno-pepper",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "Leek",
+            "language": "und",
+            "entity_slug": "leek",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "Lemon Juice",
+            "language": "und",
+            "entity_slug": "lemon-juice",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "Lime Juice",
+            "language": "und",
+            "entity_slug": "lime-juice",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "Mascarpone",
+            "language": "und",
+            "entity_slug": "mascarpone",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "Mushroom",
+            "language": "und",
+            "entity_slug": "mushroom",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "Oil",
+            "language": "und",
+            "entity_slug": "oil",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "Orange Juice",
+            "language": "und",
+            "entity_slug": "orange-juice",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "Paprika",
+            "language": "und",
+            "entity_slug": "paprika",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "Passata",
+            "language": "und",
+            "entity_slug": "passata",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "Peanut",
+            "language": "und",
+            "entity_slug": "peanut",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "Pine Nut",
+            "language": "und",
+            "entity_slug": "pine-nut",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "Pineapple Juice",
+            "language": "und",
+            "entity_slug": "pineapple-juice",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "Quinoa",
+            "language": "und",
+            "entity_slug": "quinoa",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "Rice",
+            "language": "und",
+            "entity_slug": "rice",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "Salt",
+            "language": "und",
+            "entity_slug": "salt",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "Sesame Seed",
+            "language": "und",
+            "entity_slug": "sesame-seed",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "Starch",
+            "language": "und",
+            "entity_slug": "starch",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "Stock",
+            "language": "und",
+            "entity_slug": "stock",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "Strawberry",
+            "language": "und",
+            "entity_slug": "strawberry",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "Sunflower Seed",
+            "language": "und",
+            "entity_slug": "sunflower-seed",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "Sweet Potato",
+            "language": "und",
+            "entity_slug": "sweet-potato",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "Tahini",
+            "language": "und",
+            "entity_slug": "tahini",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "Tomato",
+            "language": "und",
+            "entity_slug": "tomato",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "Walnut",
+            "language": "und",
+            "entity_slug": "walnut",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "Water",
+            "language": "und",
+            "entity_slug": "water",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "Wine",
+            "language": "und",
+            "entity_slug": "wine",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "Yogurt",
+            "language": "und",
+            "entity_slug": "yogurt",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "Backpulver",
+            "language": "de",
+            "entity_slug": "baking-powder",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "Basilikum",
+            "language": "de",
+            "entity_slug": "basil",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "brauner Zucker",
+            "language": "de",
+            "entity_slug": "sugar",
+            "attributes": {
+                "refinement": "brown"
+            },
+            "context": []
+        },
+        {
+            "label": "Ei",
+            "language": "de",
+            "entity_slug": "egg",
+            "attributes": {
+                "egg_part": "whole"
+            },
+            "context": []
+        },
+        {
+            "label": "Eier",
+            "language": "de",
+            "entity_slug": "egg",
+            "attributes": {
+                "egg_part": "whole"
+            },
+            "context": []
+        },
+        {
+            "label": "Eigelb",
+            "language": "de",
+            "entity_slug": "egg-yolk",
+            "attributes": {
+                "egg_part": "yolk"
+            },
+            "context": []
+        },
+        {
+            "label": "frische Petersilie",
+            "language": "de",
+            "entity_slug": "parsley",
+            "attributes": {
+                "state": "fresh"
+            },
+            "context": []
+        },
+        {
+            "label": "frischer Koriander",
+            "language": "de",
+            "entity_slug": "coriander",
+            "attributes": {
+                "state": "fresh"
+            },
+            "context": []
+        },
+        {
+            "label": "Frischkäse",
+            "language": "de",
+            "entity_slug": "cream-cheese",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "Frühlingszwiebeln",
+            "language": "de",
+            "entity_slug": "spring-onion",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "getrocknete Petersilie",
+            "language": "de",
+            "entity_slug": "parsley",
+            "attributes": {
+                "processing": "dried"
+            },
+            "context": []
+        },
+        {
+            "label": "getrockneter Oregano",
+            "language": "de",
+            "entity_slug": "oregano",
+            "attributes": {
+                "processing": "dried"
+            },
+            "context": []
+        },
+        {
+            "label": "Gewürzpaste für Gemüsebrühe selbst gemacht",
+            "language": "de",
+            "entity_slug": "stock-paste",
+            "attributes": {
+                "variety": "vegetable"
+            },
+            "context": []
+        },
+        {
+            "label": "Hefe",
+            "language": "de",
+            "entity_slug": "yeast",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "Honig",
+            "language": "de",
+            "entity_slug": "honey",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "Kakao",
+            "language": "de",
+            "entity_slug": "cocoa-powder",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "Kartoffeln",
+            "language": "de",
+            "entity_slug": "potato",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "Knoblauchzehe",
+            "language": "de",
+            "entity_slug": "garlic",
+            "attributes": {
+                "form": "clove"
+            },
+            "context": []
+        },
+        {
+            "label": "Knoblauchzehen",
+            "language": "de",
+            "entity_slug": "garlic",
+            "attributes": {
+                "form": "clove"
+            },
+            "context": []
+        },
+        {
+            "label": "Koriander",
+            "language": "de",
+            "entity_slug": "coriander",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "Mandeln",
+            "language": "de",
+            "entity_slug": "almond",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "Mehl",
+            "language": "de",
+            "entity_slug": "flour",
+            "attributes": {
+                "form": "flour"
+            },
+            "context": []
+        },
+        {
+            "label": "Milch",
+            "language": "de",
+            "entity_slug": "milk",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "Muskat",
+            "language": "de",
+            "entity_slug": "nutmeg",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "Möhren",
+            "language": "de",
+            "entity_slug": "carrot",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "Oregano getrocknet",
+            "language": "de",
+            "entity_slug": "oregano",
+            "attributes": {
+                "processing": "dried"
+            },
+            "context": []
+        },
+        {
+            "label": "Paprika edelsüß",
+            "language": "de",
+            "entity_slug": "paprika",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "Petersilie",
+            "language": "de",
+            "entity_slug": "parsley",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "Puderzucker",
+            "language": "de",
+            "entity_slug": "sugar",
+            "attributes": {
+                "refinement": "powdered"
+            },
+            "context": []
+        },
+        {
+            "label": "Sahne",
+            "language": "de",
+            "entity_slug": "cream",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "Schalotten",
+            "language": "de",
+            "entity_slug": "shallot",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "Senf",
+            "language": "de",
+            "entity_slug": "mustard",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "Sojasauce",
+            "language": "de",
+            "entity_slug": "soy-sauce",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "Tomatenmark",
+            "language": "de",
+            "entity_slug": "tomato-paste",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "Vanillezucker",
+            "language": "de",
+            "entity_slug": "vanilla-sugar",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "Weizenmehl",
+            "language": "de",
+            "entity_slug": "flour",
+            "attributes": {
+                "form": "flour"
+            },
+            "context": []
+        },
+        {
+            "label": "Zimt",
+            "language": "de",
+            "entity_slug": "cinnamon",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "Zitronensaft",
+            "language": "de",
+            "entity_slug": "lemon-juice",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "Zucker",
+            "language": "de",
+            "entity_slug": "sugar",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "Zwiebel",
+            "language": "de",
+            "entity_slug": "onion",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "Zwiebeln",
+            "language": "de",
+            "entity_slug": "onion",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "avocado",
+            "language": "en",
+            "entity_slug": "avocado",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "baker's flour",
+            "language": "en",
+            "entity_slug": "flour",
+            "attributes": {
+                "form": "flour",
+                "refinement": "bread"
+            },
+            "context": []
+        },
+        {
+            "label": "baking powder",
+            "language": "en",
+            "entity_slug": "baking-powder",
+            "attributes": {
+                "form": "powder"
+            },
+            "context": []
+        },
+        {
+            "label": "baking soda",
+            "language": "en",
+            "entity_slug": "baking-soda",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "basil",
+            "language": "en",
+            "entity_slug": "basil",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "beef stock",
+            "language": "en",
+            "entity_slug": "stock",
+            "attributes": {
+                "species": "beef",
+                "variety": "beef"
+            },
+            "context": []
+        },
+        {
+            "label": "bicarbonate of soda",
+            "language": "en",
+            "entity_slug": "baking-soda",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "black bean",
+            "language": "en",
+            "entity_slug": "black-bean",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "black beans",
+            "language": "en",
+            "entity_slug": "black-bean",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "blanched almonds",
+            "language": "en",
+            "entity_slug": "almond",
+            "attributes": {
+                "processing": "blanched"
+            },
+            "context": []
+        },
+        {
+            "label": "blueberry",
+            "language": "en",
+            "entity_slug": "blueberry",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "bread crumbs",
+            "language": "en",
+            "entity_slug": "breadcrumbs",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "bread flour",
+            "language": "en",
+            "entity_slug": "flour",
+            "attributes": {
+                "form": "flour",
+                "refinement": "bread"
+            },
+            "context": []
+        },
+        {
+            "label": "breadcrumbs",
+            "language": "en",
+            "entity_slug": "breadcrumbs",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "brown sugar",
+            "language": "en",
+            "entity_slug": "sugar",
+            "attributes": {
+                "refinement": "brown"
+            },
+            "context": []
+        },
+        {
+            "label": "carrots",
+            "language": "en",
+            "entity_slug": "carrot",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "caster sugar",
+            "language": "en",
+            "entity_slug": "sugar",
+            "attributes": {
+                "refinement": "caster"
+            },
+            "context": []
+        },
+        {
+            "label": "cheddar cheese",
+            "language": "en",
+            "entity_slug": "cheddar",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "chicken stock",
+            "language": "en",
+            "entity_slug": "stock",
+            "attributes": {
+                "species": "chicken",
+                "variety": "chicken"
+            },
+            "context": []
+        },
+        {
+            "label": "chicken stock paste",
+            "language": "en",
+            "entity_slug": "stock-paste",
+            "attributes": {
+                "form": "paste",
+                "species": "chicken",
+                "variety": "chicken"
+            },
+            "context": []
+        },
+        {
+            "label": "cilantro",
+            "language": "en",
+            "entity_slug": "coriander",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "cocoa powder",
+            "language": "en",
+            "entity_slug": "cocoa-powder",
+            "attributes": {
+                "form": "powder"
+            },
+            "context": []
+        },
+        {
+            "label": "coriander",
+            "language": "en",
+            "entity_slug": "coriander",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "coriander leaves",
+            "language": "en",
+            "entity_slug": "coriander",
+            "attributes": {
+                "plant_part": "leaf"
+            },
+            "context": []
+        },
+        {
+            "label": "coriander seed",
+            "language": "en",
+            "entity_slug": "coriander-seed",
+            "attributes": {
+                "form": "whole"
+            },
+            "context": []
+        },
+        {
+            "label": "coriander seeds",
+            "language": "en",
+            "entity_slug": "coriander-seed",
+            "attributes": {
+                "form": "whole"
+            },
+            "context": []
+        },
+        {
+            "label": "cornstarch",
+            "language": "en",
+            "entity_slug": "cornstarch",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "courgette",
+            "language": "en",
+            "entity_slug": "zucchini",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "cumin seeds",
+            "language": "en",
+            "entity_slug": "cumin",
+            "attributes": {
+                "form": "whole"
+            },
+            "context": []
+        },
+        {
+            "label": "double cream",
+            "language": "en",
+            "entity_slug": "cream",
+            "attributes": {
+                "cream_class": "double"
+            },
+            "context": []
+        },
+        {
+            "label": "dried instant yeast",
+            "language": "en",
+            "entity_slug": "yeast",
+            "attributes": {
+                "processing": "dried"
+            },
+            "context": []
+        },
+        {
+            "label": "dried oregano",
+            "language": "en",
+            "entity_slug": "oregano",
+            "attributes": {
+                "processing": "dried"
+            },
+            "context": []
+        },
+        {
+            "label": "dried parsley",
+            "language": "en",
+            "entity_slug": "parsley",
+            "attributes": {
+                "processing": "dried"
+            },
+            "context": []
+        },
+        {
+            "label": "egg",
+            "language": "en",
+            "entity_slug": "egg",
+            "attributes": {
+                "egg_part": "whole"
+            },
+            "context": []
+        },
+        {
+            "label": "egg white",
+            "language": "en",
+            "entity_slug": "egg-white",
+            "attributes": {
+                "egg_part": "white"
+            },
+            "context": []
+        },
+        {
+            "label": "egg whites",
+            "language": "en",
+            "entity_slug": "egg-white",
+            "attributes": {
+                "egg_part": "white"
+            },
+            "context": []
+        },
+        {
+            "label": "egg yolk",
+            "language": "en",
+            "entity_slug": "egg-yolk",
+            "attributes": {
+                "egg_part": "yolk"
+            },
+            "context": []
+        },
+        {
+            "label": "egg yolks",
+            "language": "en",
+            "entity_slug": "egg-yolk",
+            "attributes": {
+                "egg_part": "yolk"
+            },
+            "context": []
+        },
+        {
+            "label": "eggs",
+            "language": "en",
+            "entity_slug": "egg",
+            "attributes": {
+                "egg_part": "whole"
+            },
+            "context": []
+        },
+        {
+            "label": "feta cheese",
+            "language": "en",
+            "entity_slug": "feta",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "fish sauce",
+            "language": "en",
+            "entity_slug": "fish-sauce",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "fresh basil",
+            "language": "en",
+            "entity_slug": "basil",
+            "attributes": {
+                "state": "fresh"
+            },
+            "context": []
+        },
+        {
+            "label": "fresh chives",
+            "language": "en",
+            "entity_slug": "chives",
+            "attributes": {
+                "state": "fresh"
+            },
+            "context": []
+        },
+        {
+            "label": "fresh coriander",
+            "language": "en",
+            "entity_slug": "coriander",
+            "attributes": {
+                "state": "fresh"
+            },
+            "context": []
+        },
+        {
+            "label": "fresh dill",
+            "language": "en",
+            "entity_slug": "dill",
+            "attributes": {
+                "state": "fresh"
+            },
+            "context": []
+        },
+        {
+            "label": "fresh flat leaf parsley",
+            "language": "en",
+            "entity_slug": "parsley",
+            "attributes": {
+                "state": "fresh"
+            },
+            "context": []
+        },
+        {
+            "label": "fresh mint",
+            "language": "en",
+            "entity_slug": "mint",
+            "attributes": {
+                "state": "fresh"
+            },
+            "context": []
+        },
+        {
+            "label": "fresh parsley",
+            "language": "en",
+            "entity_slug": "parsley",
+            "attributes": {
+                "state": "fresh"
+            },
+            "context": []
+        },
+        {
+            "label": "fresh rosemary",
+            "language": "en",
+            "entity_slug": "rosemary",
+            "attributes": {
+                "state": "fresh"
+            },
+            "context": []
+        },
+        {
+            "label": "fresh thyme",
+            "language": "en",
+            "entity_slug": "thyme",
+            "attributes": {
+                "state": "fresh"
+            },
+            "context": []
+        },
+        {
+            "label": "freshly squeezed lemon juice",
+            "language": "en",
+            "entity_slug": "lemon-juice",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "garlic clove",
+            "language": "en",
+            "entity_slug": "garlic",
+            "attributes": {
+                "form": "clove"
+            },
+            "context": []
+        },
+        {
+            "label": "garlic cloves",
+            "language": "en",
+            "entity_slug": "garlic",
+            "attributes": {
+                "form": "clove"
+            },
+            "context": []
+        },
+        {
+            "label": "green onion",
+            "language": "en",
+            "entity_slug": "spring-onion",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "green onions",
+            "language": "en",
+            "entity_slug": "spring-onion",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "ground cinnamon",
+            "language": "en",
+            "entity_slug": "cinnamon",
+            "attributes": {
+                "form": "ground"
+            },
+            "context": []
+        },
+        {
+            "label": "ground coriander",
+            "language": "en",
+            "entity_slug": "coriander-seed",
+            "attributes": {
+                "form": "ground"
+            },
+            "context": []
+        },
+        {
+            "label": "ground cumin",
+            "language": "en",
+            "entity_slug": "cumin",
+            "attributes": {
+                "form": "ground"
+            },
+            "context": []
+        },
+        {
+            "label": "ground nutmeg",
+            "language": "en",
+            "entity_slug": "nutmeg",
+            "attributes": {
+                "form": "ground"
+            },
+            "context": []
+        },
+        {
+            "label": "ground turmeric",
+            "language": "en",
+            "entity_slug": "turmeric",
+            "attributes": {
+                "form": "ground"
+            },
+            "context": []
+        },
+        {
+            "label": "icing sugar",
+            "language": "en",
+            "entity_slug": "sugar",
+            "attributes": {
+                "refinement": "powdered"
+            },
+            "context": []
+        },
+        {
+            "label": "large eggs",
+            "language": "en",
+            "entity_slug": "egg",
+            "attributes": {
+                "egg_part": "whole",
+                "size": "large"
+            },
+            "context": []
+        },
+        {
+            "label": "lemon juice",
+            "language": "en",
+            "entity_slug": "lemon-juice",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "lemons",
+            "language": "en",
+            "entity_slug": "lemon",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "lime juice",
+            "language": "en",
+            "entity_slug": "lime-juice",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "milk",
+            "language": "en",
+            "entity_slug": "milk",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "natural vanilla extract",
+            "language": "en",
+            "entity_slug": "vanilla-extract",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "onions",
+            "language": "en",
+            "entity_slug": "onion",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "orange",
+            "language": "en",
+            "entity_slug": "orange",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "oregano",
+            "language": "en",
+            "entity_slug": "oregano",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "paprika",
+            "language": "en",
+            "entity_slug": "paprika",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "parmesan",
+            "language": "en",
+            "entity_slug": "parmesan",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "parmesan cheese",
+            "language": "en",
+            "entity_slug": "parmesan",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "parsley",
+            "language": "en",
+            "entity_slug": "parsley",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "peanut",
+            "language": "en",
+            "entity_slug": "peanut",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "peanuts",
+            "language": "en",
+            "entity_slug": "peanut",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "plain flour",
+            "language": "en",
+            "entity_slug": "flour",
+            "attributes": {
+                "form": "flour",
+                "refinement": "plain"
+            },
+            "context": []
+        },
+        {
+            "label": "potatoes",
+            "language": "en",
+            "entity_slug": "potato",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "pouring whipping cream",
+            "language": "en",
+            "entity_slug": "cream",
+            "attributes": {
+                "cream_class": "whipping"
+            },
+            "context": []
+        },
+        {
+            "label": "red onion",
+            "language": "en",
+            "entity_slug": "onion",
+            "attributes": {
+                "variety": "red"
+            },
+            "context": []
+        },
+        {
+            "label": "red onions",
+            "language": "en",
+            "entity_slug": "onion",
+            "attributes": {
+                "variety": "red"
+            },
+            "context": []
+        },
+        {
+            "label": "salted butter",
+            "language": "en",
+            "entity_slug": "butter",
+            "attributes": {
+                "saltedness": "salted"
+            },
+            "context": []
+        },
+        {
+            "label": "self raising flour",
+            "language": "en",
+            "entity_slug": "flour",
+            "attributes": {
+                "form": "flour",
+                "refinement": "self_raising"
+            },
+            "context": []
+        },
+        {
+            "label": "shallot",
+            "language": "en",
+            "entity_slug": "shallot",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "shallots",
+            "language": "en",
+            "entity_slug": "shallot",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "soy sauce",
+            "language": "en",
+            "entity_slug": "soy-sauce",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "spring onion",
+            "language": "en",
+            "entity_slug": "spring-onion",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "spring onions",
+            "language": "en",
+            "entity_slug": "spring-onion",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "sweet paprika",
+            "language": "en",
+            "entity_slug": "paprika",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "thyme",
+            "language": "en",
+            "entity_slug": "thyme",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "tomato paste",
+            "language": "en",
+            "entity_slug": "tomato-paste",
+            "attributes": {
+                "form": "paste",
+                "variety": "tomato"
+            },
+            "context": []
+        },
+        {
+            "label": "tomatoes",
+            "language": "en",
+            "entity_slug": "tomato",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "unsalted butter",
+            "language": "en",
+            "entity_slug": "butter",
+            "attributes": {
+                "saltedness": "unsalted"
+            },
+            "context": []
+        },
+        {
+            "label": "vanilla extract",
+            "language": "en",
+            "entity_slug": "vanilla-extract",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "vanilla sugar",
+            "language": "en",
+            "entity_slug": "vanilla-sugar",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "vegetable stock paste",
+            "language": "en",
+            "entity_slug": "stock-paste",
+            "attributes": {
+                "form": "paste",
+                "variety": "vegetable"
+            },
+            "context": []
+        },
+        {
+            "label": "walnut",
+            "language": "en",
+            "entity_slug": "walnut",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "walnuts",
+            "language": "en",
+            "entity_slug": "walnut",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "wheat flour",
+            "language": "en",
+            "entity_slug": "flour",
+            "attributes": {
+                "form": "flour"
+            },
+            "context": []
+        },
+        {
+            "label": "whipping cream",
+            "language": "en",
+            "entity_slug": "cream",
+            "attributes": {
+                "cream_class": "whipping"
+            },
+            "context": []
+        },
+        {
+            "label": "white onion",
+            "language": "en",
+            "entity_slug": "onion",
+            "attributes": {
+                "variety": "white"
+            },
+            "context": []
+        },
+        {
+            "label": "white onions",
+            "language": "en",
+            "entity_slug": "onion",
+            "attributes": {
+                "variety": "white"
+            },
+            "context": []
+        },
+        {
+            "label": "whole milk",
+            "language": "en",
+            "entity_slug": "milk",
+            "attributes": {
+                "fat_content": "whole",
+                "form": "whole"
+            },
+            "context": []
+        },
+        {
+            "label": "worcestershire sauce",
+            "language": "en",
+            "entity_slug": "worcestershire-sauce",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "yeast",
+            "language": "en",
+            "entity_slug": "yeast",
+            "attributes": [],
+            "context": []
+        },
+        {
+            "label": "yellow onion",
+            "language": "en",
+            "entity_slug": "onion",
+            "attributes": {
+                "variety": "yellow"
+            },
+            "context": []
+        }
+    ],
+    "critical_negative_cases": [
+        {
+            "id": "critical-negative-001",
+            "label": "cardamom pods",
+            "language": "en",
+            "forbidden_entity_slug": "coffee-pod",
+            "expected_status": null,
+            "critical": true
+        },
+        {
+            "id": "critical-negative-002",
+            "label": "green cardamom pods",
+            "language": "en",
+            "forbidden_entity_slug": "coffee-pod",
+            "expected_status": null,
+            "critical": true
+        },
+        {
+            "id": "critical-negative-003",
+            "label": "black cardamom pods",
+            "language": "en",
+            "forbidden_entity_slug": "coffee-pod",
+            "expected_status": null,
+            "critical": true
+        },
+        {
+            "id": "critical-negative-004",
+            "label": "whole cardamom pods",
+            "language": "en",
+            "forbidden_entity_slug": "coffee-pod",
+            "expected_status": null,
+            "critical": true
+        },
+        {
+            "id": "critical-negative-005",
+            "label": "ground cardamom pods",
+            "language": "en",
+            "forbidden_entity_slug": "coffee-pod",
+            "expected_status": null,
+            "critical": true
+        },
+        {
+            "id": "critical-negative-006",
+            "label": "crushed cardamom pods",
+            "language": "en",
+            "forbidden_entity_slug": "coffee-pod",
+            "expected_status": null,
+            "critical": true
+        },
+        {
+            "id": "critical-negative-007",
+            "label": "dried cardamom pods",
+            "language": "en",
+            "forbidden_entity_slug": "coffee-pod",
+            "expected_status": null,
+            "critical": true
+        },
+        {
+            "id": "critical-negative-008",
+            "label": "fresh cardamom pods",
+            "language": "en",
+            "forbidden_entity_slug": "coffee-pod",
+            "expected_status": null,
+            "critical": true
+        },
+        {
+            "id": "critical-negative-009",
+            "label": "vanilla pod",
+            "language": "en",
+            "forbidden_entity_slug": "coffee-pod",
+            "expected_status": null,
+            "critical": true
+        },
+        {
+            "id": "critical-negative-010",
+            "label": "vanilla pods",
+            "language": "en",
+            "forbidden_entity_slug": "coffee-pod",
+            "expected_status": null,
+            "critical": true
+        },
+        {
+            "id": "critical-negative-011",
+            "label": "vanilla bean pod",
+            "language": "en",
+            "forbidden_entity_slug": "coffee-pod",
+            "expected_status": null,
+            "critical": true
+        },
+        {
+            "id": "critical-negative-012",
+            "label": "vanilla bean pods",
+            "language": "en",
+            "forbidden_entity_slug": "coffee-pod",
+            "expected_status": null,
+            "critical": true
+        },
+        {
+            "id": "critical-negative-013",
+            "label": "whole vanilla pods",
+            "language": "en",
+            "forbidden_entity_slug": "coffee-pod",
+            "expected_status": null,
+            "critical": true
+        },
+        {
+            "id": "critical-negative-014",
+            "label": "split vanilla pods",
+            "language": "en",
+            "forbidden_entity_slug": "coffee-pod",
+            "expected_status": null,
+            "critical": true
+        },
+        {
+            "id": "critical-negative-015",
+            "label": "dried vanilla pods",
+            "language": "en",
+            "forbidden_entity_slug": "coffee-pod",
+            "expected_status": null,
+            "critical": true
+        },
+        {
+            "id": "critical-negative-016",
+            "label": "fresh vanilla pods",
+            "language": "en",
+            "forbidden_entity_slug": "coffee-pod",
+            "expected_status": null,
+            "critical": true
+        },
+        {
+            "id": "critical-negative-017",
+            "label": "tonka bean pods",
+            "language": "en",
+            "forbidden_entity_slug": "coffee-pod",
+            "expected_status": null,
+            "critical": true
+        },
+        {
+            "id": "critical-negative-018",
+            "label": "cocoa bean pods",
+            "language": "en",
+            "forbidden_entity_slug": "coffee-pod",
+            "expected_status": null,
+            "critical": true
+        },
+        {
+            "id": "critical-negative-019",
+            "label": "pea pods",
+            "language": "en",
+            "forbidden_entity_slug": "coffee-pod",
+            "expected_status": null,
+            "critical": true
+        },
+        {
+            "id": "critical-negative-020",
+            "label": "okra pods",
+            "language": "en",
+            "forbidden_entity_slug": "coffee-pod",
+            "expected_status": null,
+            "critical": true
+        },
+        {
+            "id": "critical-negative-021",
+            "label": "bitter chocolate",
+            "language": "en",
+            "forbidden_entity_slug": "bitters",
+            "expected_status": null,
+            "critical": true
+        },
+        {
+            "id": "critical-negative-022",
+            "label": "bitter dark chocolate",
+            "language": "en",
+            "forbidden_entity_slug": "bitters",
+            "expected_status": null,
+            "critical": true
+        },
+        {
+            "id": "critical-negative-023",
+            "label": "bittersweet chocolate",
+            "language": "en",
+            "forbidden_entity_slug": "bitters",
+            "expected_status": null,
+            "critical": true
+        },
+        {
+            "id": "critical-negative-024",
+            "label": "bitter çikolata",
+            "language": "en",
+            "forbidden_entity_slug": "bitters",
+            "expected_status": null,
+            "critical": true
+        },
+        {
+            "id": "critical-negative-025",
+            "label": "zartbitter schokolade",
+            "language": "en",
+            "forbidden_entity_slug": "bitters",
+            "expected_status": null,
+            "critical": true
+        },
+        {
+            "id": "critical-negative-026",
+            "label": "chocolat amer",
+            "language": "en",
+            "forbidden_entity_slug": "bitters",
+            "expected_status": null,
+            "critical": true
+        },
+        {
+            "id": "critical-negative-027",
+            "label": "chocolate amargo",
+            "language": "en",
+            "forbidden_entity_slug": "bitters",
+            "expected_status": null,
+            "critical": true
+        },
+        {
+            "id": "critical-negative-028",
+            "label": "cioccolato amaro",
+            "language": "en",
+            "forbidden_entity_slug": "bitters",
+            "expected_status": null,
+            "critical": true
+        },
+        {
+            "id": "critical-negative-029",
+            "label": "chocolate meio amargo",
+            "language": "en",
+            "forbidden_entity_slug": "bitters",
+            "expected_status": null,
+            "critical": true
+        },
+        {
+            "id": "critical-negative-030",
+            "label": "gorzkiej czekolady",
+            "language": "en",
+            "forbidden_entity_slug": "bitters",
+            "expected_status": null,
+            "critical": true
+        },
+        {
+            "id": "critical-negative-031",
+            "label": "unsweetened bitter chocolate",
+            "language": "en",
+            "forbidden_entity_slug": "bitters",
+            "expected_status": null,
+            "critical": true
+        },
+        {
+            "id": "critical-negative-032",
+            "label": "dark bitter chocolate",
+            "language": "en",
+            "forbidden_entity_slug": "bitters",
+            "expected_status": null,
+            "critical": true
+        },
+        {
+            "id": "critical-negative-033",
+            "label": "70 percent bitter chocolate",
+            "language": "en",
+            "forbidden_entity_slug": "bitters",
+            "expected_status": null,
+            "critical": true
+        },
+        {
+            "id": "critical-negative-034",
+            "label": "bitter cocoa chocolate",
+            "language": "en",
+            "forbidden_entity_slug": "bitters",
+            "expected_status": null,
+            "critical": true
+        },
+        {
+            "id": "critical-negative-035",
+            "label": "bitter milk chocolate",
+            "language": "en",
+            "forbidden_entity_slug": "bitters",
+            "expected_status": null,
+            "critical": true
+        },
+        {
+            "id": "critical-negative-036",
+            "label": "soy sauce",
+            "language": "en",
+            "forbidden_entity_slug": "salsa",
+            "expected_status": null,
+            "critical": true
+        },
+        {
+            "id": "critical-negative-037",
+            "label": "light soy sauce",
+            "language": "en",
+            "forbidden_entity_slug": "salsa",
+            "expected_status": null,
+            "critical": true
+        },
+        {
+            "id": "critical-negative-038",
+            "label": "dark soy sauce",
+            "language": "en",
+            "forbidden_entity_slug": "salsa",
+            "expected_status": null,
+            "critical": true
+        },
+        {
+            "id": "critical-negative-039",
+            "label": "fish sauce",
+            "language": "en",
+            "forbidden_entity_slug": "salsa",
+            "expected_status": null,
+            "critical": true
+        },
+        {
+            "id": "critical-negative-040",
+            "label": "salsa de soja",
+            "language": "en",
+            "forbidden_entity_slug": "salsa",
+            "expected_status": null,
+            "critical": true
+        },
+        {
+            "id": "critical-negative-041",
+            "label": "salsa di soia",
+            "language": "en",
+            "forbidden_entity_slug": "salsa",
+            "expected_status": null,
+            "critical": true
+        },
+        {
+            "id": "critical-negative-042",
+            "label": "salsa di pesce",
+            "language": "en",
+            "forbidden_entity_slug": "salsa",
+            "expected_status": null,
+            "critical": true
+        },
+        {
+            "id": "critical-negative-043",
+            "label": "salsa de pescado",
+            "language": "en",
+            "forbidden_entity_slug": "salsa",
+            "expected_status": null,
+            "critical": true
+        },
+        {
+            "id": "critical-negative-044",
+            "label": "di salsa di soia",
+            "language": "en",
+            "forbidden_entity_slug": "salsa",
+            "expected_status": null,
+            "critical": true
+        },
+        {
+            "id": "critical-negative-045",
+            "label": "de salsa de soja",
+            "language": "en",
+            "forbidden_entity_slug": "salsa",
+            "expected_status": null,
+            "critical": true
+        },
+        {
+            "id": "critical-negative-046",
+            "label": "sauce soja",
+            "language": "en",
+            "forbidden_entity_slug": "salsa",
+            "expected_status": null,
+            "critical": true
+        },
+        {
+            "id": "critical-negative-047",
+            "label": "sauce de soja",
+            "language": "en",
+            "forbidden_entity_slug": "salsa",
+            "expected_status": null,
+            "critical": true
+        },
+        {
+            "id": "critical-negative-048",
+            "label": "sauce poisson",
+            "language": "en",
+            "forbidden_entity_slug": "salsa",
+            "expected_status": null,
+            "critical": true
+        },
+        {
+            "id": "critical-negative-049",
+            "label": "salsa inglesa",
+            "language": "en",
+            "forbidden_entity_slug": "salsa",
+            "expected_status": null,
+            "critical": true
+        },
+        {
+            "id": "critical-negative-050",
+            "label": "salsa teriyaki",
+            "language": "en",
+            "forbidden_entity_slug": "salsa",
+            "expected_status": null,
+            "critical": true
+        },
+        {
+            "id": "critical-negative-051",
+            "label": "salsa hoisin",
+            "language": "en",
+            "forbidden_entity_slug": "salsa",
+            "expected_status": null,
+            "critical": true
+        },
+        {
+            "id": "critical-negative-052",
+            "label": "salsa barbecue",
+            "language": "en",
+            "forbidden_entity_slug": "salsa",
+            "expected_status": null,
+            "critical": true
+        },
+        {
+            "id": "critical-negative-053",
+            "label": "salsa oyster",
+            "language": "en",
+            "forbidden_entity_slug": "salsa",
+            "expected_status": null,
+            "critical": true
+        },
+        {
+            "id": "critical-negative-054",
+            "label": "salsa Worcestershire",
+            "language": "en",
+            "forbidden_entity_slug": "salsa",
+            "expected_status": null,
+            "critical": true
+        },
+        {
+            "id": "critical-negative-055",
+            "label": "salsa de ostras",
+            "language": "en",
+            "forbidden_entity_slug": "salsa",
+            "expected_status": null,
+            "critical": true
+        },
+        {
+            "id": "critical-negative-056",
+            "label": "rice flour",
+            "language": "en",
+            "forbidden_entity_slug": "rice",
+            "expected_status": null,
+            "critical": true
+        },
+        {
+            "id": "critical-negative-057",
+            "label": "brown rice flour",
+            "language": "en",
+            "forbidden_entity_slug": "rice",
+            "expected_status": null,
+            "critical": true
+        },
+        {
+            "id": "critical-negative-058",
+            "label": "white rice flour",
+            "language": "en",
+            "forbidden_entity_slug": "rice",
+            "expected_status": null,
+            "critical": true
+        },
+        {
+            "id": "critical-negative-059",
+            "label": "glutinous rice flour",
+            "language": "en",
+            "forbidden_entity_slug": "rice",
+            "expected_status": null,
+            "critical": true
+        },
+        {
+            "id": "critical-negative-060",
+            "label": "rice wine",
+            "language": "en",
+            "forbidden_entity_slug": "rice",
+            "expected_status": null,
+            "critical": true
+        },
+        {
+            "id": "critical-negative-061",
+            "label": "Chinese rice wine",
+            "language": "en",
+            "forbidden_entity_slug": "rice",
+            "expected_status": null,
+            "critical": true
+        },
+        {
+            "id": "critical-negative-062",
+            "label": "Shaoxing rice wine",
+            "language": "en",
+            "forbidden_entity_slug": "rice",
+            "expected_status": null,
+            "critical": true
+        },
+        {
+            "id": "critical-negative-063",
+            "label": "rice wine vinegar",
+            "language": "en",
+            "forbidden_entity_slug": "rice",
+            "expected_status": null,
+            "critical": true
+        },
+        {
+            "id": "critical-negative-064",
+            "label": "rice paper",
+            "language": "en",
+            "forbidden_entity_slug": "rice",
+            "expected_status": null,
+            "critical": true
+        },
+        {
+            "id": "critical-negative-065",
+            "label": "rice noodles",
+            "language": "en",
+            "forbidden_entity_slug": "rice",
+            "expected_status": null,
+            "critical": true
+        },
+        {
+            "id": "critical-negative-066",
+            "label": "rice milk",
+            "language": "en",
+            "forbidden_entity_slug": "rice",
+            "expected_status": null,
+            "critical": true
+        },
+        {
+            "id": "critical-negative-067",
+            "label": "rice syrup",
+            "language": "en",
+            "forbidden_entity_slug": "rice",
+            "expected_status": null,
+            "critical": true
+        },
+        {
+            "id": "critical-negative-068",
+            "label": "rice bran oil",
+            "language": "en",
+            "forbidden_entity_slug": "rice",
+            "expected_status": null,
+            "critical": true
+        },
+        {
+            "id": "critical-negative-069",
+            "label": "rice starch",
+            "language": "en",
+            "forbidden_entity_slug": "rice",
+            "expected_status": null,
+            "critical": true
+        },
+        {
+            "id": "critical-negative-070",
+            "label": "rice crackers",
+            "language": "en",
+            "forbidden_entity_slug": "rice",
+            "expected_status": null,
+            "critical": true
+        },
+        {
+            "id": "critical-negative-071",
+            "label": "rice pudding",
+            "language": "en",
+            "forbidden_entity_slug": "rice",
+            "expected_status": null,
+            "critical": true
+        },
+        {
+            "id": "critical-negative-072",
+            "label": "rice cake",
+            "language": "en",
+            "forbidden_entity_slug": "rice",
+            "expected_status": null,
+            "critical": true
+        },
+        {
+            "id": "critical-negative-073",
+            "label": "rice seasoning",
+            "language": "en",
+            "forbidden_entity_slug": "rice",
+            "expected_status": null,
+            "critical": true
+        },
+        {
+            "id": "critical-negative-074",
+            "label": "rice cooking wine",
+            "language": "en",
+            "forbidden_entity_slug": "rice",
+            "expected_status": null,
+            "critical": true
+        },
+        {
+            "id": "critical-negative-075",
+            "label": "rice vermicelli",
+            "language": "en",
+            "forbidden_entity_slug": "rice",
+            "expected_status": null,
+            "critical": true
+        },
+        {
+            "id": "critical-negative-076",
+            "label": "peanut oil",
+            "language": "en",
+            "forbidden_entity_slug": "peanut",
+            "expected_status": null,
+            "critical": true
+        },
+        {
+            "id": "critical-negative-077",
+            "label": "refined peanut oil",
+            "language": "en",
+            "forbidden_entity_slug": "peanut",
+            "expected_status": null,
+            "critical": true
+        },
+        {
+            "id": "critical-negative-078",
+            "label": "roasted peanut oil",
+            "language": "en",
+            "forbidden_entity_slug": "peanut",
+            "expected_status": null,
+            "critical": true
+        },
+        {
+            "id": "critical-negative-079",
+            "label": "cold pressed peanut oil",
+            "language": "en",
+            "forbidden_entity_slug": "peanut",
+            "expected_status": null,
+            "critical": true
+        },
+        {
+            "id": "critical-negative-080",
+            "label": "groundnut oil",
+            "language": "en",
+            "forbidden_entity_slug": "peanut",
+            "expected_status": null,
+            "critical": true
+        },
+        {
+            "id": "critical-negative-081",
+            "label": "arachis oil",
+            "language": "en",
+            "forbidden_entity_slug": "peanut",
+            "expected_status": null,
+            "critical": true
+        },
+        {
+            "id": "critical-negative-082",
+            "label": "peanut cooking oil",
+            "language": "en",
+            "forbidden_entity_slug": "peanut",
+            "expected_status": null,
+            "critical": true
+        },
+        {
+            "id": "critical-negative-083",
+            "label": "peanut frying oil",
+            "language": "en",
+            "forbidden_entity_slug": "peanut",
+            "expected_status": null,
+            "critical": true
+        },
+        {
+            "id": "critical-negative-084",
+            "label": "peanut flavored oil",
+            "language": "en",
+            "forbidden_entity_slug": "peanut",
+            "expected_status": null,
+            "critical": true
+        },
+        {
+            "id": "critical-negative-085",
+            "label": "blended peanut oil",
+            "language": "en",
+            "forbidden_entity_slug": "peanut",
+            "expected_status": null,
+            "critical": true
+        },
+        {
+            "id": "critical-negative-086",
+            "label": "piment",
+            "language": "en",
+            "forbidden_entity_slug": null,
+            "expected_status": "unresolved",
+            "critical": true
+        },
+        {
+            "id": "critical-negative-087",
+            "label": "ground piment",
+            "language": "en",
+            "forbidden_entity_slug": null,
+            "expected_status": "unresolved",
+            "critical": true
+        },
+        {
+            "id": "critical-negative-088",
+            "label": "fresh piment",
+            "language": "en",
+            "forbidden_entity_slug": null,
+            "expected_status": "unresolved",
+            "critical": true
+        },
+        {
+            "id": "critical-negative-089",
+            "label": "red piment",
+            "language": "en",
+            "forbidden_entity_slug": null,
+            "expected_status": "unresolved",
+            "critical": true
+        },
+        {
+            "id": "critical-negative-090",
+            "label": "green piment",
+            "language": "en",
+            "forbidden_entity_slug": null,
+            "expected_status": "unresolved",
+            "critical": true
+        },
+        {
+            "id": "critical-negative-091",
+            "label": "cornflour",
+            "language": "en",
+            "forbidden_entity_slug": null,
+            "expected_status": "unresolved",
+            "critical": true
+        },
+        {
+            "id": "critical-negative-092",
+            "label": "fine cornflour",
+            "language": "en",
+            "forbidden_entity_slug": null,
+            "expected_status": "unresolved",
+            "critical": true
+        },
+        {
+            "id": "critical-negative-093",
+            "label": "white cornflour",
+            "language": "en",
+            "forbidden_entity_slug": null,
+            "expected_status": "unresolved",
+            "critical": true
+        },
+        {
+            "id": "critical-negative-094",
+            "label": "wheat cornflour",
+            "language": "en",
+            "forbidden_entity_slug": null,
+            "expected_status": "unresolved",
+            "critical": true
+        },
+        {
+            "id": "critical-negative-095",
+            "label": "cornflour starch",
+            "language": "en",
+            "forbidden_entity_slug": null,
+            "expected_status": "unresolved",
+            "critical": true
+        },
+        {
+            "id": "critical-negative-096",
+            "label": "tomato puree",
+            "language": "en",
+            "forbidden_entity_slug": null,
+            "expected_status": "unresolved",
+            "critical": true
+        },
+        {
+            "id": "critical-negative-097",
+            "label": "tomato purée",
+            "language": "en",
+            "forbidden_entity_slug": null,
+            "expected_status": "unresolved",
+            "critical": true
+        },
+        {
+            "id": "critical-negative-098",
+            "label": "smooth tomato puree",
+            "language": "en",
+            "forbidden_entity_slug": null,
+            "expected_status": "unresolved",
+            "critical": true
+        },
+        {
+            "id": "critical-negative-099",
+            "label": "thick tomato puree",
+            "language": "en",
+            "forbidden_entity_slug": null,
+            "expected_status": "unresolved",
+            "critical": true
+        },
+        {
+            "id": "critical-negative-100",
+            "label": "concentrated tomato puree",
+            "language": "en",
+            "forbidden_entity_slug": null,
+            "expected_status": "unresolved",
+            "critical": true
+        },
+        {
+            "id": "critical-negative-101",
+            "label": "air",
+            "language": "en",
+            "forbidden_entity_slug": null,
+            "expected_status": "unresolved",
+            "critical": true
+        },
+        {
+            "id": "critical-negative-102",
+            "label": "cold air",
+            "language": "en",
+            "forbidden_entity_slug": null,
+            "expected_status": "unresolved",
+            "critical": true
+        },
+        {
+            "id": "critical-negative-103",
+            "label": "warm air",
+            "language": "en",
+            "forbidden_entity_slug": null,
+            "expected_status": "unresolved",
+            "critical": true
+        },
+        {
+            "id": "critical-negative-104",
+            "label": "dry air",
+            "language": "en",
+            "forbidden_entity_slug": null,
+            "expected_status": "unresolved",
+            "critical": true
+        },
+        {
+            "id": "critical-negative-105",
+            "label": "compressed air",
+            "language": "en",
+            "forbidden_entity_slug": null,
+            "expected_status": "unresolved",
+            "critical": true
+        },
+        {
+            "id": "critical-negative-106",
+            "label": "garam",
+            "language": "en",
+            "forbidden_entity_slug": null,
+            "expected_status": "unresolved",
+            "critical": true
+        },
+        {
+            "id": "critical-negative-107",
+            "label": "ground garam",
+            "language": "en",
+            "forbidden_entity_slug": null,
+            "expected_status": "unresolved",
+            "critical": true
+        },
+        {
+            "id": "critical-negative-108",
+            "label": "fresh garam",
+            "language": "en",
+            "forbidden_entity_slug": null,
+            "expected_status": "unresolved",
+            "critical": true
+        },
+        {
+            "id": "critical-negative-109",
+            "label": "garam powder",
+            "language": "en",
+            "forbidden_entity_slug": null,
+            "expected_status": "unresolved",
+            "critical": true
+        },
+        {
+            "id": "critical-negative-110",
+            "label": "garam spice",
+            "language": "en",
+            "forbidden_entity_slug": null,
+            "expected_status": "unresolved",
+            "critical": true
+        },
+        {
+            "id": "critical-negative-111",
+            "label": "legume",
+            "language": "en",
+            "forbidden_entity_slug": null,
+            "expected_status": "unresolved",
+            "critical": true
+        },
+        {
+            "id": "critical-negative-112",
+            "label": "legumes",
+            "language": "en",
+            "forbidden_entity_slug": null,
+            "expected_status": "unresolved",
+            "critical": true
+        },
+        {
+            "id": "critical-negative-113",
+            "label": "fresh legumes",
+            "language": "en",
+            "forbidden_entity_slug": null,
+            "expected_status": "unresolved",
+            "critical": true
+        },
+        {
+            "id": "critical-negative-114",
+            "label": "mixed legumes",
+            "language": "en",
+            "forbidden_entity_slug": null,
+            "expected_status": "unresolved",
+            "critical": true
+        },
+        {
+            "id": "critical-negative-115",
+            "label": "dried legumes",
+            "language": "en",
+            "forbidden_entity_slug": null,
+            "expected_status": "unresolved",
+            "critical": true
+        },
+        {
+            "id": "critical-negative-116",
+            "label": "red capsicum",
+            "language": "en",
+            "forbidden_entity_slug": "piper-pepper",
+            "expected_status": null,
+            "critical": true
+        },
+        {
+            "id": "critical-negative-117",
+            "label": "green capsicum",
+            "language": "en",
+            "forbidden_entity_slug": "piper-pepper",
+            "expected_status": null,
+            "critical": true
+        },
+        {
+            "id": "critical-negative-118",
+            "label": "yellow capsicum",
+            "language": "en",
+            "forbidden_entity_slug": "piper-pepper",
+            "expected_status": null,
+            "critical": true
+        },
+        {
+            "id": "critical-negative-119",
+            "label": "red bell pepper",
+            "language": "en",
+            "forbidden_entity_slug": "piper-pepper",
+            "expected_status": null,
+            "critical": true
+        },
+        {
+            "id": "critical-negative-120",
+            "label": "green bell pepper",
+            "language": "en",
+            "forbidden_entity_slug": "piper-pepper",
+            "expected_status": null,
+            "critical": true
+        },
+        {
+            "id": "critical-negative-121",
+            "label": "yellow bell pepper",
+            "language": "en",
+            "forbidden_entity_slug": "piper-pepper",
+            "expected_status": null,
+            "critical": true
+        },
+        {
+            "id": "critical-negative-122",
+            "label": "fresh red chilli",
+            "language": "en",
+            "forbidden_entity_slug": "piper-pepper",
+            "expected_status": null,
+            "critical": true
+        },
+        {
+            "id": "critical-negative-123",
+            "label": "red chilli pepper",
+            "language": "en",
+            "forbidden_entity_slug": "piper-pepper",
+            "expected_status": null,
+            "critical": true
+        },
+        {
+            "id": "critical-negative-124",
+            "label": "green chilli pepper",
+            "language": "en",
+            "forbidden_entity_slug": "piper-pepper",
+            "expected_status": null,
+            "critical": true
+        },
+        {
+            "id": "critical-negative-125",
+            "label": "jalapeño pepper",
+            "language": "en",
+            "forbidden_entity_slug": "piper-pepper",
+            "expected_status": null,
+            "critical": true
+        },
+        {
+            "id": "critical-negative-126",
+            "label": "banana pepper",
+            "language": "en",
+            "forbidden_entity_slug": "piper-pepper",
+            "expected_status": null,
+            "critical": true
+        },
+        {
+            "id": "critical-negative-127",
+            "label": "sweet pepper",
+            "language": "en",
+            "forbidden_entity_slug": "piper-pepper",
+            "expected_status": null,
+            "critical": true
+        },
+        {
+            "id": "critical-negative-128",
+            "label": "roasted red pepper",
+            "language": "en",
+            "forbidden_entity_slug": "piper-pepper",
+            "expected_status": null,
+            "critical": true
+        },
+        {
+            "id": "critical-negative-129",
+            "label": "pickled red pepper",
+            "language": "en",
+            "forbidden_entity_slug": "piper-pepper",
+            "expected_status": null,
+            "critical": true
+        },
+        {
+            "id": "critical-negative-130",
+            "label": "capsicum pepper",
+            "language": "en",
+            "forbidden_entity_slug": "piper-pepper",
+            "expected_status": null,
+            "critical": true
+        },
+        {
+            "id": "critical-negative-131",
+            "label": "hazelnut milk",
+            "language": "en",
+            "forbidden_entity_slug": "milk",
+            "expected_status": null,
+            "critical": true
+        },
+        {
+            "id": "critical-negative-132",
+            "label": "almond milk",
+            "language": "en",
+            "forbidden_entity_slug": "milk",
+            "expected_status": null,
+            "critical": true
+        },
+        {
+            "id": "critical-negative-133",
+            "label": "oat milk",
+            "language": "en",
+            "forbidden_entity_slug": "milk",
+            "expected_status": null,
+            "critical": true
+        },
+        {
+            "id": "critical-negative-134",
+            "label": "rice milk",
+            "language": "en",
+            "forbidden_entity_slug": "milk",
+            "expected_status": null,
+            "critical": true
+        },
+        {
+            "id": "critical-negative-135",
+            "label": "soy milk",
+            "language": "en",
+            "forbidden_entity_slug": "milk",
+            "expected_status": null,
+            "critical": true
+        },
+        {
+            "id": "critical-negative-136",
+            "label": "coconut milk",
+            "language": "en",
+            "forbidden_entity_slug": "milk",
+            "expected_status": null,
+            "critical": true
+        },
+        {
+            "id": "critical-negative-137",
+            "label": "cashew milk",
+            "language": "en",
+            "forbidden_entity_slug": "milk",
+            "expected_status": null,
+            "critical": true
+        },
+        {
+            "id": "critical-negative-138",
+            "label": "pea milk",
+            "language": "en",
+            "forbidden_entity_slug": "milk",
+            "expected_status": null,
+            "critical": true
+        },
+        {
+            "id": "critical-negative-139",
+            "label": "hemp milk",
+            "language": "en",
+            "forbidden_entity_slug": "milk",
+            "expected_status": null,
+            "critical": true
+        },
+        {
+            "id": "critical-negative-140",
+            "label": "macadamia milk",
+            "language": "en",
+            "forbidden_entity_slug": "milk",
+            "expected_status": null,
+            "critical": true
+        },
+        {
+            "id": "critical-negative-141",
+            "label": "food",
+            "language": "en",
+            "forbidden_entity_slug": null,
+            "expected_status": "unresolved",
+            "critical": true
+        },
+        {
+            "id": "critical-negative-142",
+            "label": "ingredient",
+            "language": "en",
+            "forbidden_entity_slug": null,
+            "expected_status": "unresolved",
+            "critical": true
+        },
+        {
+            "id": "critical-negative-143",
+            "label": "plant derived",
+            "language": "en",
+            "forbidden_entity_slug": null,
+            "expected_status": "unresolved",
+            "critical": true
+        },
+        {
+            "id": "critical-negative-144",
+            "label": "animal derived",
+            "language": "en",
+            "forbidden_entity_slug": null,
+            "expected_status": "unresolved",
+            "critical": true
+        },
+        {
+            "id": "critical-negative-145",
+            "label": "vegetable",
+            "language": "en",
+            "forbidden_entity_slug": null,
+            "expected_status": "unresolved",
+            "critical": true
+        },
+        {
+            "id": "critical-negative-146",
+            "label": "fruit",
+            "language": "en",
+            "forbidden_entity_slug": null,
+            "expected_status": "unresolved",
+            "critical": true
+        },
+        {
+            "id": "critical-negative-147",
+            "label": "herb",
+            "language": "en",
+            "forbidden_entity_slug": null,
+            "expected_status": "unresolved",
+            "critical": true
+        },
+        {
+            "id": "critical-negative-148",
+            "label": "spice",
+            "language": "en",
+            "forbidden_entity_slug": null,
+            "expected_status": "unresolved",
+            "critical": true
+        },
+        {
+            "id": "critical-negative-149",
+            "label": "nut",
+            "language": "en",
+            "forbidden_entity_slug": null,
+            "expected_status": "unresolved",
+            "critical": true
+        },
+        {
+            "id": "critical-negative-150",
+            "label": "seed",
+            "language": "en",
+            "forbidden_entity_slug": null,
+            "expected_status": "unresolved",
+            "critical": true
+        },
+        {
+            "id": "critical-negative-151",
+            "label": "grain",
+            "language": "en",
+            "forbidden_entity_slug": null,
+            "expected_status": "unresolved",
+            "critical": true
+        },
+        {
+            "id": "critical-negative-152",
+            "label": "dairy",
+            "language": "en",
+            "forbidden_entity_slug": null,
+            "expected_status": "unresolved",
+            "critical": true
+        },
+        {
+            "id": "critical-negative-153",
+            "label": "condiment",
+            "language": "en",
+            "forbidden_entity_slug": null,
+            "expected_status": "unresolved",
+            "critical": true
+        },
+        {
+            "id": "critical-negative-154",
+            "label": "beverage",
+            "language": "en",
+            "forbidden_entity_slug": null,
+            "expected_status": "unresolved",
+            "critical": true
+        },
+        {
+            "id": "critical-negative-155",
+            "label": "meal",
+            "language": "en",
+            "forbidden_entity_slug": null,
+            "expected_status": "unresolved",
+            "critical": true
+        }
+    ]
+}

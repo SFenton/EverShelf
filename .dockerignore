@@ -11,8 +11,21 @@ data/client_debug.log
 data/*.crt
 data/*.pem
 
+# Optional local frontend build outputs
+assets/js/*.min.js
+assets/css/*.min.css
+
 # Config (mounted as volume)
 .env
+
+# Isolated optional service (built from its own context)
+cookidoo-bridge/
+
+# Non-web applications and local browser artifacts
+evershelf-kiosk/
+evershelf-scale-gateway/
+evershelf-kiosk*.apk
+.playwright-mcp/
 
 # Git
 .git

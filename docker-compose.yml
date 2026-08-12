@@ -13,6 +13,28 @@ services:
     environment:
       - TZ=Europe/Rome
 
+  cookidoo-bridge:
+    profiles: ["cookidoo"]
+    build:
+      context: ./cookidoo-bridge
+    expose:
+      - "8081"
+    env_file:
+      - ./cookidoo-bridge/.env
+    volumes:
+      - cookidoo_cookies:/data
+    restart: unless-stopped
+    init: true
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      - TZ=Europe/Rome
+
 volumes:
   evershelf_data:
+    driver: local
+  cookidoo_cookies:
     driver: local

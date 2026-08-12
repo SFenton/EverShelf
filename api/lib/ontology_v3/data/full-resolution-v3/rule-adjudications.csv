@@ -1,0 +1,7 @@
+rule_id,disposition,rationale
+19,deny_identity,Salsa token or phrase rules never establish identity; only exact reviewed full-span aliases with required owner/context evidence may accept
+27,deny_identity,Jalapeño or pepper wording never proves pickling; exact reviewed prepared labels or facets remain allowed
+57,deny_identity,Rice token or head matching never establishes identity; independently reviewed exact compounds such as rice flour may accept their non-rice base with defining facets
+71,deny_identity,Onion token rules never choose among spring onion shallot or alternatives; exact reviewed full-span aliases remain allowed
+98,deny_identity,Bitters token rules never accept bitter chocolate; exact reviewed chocolate-class aliases remain allowed
+99,deny_identity,Bare pod token rules never imply coffee-pod identity; exact reviewed full-span cardamom or vanilla pod aliases may accept their own base with pod form

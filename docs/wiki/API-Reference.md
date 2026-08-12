@@ -263,6 +263,185 @@ Generate a recipe based on current inventory.
 ### `generate_recipe_stream` — POST
 Same as `generate_recipe` but streams output via Server-Sent Events.
 
+### `recipe_catalog_search` — GET
+Search the durable local recipe catalog by title and ingredient text.
+
+| Param | Type | Description |
+|-------|------|-------------|
+| `q` | string | Title/ingredient query |
+| `sort` | string | `availability`, `expiry`, or `alphabetical` |
+| `availability_weight` / `expiry_weight` | integer | Independent 0–100 ranking weights |
+| `minimum_coverage` | integer | Minimum required-ingredient coverage percent |
+| `expiring_within_days` | integer | Optional expiring-ingredient filter horizon |
+| `source` | string | Optional connector filter |
+| `locale` | string | Optional locale filter |
+| `fields` | string | `card` for compact dashboard results; otherwise `full` |
+| `limit` / `cursor` | integer/string | Snapshot-bound pagination |
+| `explain` | boolean | Include per-ingredient match explanations |
+
+The response includes a criteria hash, score/catalog snapshot, `next_cursor`,
+`has_more`, stable `dedupe_key` values, and explicit read/preview revision
+metadata. Ranking/filtering occurs in SQLite
+before the page is hydrated. A metadata freshness update that changes effective
+recipe visibility increments only the cursor revision; cursors created before that
+transition are rejected and callers must restart from the first page. Refreshes that
+remain visible or invisible keep the existing cursor revision.
+When the development-only score preview is active, cursors are accepted only for
+that one configured validated revision; changing or invalidating the setting
+rejects older preview cursors.
+
+### `recipe_catalog_suggest` — GET
+Compatibility alias for a no-query ranked catalog browse.
+
+### `recipe_catalog_recommendations` — GET
+Return 5–100 Food & Recipes carousel cards. The default 30-card mobile response
+uses a 40/40/20 availability, expiry, and deterministic-fill mix; wider clients
+request a larger total while preserving the same proportions and final display
+order.
+
+### `recipe_catalog_get` — GET
+Return one normalized catalog recipe by `id`.
+
+### `recipe_catalog_detail` — GET
+Return the bounded source-agnostic `recipe_detail_v1` projection for a positive
+`id`. The DTO contains:
+
+- `source`, attribution, canonical URL, locale, per-origin metadata/topology schema
+  versions, and image URLs
+- `general` yield/unit, active/total seconds, difficulty, category, and equipment
+- ordered `ingredients` with stable keys, bounded `source_text`, deterministic
+  `display_name` (also returned as legacy `name`), display amount facts, mapping
+  IDs/labels, current `in_stock|missing|uncertain|staple` inventory states, and an
+  additive `provider` object for ingredient/default-title/unit references,
+  provider-declared optionality, and shopping-category reference
+- additive `ingredient_groups` with stable `rig:*` keys, group/order ordinals,
+  ingredient keys/positions, and bounded provider/local labels; the flat ingredient
+  array is unchanged
+- optional `closest_match` only for `taxonomy_alias`, `taxonomy_slug`, or
+  `canonical_slug`; `taxonomy_rule` mappings are omitted regardless of confidence
+- sibling `grocery` missing/uncertain/in-stock/staple/eligible counts,
+  `max_selections`, and `blocked_reason`
+- `instructions` (including optional local group-to-step-position references), user
+  state, freshness, inventory/ranking/catalog revision, and
+  capability enums (`general`, `ingredients`, `instructions`, `quantities`,
+  `grocery_add`), `score_preview` capability/diagnostics, and explicit active
+  versus preview score/ontology IDs
+
+Cookidoo always returns:
+
+```json
+{
+  "available": false,
+  "reason": "provider_external_only",
+  "steps": [],
+  "fallback_url": "https://cookidoo.co.uk/recipes/recipe/en-GB/example-id",
+  "truncated": false
+}
+```
+
+The optional instruction `groups` property is omitted for Cookidoo. Cookidoo
+ingredient groups use bounded provider titles when present and null when empty.
+Cookidoo source amounts set `quantity_state: "display_only"` and
+`quantity_sufficiency: "unknown"`. Local/manual/generated variants may return their
+authorized stored steps, bounded instruction group labels, and genuinely known
+ranking quantities. Provider `optional: true` is optional; false or null remains
+assumed required. Only exact, pantry-descendant, or normalized-name
+inventory relations can report `in_stock`; contains or broader evidence reports
+`uncertain`.
+
+Primary ingredient and grocery labels always come from conservative source-text
+cleaning/casing. Canonical/taxonomy labels are secondary metadata and never replace
+the display label. `capabilities.grocery_add` reports feature support for a complete
+nonempty list, not whether `missing_count` is greater than zero. No ingredients and
+truncated ingredients are distinct blockers; an all-in-stock or uncertain-only
+complete list still reports capability `true`.
+
+### `recipe_catalog_grocery_add` — POST
+Recheck a recipe and add only selected ingredients that are still genuinely missing
+to EverShelf's internal shopping list. The action never calls Home Assistant and
+never interprets source amount text as a list quantity. Uncertain items are
+ineligible. Mapping IDs dedupe only for identity-safe alias/slug sources; otherwise
+the normalized source-derived name is used.
+
+```json
+{
+  "recipe_id": 123,
+  "idempotency_key": "ha-01J...",
+  "selections": [
+    { "key": "ri:2:0123456789abcdef", "position": 2 }
+  ]
+}
+```
+
+`ingredient_keys` or `positions` arrays are also accepted (maximum 100 selections).
+The bounded result contains `added`, `already_listed`, `now_in_stock`, `unresolved`,
+or `failed` per item plus normalized names/amount text for a caller to mirror.
+Replaying the same key and normalized selector payload returns the stored outcomes
+before mutable recipe metadata is revalidated, so an exact retry remains stable
+after ingredient reorder or removal. Reusing a key for a different payload returns
+HTTP 409. Idempotency records have a 30-day retention window from the original
+command; older records may be pruned by later grocery commands.
+
+### `recipe_catalog_discover` — POST
+Cookidoo discovery hydration is policy-disabled. The action returns local catalog
+results, no remote job, `detail_hydration: false`, and
+`unrefreshable_reason: "provider_detail_policy_disabled"`.
+
+### `recipe_jobs_status` — GET
+Read one background job by `id`/`idempotency_key`, list recent jobs, or pass
+`search_id` to receive aggregate hydration status, queue position, polling delay,
+exhaustion state, and compact imported/updated cards. Legacy Cookidoo discovery and
+metadata jobs terminate as `skipped` with
+`provider_detail_policy_disabled`; they do not retry or affect connector
+failure/circuit state. No new hydration jobs are enqueued.
+
+### `recipe_connectors` — GET
+List connector capabilities, enabled/configured state, and circuit-breaker health.
+Cookidoo reports `detail_hydration: false`, policy reason/version, cached-catalog
+read, canonical-link, and external-instructions-link capabilities.
+
+`ha_info` advertises `recipe_detail_v1` and `recipe_grocery_v1` alongside
+`recipe_catalog_v2` when these actions are present.
+
+### Ingredient ontology v3 operator CLI (no public HTTP mutation)
+
+`scripts/ingredient-ontology-v3.php` supports `build-candidate`, `audit`,
+`build-shadow`, `report`, `validate`, `prompt`, `stage-proposals`, `reject`,
+`dispose`, `revert`, `activate`, and `rollback`. Mutating commands require
+`--write`; activation additionally requires
+`--confirm-activate=<revision-id>`. The default/help command never activates.
+
+Candidate builds account for every product, `recipe_ingredients` row, and
+`recipe_source_ingredients` row with an accepted/candidate/ambiguous/unresolved/
+rejected assertion. Audits stream every product and distinct label plus mechanism,
+language, facet, status, delta, and false-positive-cluster counts. Shadow reports
+include coverage/cookability/rank changes, every changed currently-cookable recipe,
+all labels with frequency at least 100, and product mapping changes.
+
+There is intentionally no model API call or auto-apply endpoint. Copilot-produced
+JSON may only be staged after closed-set/schema/evidence/direction/retail/cycle
+validation. V2 API behavior remains active until a manually validated score revision
+is activated. Responses expose a nullable ontology version only through the active
+score revision.
+
+V3 explanations preserve `required`, `optional`, and `staple` flags, report
+optional unmatched rows separately, and expose bounded compatible row/product
+counts plus the minimum compatible expiry. The existing API `explain` default and
+cursor semantics are unchanged.
+
+After an initial manual v3 activation, the normal minute rebuild command preserves
+that exact ontology version, reuses same-input ready revisions, and atomically
+activates only a freshly validated replacement. It never falls back to legacy v2.
+Request reads serve a stale active v3 revision without forcing rebuild. Pruning
+keeps an eight-ancestor rollback window plus four recent ready-v3 revisions and
+the latest same-parent candidate. Proven ancestors may be restored while stale;
+non-ancestors must be current-parent v3 children and pass normal activation.
+`revert` safely withdraws pending/approved sets, is audited/idempotent once
+reverted, and still rejects applied sets without inverse provenance.
+
+### `recipe_catalog_favorite` — POST
+Set or toggle catalog favorite state with `{ "id": 123, "favorite": true }`.
+
 ### `gemini_product_hint` — POST
 Get AI storage location + shelf-life hint for a new product.
 

@@ -1,0 +1,8 @@
+normalized_label,language,required_cohort,disposition_code,meaning_json,reviewer,review_batch,rationale,source_citation
+cornflour,und,,D4,"{""interpretation"":""Two provider identities""}",operator-corrective-review-v2,full-ontology-resolution-v2,Two provider identities,corrective request blocker 1/6
+piment,und,,D4,"{""interpretation"":""Allspice/chilli homograph""}",operator-corrective-review-v2,full-ontology-resolution-v2,Allspice/chilli homograph,corrective request blocker 1/6
+tomato puree,und,,D4,"{""interpretation"":""Purée/paste contextual ambiguity""}",operator-corrective-review-v2,full-ontology-resolution-v2,Purée/paste contextual ambiguity,corrective request blocker 1/6
+tomato purée,und,,D4,"{""interpretation"":""Purée/paste contextual ambiguity""}",operator-corrective-review-v2,full-ontology-resolution-v2,Purée/paste contextual ambiguity,corrective request blocker 1/6
+pepper,en,,D4,"{""interpretation"":""Piper/Capsicum ambiguity""}",operator-corrective-review-v2,full-ontology-resolution-v2,Piper/Capsicum ambiguity,corrective request blocker 1/6
+spring onions shallots,en,,D4,"{""interpretation"":""Explicit source-level alternative""}",operator-corrective-review-v2,full-ontology-resolution-v2,Explicit source-level alternative,corrective request blocker 1/6
+spring onion shallot,en,,D4,"{""interpretation"":""Explicit source-level alternative""}",operator-corrective-review-v2,full-ontology-resolution-v2,Explicit source-level alternative,corrective request blocker 1/6

@@ -1,0 +1,7 @@
+rule_id,disposition,rationale
+19,deny_identity,Salsa phrases collide with soy/fish sauce and Portuguese parsley
+27,deny_identity,Jalapeño and pepper wording does not prove pickling
+57,deny_identity,Rice wording collides with rice flour and rice wine
+71,deny_identity,Onion wording collides with spring-onion and shallot alternatives
+98,deny_identity,Bitters wording collides with bitter chocolate
+99,deny_identity,Bare pod wording collides with cardamom and vanilla pods

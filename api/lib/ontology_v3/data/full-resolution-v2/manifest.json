@@ -1,0 +1,37 @@
+{
+  "manifest_key": "full-ontology-resolution",
+  "manifest_version": "full-resolution-v2",
+  "reviewer": "operator-corrective-review-v2",
+  "review_batch": "full-ontology-resolution-v2",
+  "activation_policy": "blocked",
+  "activation_block_reason": "Corrective ontology resolution remains shadow-only.",
+  "files": {
+    "aliases.csv": "4dd54f7c22ce6b04e902f31745067716ab0c1fa8d727941766f61d363946f5bc",
+    "context-dispositions.csv": "f8973d952aa60689e2d7363b76984747f7921962909e35d8bd8a091ee572aad3",
+    "duplicate-identities.csv": "2faa51ead1f7327b6ee92c40ca05a56efc56939093fd8e0cedba2c40a307c407",
+    "edge-reviews.csv": "40a846d587944c732492bf4d67824e5bd377cd4650c2034c691f4cd50b478234",
+    "entity-facet-policies.csv": "e717536da76d66047a5b77919471767d72da824a496b3ce71e7916339bf61eff",
+    "entity-roles.csv": "293e9d071c58fe2dc8eec7ee27f78371b73ecd64fbd911e6bac2e359a78d6e25",
+    "evidence.csv": "ec9eaa40902d990ae4509d39a7a60b3845589189081d72883eb4a12fd66057f2",
+    "primary-edges.csv": "6f1d07d52a9cd1b0cfb3350de68afc4c5bdbaea5605d3153ed9ca323b470c50b",
+    "prior-accepted-label-transitions.csv": "5f0647b647a20f7a158a366425cf28ced44b954dbc5074a1de7cc88219be4c3f",
+    "product-dispositions.csv": "bbf2ca6037dd78675691bc8f73aec9a6a8843286b7ad9f2c8fe37aa121cacb8a",
+    "provider-local-reviews.csv": "618449b216968d1cc37f9dd1876b6b7c03917b9c76b7c2e444f5086dbbdc2584",
+    "provider-terms.csv": "5bffa1ddf7fcdf993580ca996634f9e1803ff6d13352c1c510121078f7f930c4",
+    "recipe-semantic-dispositions.csv": "bbb049b2fac359cd625be2ae92e7422610f81f05743d799dda3c30e02bf451c0",
+    "resolution-gold-reviewed.csv": "9f445cd5e9733b5d30bb072af36dc6a489d9360a2a8b235bd733c931806be5f5",
+    "resolution-gold-reviewed.json": "2dc836ca51c8cc3d12d9aaf11e6a017c52a65057b9bd41948f3ae380320061bb",
+    "resolution-snapshot-v1.json": "f1012844b6dc53909fa1163ec2c4bc959989ad62495dfc44aa93971f84d37d05",
+    "rule-adjudications.csv": "feba68cf45e5d6224d7375af3da7549bdc8ea662141e7c5127acb7225c8041a2"
+  },
+  "frozen_sources": {
+    "eval_corpus_hash": "90e60ced6608ed5ff6796a5f5d665897a4cd81367f8380ef10e784143be7a789",
+    "provider_corpus_hash": "2b3c1095712bc802144d7fdb043b3628570c0cf452b7dedb9be226612c9c4bec",
+    "prior_audit_sha256": "3762e3eafe940d89f735c15265950c27d2aeb2416b690ccefa070038aea4a0f5",
+    "provider_term_count": 646,
+    "provider_frontier_labels": 99,
+    "provider_frontier_occurrences": 6854,
+    "prior_accepted_label_count": 522,
+    "entity_count": 304
+  }
+}

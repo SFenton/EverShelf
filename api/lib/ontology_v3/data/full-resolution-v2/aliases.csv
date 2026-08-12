@@ -1,0 +1,86 @@
+slug,label,language,attributes_json,required_cohort,required_evidence_kind,required_evidence_key,rationale
+piper-pepper,black pepper,en,"{""variety"":""black""}",,,,Explicit Piper identity
+piper-pepper,ground black pepper,en,"{""form"":""ground"",""variety"":""black""}",,,,Explicit Piper identity and form
+piper-pepper,freshly ground black pepper,en,"{""form"":""ground"",""variety"":""black""}",,,,Explicit Piper identity and form
+piper-pepper,black peppercorns,en,"{""form"":""whole"",""variety"":""black""}",,,,Explicit Piper identity and form
+piper-pepper,white pepper,en,"{""variety"":""white""}",,,,Explicit Piper identity
+piper-pepper,ground white pepper,en,"{""form"":""ground"",""variety"":""white""}",,,,Explicit Piper identity and form
+piper-pepper,schwarzer Pfeffer,de,"{""variety"":""black""}",,,,Explicit German Piper identity
+piper-pepper,gemahlener schwarzer Pfeffer,de,"{""form"":""ground"",""variety"":""black""}",,,,Explicit German Piper identity and form
+piper-pepper,poivre noir moulu,fr,"{""form"":""ground"",""variety"":""black""}",,,,Explicit French Piper identity and form
+piper-pepper,pimienta negra molida,es,"{""form"":""ground"",""variety"":""black""}",,,,Explicit Spanish Piper identity and form
+piper-pepper,pimenta preta moída,pt,"{""form"":""ground"",""variety"":""black""}",,,,Explicit Portuguese Piper identity and form
+piper-pepper,mielony czarny pieprz,pl,"{""form"":""ground"",""variety"":""black""}",,,,Explicit Polish Piper identity and form
+capsicum,capsicum,en,{},,,,Capsicum identity
+bell-pepper,red bell pepper,en,"{""variety"":""red""}",,,,Explicit bell pepper identity
+bell-pepper,green bell pepper,en,"{""variety"":""green""}",,,,Explicit bell pepper identity
+bell-pepper,yellow bell pepper,en,"{""variety"":""yellow""}",,,,Explicit bell pepper identity
+bell-pepper,rote paprika,de,"{""variety"":""red""}",de,provider_ref_cluster,provider-ref:com.vorwerk.ingredients.Ingredient-rpf-43,Provider-ref review plus German cohort gate
+chilli-pepper,chilli pepper,en,{},,,,Explicit chilli identity
+chilli-pepper,chili pepper,en,{},,,,Explicit chilli identity spelling
+jalapeno-pepper,jalapeño pepper,en,"{""variety"":""jalapeno""}",,,,Explicit jalapeño identity
+paprika,smoked paprika,en,"{""processing"":""smoked""}",,,,Reviewed paprika processing
+cayenne-pepper,ground cayenne pepper,en,"{""form"":""ground""}",,,,Reviewed cayenne form
+water,ice cubes,en,"{""form"":""cubes"",""processing"":""frozen""}",,provider_ref_cluster,provider-ref:com.vorwerk.ingredients.Ingredient-rpf-37,Provider-ref reviewed exact local label
+water,boiling water,en,"{""preparation"":""boiling""}",,,,Reviewed water preparation
+salt,sea salt,en,"{""salt_class"":""sea""}",,,,Reviewed salt class
+salt,fine sea salt,en,"{""form"":""fine"",""salt_class"":""sea""}",,,,Reviewed salt class and form
+salt,kosher salt,en,"{""salt_class"":""kosher""}",,,,Reviewed salt class
+oil,coconut oil,en,"{""variety"":""coconut""}",,,,Reviewed oil variety
+oil,sunflower oil,en,"{""variety"":""sunflower""}",,,,Reviewed oil variety
+oil,canola oil,en,"{""variety"":""canola""}",,,,Reviewed oil variety
+oil,rapeseed oil,en,"{""variety"":""rapeseed""}",,,,Reviewed oil variety
+oil,peanut oil,en,"{""variety"":""peanut""}",,,,Oil identity; must not resolve as peanut
+oil,grapeseed oil,en,"{""variety"":""grapeseed""}",,,,Reviewed oil variety
+oil,walnut oil,en,"{""variety"":""walnut""}",,,,Reviewed oil variety
+oil,almond oil,en,"{""variety"":""almond""}",,,,Reviewed oil variety
+rice,basmati rice,en,"{""variety"":""basmati""}",,,,Reviewed rice variety
+rice,jasmine rice,en,"{""variety"":""jasmine""}",,,,Reviewed rice variety
+rice,arborio rice,en,"{""variety"":""arborio""}",,,,Reviewed rice variety
+tomato,cherry tomatoes,en,"{""variety"":""cherry""}",,,,Reviewed tomato variety
+tomato,plum tomatoes,en,"{""variety"":""plum""}",,,,Reviewed tomato variety
+tomato,canned chopped tomatoes,en,"{""form"":""chopped"",""preservation"":""canned""}",,,,Reviewed tomato preservation and form
+tomato,sun-dried tomatoes in oil,en,"{""preservation"":""in_oil"",""processing"":""dried""}",,,,Reviewed tomato preservation
+passata,tomato passata,en,{},,,,Passata exact identity
+starch,speisestärke,de,{},de,,,Reviewed German starch identity with cohort gate
+cornstarch,corn starch,en,{},,,,Canonical cornstarch spelling
+creme-fraiche,crème fraîche,fr,{},,,,Reviewed crème fraîche identity
+creme-fraiche,creme fraiche,en,{},,,,Reviewed ASCII crème fraîche identity
+yogurt,yoghurt,en,{},,,,Reviewed spelling variant
+mascarpone,mascarpone,en,{},,,,Reviewed mascarpone identity
+ghee,clarified butter ghee,en,{},,,,Reviewed ghee identity
+bay-leaf,dried bay leaf,en,"{""processing"":""dried""}",,,,Reviewed bay leaf processing
+bay-leaf,dried bay leaves,en,"{""processing"":""dried""}",,,,Reviewed bay leaf plural
+pine-nut,pine nuts,en,{},,,,Reviewed pine nut plural
+sesame-seed,sesame seeds,en,{},,,,Reviewed sesame seed plural
+sunflower-seed,sunflower seeds,en,{},,,,Reviewed sunflower seed plural
+broccoli,broccoli florets,en,"{""form"":""florets""}",,,,Reviewed broccoli form
+sweet-potato,sweet potatoes,en,{},,,,Reviewed sweet potato plural
+strawberry,strawberries,en,{},,,,Reviewed strawberry plural
+blueberry,blueberries,en,{},,,,Reviewed blueberry plural
+quinoa,quinoa,en,{},,,,Reviewed quinoa identity
+tahini,tahini,en,{},,,,Reviewed tahini identity
+wine,dry white wine,en,"{""wine_color"":""white"",""wine_sweetness"":""dry""}",,,,Reviewed wine facets
+wine,white wine,en,"{""wine_color"":""white""}",,,,Reviewed wine color
+wine,red wine,en,"{""wine_color"":""red""}",,,,Reviewed wine color
+wine,dessert wine,en,"{""wine_sweetness"":""sweet""}",,,,Reviewed wine sweetness
+chocolate,dark chocolate,en,"{""chocolate_class"":""dark""}",,,,Reviewed chocolate class
+chocolate,bittersweet chocolate,en,"{""chocolate_class"":""bittersweet""}",,,,Reviewed chocolate class; never bitters
+chocolate,milk chocolate,en,"{""chocolate_class"":""milk""}",,,,Reviewed chocolate class
+chocolate,white chocolate,en,"{""chocolate_class"":""white""}",,,,Reviewed chocolate class
+curry-powder,curry powder,en,{},,,,Reviewed curry powder identity
+garam-masala,garam masala,en,{},,,,Reviewed garam masala identity
+clove-spice,ground cloves,en,"{""form"":""ground""}",,,,Clove spice exact phrase
+clove-spice,whole cloves,en,"{""form"":""whole""}",,,,Clove spice exact phrase
+cooking-spray,cooking spray,en,{},,,,Reviewed cooking spray identity
+food-coloring,food coloring,en,{},,,,Reviewed US spelling
+food-coloring,food colouring,en,{},,,,Reviewed UK spelling
+orange-juice,orange juice,en,{},,,,Reviewed fruit juice identity
+apple-juice,apple juice,en,{},,,,Reviewed fruit juice identity
+pineapple-juice,pineapple juice,en,{},,,,Reviewed fruit juice identity
+parsley,salsa,pt,"{""state"":""fresh""}",pt,provider_ref_cluster,provider-ref:com.vorwerk.ingredients.Ingredient-rpf-33,Portuguese salsa means parsley only with reviewed provider evidence and cohort gate
+garlic,alho,pt,"{""form"":""clove""}",pt,provider_ref_cluster,provider-ref:com.vorwerk.ingredients.Ingredient-rpf-352,Provider-ref review plus Portuguese cohort gate
+garlic,ząbki czosnku,pl,"{""form"":""clove""}",pl,provider_ref_cluster,provider-ref:com.vorwerk.ingredients.Ingredient-rpf-352,Provider-ref review plus Polish cohort gate
+sugar,cukru,pl,{},pl,provider_ref_cluster,provider-ref:com.vorwerk.ingredients.Ingredient-rpf-9,Provider-ref review plus Polish cohort gate
+ginger,fresh root ginger,en,"{""plant_part"":""root"",""state"":""fresh""}",,provider_ref_cluster,provider-ref:com.vorwerk.ingredients.Ingredient-rpf-11,Provider-ref reviewed exact local label
+celery,celery,en,{},,provider_ref_cluster,provider-ref:com.vorwerk.ingredients.Ingredient-rpf-2632,Provider-ref corroborated canonical identity

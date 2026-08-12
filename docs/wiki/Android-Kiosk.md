@@ -6,7 +6,7 @@ The EverShelf Kiosk app turns any Android tablet into a dedicated, locked-down k
 
 ## Download
 
-**[⬇ Download latest APK](https://github.com/dadaloop82/EverShelf/releases/latest/download/evershelf-kiosk.apk)**
+**[⬇ Download latest APK](https://github.com/SFenton/EverShelf/releases/download/kiosk-latest/evershelf-kiosk.apk)**
 
 > Current version: **v1.6.0** — requires Android 7.0+
 

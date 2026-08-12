@@ -1,0 +1,62 @@
+review_fingerprint,expected_product_id,disposition_code,entity_slug,attributes_json,rationale
+ed55a59be004c85f45d42015bab8b493b70edd1f29701ec5e66a67a04562daa2,15,D5,,{},Retail salsa is prepared/composite and bare salsa identity is quarantined
+01d15f1266ce35881eb71eb6e4db7efebb859f680c21be54777f0702f2b320bd,25,D9,,{},Light mayonnaise identity and defining formulation are not proven
+c20d2d9f297e779e5fb770aa70734b021b45326dc0e82e48958c8f61860f00e7,39,D9,,{},Personal leftovers label is opaque but not automatically noise
+cba9ab366269b9e6dfbff5eb5090a0d1c13c761b4ce2e4bd58fac6ce3d54a1ea,45,D2,wine,"{""wine_sweetness"":""sweet""}",Reviewed dessert wine base and sweetness
+a6ef7ab41410979ad995509a93a83242d4b4f79ce6df8fc8516a90398196d534,49,D5,,{},Multi-ingredient retail soup is composite
+fc4c94ab5648be0ab9291b4dd6feaaeebf244f1645bba5b36a4919214621cb6a,54,D5,,{},Retail cake is composite
+07d12adf99abb74ef50417977492a2071c7565e2359ca0a21d10701d645e2d62,59,D5,,{},Espresso martini is a prepared composite beverage
+a1e56accc2c38766574289fc95e2f138482f224edcbcb42df62686ccdab82928,60,D5,,{},Retail salsa is prepared/composite and bare salsa identity is quarantined
+32c85fa67437c81df00101ae6e5319e02b5716b659a53c61c519a1242a26b55d,61,D5,,{},Birthday cake is composite
+cfc0fa315c4d1078f8a31b9d449ea4254fb5b437a1da0f68106b9a7e5942d7aa,64,D5,,{},Quesabirria is a prepared meal
+20cc75ab620e57e32349297ba1478fec7b4aea5893e55eb538947d14e3a0a947,65,D9,,{},Personal restaurant shorthand is opaque
+9115485f2db09eb329cd7e8a5363c4a47925300e0c1fb8c6b203c973ac672ae3,66,D9,,{},Crispy retail processing is not sufficiently specified
+3f9545d1a675812c11040e3144d404aa53e6d9a8a0cac0109ba3fa82b971d22a,68,D5,,{},Tamarind soft drink is a prepared beverage
+24d26d019036d84ab0833312a59dc8f7738f67eeab28f43872154c69130c02ec,72,D9,,{},Opaque branded alcoholic beverage lacks a reviewed exact identity
+3acdf57cc1747f727b3cd7bd580d1b68c736dabce5be2ffeaa70b75a9eaef487,73,D9,,{},Opaque branded alcoholic beverage lacks a reviewed exact identity
+eeec483273d2539ccddc222ec24a04a4c43766bcb1e448ae1f8148a9518fccd7,84,D5,,{},Tamarind soda is a prepared beverage
+b07a931ee4391891f8ff2e8ac1a53d7051ee79623a73f52768a60836434cc300,85,D9,,{},Flavored branded soju lacks an exact reviewed product identity
+c43e44abf9dabfc3593c83c6fa0f6d798c512b2cd1726b42387b3e40bf3eeee4,94,D9,,{},Opaque assortment label does not prove a single spread identity
+797a16fad18afb208009ab9086868565f4e97824b29da20e81e62dc00b866536,101,D5,,{},Tacos are a prepared composite meal
+029cc1df2bb1fbb3db70baa146dd37a3178b74bff06370bf9824f67c5edef40e,121,D4,,{},Garnish vegetables do not identify one base ingredient
+e8f60fa8de68b755ab7b04ff5855e6720cf5400dec06e35b43d781b89a74e6d2,122,D5,,{},Named chicken dish is a prepared composite
+78a32955cf6e5d02693a81cbc53e701b2795b6cab5c9d7b7c587cb90bdc87694,123,D1,pasta,{},Reviewed exact pasta identity
+17624dc9bbb0ab70d0ba414b084869fdf28e0cda886068434659a11468ecdbd2,124,D5,,{},Named dish sauce is prepared/composite
+3fd73fe77c2b7870ab1df0d95208ce05a85b8855084a3ddf99e0dfdf5988aafb,127,D2,coffee,"{""form"":""bean""}",Reviewed coffee-bean product identity
+f93c169c7d0bd21ac574e8a1de45470afef3b355610ae6fc4c34ec4589181e81,128,D9,,{},Retail package and roast string is not an exact ontology alias
+972cbb08fe23d209724c87c5b4fb814bab5a6392b2615be6be431deb568b52a8,129,D2,tortilla-chips,"{""variety"":""corn""}",Reviewed corn tortilla chip identity
+5811aea58531c90dfaa366b49828a47976572732409aae0956863cf797c5f4be,133,D2,bacon,"{""preparation"":""thick_cut""}",Reviewed bacon identity and thick-cut preparation
+fb7e15b56bf15ec8f15dd483cd42cae717a9c25e55cee33d974ee5ffe57fbf34,135,D2,sour-cream,"{""cream_class"":""sour""}",Reviewed sour cream identity
+3510196edc71d23474e5cce3781423450b13b1108d49d2389c838ef474df4494,137,D1,cream-cheese,{},Reviewed cream cheese identity
+eae72cb85e2c0d4810ca167801a1e2223f992bf2c3332ef82578f13652291e2c,138,D5,,{},Nachos are a prepared composite
+5935160a13e3e0402e5b7bc585dcfa649036a6b837e49c85e58079e3bd0ba7ca,140,D5,,{},Burger product is prepared/composite and the exact patty identity is opaque
+7c5ffb1e6429c614a50abbdcd31286d58aac8816ffb5cc3124e5f2e463f1fbb1,141,D2,milk,"{""fat_content"":""reduced_fat"",""filtration"":""ultra_filtered""}",Reviewed milk identity; ultra-filtering is not pasteurization
+e6872ba46ef71879b5373be5a7429bc88e5030d73a697d447930a16ea0f669a5,142,D2,butter,"{""saltedness"":""unsalted""}",Reviewed unsalted butter identity
+496ce13712823b62570254794625b7ee5f44ddc8ae1bd79265236cbf80fe2757,144,D1,mango,{},Reviewed mango plural identity
+7cbfd01753ecc10f4ba025449a86554efb0cd3efcce6551ee34c6f8d0931e69b,146,D1,blueberry,{},Reviewed blueberry retail identity
+681e581d5690def4730974f83f49ee5104e32b7fb28e6596c50f8abec0125125,147,D5,,{},Seasoning dressing and dip mix is a prepared composite
+f279422857b75514237bfe812e2662a4ae3ab29b31ed2921d79c188b28588f9f,148,D1,buns,{},Reviewed hamburger bun identity; sesame topping is nondefining
+e66690b3796c6cd41ada98e810d6d7d3c489e4afad8cf92c6b1400651ce3aa82,149,D5,,{},Plant-based burger patties are prepared composite products
+2615b22a67d85adeebb4ad6d0f658d1606b76176c604bfe600f79242f5e0f3f1,151,D2,brie,"{""cream_class"":""double""}",Reviewed Brie identity and double-cream class
+274989605610e67b2841315f6ab2381e00ce1069971a084646547f95afaa6fb3,152,D5,,{},Cherry pie is a prepared composite
+9c51eafa42b4901655c4ee1c67f4f3031e7206f0373a1ca0d7f242b3f9e55264,153,D5,,{},Blueberry lemonade is a prepared composite beverage
+e6d9dfb75615bb0da6a29237475c89fe55094b63666dcb67b54c43de9ad8f937,154,D5,,{},Chicken sauce is a prepared composite
+c87caf03294b0a0f3921892ddd3115c63c3256cb0e2b774aec0f0b13eda75a42,155,D9,,{},Brioche-style wording does not prove an exact bread variety
+c10efd0ae8c5682fc407fcf4268ea2a408398904bd2c98e0f5b94126672f7cc3,156,D5,,{},Cola soda is a prepared beverage
+b8f6e0cea8a27c81fd46284ad96a26783abc6398a74de466810d07c9c5011c38,157,D5,,{},Zero-calorie cola is a prepared beverage
+019aa53b37f8a7a2fe3e821daca5d55ba64998db207e1f8469247f3ea58d59c9,158,D5,,{},Flavored retail chips are prepared snack products
+aba7770a4c8b82e9860f341f60d593b1b8cc528d35142249bea2d35955d9c78e,159,D5,,{},Flavored retail chips are prepared snack products
+47e24cf2c219e3793346fa9b8b7f27ae657839af2716847437e09fe2da13697e,160,D5,,{},Flavored retail chips are prepared snack products
+6e0cf7471ae1088e4dad581ecff220a59a32c5cc3b46ca6ad798c112b03f098a,161,D1,baguette,{},Reviewed sourdough baguette base identity
+efa72a6de94be50b1e935b36860f043e72386cfa3bc35530fffc2c6f98dfa11c,162,D5,,{},Flavored coffee creamer is a prepared composite product
+493eb633b92b1af3d550e65f4aadf345f069117fb054a8da4a4120341908ba8a,163,D5,,{},Flavored coffee creamer is a prepared composite product
+070fa76a47ba027514fe193541ff1e59e048a957d30e599e45f0f8cfd1a7ac52,164,D5,,{},Branded sports drink is a prepared beverage
+c78c4386ce7ffc9ea1b321aa69ef2a1f1d376dc08350d7f05cedae7f9ee42d45,165,D5,,{},Branded puff cereal is a prepared composite
+7f207c5173cc9fd6a722a8d5bc60d716e1cd66d17e960d8c6ecac11e206b57e2,166,D5,,{},Branded puff cereal is a prepared composite
+fab9a2a2c560dec8e77fa1240b00f96975539ad3661fa17afa461240bd3a2721,175,D5,,{},Garlic shrimp pasta is a prepared meal
+cd621270b657ca54a2fc129aaec0dc10a0cbed33b4c269459e7dcb78483319e0,176,D5,,{},Santa Fe chicken salad is a prepared composite
+2d7660c25088f11ddc64a15ba3ec14a83505aed0d78c48e4cc2d02455da57091,177,D5,,{},Santa Fe salad is a prepared composite
+8d24baea176046f93e3c7953b199bd185e5fc1243600a3b931d5e8a2436c562b,178,D5,,{},Chocolate candy is a prepared composite
+a1026808fdd7aca3ef4ef4c218873e8ea1b46a85d2587d447e6f148e928b0607,179,D5,,{},Beef bibimbap is a prepared meal
+8f874b7bf25d1c1b3ae2b04a3f4bb2028861824e7dd5f5c7574799761e5b04bc,180,D5,,{},Smoke-roasted salmon bites are a prepared composite
+6c9822f3583da5596981e69175ea2476ca88cc590dfbf517befec9bb3061077a,181,D1,jack-fruit,{},Reviewed jackfruit identity

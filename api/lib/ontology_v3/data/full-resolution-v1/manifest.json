@@ -1,0 +1,36 @@
+{
+  "manifest_key": "full-ontology-resolution",
+  "manifest_version": "full-resolution-v1",
+  "reviewer": "GPT-5.6-Sol",
+  "review_batch": "full-ontology-resolution-v1",
+  "activation_policy": "blocked",
+  "activation_block_reason": "Full ontology resolution remains shadow-only and activation-blocked by policy.",
+  "files": {
+    "entities.csv": "6de22f3d2baecb57092d7c006c20db944a1e79d6f5b4a2f75ee6592d458dd316",
+    "aliases.csv": "4dd54f7c22ce6b04e902f31745067716ab0c1fa8d727941766f61d363946f5bc",
+    "duplicate-identities.csv": "63eba45045e631fcb4ba0d306272c9e2da2583c2c455b050d0d844320abaa720",
+    "previous-edges.csv": "3fda5c2ee10c70ce01df0c85e2e8bcc2fb053e2b656940ad43e0934e907514d1",
+    "edge-overrides.csv": "8b9895681af1e4bb23f3291ebcd9ef0ed93afe2a636ad293c204273f7ebec595",
+    "rule-adjudications.csv": "feba68cf45e5d6224d7375af3da7549bdc8ea662141e7c5127acb7225c8041a2",
+    "evidence.csv": "ec9eaa40902d990ae4509d39a7a60b3845589189081d72883eb4a12fd66057f2",
+    "product-dispositions.csv": "70faa7e8ee9e0ed756fa365ce2c9e5fcc01e529a5faee349c08acf4a1dfcfe9d"
+  },
+  "frozen_sources": {
+    "eval_corpus_hash": "90e60ced6608ed5ff6796a5f5d665897a4cd81367f8380ef10e784143be7a789",
+    "provider_term_count": 646,
+    "product_count": 174,
+    "legacy_recipe_row_count": 402284,
+    "provider_frontier": {
+      "ref_unique_nonaccepted_labels": 846,
+      "ref_unique_nonaccepted_occurrences": 47562,
+      "linked_accepted_title_labels": 99,
+      "linked_accepted_title_occurrences": 6854,
+      "inverse_ambiguous_local_labels": 19,
+      "generic_terms": 30,
+      "local_provider_conflicts": 6,
+      "variant_terms": 1,
+      "eval_audit_sha256": "3762e3eafe940d89f735c15265950c27d2aeb2416b690ccefa070038aea4a0f5",
+      "provider_audit_sha256": "c45cd1697f0b885e5eed53c130d14806e80cf918cd4340cd5e52b62789b4c073"
+    }
+  }
+}

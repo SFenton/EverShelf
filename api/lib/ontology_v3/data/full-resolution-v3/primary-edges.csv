@@ -1,0 +1,23 @@
+child_slug,parent_slug,reviewer,review_batch,rationale,source_citation
+apple-juice,juice,operator-corrective-review-v3,full-ontology-resolution-v3,Apple juice is a subtype of juice,corrective-v3.13 complete primary-edge semantic audit
+bacon,meat,operator-corrective-review-v3,full-ontology-resolution-v3,Bacon is prepared meat and is derived from pork rather than a pork subtype,corrective-v3.13 complete primary-edge semantic audit
+breadcrumbs,bakery,operator-corrective-review-v3,full-ontology-resolution-v3,Breadcrumbs are a prepared bakery identity derived from bread,corrective-v3.13 complete primary-edge semantic audit
+chili-pepper,,operator-corrective-review-v3,full-ontology-resolution-v3,Inactive spelling duplicate has no primary edge,corrective-v3.13 duplicate identity audit
+coconut-milk,milk-alternative,operator-corrective-review-v3,full-ontology-resolution-v3,Coconut milk is a plant milk alternative,corrective-v3.13 complete primary-edge semantic audit
+coffee-creamer,creamer,operator-corrective-review-v3,full-ontology-resolution-v3,Coffee creamer is a subtype of creamer,corrective-v3.13 complete primary-edge semantic audit
+coffee-pod,coffee,operator-corrective-review-v3,full-ontology-resolution-v3,A coffee pod is a packaged prepared coffee identity,corrective-v3.13 complete primary-edge semantic audit
+duck,poultry,operator-corrective-review-v3,full-ontology-resolution-v3,Duck is poultry rather than a direct generic meat child,corrective-v3.13 complete primary-edge semantic audit
+fish-sauce,sauce,operator-corrective-review-v3,full-ontology-resolution-v3,Fish sauce is a subtype of sauce,corrective-v3.13 complete primary-edge semantic audit
+foie-gras,prepared-food,operator-corrective-review-v3,full-ontology-resolution-v3,Foie gras is prepared offal and not an is-a child of duck,corrective-v3.13 culinary identity audit
+grits,cereal,operator-corrective-review-v3,full-ontology-resolution-v3,Grits are a prepared cereal derived from corn,corrective-v3.13 complete primary-edge semantic audit
+half-and-half,,operator-corrective-review-v3,full-ontology-resolution-v3,Inactive duplicate represented by cream plus cream_class has no primary edge,corrective-v3.13 duplicate identity audit
+lemon-juice,juice,operator-corrective-review-v3,full-ontology-resolution-v3,Lemon juice is a subtype of juice,corrective-v3.13 complete primary-edge semantic audit
+lime-juice,juice,operator-corrective-review-v3,full-ontology-resolution-v3,Lime juice is a subtype of juice,corrective-v3.13 complete primary-edge semantic audit
+nut-butter,spread,operator-corrective-review-v3,full-ontology-resolution-v3,Nut butter is a spread rather than a generic condiment fallback,corrective-v3.13 complete primary-edge semantic audit
+orange-juice,juice,operator-corrective-review-v3,full-ontology-resolution-v3,Orange juice is a subtype of juice,corrective-v3.13 complete primary-edge semantic audit
+pear-marmalade,fruit-preserve,operator-corrective-review-v3,full-ontology-resolution-v3,Pear marmalade is a fruit preserve and only derives from pear,corrective-v3.13 culinary identity audit
+pineapple-juice,juice,operator-corrective-review-v3,full-ontology-resolution-v3,Pineapple juice is a subtype of juice,corrective-v3.13 complete primary-edge semantic audit
+soy-sauce,sauce,operator-corrective-review-v3,full-ontology-resolution-v3,Soy sauce is a subtype of sauce,corrective-v3.13 complete primary-edge semantic audit
+stock-paste,stock-base,operator-corrective-review-v3,full-ontology-resolution-v3,Stock paste is a concentrated stock base,corrective-v3.13 complete primary-edge semantic audit
+white-chocolate,,operator-corrective-review-v3,full-ontology-resolution-v3,Inactive duplicate represented by chocolate plus chocolate_class has no primary edge,corrective-v3.13 duplicate identity audit
+worcestershire-sauce,sauce,operator-corrective-review-v3,full-ontology-resolution-v3,Worcestershire sauce is a subtype of sauce,corrective-v3.13 complete primary-edge semantic audit

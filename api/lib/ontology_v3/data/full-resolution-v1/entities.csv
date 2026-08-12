@@ -1,0 +1,95 @@
+slug,name,entity_kind,identity_role,parent_slug,active,canonical_alias,rationale
+food,Food,ingredient,structural_category,,1,0,Single ontology root
+ingredient,Ingredient,ingredient,structural_category,food,1,0,Raw and pantry ingredient backbone
+plant-derived,Plant Derived,ingredient,structural_category,ingredient,1,0,Plant-derived structural branch
+animal-derived,Animal Derived,ingredient,structural_category,ingredient,1,0,Animal-derived structural branch
+prepared-food,Prepared Food,prepared_food,structural_category,food,1,0,Prepared-food structural branch
+composite-food,Composite Food,composite_food,structural_category,prepared-food,1,0,Composite-food structural branch
+herb,Herb,ingredient,structural_category,plant-derived,1,0,Herb branch
+spice,Spice,ingredient,structural_category,plant-derived,1,0,Spice branch
+nut,Nut,ingredient,structural_category,plant-derived,1,0,Nut branch
+seed,Seed,ingredient,structural_category,plant-derived,1,0,Seed branch
+legume,Legume,ingredient,structural_category,plant-derived,1,0,Legume branch; never a normal identity
+grain,Grain,ingredient,structural_category,plant-derived,1,0,Grain branch
+flour-starch,Flour and Starch,ingredient,structural_category,plant-derived,1,0,Flour and starch branch
+sweetener,Sweetener,ingredient,structural_category,ingredient,1,0,Sweetener branch
+oil-fat,Oil and Fat,ingredient,structural_category,ingredient,1,0,Oil and fat branch
+meat,Meat,ingredient,structural_category,animal-derived,1,0,Meat branch
+poultry,Poultry,ingredient,structural_category,meat,1,0,Poultry branch
+seafood,Seafood,ingredient,structural_category,animal-derived,1,0,Seafood branch
+dairy,Dairy,ingredient,structural_category,animal-derived,1,0,Dairy branch
+egg-category,Egg Products,ingredient,structural_category,animal-derived,1,0,Egg branch
+condiment,Condiment,prepared_food,structural_category,prepared-food,1,0,Condiment branch
+leavening,Leavening,ingredient,structural_category,ingredient,1,0,Leavening branch
+thickener,Thickener,ingredient,structural_category,ingredient,1,0,Thickener branch
+sauce,Sauce,prepared_food,structural_category,prepared-food,1,0,Sauce branch
+stock-broth,Stock and Broth,prepared_food,structural_category,prepared-food,1,0,Stock and broth branch
+beverage,Beverage,prepared_food,structural_category,prepared-food,1,0,Beverage branch
+bakery,Bakery,prepared_food,structural_category,prepared-food,1,0,Bakery branch
+snack,Snack,prepared_food,structural_category,prepared-food,1,0,Snack branch
+meal,Meal,composite_food,structural_category,composite-food,1,0,Meal branch
+soup,Soup,composite_food,structural_category,meal,1,0,Soup branch
+salad,Salad,composite_food,structural_category,meal,1,0,Salad branch
+pizza,Pizza,composite_food,structural_category,meal,1,0,Pizza branch
+dessert,Dessert,composite_food,structural_category,composite-food,1,0,Dessert branch
+vegetable,Vegetable,ingredient,structural_category,plant-derived,1,0,Vegetable branch
+fruit,Fruit,ingredient,structural_category,plant-derived,1,0,Fruit branch
+staple,Staple,ingredient,staple_class,ingredient,1,0,Explicit staple-only path
+piper-pepper,Piper Pepper,ingredient,identity_leaf,spice,1,0,Piper nigrum identity separate from Capsicum
+capsicum,Capsicum,ingredient,identity_leaf,vegetable,1,1,Capsicum base identity
+chilli-pepper,Chilli Pepper,ingredient,identity_leaf,capsicum,1,1,Chilli identity
+bell-pepper,Bell Pepper,ingredient,identity_leaf,capsicum,1,1,Bell pepper identity
+jalapeno-pepper,Jalapeño Pepper,ingredient,identity_leaf,chilli-pepper,1,1,Jalapeño identity
+paprika,Paprika,ingredient,identity_leaf,spice,1,1,Paprika spice identity
+cayenne-pepper,Cayenne Pepper,ingredient,identity_leaf,spice,1,1,Cayenne spice identity
+tomato,Tomato,ingredient,identity_leaf,vegetable,1,1,Tomato identity
+passata,Passata,prepared_food,prepared_identity,sauce,1,1,Reviewed strained tomato preparation
+starch,Starch,ingredient,identity_leaf,flour-starch,1,1,Generic culinary starch
+cornstarch,Cornstarch,ingredient,identity_leaf,starch,1,1,Cornstarch identity
+flour,Flour,ingredient,identity_leaf,flour-starch,1,1,Generic flour identity
+bay-leaf,Bay Leaf,ingredient,identity_leaf,herb,1,1,Bay leaf identity
+creme-fraiche,Crème Fraîche,ingredient,identity_leaf,dairy,1,1,Crème fraîche identity
+yogurt,Yogurt,ingredient,identity_leaf,dairy,1,1,Yogurt identity
+buttermilk,Buttermilk,ingredient,identity_leaf,dairy,1,1,Buttermilk identity
+mascarpone,Mascarpone,ingredient,identity_leaf,dairy,1,1,Mascarpone identity
+ghee,Ghee,ingredient,identity_leaf,oil-fat,1,1,Ghee identity
+egg,Egg,ingredient,identity_leaf,egg-category,1,1,Whole egg base identity
+egg-white,Egg White,ingredient,identity_leaf,egg-category,1,1,Egg white identity
+egg-yolk,Egg Yolk,ingredient,identity_leaf,egg-category,1,1,Egg yolk identity
+almond,Almond,ingredient,identity_leaf,nut,1,1,Almond identity
+walnut,Walnut,ingredient,identity_leaf,nut,1,1,Walnut identity
+hazelnut,Hazelnut,ingredient,identity_leaf,nut,1,1,Hazelnut identity
+peanut,Peanut,ingredient,identity_leaf,legume,1,1,Peanut identity
+pine-nut,Pine Nut,ingredient,identity_leaf,nut,1,1,Pine nut identity
+sesame-seed,Sesame Seed,ingredient,identity_leaf,seed,1,1,Sesame seed identity
+sunflower-seed,Sunflower Seed,ingredient,identity_leaf,seed,1,1,Sunflower seed identity
+bean,Bean,ingredient,identity_leaf,legume,1,1,Bean identity
+black-bean,Black Bean,ingredient,identity_leaf,bean,1,1,Black bean identity
+broccoli,Broccoli,ingredient,identity_leaf,vegetable,1,1,Broccoli identity
+leek,Leek,ingredient,identity_leaf,vegetable,1,1,Leek identity
+mushroom,Mushroom,ingredient,identity_leaf,vegetable,1,1,Mushroom identity
+sweet-potato,Sweet Potato,ingredient,identity_leaf,vegetable,1,1,Sweet potato identity
+banana,Banana,ingredient,identity_leaf,fruit,1,1,Banana identity
+strawberry,Strawberry,ingredient,identity_leaf,fruit,1,1,Strawberry identity
+blueberry,Blueberry,ingredient,identity_leaf,fruit,1,1,Blueberry identity
+quinoa,Quinoa,ingredient,identity_leaf,grain,1,1,Quinoa identity
+tahini,Tahini,prepared_food,prepared_identity,condiment,1,1,Tahini identity
+water,Water,ingredient,identity_leaf,ingredient,1,1,Water identity
+salt,Salt,ingredient,identity_leaf,ingredient,1,1,Salt identity
+oil,Oil,ingredient,identity_leaf,oil-fat,1,1,Culinary oil base identity
+rice,Rice,ingredient,identity_leaf,grain,1,1,Rice base identity
+wine,Wine,ingredient,identity_leaf,beverage,1,1,Wine base identity
+chocolate,Chocolate,ingredient,identity_leaf,ingredient,1,1,Chocolate base identity
+stock,Stock,prepared_food,prepared_identity,stock-broth,1,1,Stock identity
+coffee,Coffee,ingredient,identity_leaf,beverage,1,1,Coffee identity
+coffee-pod,Coffee Pod,prepared_food,prepared_identity,beverage,1,1,Coffee pod prepared identity
+curry-powder,Curry Powder,ingredient,identity_leaf,spice,1,1,Curry powder identity
+garam-masala,Garam Masala,ingredient,identity_leaf,spice,1,1,Garam masala identity
+clove-spice,Clove,ingredient,identity_leaf,spice,1,0,Clove spice kept distinct from garlic form
+cooking-spray,Cooking Spray,prepared_food,prepared_identity,oil-fat,1,1,Cooking spray identity
+food-coloring,Food Coloring,ingredient,identity_leaf,ingredient,1,1,Food coloring identity
+orange-juice,Orange Juice,prepared_food,prepared_identity,beverage,1,1,Orange juice identity
+apple-juice,Apple Juice,prepared_food,prepared_identity,beverage,1,1,Apple juice identity
+pineapple-juice,Pineapple Juice,prepared_food,prepared_identity,beverage,1,1,Pineapple juice identity
+lemon-juice,Lemon Juice,prepared_food,prepared_identity,beverage,1,1,Lemon juice identity
+lime-juice,Lime Juice,prepared_food,prepared_identity,beverage,1,1,Lime juice identity

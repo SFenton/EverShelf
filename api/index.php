@@ -84,6 +84,11 @@ if (($_GET['action'] ?? '') === 'ha_info' && evershelfApiTokenRequired() && !eve
         'has_token'          => true,
         'api_token_required' => true,
         'api_version'        => 1,
+        'capabilities'       => [
+            'recipe_catalog_v2',
+            'recipe_detail_v1',
+            'recipe_grocery_v1',
+        ],
         'items_count'        => null,
     ], JSON_UNESCAPED_UNICODE);
     exit;
@@ -684,6 +689,14 @@ function checkRateLimit(string $action): void {
     $aiActions = ['gemini_expiry', 'gemini_readExpiry', 'gemini_chat', 'gemini_identify', 'gemini_suggest_shopping', 'chat_to_recipe', 'recipe_from_ingredient', 'gemini_number_ocr', 'gemini_barcode_visual', 'location_suggestion_ai'];
     $loginActions = [];
     $recipeActions = ['generate_recipe', 'generate_recipe_stream'];
+    $recipeCatalogActions = [
+        'recipe_catalog_search', 'recipe_catalog_get', 'recipe_catalog_suggest',
+        'recipe_catalog_recommendations', 'recipe_catalog_detail',
+        'recipe_catalog_grocery_add',
+        'recipe_jobs_status', 'recipe_connectors',
+        'recipe_catalog_save', 'recipe_catalog_delete', 'recipe_catalog_favorite',
+    ];
+    $recipeRefreshActions = ['recipe_catalog_refresh', 'recipe_catalog_discover'];
     $errorActions = ['report_error', 'check_update'];
     $priceActions = ['get_shopping_price', 'get_all_shopping_prices'];
 
@@ -700,6 +713,14 @@ function checkRateLimit(string $action): void {
         $limit = 5;
         $window = 60;
         $bucket = 'recipe';
+    } elseif (in_array($action, $recipeRefreshActions, true)) {
+        $limit = 10;
+        $window = 60;
+        $bucket = 'recipe_refresh';
+    } elseif (in_array($action, $recipeCatalogActions, true)) {
+        $limit = 60;
+        $window = 60;
+        $bucket = 'recipe_catalog';
     } elseif (in_array($action, $errorActions)) {
         $limit = 20;
         $window = 60;
@@ -754,7 +775,7 @@ if ($rateLimitAction) {
     checkRateLimit($rateLimitAction);
 }
 
-// CSRF guard for write actions: POST requests that modify data must include
+// CSRF guard: every POST request must include
 // either X-EverShelf-Request: 1 (webapp) or Content-Type: application/json.
 // This prevents cross-site HTML form submissions from triggering mutations.
 // JSON Content-Type already requires a CORS preflight which provides a baseline;
@@ -768,11 +789,18 @@ $_writeActions = [
     'bring_add','bring_remove','bring_sync','bring_set_spec','bring_migrate_names',
     'shopping_add','shopping_remove',
     'dismiss_anomaly','save_settings',
-];
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && in_array($rateLimitAction, $_writeActions, true)) {
+    'recipe_catalog_save','recipe_catalog_delete','recipe_catalog_favorite',
+    'recipe_catalog_refresh','recipe_catalog_discover','recipe_catalog_grocery_add',
+]; // Kept as endpoint documentation; POST protection is intentionally default-on.
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $csrfHeader  = $_SERVER['HTTP_X_EVERSHELF_REQUEST'] ?? '';
     $contentType = $_SERVER['CONTENT_TYPE'] ?? '';
-    if ($csrfHeader !== '1' && stripos($contentType, 'application/json') === false) {
+    $contentTypeEssence = strtolower(trim(explode(';', $contentType, 2)[0]));
+    $jsonContentType = preg_match(
+        '#^application/(?:[a-z0-9.+-]+\+)?json$#',
+        $contentTypeEssence
+    ) === 1;
+    if ($csrfHeader !== '1' && !$jsonContentType) {
         EverLog::warn('csrf_rejected (403)');
         http_response_code(403);
         echo json_encode(['success' => false, 'error' => 'csrf_rejected']);
@@ -1048,6 +1076,45 @@ try {
             break;
         case 'recipes_toggle_favorite':
             recipeToggleFavorite($db);
+            break;
+        case 'recipe_catalog_search':
+            recipeCatalogApiSearch($db);
+            break;
+        case 'recipe_catalog_get':
+            recipeCatalogApiGet($db);
+            break;
+        case 'recipe_catalog_detail':
+            recipeCatalogApiDetail($db);
+            break;
+        case 'recipe_catalog_suggest':
+            recipeCatalogApiSuggest($db);
+            break;
+        case 'recipe_catalog_recommendations':
+            recipeCatalogApiRecommendations($db);
+            break;
+        case 'recipe_jobs_status':
+            recipeCatalogApiJobsStatus($db);
+            break;
+        case 'recipe_connectors':
+            recipeCatalogApiConnectors($db);
+            break;
+        case 'recipe_catalog_discover':
+            recipeCatalogApiDiscover($db);
+            break;
+        case 'recipe_catalog_save':
+            recipeCatalogApiSave($db);
+            break;
+        case 'recipe_catalog_delete':
+            recipeCatalogApiDelete($db);
+            break;
+        case 'recipe_catalog_favorite':
+            recipeCatalogApiFavorite($db);
+            break;
+        case 'recipe_catalog_refresh':
+            recipeCatalogApiRefresh($db);
+            break;
+        case 'recipe_catalog_grocery_add':
+            recipeCatalogApiGroceryAdd($db);
             break;
         case 'macro_stats':
             getMacroStats($db);
@@ -1915,7 +1982,7 @@ function haSuggestRecipe(PDO $db): void {
     $limit    = max(3, min(12, (int)($_GET['limit'] ?? 8)));
 
     try {
-        $where = "i.quantity > 0";
+        $where = "i.quantity > 0 AND COALESCE(i.prepared_food, 0) = 0";
         if ($location) $where .= " AND i.location = " . $db->quote($location);
 
         $expiringRows = $db->query(
@@ -1931,7 +1998,7 @@ function haSuggestRecipe(PDO $db): void {
             "SELECT p.name, i.quantity, p.unit
              FROM inventory i
              JOIN products p ON p.id = i.product_id
-             WHERE i.quantity > 0 AND i.expiry_date IS NULL" .
+             WHERE i.quantity > 0 AND COALESCE(i.prepared_food, 0) = 0 AND i.expiry_date IS NULL" .
             ($location ? " AND i.location = " . $db->quote($location) : "") .
             " ORDER BY p.name LIMIT 15"
         )->fetchAll(PDO::FETCH_ASSOC);
@@ -1961,7 +2028,7 @@ function haSuggestRecipe(PDO $db): void {
         ];
 
         $result = callGeminiWithFallback($apiKey, $payload, 25);
-        $text = $result['candidates'][0]['content']['parts'][0]['text'] ?? null;
+        $text = $result['data']['candidates'][0]['content']['parts'][0]['text'] ?? null;
 
         if (!$text) {
             http_response_code(503);
@@ -2128,6 +2195,11 @@ function haGetInfo(PDO $db): void {
         'has_token'   => evershelfApiTokenRequired(),
         'api_token_required' => evershelfApiTokenRequired(),
         'api_version' => 1,
+        'capabilities' => [
+            'recipe_catalog_v2',
+            'recipe_detail_v1',
+            'recipe_grocery_v1',
+        ],
         'items_count' => $itemsCount,
     ], JSON_UNESCAPED_UNICODE);
 }
@@ -2987,7 +3059,7 @@ function _barcodeLookupGemini(string $barcode, string $apiKey): ?array {
     if (!$result) return null;
 
     $text = '';
-    foreach ($result['candidates'][0]['content']['parts'] ?? [] as $part) {
+    foreach ($result['data']['candidates'][0]['content']['parts'] ?? [] as $part) {
         $text .= ($part['text'] ?? '');
     }
     $text = trim($text);
@@ -3114,6 +3186,13 @@ function saveProduct(PDO $db): void {
                 updated_at=CURRENT_TIMESTAMP WHERE id=?
             ");
             $stmt->execute([...$params, $id]);
+            if (array_key_exists('prepared_food', $input)) {
+                _setPositiveInventoryPreparedFood($db, $id, $preparedFood);
+            }
+            _syncProductPreparedFood($db, $id);
+            if (array_key_exists('prepared_food', $input)) {
+                recipeJobEnqueueInventoryChanged($db, $id, 'product_save_prepared_food');
+            }
             $queue = canonicalIngredientEnqueueProduct($db, $id, $merged ? 'product_save_merge_update' : 'product_save_update');
             echo json_encode(productSaveResponse($db, $id, $merged, $queue), JSON_UNESCAPED_UNICODE);
             return;
@@ -3135,6 +3214,9 @@ function saveProduct(PDO $db): void {
             $ingredientsText, $ingredientsTagsJson, $offGenericName, $preparedFood,
         ]);
         $newId = (int)$db->lastInsertId();
+        if (array_key_exists('prepared_food', $input)) {
+            recipeJobEnqueueInventoryChanged($db, $newId, 'product_save_prepared_food');
+        }
         $queue = canonicalIngredientEnqueueProduct($db, $newId, 'product_save_create');
         echo json_encode(productSaveResponse($db, $newId, false, $queue), JSON_UNESCAPED_UNICODE);
     } catch (PDOException $e) {
@@ -3164,6 +3246,13 @@ function saveProduct(PDO $db): void {
                     updated_at=CURRENT_TIMESTAMP WHERE id=?
                 ");
                 $stmt->execute([...$params, $owner]);
+                if (array_key_exists('prepared_food', $input)) {
+                    _setPositiveInventoryPreparedFood($db, $owner, (int)$params[14]);
+                }
+                _syncProductPreparedFood($db, $owner);
+                if (array_key_exists('prepared_food', $input)) {
+                    recipeJobEnqueueInventoryChanged($db, $owner, 'product_save_prepared_food');
+                }
                 $queue = canonicalIngredientEnqueueProduct($db, $owner, 'product_save_barcode_merge');
                 echo json_encode(productSaveResponse($db, $owner, true, $queue), JSON_UNESCAPED_UNICODE);
                 return;
@@ -3207,10 +3296,32 @@ function setProductPreparedFood(PDO $db): void {
     $prepared = array_key_exists('prepared_food', $input)
         ? (int)filter_var($input['prepared_food'], FILTER_VALIDATE_BOOLEAN)
         : 1;
-    $db->prepare("UPDATE products SET prepared_food = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?")
-       ->execute([$prepared, $id]);
-    $queue = canonicalIngredientEnqueueProduct($db, $id, 'product_prepared_food_flag');
-
+    $queue = [];
+    dbWithRetry(function () use ($db, $prepared, $id, &$queue): void {
+        $db->beginTransaction();
+        try {
+            $db->prepare("UPDATE products SET prepared_food = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?")
+               ->execute([$prepared, $id]);
+            _setPositiveInventoryPreparedFood($db, $id, $prepared);
+            _syncProductPreparedFood($db, $id);
+            $queue = canonicalIngredientEnqueueProduct(
+                $db,
+                $id,
+                'product_prepared_food_flag'
+            );
+            recipeJobEnqueueInventoryChanged(
+                $db,
+                $id,
+                'product_prepared_food_flag'
+            );
+            $db->commit();
+        } catch (Throwable $e) {
+            if ($db->inTransaction()) {
+                $db->rollBack();
+            }
+            throw $e;
+        }
+    });
     echo json_encode([
         'success' => true,
         'id' => $id,
@@ -3786,7 +3897,9 @@ function addToInventory(PDO $db): void {
         echo json_encode(['error' => 'Invalid location']);
         return;
     }
-    
+
+    $db->exec('BEGIN IMMEDIATE');
+    try {
     // If a different unit was specified, update the product's unit.
     // NOTE: default_quantity is the PACKAGE SIZE, not the quantity being added —
     // do NOT overwrite it here. It is managed via product_save / the edit form.
@@ -3814,8 +3927,7 @@ function addToInventory(PDO $db): void {
     
     $vacuumSealed = (int)($input['vacuum_sealed'] ?? 0);
     $expiryUserSet = (int)($input['expiry_user_set'] ?? 0);
-    // New stock inherits the product's prepared-food state so the "any flagged row" rule
-    // stays consistent with what the product itself claims.
+    // New stock inherits an explicit/all-prepared product state. Mixed products are false.
     $preparedStmt = $db->prepare("SELECT prepared_food FROM products WHERE id = ?");
     $preparedStmt->execute([$productId]);
     $preparedFood = (int)($preparedStmt->fetchColumn() ?: 0);
@@ -3832,11 +3944,19 @@ function addToInventory(PDO $db): void {
           AND location = ?
           AND opened_at IS NULL
           AND COALESCE(expiry_date, '') = COALESCE(?, '')
+          AND CAST(COALESCE(expiry_user_set, 0) AS INTEGER) = CAST(? AS INTEGER)
           AND CAST(COALESCE(vacuum_sealed, 0) AS INTEGER) = CAST(? AS INTEGER)
           AND CAST(COALESCE(prepared_food, 0) AS INTEGER) = CAST(? AS INTEGER)
         ORDER BY added_at ASC LIMIT 1
     ");
-    $stmt->execute([$productId, $location, $expiry, $vacuumSealed, $preparedFood]);
+    $stmt->execute([
+        $productId,
+        $location,
+        $expiry,
+        $expiryUserSet,
+        $vacuumSealed,
+        $preparedFood,
+    ]);
     $existing = $stmt->fetch();
 
     if ($existing) {
@@ -3844,11 +3964,13 @@ function addToInventory(PDO $db): void {
         $newQty = $existing['quantity'] + $quantity;
         $stmt = $db->prepare("UPDATE inventory SET quantity = ?, expiry_user_set = CASE WHEN ? = 1 THEN 1 ELSE expiry_user_set END, updated_at = CURRENT_TIMESTAMP WHERE id = ?");
         $stmt->execute([$newQty, $expiryUserSet, $existing['id']]);
+        $inventoryId = (int)$existing['id'];
     } else {
         $newQty = $quantity;
         // Different expiry/sealed batches and opened packs get distinct rows.
         $stmt = $db->prepare("INSERT INTO inventory (product_id, location, quantity, expiry_date, vacuum_sealed, expiry_user_set, prepared_food) VALUES (?, ?, ?, ?, ?, ?, ?)");
         $stmt->execute([$productId, $location, $quantity, $expiry, $vacuumSealed, $expiryUserSet, $preparedFood]);
+        $inventoryId = (int)$db->lastInsertId();
     }
     
     // Get total across all locations
@@ -3862,8 +3984,24 @@ function addToInventory(PDO $db): void {
     $prodInfo = $stmt->fetch();
     
     // Log transaction
-    $stmt = $db->prepare("INSERT INTO transactions (product_id, type, quantity, location) VALUES (?, 'in', ?, ?)");
-    $stmt->execute([$productId, $quantity, $location]);
+    $stmt = $db->prepare("
+        INSERT INTO transactions (
+            product_id, inventory_id, type, quantity, location, prepared_food,
+            inventory_expiry_date, inventory_expiry_user_set,
+            inventory_vacuum_sealed, inventory_opened_at
+        )
+        VALUES (?, ?, 'in', ?, ?, ?, ?, ?, ?, NULL)
+    ");
+    $stmt->execute([
+        $productId,
+        $inventoryId,
+        $quantity,
+        $location,
+        $preparedFood,
+        $expiry,
+        $expiryUserSet,
+        $vacuumSealed,
+    ]);
     recordProductLocation(
         $db,
         $productId,
@@ -3873,8 +4011,17 @@ function addToInventory(PDO $db): void {
         (int)$db->lastInsertId(),
     );
     
-    $bringRemoval = bringRemoveProductFromList($db, $productId);
+    _syncProductPreparedFood($db, (int)$productId);
+    recipeJobEnqueueInventoryChanged($db, (int)$productId, 'inventory_add');
+        $db->commit();
+    } catch (Throwable $e) {
+        if ($db->inTransaction()) {
+            $db->rollBack();
+        }
+        throw $e;
+    }
 
+    $bringRemoval = bringRemoveProductFromList($db, $productId);
     echo json_encode([
         'success' => true,
         'new_qty' => $newQty,
@@ -4028,17 +4175,20 @@ function useFromInventory(PDO $db): void {
     }
 
     try {
-        dbWithRetry(function () use ($db, $productId, $quantity, $useAll, $location, $notes): void {
-            useFromInventoryCore($db, $productId, $quantity, $useAll, $location, $notes);
-        });
+        useFromInventoryCore($db, $productId, $quantity, $useAll, $location, $notes);
     } catch (\PDOException $e) {
+        try { $db->exec('ROLLBACK'); } catch (Throwable $rollbackError) {}
         EverLog::error('useFromInventory db error', ['msg' => $e->getMessage()]);
         http_response_code(500);
         echo json_encode(['success' => false, 'error' => 'Database busy — please retry']);
+    } catch (Throwable $e) {
+        try { $db->exec('ROLLBACK'); } catch (Throwable $rollbackError) {}
+        throw $e;
     }
 }
 
 function useFromInventoryCore(PDO $db, $productId, $quantity, $useAll, $location, $notes): void {
+    $db->exec('BEGIN IMMEDIATE');
     // ── Server-side deduplication ─────────────────────────────────────────
     // Guard against accidental double-consume triggers (scale jitter, double tap,
     // delayed/offline replay burst). We only apply this stricter gate to manual
@@ -4087,43 +4237,80 @@ function useFromInventoryCore(PDO $db, $productId, $quantity, $useAll, $location
             'error'   => 'Operazione già registrata di recente — verifica prima la quantità rimasta.',
             'duplicate' => true,
         ]);
+        $db->exec('ROLLBACK');
         return;
     }
     // ─────────────────────────────────────────────────────────────────────
     
     // Handle "throw all from all locations"
     if ($useAll && $location === '__all__') {
-        $stmt = $db->prepare("SELECT id, quantity, location FROM inventory WHERE product_id = ? AND quantity > 0");
-        $stmt->execute([$productId]);
-        $allItems = $stmt->fetchAll();
-        $totalRemoved = 0;
-        $explicitFinish = !_isWasteNotes($notes);
-        foreach ($allItems as $item) {
-            $totalRemoved += $item['quantity'];
-            $type = _isWasteNotes($notes) ? 'waste' : 'out';
-            $stmt = $db->prepare("INSERT INTO transactions (product_id, type, quantity, location, notes) VALUES (?, ?, ?, ?, ?)");
-            $stmt->execute([$productId, $type, $item['quantity'], $item['location'], $notes]);
+        try {
+            $stmt = $db->prepare("
+                SELECT id, quantity, location, prepared_food, expiry_date,
+                       expiry_user_set, vacuum_sealed, opened_at
+                FROM inventory
+                WHERE product_id = ? AND quantity > 0
+            ");
+            $stmt->execute([$productId]);
+            $allItems = $stmt->fetchAll();
+            $totalRemoved = 0;
+            $explicitFinish = !_isWasteNotes($notes);
+            foreach ($allItems as $item) {
+                $totalRemoved += $item['quantity'];
+                $type = _isWasteNotes($notes) ? 'waste' : 'out';
+                $stmt = $db->prepare("
+                    INSERT INTO transactions (
+                        product_id, inventory_id, type, quantity, location,
+                        prepared_food, inventory_expiry_date,
+                        inventory_expiry_user_set, inventory_vacuum_sealed,
+                        inventory_opened_at, notes, undo_safe
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ");
+                $stmt->execute([
+                    $productId,
+                    (int)$item['id'],
+                    $type,
+                    $item['quantity'],
+                    $item['location'],
+                    (int)($item['prepared_food'] ?? 0),
+                    $item['expiry_date'] ?? null,
+                    (int)($item['expiry_user_set'] ?? 0),
+                    (int)($item['vacuum_sealed'] ?? 0),
+                    $item['opened_at'] ?? null,
+                    $notes,
+                    $explicitFinish ? 0 : 1,
+                ]);
 
-            // User explicitly chose "use all/finished": do not keep qty=0 rows that
-            // would trigger a redundant "are you sure it's finished" banner.
-            if ($explicitFinish) {
-                $stmt = $db->prepare("DELETE FROM inventory WHERE id = ?");
-                $stmt->execute([$item['id']]);
-            } else {
-                $stmt = $db->prepare("UPDATE inventory SET quantity = 0, updated_at = CURRENT_TIMESTAMP WHERE id = ?");
-                $stmt->execute([$item['id']]);
+                // User explicitly chose "use all/finished": do not keep qty=0 rows that
+                // would trigger a redundant "are you sure it's finished" banner.
+                if ($explicitFinish) {
+                    $stmt = $db->prepare("DELETE FROM inventory WHERE id = ?");
+                    $stmt->execute([$item['id']]);
+                } else {
+                    $stmt = $db->prepare("UPDATE inventory SET quantity = 0, updated_at = CURRENT_TIMESTAMP WHERE id = ?");
+                    $stmt->execute([$item['id']]);
+                }
             }
+            _maybeApplyWasteLearning($db, (int)$productId, $notes, $location === '__all__' ? 'dispensa' : $location);
+            _syncProductPreparedFood($db, (int)$productId);
+            recipeJobEnqueueInventoryChanged($db, (int)$productId, 'inventory_use_all');
+            $db->exec('COMMIT');
+        } catch (Throwable $e) {
+            try { $db->exec('ROLLBACK'); } catch (Throwable $rollbackError) {}
+            throw $e;
         }
-        _maybeApplyWasteLearning($db, (int)$productId, $notes, $location === '__all__' ? 'dispensa' : $location);
         echo json_encode(['success' => true, 'remaining' => 0, 'removed' => $totalRemoved]);
         return;
     }
     
-    $stmt = $db->prepare("SELECT id, quantity, opened_at, vacuum_sealed FROM inventory WHERE product_id = ? AND location = ? AND quantity > 0 ORDER BY (quantity != CAST(CAST(quantity AS INTEGER) AS REAL)) DESC, quantity ASC");
+    $stmt = $db->prepare("SELECT id, quantity, expiry_date, expiry_user_set, opened_at, vacuum_sealed, prepared_food FROM inventory WHERE product_id = ? AND location = ? AND quantity > 0 ORDER BY (quantity != CAST(CAST(quantity AS INTEGER) AS REAL)) DESC, quantity ASC");
     $stmt->execute([$productId, $location]);
-    $existing = $stmt->fetch();
+    $locationItems = $stmt->fetchAll(PDO::FETCH_ASSOC);
+    $existing = $locationItems[0] ?? null;
     
     if (!$existing) {
+        $db->exec('ROLLBACK');
         EverLog::warn('useFromInventory: product not found in inventory (404)');
         http_response_code(404);
         echo json_encode(['error' => 'Product not found in inventory at this location']);
@@ -4131,14 +4318,89 @@ function useFromInventoryCore(PDO $db, $productId, $quantity, $useAll, $location
     }
     
     if ($useAll) {
-        $quantity = $existing['quantity'];
+        $quantity = array_sum(array_map(
+            static fn(array $item): float => (float)$item['quantity'],
+            $locationItems
+        ));
+    } else {
+        $sufficientItems = array_values(array_filter(
+            $locationItems,
+            static fn(array $item): bool => (float)$item['quantity'] + 0.0001 >= (float)$quantity
+        ));
+        usort(
+            $sufficientItems,
+            static fn(array $a, array $b): int => (float)$a['quantity'] <=> (float)$b['quantity']
+        );
+        if ($sufficientItems) {
+            $existing = $sufficientItems[0];
+        }
     }
     
     // Auto-split conf products: separate whole confs from opened (fractional) part
     $openedId = null;
+    $undoSafe = 1;
     $stmt2 = $db->prepare("SELECT name, category, unit, default_quantity, package_unit FROM products WHERE id = ?");
     $stmt2->execute([$productId]);
     $prodInfo = $stmt2->fetch();
+
+    $locationTotal = array_sum(array_map(
+        static fn(array $item): float => (float)$item['quantity'],
+        $locationItems
+    ));
+    if ((float)$quantity > $locationTotal + 0.0001) {
+        $db->exec('ROLLBACK');
+        http_response_code(400);
+        echo json_encode(['success' => false, 'error' => 'Requested quantity exceeds stock']);
+        return;
+    }
+    if ((float)$quantity > (float)$existing['quantity'] + 0.0001) {
+        $type = _isWasteNotes($notes) ? 'waste' : 'out';
+        $quantityLeft = (float)$quantity;
+        foreach ($locationItems as $item) {
+            $itemQuantity = (float)$item['quantity'];
+            if ($quantityLeft + 0.0001 < $itemQuantity) {
+                $existing = $item;
+                $quantity = $quantityLeft;
+                break;
+            }
+            $db->prepare("
+                INSERT INTO transactions (
+                    product_id, inventory_id, type, quantity, location,
+                    prepared_food, inventory_expiry_date,
+                    inventory_expiry_user_set, inventory_vacuum_sealed,
+                    inventory_opened_at, notes
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ")->execute([
+                $productId,
+                (int)$item['id'],
+                $type,
+                $itemQuantity,
+                $location,
+                (int)($item['prepared_food'] ?? 0),
+                $item['expiry_date'] ?? null,
+                (int)($item['expiry_user_set'] ?? 0),
+                (int)($item['vacuum_sealed'] ?? 0),
+                $item['opened_at'] ?? null,
+                $notes,
+            ]);
+            $db->prepare("
+                UPDATE inventory
+                SET quantity = 0, updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+            ")->execute([(int)$item['id']]);
+            $quantityLeft = max(0.0, $quantityLeft - $itemQuantity);
+            if ($quantityLeft <= 0.0001) {
+                break;
+            }
+        }
+        if ($quantityLeft <= 0.0001) {
+            _maybeApplyWasteLearning($db, (int)$productId, $notes, $location);
+            $remaining = max(0.0, $locationTotal - (float)$quantity);
+            $openedId = null;
+            goto afterDeduct;
+        }
+    }
     
     if ($prodInfo && $prodInfo['unit'] === 'conf' && $prodInfo['default_quantity'] > 0 && !$useAll) {
         $totalQty = (float)$existing['quantity'];
@@ -4152,7 +4414,7 @@ function useFromInventoryCore(PDO $db, $productId, $quantity, $useAll, $location
             $stmt3->execute([$wholeConfs, $existing['id']]);
             
             // Get expiry and vacuum_sealed from original row
-            $stmt3 = $db->prepare("SELECT expiry_date, vacuum_sealed FROM inventory WHERE id = ?");
+            $stmt3 = $db->prepare("SELECT expiry_date, vacuum_sealed, prepared_food FROM inventory WHERE id = ?");
             $stmt3->execute([$existing['id']]);
             $origRow = $stmt3->fetch();
             
@@ -4167,15 +4429,37 @@ function useFromInventoryCore(PDO $db, $productId, $quantity, $useAll, $location
                 if (!empty($origRow['expiry_date']) && strtotime($origRow['expiry_date']) < strtotime($openedExpiry)) {
                     $openedExpiry = $origRow['expiry_date'];
                 }
-                $stmt3 = $db->prepare("INSERT INTO inventory (product_id, location, quantity, expiry_date, vacuum_sealed, opened_at) VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)");
-                $stmt3->execute([$productId, $location, $newFraction, $openedExpiry, $vacuum]);
+                $stmt3 = $db->prepare("INSERT INTO inventory (product_id, location, quantity, expiry_date, vacuum_sealed, opened_at, prepared_food) VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?)");
+                $stmt3->execute([$productId, $location, $newFraction, $openedExpiry, $vacuum, (int)($origRow['prepared_food'] ?? 0)]);
                 $openedId = (int)$db->lastInsertId();
             }
             
             // Log transaction
             $type = _isWasteNotes($notes) ? 'waste' : 'out';
-            $stmt3 = $db->prepare("INSERT INTO transactions (product_id, type, quantity, location, notes) VALUES (?, ?, ?, ?, ?)");
-            $stmt3->execute([$productId, $type, $quantity, $location, $notes]);
+            $undoSafe = 0;
+            $stmt3 = $db->prepare("
+                INSERT INTO transactions (
+                    product_id, inventory_id, type, quantity, location,
+                    prepared_food, inventory_expiry_date,
+                    inventory_expiry_user_set, inventory_vacuum_sealed,
+                    inventory_opened_at, notes, undo_safe
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ");
+            $stmt3->execute([
+                $productId,
+                (int)$existing['id'],
+                $type,
+                $quantity,
+                $location,
+                (int)($existing['prepared_food'] ?? 0),
+                $existing['expiry_date'] ?? null,
+                (int)($existing['expiry_user_set'] ?? 0),
+                (int)($existing['vacuum_sealed'] ?? 0),
+                $existing['opened_at'] ?? null,
+                $notes,
+                $undoSafe,
+            ]);
             _maybeApplyWasteLearning($db, (int)$productId, $notes, $location);
             
             $remaining = $newFraction > 0.001 ? $newFraction : 0;
@@ -4208,6 +4492,7 @@ function useFromInventoryCore(PDO $db, $productId, $quantity, $useAll, $location
         }
 
         if ($isNowOpened && !$wasOpened) {
+            $undoSafe = 0;
             // First time opened: recalculate expiry with shorter shelf life
             $pName = $prodInfo['name'] ?? '';
             $pCat = $prodInfo['category'] ?? '';
@@ -4230,8 +4515,8 @@ function useFromInventoryCore(PDO $db, $productId, $quantity, $useAll, $location
                     $stmt = $db->prepare("UPDATE inventory SET quantity = ?, opened_at = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?");
                     $stmt->execute([$newWhole, $existing['id']]);
                     // New row for the opened fraction with short shelf-life expiry
-                    $stmt = $db->prepare("INSERT INTO inventory (product_id, location, quantity, expiry_date, vacuum_sealed, opened_at) VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)");
-                    $stmt->execute([$productId, $location, $newFrac, $openedExpiry, $vacuum]);
+                    $stmt = $db->prepare("INSERT INTO inventory (product_id, location, quantity, expiry_date, vacuum_sealed, opened_at, prepared_food) VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?)");
+                    $stmt->execute([$productId, $location, $newFrac, $openedExpiry, $vacuum, (int)($existing['prepared_food'] ?? 0)]);
                     $openedId = (int)$db->lastInsertId();
                 } else {
                     // Only the opened fraction remains (≤ 1 conf) — single row
@@ -4246,8 +4531,8 @@ function useFromInventoryCore(PDO $db, $productId, $quantity, $useAll, $location
                     $stmt = $db->prepare("UPDATE inventory SET quantity = ?, opened_at = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?");
                     $stmt->execute([$newWholePkgs * $defQty, $existing['id']]);
                     // New row for the opened partial package with short shelf-life expiry
-                    $stmt = $db->prepare("INSERT INTO inventory (product_id, location, quantity, expiry_date, vacuum_sealed, opened_at) VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)");
-                    $stmt->execute([$productId, $location, $newRemainder, $openedExpiry, $vacuum]);
+                    $stmt = $db->prepare("INSERT INTO inventory (product_id, location, quantity, expiry_date, vacuum_sealed, opened_at, prepared_food) VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?)");
+                    $stmt->execute([$productId, $location, $newRemainder, $openedExpiry, $vacuum, (int)($existing['prepared_food'] ?? 0)]);
                     $openedId = (int)$db->lastInsertId();
                 } else {
                     // Only the opened remainder (last package) — single row
@@ -4266,8 +4551,29 @@ function useFromInventoryCore(PDO $db, $productId, $quantity, $useAll, $location
     
     // Log transaction (actual amount removed, not requested)
     $type = _isWasteNotes($notes) ? 'waste' : 'out';
-    $stmt = $db->prepare("INSERT INTO transactions (product_id, type, quantity, location, notes) VALUES (?, ?, ?, ?, ?)");
-    $stmt->execute([$productId, $type, $actualDeducted, $location, $notes]);
+    $stmt = $db->prepare("
+        INSERT INTO transactions (
+            product_id, inventory_id, type, quantity, location,
+            prepared_food, inventory_expiry_date,
+            inventory_expiry_user_set, inventory_vacuum_sealed,
+            inventory_opened_at, notes, undo_safe
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ");
+    $stmt->execute([
+        $productId,
+        (int)$existing['id'],
+        $type,
+        $actualDeducted,
+        $location,
+        (int)($existing['prepared_food'] ?? 0),
+        $existing['expiry_date'] ?? null,
+        (int)($existing['expiry_user_set'] ?? 0),
+        (int)($existing['vacuum_sealed'] ?? 0),
+        $existing['opened_at'] ?? null,
+        $notes,
+        $undoSafe,
+    ]);
     _maybeApplyWasteLearning($db, (int)$productId, $notes, $location);
 
     // User explicitly chose "use all/finished": remove this row now instead of
@@ -4293,6 +4599,10 @@ function useFromInventoryCore(PDO $db, $productId, $quantity, $useAll, $location
     }
     
     afterDeduct:
+
+    _syncProductPreparedFood($db, (int)$productId);
+    recipeJobEnqueueInventoryChanged($db, (int)$productId, 'inventory_use');
+    $db->exec('COMMIT');
     
     // Auto-add to Bring! if product is completely finished (no inventory left anywhere)
     $addedToBring = false;
@@ -4302,8 +4612,12 @@ function useFromInventoryCore(PDO $db, $productId, $quantity, $useAll, $location
         $totalLeft = (float)($stmt->fetchColumn() ?: 0);
 
         if ($totalLeft <= 0) {
-            $bringResult = bringAddDepletedProduct($db, $productId);
-            $addedToBring = !empty($bringResult['added']) || !empty($bringResult['updated']);
+            try {
+                $bringResult = bringAddDepletedProduct($db, $productId);
+                $addedToBring = !empty($bringResult['added']) || !empty($bringResult['updated']);
+            } catch (Throwable $e) {
+                EverLog::warn('bringAddDepletedProduct after deduct: ' . $e->getMessage());
+            }
         }
     }
 
@@ -4368,13 +4682,63 @@ function useFromInventoryCore(PDO $db, $productId, $quantity, $useAll, $location
     invalidateSmartShoppingCache();
 }
 
+function resetProductUnitConversionHistory(PDO $db, int $productId): int {
+    $db->prepare("
+        UPDATE transactions
+        SET undone = 1, undo_safe = 0
+        WHERE product_id = ? AND undone = 0
+    ")->execute([$productId]);
+    $rows = $db->prepare("
+        SELECT id, quantity, location, prepared_food, expiry_date,
+               expiry_user_set, vacuum_sealed, opened_at
+        FROM inventory
+        WHERE product_id = ? AND quantity > 0
+        ORDER BY id
+    ");
+    $rows->execute([$productId]);
+    $baseline = $db->prepare("
+        INSERT INTO transactions (
+            product_id, inventory_id, type, quantity, location,
+            prepared_food, inventory_expiry_date,
+            inventory_expiry_user_set, inventory_vacuum_sealed,
+            inventory_opened_at, notes, undo_safe
+        )
+        VALUES (?, ?, 'in', ?, ?, ?, ?, ?, ?, ?,
+                '[Unit conversion baseline]', 0)
+    ");
+    $created = 0;
+    foreach ($rows->fetchAll(PDO::FETCH_ASSOC) as $row) {
+        $baseline->execute([
+            $productId,
+            (int)$row['id'],
+            (float)$row['quantity'],
+            (string)$row['location'],
+            (int)($row['prepared_food'] ?? 0),
+            $row['expiry_date'] ?? null,
+            (int)($row['expiry_user_set'] ?? 0),
+            (int)($row['vacuum_sealed'] ?? 0),
+            $row['opened_at'] ?? null,
+        ]);
+        $created++;
+    }
+    return $created;
+}
+
 function updateInventory(PDO $db): void {
     EverLog::info('updateInventory');
     $input = json_decode(file_get_contents('php://input'), true);
     $id = $input['id'] ?? 0;
 
     // Read current state before update (needed for transaction reconciliation)
-    $prev = $db->prepare("SELECT quantity, location, product_id FROM inventory WHERE id = ?");
+    $prev = $db->prepare("
+        SELECT i.quantity, i.location, i.product_id, i.prepared_food,
+               i.expiry_date, i.expiry_user_set, i.vacuum_sealed, i.opened_at,
+               p.unit AS product_unit, p.package_unit AS product_package_unit,
+               p.default_quantity AS product_default_quantity
+        FROM inventory i
+        JOIN products p ON p.id = i.product_id
+        WHERE i.id = ?
+    ");
     $prev->execute([$id]);
     $prevRow = $prev->fetch(PDO::FETCH_ASSOC);
 
@@ -4393,6 +4757,27 @@ function updateInventory(PDO $db): void {
     dbWithRetry(function () use ($db, $fields, $params, $input, $prevRow, $id): void {
         $db->beginTransaction();
         try {
+            $previousUnit = (string)($prevRow['product_unit'] ?? '');
+            $requestedUnit = isset($input['unit'])
+                ? (string)$input['unit']
+                : $previousUnit;
+            $previousPackageUnit = (string)($prevRow['product_package_unit'] ?? '');
+            $requestedPackageUnit = array_key_exists('package_unit', $input)
+                ? (string)($input['package_unit'] ?? '')
+                : $previousPackageUnit;
+            $previousPackageSize = (float)($prevRow['product_default_quantity'] ?? 0);
+            $requestedPackageSize = array_key_exists('package_size', $input)
+                ? (float)($input['package_size'] ?? 0)
+                : $previousPackageSize;
+            $structuralChange = $requestedUnit !== $previousUnit
+                || (
+                    ($previousUnit === 'conf' || $requestedUnit === 'conf')
+                    && (
+                        $requestedPackageUnit !== $previousPackageUnit
+                        || abs($requestedPackageSize - $previousPackageSize) > 0.001
+                    )
+                );
+
             $stmt = $db->prepare("UPDATE inventory SET " . implode(', ', $fields) . " WHERE id = ?");
             $stmt->execute($params);
 
@@ -4403,11 +4788,29 @@ function updateInventory(PDO $db): void {
                 $diff   = round($newQty - $oldQty, 6);
                 $loc    = $input['location'] ?? $prevRow['location'];
                 $pid    = (int)$prevRow['product_id'];
-                if (abs($diff) > 0.001) {
+                if (abs($diff) > 0.001 && !$structuralChange) {
                     $txType = $diff > 0 ? 'in' : 'out';
                     $txQty  = abs($diff);
-                    $db->prepare("INSERT INTO transactions (product_id, type, quantity, location, notes) VALUES (?, ?, ?, ?, '[Manual correction]')")
-                       ->execute([$pid, $txType, $txQty, $loc]);
+                    $db->prepare("
+                        INSERT INTO transactions (
+                            product_id, inventory_id, type, quantity, location,
+                            prepared_food, inventory_expiry_date,
+                            inventory_expiry_user_set, inventory_vacuum_sealed,
+                            inventory_opened_at, notes
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '[Manual correction]')
+                    ")->execute([
+                        $pid,
+                        (int)$id,
+                        $txType,
+                        $txQty,
+                        $loc,
+                        (int)($prevRow['prepared_food'] ?? 0),
+                        $prevRow['expiry_date'] ?? null,
+                        (int)($prevRow['expiry_user_set'] ?? 0),
+                        (int)($prevRow['vacuum_sealed'] ?? 0),
+                        $prevRow['opened_at'] ?? null,
+                    ]);
                 }
             }
 
@@ -4431,6 +4834,11 @@ function updateInventory(PDO $db): void {
                 $stmt->execute([$input['package_unit'], $input['package_size'] ?? 0, $input['product_id']]);
             }
 
+            if ($structuralChange && $prevRow) {
+                $pid = (int)$prevRow['product_id'];
+                resetProductUnitConversionHistory($db, $pid);
+            }
+
             if (
                 isset($input['location'])
                 && $prevRow
@@ -4441,6 +4849,17 @@ function updateInventory(PDO $db): void {
                     (int)$prevRow['product_id'],
                     (string)$input['location'],
                     'inventory_move',
+                );
+            }
+            if ($prevRow) {
+                _syncProductPreparedFood(
+                    $db,
+                    (int)$prevRow['product_id']
+                );
+                recipeJobEnqueueInventoryChanged(
+                    $db,
+                    (int)$prevRow['product_id'],
+                    'inventory_update'
                 );
             }
 
@@ -4487,7 +4906,12 @@ function deleteInventory(PDO $db): void {
         }
     }
 
-    $stmt = $db->prepare("SELECT id, product_id, quantity, location FROM inventory WHERE id = ?");
+    $stmt = $db->prepare("
+        SELECT id, product_id, quantity, location, prepared_food,
+               expiry_date, expiry_user_set, vacuum_sealed, opened_at
+        FROM inventory
+        WHERE id = ?
+    ");
     $stmt->execute([$id]);
     $row = $stmt->fetch(PDO::FETCH_ASSOC);
     if (!$row) {
@@ -4517,9 +4941,33 @@ function deleteInventory(PDO $db): void {
                    ->execute([$remaining, $id]);
             }
             if ($removedQty > 0.0001) {
-                $db->prepare("INSERT INTO transactions (product_id, type, quantity, location, notes) VALUES (?, 'out', ?, ?, ?)")
-                   ->execute([(int)$row['product_id'], $removedQty, $row['location'], '[Eliminazione inventario]']);
+                $db->prepare("
+                    INSERT INTO transactions (
+                        product_id, inventory_id, type, quantity, location,
+                        prepared_food, inventory_expiry_date,
+                        inventory_expiry_user_set, inventory_vacuum_sealed,
+                        inventory_opened_at, notes
+                    )
+                    VALUES (?, ?, 'out', ?, ?, ?, ?, ?, ?, ?, ?)
+                ")->execute([
+                    (int)$row['product_id'],
+                    (int)$row['id'],
+                    $removedQty,
+                    $row['location'],
+                    (int)($row['prepared_food'] ?? 0),
+                    $row['expiry_date'] ?? null,
+                    (int)($row['expiry_user_set'] ?? 0),
+                    (int)($row['vacuum_sealed'] ?? 0),
+                    $row['opened_at'] ?? null,
+                    '[Eliminazione inventario]',
+                ]);
             }
+            _syncProductPreparedFood($db, (int)$row['product_id']);
+            recipeJobEnqueueInventoryChanged(
+                $db,
+                (int)$row['product_id'],
+                'inventory_delete'
+            );
             $db->commit();
         } catch (Throwable $e) {
             if ($db->inTransaction()) $db->rollBack();
@@ -4531,7 +4979,7 @@ function deleteInventory(PDO $db): void {
 }
 
 function _inventoryRowById(PDO $db, int $id): ?array {
-    $stmt = $db->prepare("SELECT id, product_id, quantity, location, expiry_date, expiry_user_set, vacuum_sealed, opened_at FROM inventory WHERE id = ?");
+    $stmt = $db->prepare("SELECT id, product_id, quantity, location, expiry_date, expiry_user_set, vacuum_sealed, opened_at, prepared_food FROM inventory WHERE id = ?");
     $stmt->execute([$id]);
     $row = $stmt->fetch(PDO::FETCH_ASSOC);
     return $row ?: null;
@@ -4570,9 +5018,33 @@ function deleteInventoryOne(PDO $db): void {
                 $removedRow = true;
             }
             if ($removeQty > 0.0001) {
-                $db->prepare("INSERT INTO transactions (product_id, type, quantity, location, notes) VALUES (?, 'out', ?, ?, ?)")
-                   ->execute([(int)$row['product_id'], $removeQty, $row['location'], '[Eliminazione inventario]']);
+                $db->prepare("
+                    INSERT INTO transactions (
+                        product_id, inventory_id, type, quantity, location,
+                        prepared_food, inventory_expiry_date,
+                        inventory_expiry_user_set, inventory_vacuum_sealed,
+                        inventory_opened_at, notes
+                    )
+                    VALUES (?, ?, 'out', ?, ?, ?, ?, ?, ?, ?, ?)
+                ")->execute([
+                    (int)$row['product_id'],
+                    (int)$row['id'],
+                    $removeQty,
+                    $row['location'],
+                    (int)($row['prepared_food'] ?? 0),
+                    $row['expiry_date'] ?? null,
+                    (int)($row['expiry_user_set'] ?? 0),
+                    (int)($row['vacuum_sealed'] ?? 0),
+                    $row['opened_at'] ?? null,
+                    '[Eliminazione inventario]',
+                ]);
             }
+            _syncProductPreparedFood($db, (int)$row['product_id']);
+            recipeJobEnqueueInventoryChanged(
+                $db,
+                (int)$row['product_id'],
+                'inventory_delete_one'
+            );
             $db->commit();
         } catch (Throwable $e) {
             if ($db->inTransaction()) $db->rollBack();
@@ -4642,6 +5114,11 @@ function updateInventoryOne(PDO $db): void {
                 $db->prepare("UPDATE inventory SET expiry_date = ?, expiry_user_set = 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?")
                    ->execute([$expiry, $id]);
             }
+            recipeJobEnqueueInventoryChanged(
+                $db,
+                (int)$row['product_id'],
+                'inventory_expiry_update'
+            );
             $db->commit();
         } catch (Throwable $e) {
             if ($db->inTransaction()) $db->rollBack();
@@ -4694,14 +5171,47 @@ function _inventoryMergeIdenticalRows(PDO $db, array $row, int $prepared, int $p
     return $keepId;
 }
 
-/** products.prepared_food is true when ANY stocked inventory row is flagged. */
+function _setPositiveInventoryPreparedFood(PDO $db, int $productId, int $prepared): void {
+    $db->prepare("
+        UPDATE inventory
+        SET prepared_food = ?, updated_at = CURRENT_TIMESTAMP
+        WHERE product_id = ? AND quantity > 0
+    ")->execute([$prepared ? 1 : 0, $productId]);
+}
+
+/**
+ * Product state is derived from stocked rows: true only when every positive row is
+ * prepared. With no positive rows, preserve the explicit product-level choice.
+ */
 function _syncProductPreparedFood(PDO $db, int $productId): int {
-    $stmt = $db->prepare("SELECT EXISTS(SELECT 1 FROM inventory WHERE product_id = ? AND prepared_food = 1 AND quantity > 0)");
+    $stmt = $db->prepare("
+        SELECT p.prepared_food AS current_state,
+               COUNT(i.id) AS positive_rows,
+               COALESCE(SUM(CASE WHEN COALESCE(i.prepared_food, 0) = 1 THEN 1 ELSE 0 END), 0)
+                   AS prepared_rows
+        FROM products p
+        LEFT JOIN inventory i ON i.product_id = p.id AND i.quantity > 0
+        WHERE p.id = ?
+        GROUP BY p.id
+    ");
     $stmt->execute([$productId]);
-    $any = (int)$stmt->fetchColumn();
-    $db->prepare("UPDATE products SET prepared_food = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?")
-       ->execute([$any, $productId]);
-    return $any;
+    $row = $stmt->fetch(PDO::FETCH_ASSOC);
+    if (!$row) {
+        return 0;
+    }
+    $positiveRows = (int)$row['positive_rows'];
+    $prepared = $positiveRows > 0
+        ? ((int)$row['prepared_rows'] === $positiveRows ? 1 : 0)
+        : (int)$row['current_state'];
+    if ($prepared !== (int)$row['current_state']) {
+        $db->prepare("UPDATE products SET prepared_food = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?")
+           ->execute([$prepared, $productId]);
+        canonicalIngredientEnqueueProduct($db, $productId, 'inventory_prepared_food_aggregate');
+        if (function_exists('recipeJobEnqueueInventoryChanged')) {
+            recipeJobEnqueueInventoryChanged($db, $productId, 'inventory_prepared_food_aggregate');
+        }
+    }
+    return $prepared;
 }
 
 /**
@@ -4742,8 +5252,22 @@ function setInventoryPreparedFood(PDO $db): void {
     $productId = (int)$row['product_id'];
     $targetId = $id;
     $split = false;
+    $productPrepared = false;
+    $queue = [];
 
-    dbWithRetry(function () use ($db, $row, $id, $prepared, $qty, $rowQty, &$targetId, &$split): void {
+    dbWithRetry(function () use (
+        $db,
+        $row,
+        $id,
+        $prepared,
+        $qty,
+        $rowQty,
+        $productId,
+        &$targetId,
+        &$split,
+        &$productPrepared,
+        &$queue
+    ): void {
         $db->beginTransaction();
         try {
             if ($qty >= $rowQty - 0.0001) {
@@ -4769,6 +5293,17 @@ function setInventoryPreparedFood(PDO $db): void {
                 $targetId = _inventoryMergeIdenticalRows($db, $row, $prepared, (int)$db->lastInsertId());
                 $split = true;
             }
+            $productPrepared = _syncProductPreparedFood($db, $productId);
+            $queue = canonicalIngredientEnqueueProduct(
+                $db,
+                $productId,
+                'inventory_prepared_food_flag'
+            );
+            recipeJobEnqueueInventoryChanged(
+                $db,
+                $productId,
+                'inventory_prepared_food_flag'
+            );
             $db->commit();
         } catch (Throwable $e) {
             if ($db->inTransaction()) $db->rollBack();
@@ -4776,8 +5311,6 @@ function setInventoryPreparedFood(PDO $db): void {
         }
     });
 
-    $productPrepared = _syncProductPreparedFood($db, $productId);
-    $queue = canonicalIngredientEnqueueProduct($db, $productId, 'inventory_prepared_food_flag');
     invalidateSmartShoppingCache();
 
     echo json_encode([
@@ -4948,6 +5481,9 @@ function mergeProducts(PDO $db, int $keepId, int $dropId): void {
         }
         throw $e;
     }
+    _syncProductPreparedFood($db, $keepId);
+    canonicalIngredientEnqueueProduct($db, $keepId, 'product_merge');
+    recipeJobEnqueueInventoryChanged($db, $keepId, 'product_merge');
 }
 
 function mergeProduct(PDO $db): void {
@@ -5065,8 +5601,17 @@ function confirmFinished(PDO $db): void {
             $location = $locStmt->fetchColumn();
         }
         $location = $location ?: 'dispensa';
-        $db->prepare("INSERT INTO transactions (product_id, type, quantity, location, notes) VALUES (?, 'out', ?, ?, ?)")
-           ->execute([$productId, round($expected, 3), $location, '[Riconciliazione] Confermato esaurito']);
+        $db->prepare("
+            INSERT INTO transactions (
+                product_id, type, quantity, location, notes, accounting_only
+            )
+            VALUES (?, 'out', ?, ?, ?, 1)
+        ")->execute([
+            $productId,
+            round($expected, 3),
+            $location,
+            '[Riconciliazione] Confermato esaurito',
+        ]);
     }
 
     $db->prepare("DELETE FROM inventory WHERE product_id = ? AND quantity <= 0")->execute([$productId]);
@@ -5091,9 +5636,10 @@ function restoreGhostInventory(PDO $db): void {
         return;
     }
 
-    $prod = $db->prepare("SELECT id FROM products WHERE id = ?");
+    $prod = $db->prepare("SELECT id, prepared_food FROM products WHERE id = ?");
     $prod->execute([$productId]);
-    if (!$prod->fetchColumn()) {
+    $product = $prod->fetch(PDO::FETCH_ASSOC);
+    if (!$product) {
         http_response_code(404);
         echo json_encode(['error' => 'Product not found']);
         return;
@@ -5109,15 +5655,17 @@ function restoreGhostInventory(PDO $db): void {
     $row = $stmt->fetch(PDO::FETCH_ASSOC);
 
     if ($row) {
-        $db->prepare("UPDATE inventory SET quantity = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?")
-           ->execute([$quantity, (int)$row['id']]);
+        $db->prepare("UPDATE inventory SET quantity = ?, prepared_food = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?")
+           ->execute([$quantity, (int)($product['prepared_food'] ?? 0), (int)$row['id']]);
         $invId = (int)$row['id'];
     } else {
-        $db->prepare("INSERT INTO inventory (product_id, location, quantity) VALUES (?, ?, ?)")
-           ->execute([$productId, $location, $quantity]);
+        $db->prepare("INSERT INTO inventory (product_id, location, quantity, prepared_food) VALUES (?, ?, ?, ?)")
+           ->execute([$productId, $location, $quantity, (int)($product['prepared_food'] ?? 0)]);
         $invId = (int)$db->lastInsertId();
     }
     recordProductLocation($db, $productId, $location, 'ghost_restore');
+    _syncProductPreparedFood($db, $productId);
+    recipeJobEnqueueInventoryChanged($db, $productId, 'inventory_ghost_restore');
 
     echo json_encode([
         'success'      => true,
@@ -5173,7 +5721,14 @@ function listTransactions(PDO $db): void {
  * Marks the original as undone=1 and logs a counter-transaction with notes='[Annullato]'.
  */
 function undoTransaction(PDO $db): void {
-    $input = json_decode(file_get_contents('php://input'), true);
+    $input = (
+        defined('RECIPE_BACKEND_TEST_MODE')
+        && RECIPE_BACKEND_TEST_MODE
+        && isset($GLOBALS['TRANSACTION_UNDO_INPUT'])
+        && is_array($GLOBALS['TRANSACTION_UNDO_INPUT'])
+    )
+        ? $GLOBALS['TRANSACTION_UNDO_INPUT']
+        : json_decode(file_get_contents('php://input'), true);
     $txId = (int)($input['id'] ?? 0);
     if (!$txId) {
         EverLog::info('undoTransaction');
@@ -5203,18 +5758,220 @@ function undoTransaction(PDO $db): void {
         return;
     }
 
-    $db->beginTransaction();
-    try {
-        $productId = (int)$tx['product_id'];
-        $quantity  = (float)$tx['quantity'];
-        $location  = $tx['location'] ?: 'dispensa';
-        $type      = $tx['type'];
+    $db->exec('BEGIN IMMEDIATE');
+    $lockedStmt = $db->prepare("
+        SELECT t.*, p.name
+        FROM transactions t
+        JOIN products p ON t.product_id = p.id
+        WHERE t.id = ?
+        LIMIT 1
+    ");
+    $lockedStmt->execute([$txId]);
+    $tx = $lockedStmt->fetch(PDO::FETCH_ASSOC);
+    if (!$tx || !empty($tx['undone'])) {
+        $db->exec('ROLLBACK');
+        http_response_code(409);
+        echo json_encode(['error' => 'Transaction already undone', 'already_undone' => true]);
+        return;
+    }
+    if (!empty($tx['accounting_only'])) {
+        $markAccountingUndo = $db->prepare("
+            UPDATE transactions SET undone = 1
+            WHERE id = ? AND undone = 0
+        ");
+        $markAccountingUndo->execute([$txId]);
+        if ($markAccountingUndo->rowCount() !== 1) {
+            $db->exec('ROLLBACK');
+            http_response_code(409);
+            echo json_encode(['error' => 'Transaction already undone', 'already_undone' => true]);
+            return;
+        }
+        $db->exec('COMMIT');
+        echo json_encode([
+            'success' => true,
+            'name' => $tx['name'],
+            'accounting_only' => true,
+        ]);
+        return;
+    }
+    if (isset($tx['undo_safe']) && (int)$tx['undo_safe'] === 0) {
+        $db->exec('ROLLBACK');
+        http_response_code(409);
+        echo json_encode([
+            'error' => 'undo_conflict',
+            'message' => 'This operation changed package structure and cannot be undone exactly.',
+        ]);
+        return;
+    }
 
+    if (
+        in_array($tx['type'], ['out', 'waste'], true)
+        && $tx['prepared_food'] === null
+    ) {
+        $legacyRow = null;
+        if (!empty($tx['inventory_id'])) {
+            $legacyStmt = $db->prepare("
+                SELECT prepared_food, expiry_date, expiry_user_set,
+                       vacuum_sealed, opened_at
+                FROM inventory
+                WHERE id = ? AND product_id = ?
+                LIMIT 1
+            ");
+            $legacyStmt->execute([(int)$tx['inventory_id'], (int)$tx['product_id']]);
+            $legacyRow = $legacyStmt->fetch(PDO::FETCH_ASSOC) ?: null;
+        }
+        if ($legacyRow !== null) {
+            $tx['prepared_food'] = (int)($legacyRow['prepared_food'] ?? 0);
+            $tx['inventory_expiry_date'] = $legacyRow['expiry_date'] ?? null;
+            $tx['inventory_expiry_user_set'] = (int)($legacyRow['expiry_user_set'] ?? 0);
+            $tx['inventory_vacuum_sealed'] = (int)($legacyRow['vacuum_sealed'] ?? 0);
+            $tx['inventory_opened_at'] = $legacyRow['opened_at'] ?? null;
+        } else {
+            $stateStmt = $db->prepare("
+                SELECT MIN(CAST(COALESCE(prepared_food, 0) AS INTEGER)) AS min_state,
+                       MAX(CAST(COALESCE(prepared_food, 0) AS INTEGER)) AS max_state
+                FROM inventory
+                WHERE product_id = ? AND quantity > 0
+            ");
+            $stateStmt->execute([(int)$tx['product_id']]);
+            $states = $stateStmt->fetch(PDO::FETCH_ASSOC) ?: [];
+            if (
+                $states['min_state'] !== null
+                && $states['max_state'] !== null
+                && (int)$states['min_state'] !== (int)$states['max_state']
+            ) {
+                $db->exec('ROLLBACK');
+                http_response_code(409);
+                echo json_encode([
+                    'error' => 'legacy_undo_ambiguous',
+                    'message' => 'This legacy transaction cannot safely restore prepared-food state.',
+                ]);
+                return;
+            }
+            $tx['prepared_food'] = (int)($states['max_state'] ?? 0);
+        }
+    }
+
+    $productId = (int)$tx['product_id'];
+    $quantity  = (float)$tx['quantity'];
+    $location  = $tx['location'] ?: 'dispensa';
+    $type      = $tx['type'];
+    $transactionInventoryId = (int)($tx['inventory_id'] ?? 0);
+    $transactionPreparedFood = $tx['prepared_food'] !== null
+        ? (int)$tx['prepared_food']
+        : null;
+    $transactionExpiryDate = $tx['inventory_expiry_date'] ?? null;
+    $transactionExpiryUserSet = $tx['inventory_expiry_user_set'] !== null
+        ? (int)$tx['inventory_expiry_user_set']
+        : 0;
+    $transactionVacuumSealed = $tx['inventory_vacuum_sealed'] !== null
+        ? (int)$tx['inventory_vacuum_sealed']
+        : 0;
+    $transactionOpenedAt = $tx['inventory_opened_at'] ?? null;
+
+    $readExactBatch = static function (
+        PDO $db,
+        int $productId,
+        int $inventoryId,
+        string $location,
+        ?int $preparedFood,
+        ?string $expiryDate,
+        int $expiryUserSet,
+        int $vacuumSealed,
+        ?string $openedAt
+    ): ?array {
+        $idClause = $inventoryId > 0 ? 'AND id = ?' : '';
+        $params = [$productId, $location];
+        if ($inventoryId > 0) {
+            $params[] = $inventoryId;
+        }
+        $params = array_merge($params, [
+            $preparedFood ?? 0,
+            $expiryDate,
+            $expiryUserSet,
+            $vacuumSealed,
+            $openedAt,
+        ]);
+        $stmt = $db->prepare("
+            SELECT id, quantity
+            FROM inventory
+            WHERE product_id = ? AND location = ?
+              {$idClause}
+              AND CAST(COALESCE(prepared_food, 0) AS INTEGER) = ?
+              AND COALESCE(expiry_date, '') = COALESCE(?, '')
+              AND CAST(COALESCE(expiry_user_set, 0) AS INTEGER) = ?
+              AND CAST(COALESCE(vacuum_sealed, 0) AS INTEGER) = ?
+              AND COALESCE(opened_at, '') = COALESCE(?, '')
+            ORDER BY id
+            LIMIT 1
+        ");
+        $stmt->execute($params);
+        return $stmt->fetch(PDO::FETCH_ASSOC) ?: null;
+    };
+
+    $exactBatch = null;
+    if ($type === 'in') {
+        if ($transactionInventoryId <= 0) {
+            $db->exec('ROLLBACK');
+            http_response_code(409);
+            echo json_encode(['error' => 'legacy_undo_ambiguous']);
+            return;
+        }
+        $exactBatch = $readExactBatch(
+            $db,
+            $productId,
+            $transactionInventoryId,
+            $location,
+            $transactionPreparedFood,
+            $transactionExpiryDate,
+            $transactionExpiryUserSet,
+            $transactionVacuumSealed,
+            $transactionOpenedAt
+        );
+        if ($exactBatch === null || (float)$exactBatch['quantity'] + 0.0001 < $quantity) {
+            $db->exec('ROLLBACK');
+            http_response_code(409);
+            echo json_encode([
+                'error' => 'undo_conflict',
+                'message' => 'The added batch changed and can no longer be undone exactly.',
+            ]);
+            return;
+        }
+    } elseif ($type === 'out' || $type === 'waste') {
+        $exactBatch = $readExactBatch(
+            $db,
+            $productId,
+            $transactionInventoryId,
+            $location,
+            $transactionPreparedFood,
+            $transactionExpiryDate,
+            $transactionExpiryUserSet,
+            $transactionVacuumSealed,
+            $transactionOpenedAt
+        );
+        if ($exactBatch === null) {
+            $otherRows = $db->prepare("
+                SELECT COUNT(*)
+                FROM inventory
+                WHERE product_id = ? AND location = ? AND quantity > 0
+            ");
+            $otherRows->execute([$productId, $location]);
+            if ((int)$otherRows->fetchColumn() > 0) {
+                $db->exec('ROLLBACK');
+                http_response_code(409);
+                echo json_encode([
+                    'error' => 'undo_conflict',
+                    'message' => 'The inventory batch changed and cannot be reconstructed exactly.',
+                ]);
+                return;
+            }
+        }
+    }
+
+    try {
         if ($type === 'in') {
             // Reverse an ADD: remove quantity from inventory
-            $stmt2 = $db->prepare("SELECT id, quantity FROM inventory WHERE product_id = ? AND location = ? AND quantity > 0 ORDER BY quantity DESC LIMIT 1");
-            $stmt2->execute([$productId, $location]);
-            $row = $stmt2->fetch();
+            $row = $exactBatch;
             if ($row) {
                 $newQty = max(0, (float)$row['quantity'] - $quantity);
                 if ($newQty <= 0) {
@@ -5224,21 +5981,77 @@ function undoTransaction(PDO $db): void {
                 }
             }
             // Log counter-transaction
-            $db->prepare("INSERT INTO transactions (product_id, type, quantity, location, notes) VALUES (?, 'out', ?, ?, '[Undone]')")->execute([$productId, $quantity, $location]);
+            $db->prepare("
+                INSERT INTO transactions (
+                    product_id, inventory_id, type, quantity, location,
+                    prepared_food, inventory_expiry_date,
+                    inventory_expiry_user_set, inventory_vacuum_sealed,
+                    inventory_opened_at, notes, undone
+                )
+                VALUES (?, ?, 'out', ?, ?, ?, ?, ?, ?, ?, '[Undone]', 1)
+            ")->execute([
+                $productId,
+                $row ? (int)$row['id'] : ($transactionInventoryId ?: null),
+                $quantity,
+                $location,
+                $transactionPreparedFood,
+                $transactionExpiryDate,
+                $transactionExpiryUserSet,
+                $transactionVacuumSealed,
+                $transactionOpenedAt,
+            ]);
 
         } elseif ($type === 'out' || $type === 'waste') {
             // Reverse a USE: add quantity back to inventory
-            $stmt2 = $db->prepare("SELECT id, quantity FROM inventory WHERE product_id = ? AND location = ? ORDER BY quantity DESC LIMIT 1");
-            $stmt2->execute([$productId, $location]);
-            $row = $stmt2->fetch();
+            if ($transactionPreparedFood === null) {
+                $preparedStmt = $db->prepare("SELECT prepared_food FROM products WHERE id = ?");
+                $preparedStmt->execute([$productId]);
+                $transactionPreparedFood = (int)($preparedStmt->fetchColumn() ?: 0);
+            }
+            $row = $exactBatch;
             if ($row) {
                 $db->prepare("UPDATE inventory SET quantity = quantity + ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?")->execute([$quantity, $row['id']]);
+                $restoredInventoryId = (int)$row['id'];
             } else {
                 // No row at this location — create one without expiry
-                $db->prepare("INSERT INTO inventory (product_id, location, quantity) VALUES (?, ?, ?)")->execute([$productId, $location, $quantity]);
+                $db->prepare("
+                    INSERT INTO inventory (
+                        product_id, location, quantity, expiry_date,
+                        expiry_user_set, vacuum_sealed, opened_at, prepared_food
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ")->execute([
+                    $productId,
+                    $location,
+                    $quantity,
+                    $transactionExpiryDate,
+                    $transactionExpiryUserSet,
+                    $transactionVacuumSealed,
+                    $transactionOpenedAt,
+                    $transactionPreparedFood,
+                ]);
+                $restoredInventoryId = (int)$db->lastInsertId();
             }
             // Log counter-transaction
-            $db->prepare("INSERT INTO transactions (product_id, type, quantity, location, notes) VALUES (?, 'in', ?, ?, '[Undone]')")->execute([$productId, $quantity, $location]);
+            $db->prepare("
+                INSERT INTO transactions (
+                    product_id, inventory_id, type, quantity, location,
+                    prepared_food, inventory_expiry_date,
+                    inventory_expiry_user_set, inventory_vacuum_sealed,
+                    inventory_opened_at, notes, undone
+                )
+                VALUES (?, ?, 'in', ?, ?, ?, ?, ?, ?, ?, '[Undone]', 1)
+            ")->execute([
+                $productId,
+                $restoredInventoryId,
+                $quantity,
+                $location,
+                $transactionPreparedFood,
+                $transactionExpiryDate,
+                $transactionExpiryUserSet,
+                $transactionVacuumSealed,
+                $transactionOpenedAt,
+            ]);
             recordProductLocation(
                 $db,
                 $productId,
@@ -5250,15 +6063,28 @@ function undoTransaction(PDO $db): void {
         }
 
         // Mark original as undone
-        $db->prepare("UPDATE transactions SET undone = 1 WHERE id = ?")->execute([$txId]);
+        $markUndone = $db->prepare("
+            UPDATE transactions SET undone = 1
+            WHERE id = ? AND undone = 0
+        ");
+        $markUndone->execute([$txId]);
+        if ($markUndone->rowCount() !== 1) {
+            throw new RuntimeException('Transaction was already undone');
+        }
         if ($type === 'in') {
             undoProductLocationTransaction($db, $txId);
         }
         refreshProductLastLocation($db, $productId);
-        $db->commit();
+        _syncProductPreparedFood($db, $productId);
+        recipeJobEnqueueInventoryChanged($db, $productId, 'transaction_undo');
+        $db->exec('COMMIT');
         echo json_encode(['success' => true, 'name' => $tx['name']]);
     } catch (Exception $e) {
-        $db->rollBack();
+        try {
+            $db->exec('ROLLBACK');
+        } catch (Throwable $rollbackError) {
+            // The transaction may already have been committed or rolled back.
+        }
         EverLog::error('undoTransaction: DB error (500)');
         http_response_code(500);
         echo json_encode(['error' => 'DB error: ' . $e->getMessage()]);
@@ -5502,9 +6328,11 @@ function getStats(PDO $db): void {
             (SELECT COALESCE(SUM(quantity),0) FROM inventory)           AS total_items,
             (SELECT COUNT(DISTINCT location) FROM inventory)            AS total_locations,
             (SELECT COUNT(*) FROM transactions
-             WHERE type='in'  AND created_at >= datetime('now','-7 days')) AS recent_in,
+             WHERE type='in' AND undone = 0
+               AND created_at >= datetime('now','-7 days')) AS recent_in,
             (SELECT COUNT(*) FROM transactions
-             WHERE type='out' AND created_at >= datetime('now','-7 days')) AS recent_out
+             WHERE type='out' AND undone = 0
+               AND created_at >= datetime('now','-7 days')) AS recent_out
     ")->fetch(PDO::FETCH_ASSOC);
     $totalProducts = (int)$summary['total_products'];
     $totalItems    = (float)$summary['total_items'];
@@ -5657,7 +6485,8 @@ function getStats(PDO $db): void {
             SUM(CASE WHEN created_at >= datetime('now', '-60 days') AND created_at < datetime('now', '-30 days') THEN 1 ELSE 0 END) AS m1,
             SUM(CASE WHEN created_at >= datetime('now', '-90 days') AND created_at < datetime('now', '-60 days') THEN 1 ELSE 0 END) AS m2
         FROM transactions
-        WHERE type IN ('out', 'waste') AND created_at >= datetime('now', '-90 days')
+        WHERE type IN ('out', 'waste') AND undone = 0
+          AND created_at >= datetime('now', '-90 days')
         GROUP BY type
     ")->fetchAll();
     $used30 = 0; $wasted30 = 0;
@@ -5977,7 +6806,7 @@ function recentPopularProducts(PDO $db): void {
                MAX(t.created_at) as last_used
         FROM transactions t
         JOIN products p ON p.id = t.product_id
-        WHERE t.type = 'out'
+        WHERE t.type = 'out' AND t.undone = 0
         GROUP BY t.product_id
         ORDER BY last_used DESC
         LIMIT 4
@@ -5991,7 +6820,7 @@ function recentPopularProducts(PDO $db): void {
                COUNT(*) as usage_count
         FROM transactions t
         JOIN products p ON p.id = t.product_id
-        WHERE t.type = 'out'
+        WHERE t.type = 'out' AND t.undone = 0
           AND t.created_at >= datetime('now', '-90 days')
         GROUP BY t.product_id
         ORDER BY usage_count DESC
@@ -6035,6 +6864,7 @@ function getConsumptionPredictions(PDO $db): void {
             SELECT quantity, created_at
             FROM transactions
             WHERE product_id = ? AND location = ? AND type = 'out'
+              AND undone = 0
               AND created_at >= datetime('now', '-90 days')
             ORDER BY created_at ASC
         ");
@@ -6303,11 +7133,10 @@ function dbCleanup(?PDO $db = null): void {
     $txDays     = max(30, (int)env('TRANSACTION_RETENTION_DAYS', '90'));
     $pdo = $db ?? getDB();
     try {
-        // Delete old recipes (generated recipe plans)
-        $pdo->prepare("DELETE FROM recipes WHERE date < date('now', ? || ' days')")
-            ->execute(["-$recipeDays"]);
+        // Keep favorites indefinitely; normalized catalog rows have their own policy.
+        recipeLegacyCleanup($pdo, $recipeDays);
         // Delete old transactions (keep at least the last $txDays of history)
-        $pdo->prepare("DELETE FROM transactions WHERE created_at < datetime('now', ? || ' days') AND undone = 0")
+        $pdo->prepare("DELETE FROM transactions WHERE created_at < datetime('now', ? || ' days')")
             ->execute(["-$txDays"]);
         // Compact the database
         $pdo->exec('VACUUM');
@@ -7315,7 +8144,11 @@ function recipeParseQtyString(string $qty): array {
 }
 
 function recipeGetProductTotalStock(PDO $db, int $productId): float {
-    $stmt = $db->prepare('SELECT COALESCE(SUM(quantity), 0) FROM inventory WHERE product_id = ? AND quantity > 0');
+    $stmt = $db->prepare('
+        SELECT COALESCE(SUM(quantity), 0)
+        FROM inventory
+        WHERE product_id = ? AND quantity > 0 AND COALESCE(prepared_food, 0) = 0
+    ');
     $stmt->execute([$productId]);
     return (float)$stmt->fetchColumn();
 }
@@ -7481,7 +8314,11 @@ function recipeFinalizeIngQty(array &$ing, float $totalStockQty): void {
     $unit = $ing['inventory_unit'] ?? 'pz';
     $pkgSize = (float)($ing['default_quantity'] ?? 0);
     $pkgUnit = strtolower($ing['package_unit'] ?? '');
-    $isConfSub = ($unit === 'conf' && $pkgSize > 0 && in_array($pkgUnit, ['g', 'ml'], true));
+    $isConfSub = (
+        $unit === 'conf'
+        && $pkgSize > 0
+        && in_array($pkgUnit, ['g', 'ml', 'pz'], true)
+    );
 
     $useQty = (float)($ing['qty_number'] ?? 0);
 
@@ -7775,7 +8612,11 @@ function recipeApplyPantryQtyFields(array &$ing, array $bestMatch): void {
         } elseif ($invUnit === 'conf') {
             $defQty = (float)($bestMatch['default_quantity'] ?? 0);
             $pkgUnitLC = strtolower($bestMatch['package_unit'] ?? '');
-            if ($defQty > 0 && ($pkgUnitLC === 'g' || $pkgUnitLC === 'ml') && ($recipeUnit === 'g' || $recipeUnit === 'ml')) {
+            if (
+                $defQty > 0
+                && in_array($pkgUnitLC, ['g', 'ml', 'pz'], true)
+                && $recipeUnit === $pkgUnitLC
+            ) {
                 $qtyNum = $recipeVal;
                 $ing['qty'] = round($qtyNum) . ' ' . $pkgUnitLC;
                 $confAlreadyInSubUnit = true;
@@ -7797,7 +8638,7 @@ function recipeApplyPantryQtyFields(array &$ing, array $bestMatch): void {
     if (!$confAlreadyInSubUnit && $invUnit === 'conf' && $qtyNum > 0) {
         $defQty = (float)($bestMatch['default_quantity'] ?? 0);
         $pkgUnitLC = strtolower($bestMatch['package_unit'] ?? '');
-        if ($defQty > 0 && ($pkgUnitLC === 'g' || $pkgUnitLC === 'ml')) {
+        if ($defQty > 0 && in_array($pkgUnitLC, ['g', 'ml', 'pz'], true)) {
             if ($recipeVal > 0 && $recipeUnit === $pkgUnitLC) {
                 $qtyNum = $recipeVal;
                 $ing['qty'] = round($qtyNum) . ' ' . $pkgUnitLC;
@@ -7914,7 +8755,7 @@ function generateRecipe(PDO $db): void {
                CASE WHEN i.expiry_date IS NOT NULL THEN julianday(i.expiry_date) - julianday('now') ELSE 999 END AS days_left
         FROM inventory i
         JOIN products p ON p.id = i.product_id
-        WHERE i.quantity > 0
+        WHERE i.quantity > 0 AND COALESCE(i.prepared_food, 0) = 0
         ORDER BY days_left ASC
     ");
     $items = $stmt->fetchAll(PDO::FETCH_ASSOC);
@@ -8301,6 +9142,11 @@ PROMPT;
 
     if ($recipe && !empty($recipe['title'])) {
         $removed = recipePostProcessGenerated($db, $recipe, $items);
+        $recipe['language'] = $recipe['language'] ?? $lang;
+        recipeCatalogPersistGenerated($db, $recipe, [
+            'language' => $lang,
+            'locale' => $lang,
+        ]);
 
         EverLog::info('recipe generated', ['title' => $recipe['title'] ?? '?', 'meal' => $mealType, 'persons' => $persons, 'ingredients' => count($recipe['ingredients'] ?? []), 'shopping_suggestions' => count($removed)]);
         echo json_encode(['success' => true, 'recipe' => $recipe]);
@@ -8332,7 +9178,7 @@ function chatToRecipe(PDO $db): void {
                CASE WHEN i.expiry_date IS NOT NULL THEN julianday(i.expiry_date) - julianday('now') ELSE 999 END AS days_left
         FROM inventory i
         JOIN products p ON p.id = i.product_id
-        WHERE i.quantity > 0
+        WHERE i.quantity > 0 AND COALESCE(i.prepared_food, 0) = 0
         ORDER BY days_left ASC
     ");
     $items = $stmt->fetchAll(PDO::FETCH_ASSOC);
@@ -8400,6 +9246,11 @@ PROMPT;
     recipeApplyStockHintsToRecipe($db, $recipe);
     $removed = recipeEnforcePantryOnly($recipe);
     recipeAttachShoppingSuggestions($recipe, $removed);
+    $recipe['language'] = $recipe['language'] ?? $lang;
+    recipeCatalogPersistGenerated($db, $recipe, [
+        'language' => $lang,
+        'locale' => $lang,
+    ]);
 
     echo json_encode(['success' => true, 'recipe' => $recipe]);
 }
@@ -8429,11 +9280,27 @@ function recipeFromIngredient(PDO $db): void {
                CASE WHEN i.expiry_date IS NOT NULL THEN julianday(i.expiry_date) - julianday('now') ELSE 999 END AS days_left
         FROM inventory i
         JOIN products p ON p.id = i.product_id
-        WHERE i.quantity > 0
+        WHERE i.quantity > 0 AND COALESCE(i.prepared_food, 0) = 0
         ORDER BY days_left ASC
     ");
     $items = $stmt->fetchAll(PDO::FETCH_ASSOC);
     recipeAttachCanonicalAliases($db, $items);
+
+    $eligibleIngredient = false;
+    foreach ($items as $item) {
+        $score = recipeScorePantryMatch($ingredientName, (string)$item['name']);
+        foreach (($item['canonical_aliases'] ?? []) as $alias) {
+            $score = max($score, recipeScorePantryMatch($ingredientName, (string)$alias));
+        }
+        if ($score >= RECIPE_PANTRY_MIN_MATCH_SCORE) {
+            $eligibleIngredient = true;
+            break;
+        }
+    }
+    if (!$eligibleIngredient) {
+        echo json_encode(['success' => false, 'error' => 'ingredient_not_available']);
+        return;
+    }
 
     // Build compact pantry text (same logic as generateRecipe)
     $ingredientLines = [];
@@ -8513,6 +9380,11 @@ PROMPT;
     }
 
     recipePostProcessGenerated($db, $recipe, $items);
+    $recipe['language'] = $recipe['language'] ?? $lang;
+    recipeCatalogPersistGenerated($db, $recipe, [
+        'language' => $lang,
+        'locale' => $lang,
+    ]);
 
     EverLog::info('recipe_from_ingredient ok', ['ingredient' => $ingredientName, 'title' => $recipe['title'] ?? '?', 'persons' => $persons]);
     echo json_encode(['success' => true, 'recipe' => $recipe]);
@@ -8567,7 +9439,7 @@ function generateRecipeStream(PDO $db): void {
                CASE WHEN i.expiry_date IS NOT NULL THEN julianday(i.expiry_date) - julianday('now') ELSE 999 END AS days_left
         FROM inventory i
         JOIN products p ON p.id = i.product_id
-        WHERE i.quantity > 0
+        WHERE i.quantity > 0 AND COALESCE(i.prepared_food, 0) = 0
         ORDER BY days_left ASC
     ");
     $items = $stmt->fetchAll(PDO::FETCH_ASSOC);
@@ -8958,6 +9830,11 @@ PROMPT;
         }, $recipe['steps']));
     }
     recipePostProcessGenerated($db, $recipe, $items);
+    $recipe['language'] = $recipe['language'] ?? $lang;
+    recipeCatalogPersistGenerated($db, $recipe, [
+        'language' => $lang,
+        'locale' => $lang,
+    ]);
 
     $send('status', ['step' => 4, 'message' => '✅ Ricetta pronta!']);
     $send('recipe', ['recipe' => $recipe]);
@@ -13262,7 +14139,7 @@ function appSettingsSave(PDO $db): void {
 
 function recipesList(PDO $db): void {
     $limit = min(intval($_GET['limit'] ?? 60), 200);
-    $rows = $db->query("SELECT id, date, meal, recipe_json, created_at, is_favorite FROM recipes ORDER BY is_favorite DESC, date DESC, created_at DESC LIMIT {$limit}")->fetchAll();
+    $rows = $db->query("SELECT id, date, meal, recipe_json, created_at, is_favorite, catalog_recipe_id FROM recipes ORDER BY is_favorite DESC, date DESC, created_at DESC LIMIT {$limit}")->fetchAll();
     EverLog::debug('recipesList');
     $recipes = [];
     foreach ($rows as $row) {
@@ -13273,6 +14150,9 @@ function recipesList(PDO $db): void {
             'recipe'      => json_decode($row['recipe_json'], true),
             'savedAt'     => strtotime($row['created_at']) * 1000,
             'is_favorite' => (bool)$row['is_favorite'],
+            'catalog_recipe_id' => $row['catalog_recipe_id'] !== null
+                ? (int)$row['catalog_recipe_id']
+                : null,
         ];
     }
     echo json_encode(['success' => true, 'recipes' => $recipes]);
@@ -13280,17 +14160,73 @@ function recipesList(PDO $db): void {
 
 function recipeToggleFavorite(PDO $db): void {
     EverLog::info('recipeToggleFavorite');
-    $input = json_decode(file_get_contents('php://input'), true);
+    $input = (
+        defined('RECIPE_BACKEND_TEST_MODE')
+        && RECIPE_BACKEND_TEST_MODE
+        && isset($GLOBALS['LEGACY_RECIPE_FAVORITE_INPUT'])
+        && is_array($GLOBALS['LEGACY_RECIPE_FAVORITE_INPUT'])
+    )
+        ? $GLOBALS['LEGACY_RECIPE_FAVORITE_INPUT']
+        : json_decode(file_get_contents('php://input'), true);
     $id = intval($input['id'] ?? 0);
     if ($id <= 0) { echo json_encode(['error' => 'Invalid id']); return; }
-    $db->prepare("UPDATE recipes SET is_favorite = 1 - is_favorite WHERE id = ?")->execute([$id]);
-    $fav = (int)$db->query("SELECT is_favorite FROM recipes WHERE id = {$id}")->fetchColumn();
+    $db->beginTransaction();
+    try {
+        $read = $db->prepare("
+            SELECT is_favorite, catalog_recipe_id
+            FROM recipes
+            WHERE id = ?
+        ");
+        $read->execute([$id]);
+        $legacyState = $read->fetch(PDO::FETCH_ASSOC);
+        if (!$legacyState) {
+            $db->rollBack();
+            http_response_code(404);
+            echo json_encode(['error' => 'Recipe not found']);
+            return;
+        }
+        $fav = empty($legacyState['is_favorite']) ? 1 : 0;
+        $catalogRecipeId = (int)($legacyState['catalog_recipe_id'] ?? 0);
+        if ($catalogRecipeId > 0) {
+            if (recipeCatalogGetById($db, $catalogRecipeId) !== null) {
+                recipeCatalogSetFavorite($db, $catalogRecipeId, (bool)$fav);
+            } else {
+                $catalogRecipeId = 0;
+            }
+        }
+        if ($catalogRecipeId > 0) {
+            $db->prepare("
+                UPDATE recipes
+                SET is_favorite = ?
+                WHERE catalog_recipe_id = ?
+            ")->execute([$fav, $catalogRecipeId]);
+        } else {
+            $db->prepare("
+                UPDATE recipes
+                SET is_favorite = ?, catalog_recipe_id = NULL
+                WHERE id = ?
+            ")->execute([$fav, $id]);
+        }
+        $db->commit();
+    } catch (Throwable $e) {
+        if ($db->inTransaction()) {
+            $db->rollBack();
+        }
+        throw $e;
+    }
     echo json_encode(['success' => true, 'is_favorite' => (bool)$fav]);
 }
 
 function recipesSave(PDO $db): void {
     EverLog::info('recipesSave');
-    $input = json_decode(file_get_contents('php://input'), true);
+    $input = (
+        defined('RECIPE_BACKEND_TEST_MODE')
+        && RECIPE_BACKEND_TEST_MODE
+        && isset($GLOBALS['LEGACY_RECIPE_SAVE_INPUT'])
+        && is_array($GLOBALS['LEGACY_RECIPE_SAVE_INPUT'])
+    )
+        ? $GLOBALS['LEGACY_RECIPE_SAVE_INPUT']
+        : json_decode(file_get_contents('php://input'), true);
     $date = $input['date'] ?? date('Y-m-d');
     $meal = trim($input['meal'] ?? '') ?: 'libero';
     $recipe = $input['recipe'] ?? null;
@@ -13300,12 +14236,102 @@ function recipesSave(PDO $db): void {
         return;
     }
 
-    // UPSERT: one recipe per meal per day (last one wins)
-    $stmt = $db->prepare("INSERT INTO recipes (date, meal, recipe_json, created_at) VALUES (?, ?, ?, datetime('now'))
-                          ON CONFLICT(date, meal) DO UPDATE SET recipe_json = excluded.recipe_json, created_at = excluded.created_at");
-    $stmt->execute([$date, $meal, json_encode($recipe)]);
+    // Legacy slot remains one recipe per meal/day; normalized catalog preserves variants.
+    $catalogLock = recipeCatalogSaveLock();
+    try {
+        $db->beginTransaction();
+        $existingLegacyStmt = $db->prepare("
+            SELECT is_favorite, catalog_recipe_id, recipe_json
+            FROM recipes
+            WHERE date = ? AND meal = ?
+            LIMIT 1
+        ");
+        $existingLegacyStmt->execute([$date, $meal]);
+        $existingLegacy = $existingLegacyStmt->fetch(PDO::FETCH_ASSOC) ?: null;
+        $recipeLanguage = '';
+        foreach ([$recipe['language'] ?? null, $recipe['lang'] ?? null] as $candidate) {
+            if (
+                is_string($candidate)
+                && trim($candidate) !== ''
+                && recipeQuantityNormalizeLocale($candidate) !== 'und'
+            ) {
+                $recipeLanguage = trim($candidate);
+                break;
+            }
+        }
+        $recipeLocale = '';
+        foreach ([
+            $recipe['locale'] ?? null,
+            $recipe['language'] ?? null,
+            $recipe['lang'] ?? null,
+        ] as $candidate) {
+            if (
+                is_string($candidate)
+                && trim($candidate) !== ''
+                && recipeQuantityNormalizeLocale($candidate) !== 'und'
+            ) {
+                $recipeLocale = trim($candidate);
+                break;
+            }
+        }
+        $catalogMetadata = [
+            'connector' => 'manual',
+            'language' => $recipeLanguage !== '' ? $recipeLanguage : 'und',
+            'locale' => $recipeLocale !== '' ? $recipeLocale : 'und',
+        ];
+        $exactRecipeId = recipeCatalogFindExactContentRecipeId($db, $recipe, $catalogMetadata);
+        if ($exactRecipeId === null) {
+            $exactRecipeId = (int)recipeCatalogSaveVariant($db, $recipe, $catalogMetadata)['id'];
+        }
+        $catalogFavorite = !empty(recipeCatalogGetById($db, $exactRecipeId)['favorite']);
+        if (
+            $existingLegacy !== null
+            && (int)($existingLegacy['catalog_recipe_id'] ?? 0) === 0
+            && !empty($existingLegacy['is_favorite'])
+            && recipeCatalogBuildExactExternalId(
+                recipeCatalogNormalizeRecipe($db, json_decode(
+                    (string)$existingLegacy['recipe_json'],
+                    true
+                ) ?: [], $catalogMetadata)
+            ) === recipeCatalogBuildExactExternalId(
+                recipeCatalogNormalizeRecipe($db, $recipe, $catalogMetadata)
+            )
+        ) {
+            recipeCatalogSetFavorite($db, $exactRecipeId, true);
+            $catalogFavorite = true;
+        }
+        $stmt = $db->prepare("
+            INSERT INTO recipes (
+                date, meal, recipe_json, catalog_recipe_id, is_favorite, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, datetime('now'))
+            ON CONFLICT(date, meal) DO UPDATE SET
+                recipe_json = excluded.recipe_json,
+                catalog_recipe_id = excluded.catalog_recipe_id,
+                is_favorite = excluded.is_favorite,
+                created_at = excluded.created_at
+        ");
+        $stmt->execute([
+            $date,
+            $meal,
+            json_encode($recipe),
+            $exactRecipeId,
+            $catalogFavorite ? 1 : 0,
+        ]);
+        $legacyIdStmt = $db->prepare("SELECT id FROM recipes WHERE date = ? AND meal = ?");
+        $legacyIdStmt->execute([$date, $meal]);
+        $legacyLastInsertId = (int)$legacyIdStmt->fetchColumn();
+        $db->commit();
+    } catch (Throwable $e) {
+        if ($db->inTransaction()) {
+            $db->rollBack();
+        }
+        throw $e;
+    } finally {
+        recipeCatalogSaveUnlock($catalogLock);
+    }
 
-    echo json_encode(['success' => true, 'id' => $db->lastInsertId()]);
+    echo json_encode(['success' => true, 'id' => $legacyLastInsertId]);
 }
 
 function recipesDelete(PDO $db): void {

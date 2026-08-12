@@ -1,0 +1,305 @@
+slug,canonical_name,entity_kind,identity_role,active,reviewer,review_batch,rationale,source_citation
+alcoholic-beverage,Alcoholic beverage,ingredient,prepared_identity,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+almond,Almond,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+almonds,Almonds,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+animal-derived,Animal Derived,ingredient,structural_category,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit structural category review,frozen-eval-v3.11:ingredient_ontology_entities
+apple-juice,Apple Juice,prepared_food,prepared_identity,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+arborio-rice,Arborio rice,ingredient,identity_leaf,0,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+avocado,Avocado,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+bacon,Bacon,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+baguette,Baguette,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+bakery,Bakery,prepared_food,structural_category,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit structural category review,frozen-eval-v3.11:ingredient_ontology_entities
+baking-powder,Baking powder,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+baking-soda,Baking soda,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+banana,Banana,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+barbecue-sauce,Barbecue sauce,ingredient,prepared_identity,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+basil,Basil,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+bay-leaf,Bay Leaf,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+bean,Bean,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+beans,Beans,ingredient,identity_leaf,0,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+beef,Beef,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+beef-stock,Beef stock,ingredient,identity_leaf,0,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+bell-pepper,Bell Pepper,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+berry,Berry,ingredient,structural_category,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit structural category review,frozen-eval-v3.11:ingredient_ontology_entities
+beverage,Beverage,prepared_food,structural_category,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit structural category review,frozen-eval-v3.11:ingredient_ontology_entities
+bibimbap,Bibimbap,ingredient,composite_identity,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+bitters,Bitters,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+black-bean,Black Bean,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+black-bean-salad,Black bean salad,prepared_food,composite_identity,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+black-bean-sauce,Black bean sauce,ingredient,prepared_identity,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+black-beans,Black beans,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+blueberries,Blueberries,ingredient,identity_leaf,0,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+blueberry,Blueberry,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+bread,Bread,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+bread-crumbs,Bread crumbs,ingredient,identity_leaf,0,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+breadcrumbs,Breadcrumbs,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+brie,Brie,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+broccoli,Broccoli,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+brown-mustard,Brown mustard,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+brown-sugar,Brown sugar,ingredient,identity_leaf,0,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+buns,Buns,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+butter,Butter,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+buttermilk,Buttermilk,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+caesar-dressing,Caesar dressing,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+cake,Cake,ingredient,composite_identity,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+capsicum,Capsicum,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+cardamom,Cardamom,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+carrot,Carrot,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+cauliflower,Cauliflower,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+cayenne-pepper,Cayenne Pepper,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+celery,Celery,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+cereal,Cereal,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+cheddar,Cheddar,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+cheese,Cheese,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+cheese-soup,Cheese soup,composite_food,composite_identity,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+cherry,Cherry,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+cherry-pie,Cherry pie,ingredient,composite_identity,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+chicken,Chicken,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+chicken-breast,Chicken breast,ingredient,identity_leaf,0,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+chicken-sauce,Chicken sauce,ingredient,prepared_identity,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+chicken-stock,Chicken stock,ingredient,identity_leaf,0,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+chicken-stock-base,Chicken stock base,ingredient,identity_leaf,0,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+chili-garlic-sauce,Chili garlic sauce,ingredient,prepared_identity,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+chili-paste,Chili paste,ingredient,prepared_identity,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+chili-pepper,Chili pepper,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+chilli-pepper,Chilli Pepper,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+chimichurri-sauce,Chimichurri sauce,ingredient,prepared_identity,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+chips,Chips,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+chives,Chives,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+chocolate,Chocolate,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+cilantro,Cilantro,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+cinnamon,Cinnamon,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+clams,Clams,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+clove-spice,Clove,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+cocoa-powder,Cocoa Powder,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+coconut,Coconut,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+coconut-milk,Coconut milk,ingredient,prepared_identity,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+coffee,Coffee,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+coffee-creamer,Coffee creamer,ingredient,prepared_identity,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+coffee-pod,Coffee Pod,prepared_food,prepared_identity,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+composite-food,Composite Food,composite_food,structural_category,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit structural category review,frozen-eval-v3.11:ingredient_ontology_entities
+condensed-milk,Condensed milk,ingredient,prepared_identity,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+condiment,Condiment,prepared_food,structural_category,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit structural category review,frozen-eval-v3.11:ingredient_ontology_entities
+cookies,Cookies,ingredient,composite_identity,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+cooking-spray,Cooking Spray,prepared_food,prepared_identity,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+cooking-wine,Cooking wine,ingredient,prepared_identity,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+coriander,Coriander,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+coriander-seed,Coriander Seed,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+corn,Corn,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+corn-starch,Corn starch,ingredient,identity_leaf,0,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+cornstarch,Cornstarch,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+couscous,Couscous,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+cream,Cream,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+cream-cheese,Cream cheese,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+creamer,Creamer,ingredient,prepared_identity,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+creme-fraiche,Crème Fraîche,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+cucumber,Cucumber,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+cumin,Cumin,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+curry-paste,Curry paste,ingredient,prepared_identity,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+curry-powder,Curry Powder,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+dairy,Dairy,ingredient,structural_category,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit structural category review,frozen-eval-v3.11:ingredient_ontology_entities
+dessert,Dessert,composite_food,structural_category,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit structural category review,frozen-eval-v3.11:ingredient_ontology_entities
+dijon-mustard,Dijon mustard,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+dill,Dill,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+dip,Dip,ingredient,prepared_identity,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+duck,Duck,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+egg,Egg,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+egg-category,Egg Products,ingredient,structural_category,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit structural category review,frozen-eval-v3.11:ingredient_ontology_entities
+egg-white,Egg White,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+egg-whites,Egg whites,ingredient,identity_leaf,0,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+egg-yolk,Egg Yolk,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+eggs,Eggs,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+evaporated-milk,Evaporated milk,ingredient,prepared_identity,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+feta,Feta,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+fish-sauce,Fish Sauce,ingredient,prepared_identity,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+flavoring,Flavoring,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+flour,Flour,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+flour-starch,Flour and Starch,ingredient,structural_category,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit structural category review,frozen-eval-v3.11:ingredient_ontology_entities
+foie-gras,Foie gras,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+food,Food,ingredient,structural_category,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit structural category review,frozen-eval-v3.11:ingredient_ontology_entities
+food-coloring,Food Coloring,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+fruit,Fruit,ingredient,structural_category,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit structural category review,frozen-eval-v3.11:ingredient_ontology_entities
+fruit-preserve,Fruit preserve,ingredient,prepared_identity,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+garam-masala,Garam Masala,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+garlic,Garlic,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+garlic-cloves,Garlic cloves,ingredient,identity_leaf,0,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+gelatin,Gelatin,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+ghee,Ghee,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+ginger,Ginger,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+grain,Grain,ingredient,structural_category,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit structural category review,frozen-eval-v3.11:ingredient_ontology_entities
+green-onion,Green onion,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+grits,Grits,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+guacamole,Guacamole,ingredient,prepared_identity,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+half-and-half,Half and half,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+hazelnut,Hazelnut,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+heavy-cream,Heavy cream,ingredient,identity_leaf,0,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+herb,Herb,ingredient,structural_category,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit structural category review,frozen-eval-v3.11:ingredient_ontology_entities
+hoisin-sauce,Hoisin sauce,ingredient,prepared_identity,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+honey,Honey,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+ingredient,Ingredient,ingredient,structural_category,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit structural category review,frozen-eval-v3.11:ingredient_ontology_entities
+jack-fruit,Jack Fruit,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+jalapeno-pepper,Jalapeño Pepper,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+jasmine-rice,Jasmine rice,ingredient,identity_leaf,0,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+juice,Juice,ingredient,prepared_identity,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+ketchup,Ketchup,ingredient,prepared_identity,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+leafy-vegetable,Leafy vegetable,ingredient,structural_category,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit structural category review,frozen-eval-v3.11:ingredient_ontology_entities
+leavening,Leavening,ingredient,structural_category,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit structural category review,frozen-eval-v3.11:ingredient_ontology_entities
+leavening-agent,Leavening agent,ingredient,structural_category,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit structural category review,frozen-eval-v3.11:ingredient_ontology_entities
+leek,Leek,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+legume,Legume,ingredient,structural_category,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit structural category review,frozen-eval-v3.11:ingredient_ontology_entities
+legumes,Legumes,ingredient,identity_leaf,0,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+lemon,Lemon,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+lemon-juice,Lemon Juice,prepared_food,prepared_identity,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+lime,Lime,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+lime-juice,Lime Juice,prepared_food,prepared_identity,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+mango,Mango,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+maple-syrup,Maple syrup,ingredient,prepared_identity,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+marinara-sauce,Marinara sauce,ingredient,prepared_identity,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+marry-me-chicken,Marry Me Chicken,ingredient,composite_identity,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+marry-me-chicken-sauce,Marry Me Chicken Sauce,ingredient,prepared_identity,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+mascarpone,Mascarpone,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+mayonnaise,Mayonnaise,ingredient,prepared_identity,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+meal,Meal,composite_food,structural_category,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit structural category review,frozen-eval-v3.11:ingredient_ontology_entities
+meat,Meat,ingredient,structural_category,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit structural category review,frozen-eval-v3.11:ingredient_ontology_entities
+meat-alternative,Meat alternative,ingredient,structural_category,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit structural category review,frozen-eval-v3.11:ingredient_ontology_entities
+mexican-salsa,Mexican Salsa,prepared_food,prepared_identity,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+milk,Milk,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+milk-alternative,Milk alternative,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+mint,Mint,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+miso,Miso,ingredient,prepared_identity,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+miso-soup,Miso soup,composite_food,composite_identity,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+molasses,Molasses,ingredient,prepared_identity,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+mozzarella,Mozzarella,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+multi-ingredient-soup,Multi-ingredient soup,composite_food,composite_identity,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+mushroom,Mushroom,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+mustard,Mustard,ingredient,prepared_identity,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+nachos,Nachos,ingredient,composite_identity,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+noodle,Noodle,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+noodle-soup,Noodle Soup,composite_food,composite_identity,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+noodles,Noodles,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+nut,Nut,ingredient,structural_category,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit structural category review,frozen-eval-v3.11:ingredient_ontology_entities
+nut-butter,Nut butter,ingredient,prepared_identity,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+nutmeg,Nutmeg,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+nuts,Nuts,ingredient,structural_category,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit structural category review,frozen-eval-v3.11:ingredient_ontology_entities
+oats,Oats,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+oil,Oil,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+oil-fat,Oil and Fat,ingredient,structural_category,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit structural category review,frozen-eval-v3.11:ingredient_ontology_entities
+olive,Olive,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+olives,Olives,ingredient,identity_leaf,0,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+onion,Onion,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+orange,Orange,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+orange-juice,Orange Juice,prepared_food,prepared_identity,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+oregano,Oregano,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+oyster,Oyster,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+oyster-sauce,Oyster sauce,ingredient,prepared_identity,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+paprika,Paprika,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+parmesan,Parmesan,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+parsley,Parsley,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+passata,Passata,prepared_food,prepared_identity,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+pasta,Pasta,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+peanut,Peanut,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+peanut-butter,Peanut butter,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+peanuts,Peanuts,ingredient,identity_leaf,0,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+pear,Pear,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+pear-marmalade,Pear marmalade,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+pepper,Pepper,ingredient,identity_leaf,0,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+pepper-jack-cheese,Pepper jack cheese,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+peppercorn,Peppercorn,ingredient,identity_leaf,0,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+pepperoni-pizza,Pepperoni pizza,composite_food,composite_identity,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+pickle-chips,Pickle chips,ingredient,prepared_identity,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+pickled-jalapeno-peppers,Pickled jalapeño peppers,ingredient,identity_leaf,0,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+pickled-peppers,Pickled peppers,ingredient,prepared_identity,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+pickles,Pickles,ingredient,prepared_identity,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+pie,Pie,ingredient,composite_identity,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+pine-nut,Pine Nut,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+pineapple,Pineapple,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+pineapple-juice,Pineapple Juice,prepared_food,prepared_identity,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+piper-pepper,Piper Pepper,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+pizza,Pizza,composite_food,structural_category,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit structural category review,frozen-eval-v3.11:ingredient_ontology_entities
+plant-based-burger-patty,Plant-based burger patty,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+plant-based-meat-alternative,Plant-based meat alternative,ingredient,structural_category,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit structural category review,frozen-eval-v3.11:ingredient_ontology_entities
+plant-based-milk,Plant-based milk,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+plant-derived,Plant Derived,ingredient,structural_category,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit structural category review,frozen-eval-v3.11:ingredient_ontology_entities
+pork,Pork,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+potato,Potato,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+poultry,Poultry,ingredient,structural_category,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit structural category review,frozen-eval-v3.11:ingredient_ontology_entities
+prepared-food,Prepared Food,prepared_food,structural_category,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit structural category review,frozen-eval-v3.11:ingredient_ontology_entities
+prepared-meal,Prepared meal,prepared_food,structural_category,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit structural category review,frozen-eval-v3.11:ingredient_ontology_entities
+quinoa,Quinoa,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+ranch-dressing,Ranch Dressing,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+rice,Rice,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+rosemary,Rosemary,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+salad,Salad,composite_food,structural_category,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit structural category review,frozen-eval-v3.11:ingredient_ontology_entities
+salad-dressing,Salad dressing,prepared_food,prepared_identity,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+salsa,Salsa,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+salsa-verde,Salsa Verde,prepared_food,prepared_identity,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+salt,Salt,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+santa-fe-salad,Santa Fe Salad,prepared_food,composite_identity,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+sauce,Sauce,prepared_food,structural_category,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit structural category review,frozen-eval-v3.11:ingredient_ontology_entities
+seafood,Seafood,ingredient,structural_category,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit structural category review,frozen-eval-v3.11:ingredient_ontology_entities
+seasoning,Seasoning,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+seasoning-blend,Seasoning blend,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+seed,Seed,ingredient,structural_category,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit structural category review,frozen-eval-v3.11:ingredient_ontology_entities
+sesame,Sesame,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+sesame-oil,Sesame oil,ingredient,identity_leaf,0,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+sesame-seed,Sesame Seed,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+sesame-seeds,Sesame seeds,ingredient,identity_leaf,0,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+shallot,Shallot,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+shellfish,Shellfish,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+smoke-roasted-salmon-bites,Smoke Roasted Salmon Bites,ingredient,composite_identity,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+snack,Snack,prepared_food,structural_category,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit structural category review,frozen-eval-v3.11:ingredient_ontology_entities
+soda,Soda,ingredient,prepared_identity,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+soup,Soup,composite_food,structural_category,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit structural category review,frozen-eval-v3.11:ingredient_ontology_entities
+sour-cream,Sour cream,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+soy-sauce,Soy sauce,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+soybean,Soybean,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+spice,Spice,ingredient,structural_category,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit structural category review,frozen-eval-v3.11:ingredient_ontology_entities
+spicy-brown-mustard,Spicy brown mustard,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+spinach,Spinach,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+sports-drink,Sports drink,ingredient,prepared_identity,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+spread,Spread,ingredient,prepared_identity,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+spring-onion,Spring Onion,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+staple,Staple,ingredient,staple_class,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+starch,Starch,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+steak-sauce,Steak sauce,ingredient,prepared_identity,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+stock,Stock,prepared_food,prepared_identity,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+stock-base,Stock base,ingredient,prepared_identity,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+stock-broth,Stock and Broth,prepared_food,structural_category,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit structural category review,frozen-eval-v3.11:ingredient_ontology_entities
+stock-paste,Stock Paste,ingredient,prepared_identity,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+strawberry,Strawberry,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+sugar,Sugar,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+sun-dried-tomatoes,Sun-dried tomatoes,ingredient,identity_leaf,0,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+sunflower-seed,Sunflower Seed,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+sweet-potato,Sweet Potato,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+sweetener,Sweetener,ingredient,structural_category,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit structural category review,frozen-eval-v3.11:ingredient_ontology_entities
+swiss-cheese,Swiss cheese,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+syrup,Syrup,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+tacos,Tacos,ingredient,composite_identity,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+tahini,Tahini,prepared_food,prepared_identity,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+tamarind,Tamarind,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+thickener,Thickener,ingredient,structural_category,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit structural category review,frozen-eval-v3.11:ingredient_ontology_entities
+thyme,Thyme,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+tomato,Tomato,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+tomato-paste,Tomato Paste,ingredient,prepared_identity,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+tomato-sauce,Tomato sauce,ingredient,prepared_identity,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+tortilla-chips,Tortilla chips,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+tree-nuts,Tree nuts,ingredient,structural_category,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit structural category review,frozen-eval-v3.11:ingredient_ontology_entities
+turmeric,Turmeric,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+vanilla,Vanilla,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+vanilla-extract,Vanilla Extract,ingredient,prepared_identity,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+vanilla-sugar,Vanilla Sugar,composite_food,composite_identity,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+vegetable,Vegetable,ingredient,structural_category,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit structural category review,frozen-eval-v3.11:ingredient_ontology_entities
+vegetable-soup,Vegetable soup,composite_food,composite_identity,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+vegetables,Vegetables,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+vinegar,Vinegar,ingredient,prepared_identity,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+walnut,Walnut,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+walnuts,Walnuts,ingredient,identity_leaf,0,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+water,Water,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+wheat,Wheat,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+white-chocolate,White chocolate,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+wine,Wine,ingredient,prepared_identity,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+worcestershire-sauce,Worcestershire Sauce,ingredient,prepared_identity,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+yeast,Yeast,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+yellow-mustard,Yellow mustard,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+yogurt,Yogurt,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities
+zucchini,Zucchini,ingredient,identity_leaf,1,operator-corrective-review-v2,full-ontology-resolution-v2,Explicit identity eligibility review,frozen-eval-v3.11:ingredient_ontology_entities

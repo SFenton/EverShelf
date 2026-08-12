@@ -3,6 +3,50 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
+val signingStoreFile =
+    providers.gradleProperty("EVERSHELF_SIGNING_STORE_FILE").orNull
+        ?: System.getenv("EVERSHELF_SIGNING_STORE_FILE")
+val signingStorePassword =
+    providers.gradleProperty("EVERSHELF_SIGNING_STORE_PASSWORD").orNull
+        ?: System.getenv("EVERSHELF_SIGNING_STORE_PASSWORD")
+val signingKeyAlias =
+    providers.gradleProperty("EVERSHELF_SIGNING_KEY_ALIAS").orNull
+        ?: System.getenv("EVERSHELF_SIGNING_KEY_ALIAS")
+val signingKeyPassword =
+    providers.gradleProperty("EVERSHELF_SIGNING_KEY_PASSWORD").orNull
+        ?: System.getenv("EVERSHELF_SIGNING_KEY_PASSWORD")
+val releaseSigningConfigured = listOf(
+    signingStoreFile,
+    signingStorePassword,
+    signingKeyAlias,
+    signingKeyPassword,
+).all { !it.isNullOrBlank() }
+
+if (
+    gradle.startParameter.taskNames.any {
+        it.contains("release", ignoreCase = true)
+    } && !releaseSigningConfigured
+) {
+    throw GradleException(
+        "Release signing requires the EVERSHELF_SIGNING_* Gradle properties " +
+            "or environment variables."
+    )
+}
+
+gradle.taskGraph.whenReady { graph ->
+    if (
+        !releaseSigningConfigured
+        && graph.allTasks.any {
+            it.name.contains("release", ignoreCase = true)
+        }
+    ) {
+        throw GradleException(
+            "Release signing requires the EVERSHELF_SIGNING_* Gradle " +
+                "properties or environment variables."
+        )
+    }
+}
+
 android {
     namespace = "it.dadaloop.evershelf.kiosk"
     compileSdk = 35
@@ -16,23 +60,28 @@ android {
     }
 
     signingConfigs {
-        // Project keystore — same on every machine so OTA updates always work.
-        create("project") {
-            storeFile = file("../evershelf.jks")
-            storePassword = "evershelf123"
-            keyAlias = "evershelf"
-            keyPassword = "evershelf123"
+        if (releaseSigningConfigured) {
+            create("externalRelease") {
+                storeFile = file(signingStoreFile!!)
+                storePassword = signingStorePassword
+                keyAlias = signingKeyAlias
+                keyPassword = signingKeyPassword
+            }
         }
     }
 
     buildTypes {
         debug {
-            signingConfig = signingConfigs.getByName("project")
+            // Use Android's standard per-machine debug signing key.
         }
         release {
             isMinifyEnabled = false
-            signingConfig = signingConfigs.getByName("project")
-            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"))
+            if (releaseSigningConfigured) {
+                signingConfig = signingConfigs.getByName("externalRelease")
+            }
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt")
+            )
         }
     }
 

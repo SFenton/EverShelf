@@ -1,0 +1,17 @@
+child_slug,previous_parent_slug,rationale
+almonds,tree-nuts,Confirmed legacy primary edge lost by prior canonicalization
+beef-stock,stock,Confirmed legacy primary edge lost by prior canonicalization
+black-beans,beans,Confirmed legacy primary edge lost by prior canonicalization
+blueberries,berry,Confirmed legacy primary edge lost by prior canonicalization
+bread-crumbs,bread,Confirmed legacy primary edge lost by prior canonicalization
+chicken-stock,stock,Confirmed legacy primary edge lost by prior canonicalization
+chicken-stock-base,stock-base,Confirmed legacy primary edge lost by prior canonicalization
+cilantro,herb,Confirmed legacy primary edge lost by prior canonicalization
+egg-whites,eggs,Confirmed legacy primary edge lost by prior canonicalization
+garlic-cloves,garlic,Confirmed legacy primary edge lost by prior canonicalization
+green-onion,onion,Confirmed legacy primary edge lost by prior canonicalization
+legumes,nuts,Confirmed invalid legacy edge lost by prior canonicalization
+olives,vegetable,Confirmed legacy primary edge lost by prior canonicalization
+peanuts,legumes,Confirmed legacy primary edge lost by prior canonicalization
+walnuts,tree-nuts,Confirmed legacy primary edge lost by prior canonicalization
+jalapeno-pepper,pickled-peppers,Confirmed copied rebuild parent change requiring correction

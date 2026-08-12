@@ -80,6 +80,88 @@ Tap **🍳 Recipes** → **Generate Recipe** to get a recipe using:
 
 Recipes stream live via Server-Sent Events so results appear as they are generated.
 
+### Recipe Discovery and Search
+
+The Recipes page also maintains a local catalog:
+
+- Search recipe titles and ingredient names with SQLite FTS5
+- Rank by pantry coverage or by ingredients expiring soon
+- Browse compact 50-card pages with independent availability/expiry weights,
+  minimum coverage filters, alphabetical sorting, and snapshot-bound cursors
+- Fill a deterministic five-page recommendation carousel whose requested size
+  scales with the client layout while preserving availability-led, expiry-led,
+  and relevant fallback proportions
+- Use a continuous expiry curve for every dated ingredient; the ranking is not limited to the dashboard's 3-day alert cutoff
+- Match specific products through the canonical taxonomy (for example chicken thigh → chicken → poultry)
+- Explain exact, descendant, ancestor, missing, and expiry matches
+- Preserve source variants rather than destructively merging similar recipes
+- Open a bounded, source-agnostic recipe detail projection with General facts,
+  ordered inventory-aware ingredients, deterministic source-derived display labels,
+  additive named ingredient topology/provider metadata, optional authorized local instruction groups,
+  secondary identity-safe mapping hints, user/freshness state, and explicit capabilities
+- Add selected missing ingredients idempotently to EverShelf's internal shopping list;
+  inventory is rechecked at mutation time, uncertain items remain ineligible, broad
+  taxonomy rules cannot rename/dedupe groceries, and Home Assistant is never called directly
+- Keep local results available when every remote connector is offline
+- Keep remote Cookidoo hydration policy-disabled while preserving local/cached recipe search
+
+Generated recipes are persisted automatically. Prepared-food inventory rows and
+already-expired stock are excluded from automatic suggestions. Inventory matching
+is materialized into atomically activated score revisions so empty and broad
+queries remain bounded as the catalog grows.
+
+### Faceted Ingredient Ontology v3
+
+- Versioned base entities, locale labels, a cycle-free primary `is_a` spine,
+  reviewed typed relations, and closed defining facets
+- Complete, isolated mapping assertions for products plus legacy/source recipe rows
+- Exact multilingual staple aliases without prefix false positives
+- Attribute-aware identity that distinguishes powder/fresh, sliced/block/shredded,
+  sugar refinements, chicken cuts/bone/skin, vinegar varieties, and composites
+- Staged Gemini 3.5 Flash proposals with deterministic validation and no auto-write
+- Full materialized shadow scores and exhaustive current-vs-v3 reports
+- Write-reserved one-pointer activation, an eight-ancestor stale-safe rollback
+  window, bounded revision retention, stale-active request serving, and
+  model-aware scheduled replacement derived from the active score revision
+- Source-only fingerprints plus separate scoring-content hashes, audited proposal
+  lifecycle events with safe unapplied revert, non-vacuous frozen-gold
+  precision/recall gates, complete compatible-lot quantity/minimum-expiry
+  aggregation, and optional-aware explanations
+
+The feature is disabled and not activated by default. Lower
+cookability after removing broad false positives is an expected correctness result.
+
+### Experimental Cookidoo Metadata Discovery
+
+Existing isolated pilot artifacts use the bounded `metadata-v2` storage contract:
+
+- Recipe title
+- Yield quantity and unit when both are available
+- Active and total time in seconds, difficulty, and one primary category label
+- Provider-listed additional equipment/utensil nouns
+- Ordered ingredient names, including repeated positions
+- Short ingredient group titles plus group/within-group ordinals
+- Provider ingredient/default-title/unit references
+- Provider-declared optional booleans and shopping-category references
+- Display-only exact/range values, unit, and bounded source amount text
+- Remote image URL
+- Cookidoo URL and opaque recipe ID
+- Locale and retrieval/staleness timestamps
+
+Cookidoo source amounts are stored separately from ranking quantity/unit fields and
+never alter coverage, cookability, or shopping-list quantity. Official instructions,
+notes/tips, category or collection descriptions, nutrition, tags, preparation prose,
+Guided Cooking data, raw payloads, and image files are not stored or returned.
+Ingredient `preparation` is never accessed. The Instructions capability is an
+external Cookidoo link with an empty step list and no group property; local/manual/generated
+recipes may use bounded group labels backed by their own structured data.
+
+Current repository policy disables provider detail hydration because the available
+response co-transports official steps. Bridge search/direct metadata fail locally
+before provider calls; discovery and backfill enqueue are refused; legacy queued
+jobs are skipped without connector accounting. Existing cached rows remain readable,
+including external canonical/instructions links. No full backfill is authorized.
+
 ### AI Chat Assistant
 
 Open **💬 Chat** to ask questions like:

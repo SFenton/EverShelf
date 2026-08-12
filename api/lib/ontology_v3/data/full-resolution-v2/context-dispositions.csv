@@ -1,0 +1,3 @@
+normalized_label,language,required_cohort,required_evidence_kind,required_evidence_key,disposition_code,meaning_entity_slug,meaning_json,reviewer,review_batch,rationale,source_citation
+legume,ro,ro,reviewed_context,ro-legume-vegetable,D3,vegetable,"{""interpretation"":""generic vegetable wording, not pulse""}",operator-corrective-review-v2,full-ontology-resolution-v2,Reviewed Romanian contextual interpretation,corrective request blocker 1/6
+legumes,pt,pt,reviewed_context,pt-legumes-vegetable,D3,vegetable,"{""interpretation"":""generic vegetable wording, not pulse""}",operator-corrective-review-v2,full-ontology-resolution-v2,Reviewed Portuguese contextual interpretation,corrective request blocker 1/6
