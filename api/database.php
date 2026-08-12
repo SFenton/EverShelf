@@ -476,6 +476,45 @@ function migratePreparedFoodAggregateSemantics(PDO $db): void {
     }
 }
 
+function databaseAddColumnIfMissing(
+    PDO $db,
+    string $table,
+    string $column,
+    string $definition
+): bool {
+    foreach ([$table, $column] as $identifier) {
+        if (!preg_match('/^[A-Za-z_][A-Za-z0-9_]*$/', $identifier)) {
+            throw new InvalidArgumentException(
+                'Invalid database migration identifier'
+            );
+        }
+    }
+    $columns = array_column(
+        $db->query("PRAGMA table_info({$table})")
+            ->fetchAll(PDO::FETCH_ASSOC),
+        'name'
+    );
+    if (in_array($column, $columns, true)) {
+        return false;
+    }
+    try {
+        $db->exec(
+            "ALTER TABLE {$table} ADD COLUMN {$column} {$definition}"
+        );
+        return true;
+    } catch (PDOException $e) {
+        if (
+            str_contains(
+                strtolower($e->getMessage()),
+                'duplicate column'
+            )
+        ) {
+            return false;
+        }
+        throw $e;
+    }
+}
+
 function migrateDB(PDO $db): void {
     // Guard: if core tables don't exist yet (e.g. DB file present but empty / partial init),
     // run initializeDB first so all tables are created, then return — no ALTER TABLE needed.
@@ -646,13 +685,20 @@ function migrateDB(PDO $db): void {
     // Add vacuum_sealed column to inventory if missing
     $invCols = $db->query("PRAGMA table_info(inventory)")->fetchAll();
     $invColNames = array_column($invCols, 'name');
-    if (!in_array('vacuum_sealed', $invColNames)) {
-        $db->exec("ALTER TABLE inventory ADD COLUMN vacuum_sealed INTEGER DEFAULT 0");
-    }
+    databaseAddColumnIfMissing(
+        $db,
+        'inventory',
+        'vacuum_sealed',
+        'INTEGER DEFAULT 0'
+    );
 
     // Add opened_at column to inventory if missing
-    if (!in_array('opened_at', $invColNames)) {
-        $db->exec("ALTER TABLE inventory ADD COLUMN opened_at DATETIME DEFAULT NULL");
+    if (databaseAddColumnIfMissing(
+        $db,
+        'inventory',
+        'opened_at',
+        'DATETIME DEFAULT NULL'
+    )) {
         // Backfill: detect already-opened fridge items and set opened_at.
         // Only frigo items — pantry/freezer fractional quantities don't imply opened.
         backfillOpenedItems($db);
@@ -680,32 +726,23 @@ function migrateDB(PDO $db): void {
     // Add undone column to transactions if missing
     $txCols = $db->query("PRAGMA table_info(transactions)")->fetchAll();
     $txColNames = array_column($txCols, 'name');
-    if (!in_array('undone', $txColNames)) {
-        $db->exec("ALTER TABLE transactions ADD COLUMN undone INTEGER DEFAULT 0");
-    }
-    if (!in_array('inventory_id', $txColNames, true)) {
-        $db->exec("ALTER TABLE transactions ADD COLUMN inventory_id INTEGER DEFAULT NULL");
-    }
-    if (!in_array('prepared_food', $txColNames, true)) {
-        $db->exec("ALTER TABLE transactions ADD COLUMN prepared_food INTEGER DEFAULT NULL");
-    }
-    if (!in_array('inventory_expiry_date', $txColNames, true)) {
-        $db->exec("ALTER TABLE transactions ADD COLUMN inventory_expiry_date DATE DEFAULT NULL");
-    }
-    if (!in_array('inventory_expiry_user_set', $txColNames, true)) {
-        $db->exec("ALTER TABLE transactions ADD COLUMN inventory_expiry_user_set INTEGER DEFAULT NULL");
-    }
-    if (!in_array('inventory_vacuum_sealed', $txColNames, true)) {
-        $db->exec("ALTER TABLE transactions ADD COLUMN inventory_vacuum_sealed INTEGER DEFAULT NULL");
-    }
-    if (!in_array('inventory_opened_at', $txColNames, true)) {
-        $db->exec("ALTER TABLE transactions ADD COLUMN inventory_opened_at DATETIME DEFAULT NULL");
-    }
-    if (!in_array('accounting_only', $txColNames, true)) {
-        $db->exec("ALTER TABLE transactions ADD COLUMN accounting_only INTEGER NOT NULL DEFAULT 0");
-    }
-    if (!in_array('undo_safe', $txColNames, true)) {
-        $db->exec("ALTER TABLE transactions ADD COLUMN undo_safe INTEGER NOT NULL DEFAULT 1");
+    foreach ([
+        ['undone', 'INTEGER DEFAULT 0'],
+        ['inventory_id', 'INTEGER DEFAULT NULL'],
+        ['prepared_food', 'INTEGER DEFAULT NULL'],
+        ['inventory_expiry_date', 'DATE DEFAULT NULL'],
+        ['inventory_expiry_user_set', 'INTEGER DEFAULT NULL'],
+        ['inventory_vacuum_sealed', 'INTEGER DEFAULT NULL'],
+        ['inventory_opened_at', 'DATETIME DEFAULT NULL'],
+        ['accounting_only', 'INTEGER NOT NULL DEFAULT 0'],
+        ['undo_safe', 'INTEGER NOT NULL DEFAULT 1'],
+    ] as [$column, $definition]) {
+        databaseAddColumnIfMissing(
+            $db,
+            'transactions',
+            $column,
+            $definition
+        );
     }
 
     // Ensure composite indexes exist (added in v1.7.5 for performance)
@@ -729,13 +766,18 @@ function migrateDB(PDO $db): void {
         ");
         $db->exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_shopping_list_name ON shopping_list(lower(name))");
     }
-    $shopCols = array_column($db->query("PRAGMA table_info(shopping_list)")->fetchAll(PDO::FETCH_ASSOC), 'name');
-    if (!in_array('quantity', $shopCols, true)) {
-        $db->exec("ALTER TABLE shopping_list ADD COLUMN quantity REAL NOT NULL DEFAULT 1");
-    }
-    if (!in_array('canonical_key', $shopCols, true)) {
-        $db->exec("ALTER TABLE shopping_list ADD COLUMN canonical_key TEXT DEFAULT NULL");
-    }
+    databaseAddColumnIfMissing(
+        $db,
+        'shopping_list',
+        'quantity',
+        'REAL NOT NULL DEFAULT 1'
+    );
+    databaseAddColumnIfMissing(
+        $db,
+        'shopping_list',
+        'canonical_key',
+        'TEXT DEFAULT NULL'
+    );
     $db->exec("
         CREATE UNIQUE INDEX IF NOT EXISTS idx_shopping_list_canonical_key
         ON shopping_list(canonical_key)

@@ -78,6 +78,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   signing key and inline credentials, externalized release signing, excluded
   kiosk/Playwright artifacts from web images, and denied all HTTP access to
   maintenance scripts.
+- **Concurrent startup migrations** — Legacy column additions now tolerate a
+  second process winning the same SQLite migration race, preventing duplicate
+  column fatals when Apache and cron start together.
 - **Recipe queue leases and API IDs** — Stale exhausted leases now terminate
   with stable `lease_exhausted` state while only nonexhausted leases retry.
   When provider detail policy is disabled, every pending/retry/leased Cookidoo
