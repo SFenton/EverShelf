@@ -239,13 +239,15 @@ $stmt = $db->prepare("
                 AND other_origin.connector <> 'cookidoo'
           )
     )
-    SELECT scoped.id, scoped.title, source.position,
+    SELECT scoped.id AS id, scoped.title AS title,
+           source.position AS position,
            source.name AS raw_text, source.normalized_name
     FROM scoped
     JOIN recipe_source_ingredients source
       ON source.recipe_id = scoped.id
     UNION ALL
-    SELECT scoped.id, scoped.title, ranking.position,
+    SELECT scoped.id AS id, scoped.title AS title,
+           ranking.position AS position,
            ranking.raw_text, ranking.normalized_name
     FROM scoped
     JOIN recipe_ingredients ranking
