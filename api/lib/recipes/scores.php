@@ -1792,6 +1792,7 @@ function recipeCatalogBrowseCte(
         ";
         $params[':locale'] = $criteria['locale'];
     }
+    $languageWhere = recipeCookidooLanguageVisibilitySql('c');
     $expiryWhere = '';
     if ($criteria['expiring_within_days'] !== null) {
         $expiryWhere = "
@@ -1875,6 +1876,7 @@ function recipeCatalogBrowseCte(
               {$expiryWhere}
               {$sourceWhere}
               {$localeWhere}
+              {$languageWhere}
         ),
         ranked AS (
             SELECT base.*,
@@ -2172,6 +2174,8 @@ function recipeCatalogCardsByIds(PDO $db, array $recipeIds): array {
         return [];
     }
     $placeholders = implode(',', array_fill(0, count($recipeIds), '?'));
+    $languageVisibility =
+        recipeCookidooLanguageVisibilitySql('c');
     $stmt = $db->prepare("
         SELECT c.id, COALESCE(cl.cluster_key, 'recipe:' || c.id) AS dedupe_key,
                c.title, c.image_url, c.primary_connector,
@@ -2187,6 +2191,7 @@ function recipeCatalogCardsByIds(PDO $db, array $recipeIds): array {
         FROM recipe_catalog c
         LEFT JOIN recipe_clusters cl ON cl.recipe_id = c.id
         WHERE c.id IN ({$placeholders}) AND c.deleted_at IS NULL
+        {$languageVisibility}
     ");
     $stmt->execute($recipeIds);
     $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);

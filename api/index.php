@@ -84,11 +84,13 @@ if (($_GET['action'] ?? '') === 'ha_info' && evershelfApiTokenRequired() && !eve
         'has_token'          => true,
         'api_token_required' => true,
         'api_version'        => 1,
-        'capabilities'       => [
+        'capabilities'       => array_values(array_filter([
             'recipe_catalog_v2',
             'recipe_detail_v1',
             'recipe_grocery_v1',
-        ],
+            'recipe_ingredient_feedback_v1',
+            'recipe_ingredient_feedback_v2',
+        ])),
         'items_count'        => null,
     ], JSON_UNESCAPED_UNICODE);
     exit;
@@ -693,6 +695,10 @@ function checkRateLimit(string $action): void {
         'recipe_catalog_search', 'recipe_catalog_get', 'recipe_catalog_suggest',
         'recipe_catalog_recommendations', 'recipe_catalog_detail',
         'recipe_catalog_grocery_add',
+        'recipe_catalog_ingredient_override',
+        'recipe_catalog_identity_feedback',
+        'recipe_catalog_ingredient_decision',
+        'recipe_catalog_planner_add',
         'recipe_jobs_status', 'recipe_connectors',
         'recipe_catalog_save', 'recipe_catalog_delete', 'recipe_catalog_favorite',
     ];
@@ -791,6 +797,9 @@ $_writeActions = [
     'dismiss_anomaly','save_settings',
     'recipe_catalog_save','recipe_catalog_delete','recipe_catalog_favorite',
     'recipe_catalog_refresh','recipe_catalog_discover','recipe_catalog_grocery_add',
+    'recipe_catalog_ingredient_override','recipe_catalog_identity_feedback',
+    'recipe_catalog_ingredient_decision',
+    'recipe_catalog_planner_add',
 ]; // Kept as endpoint documentation; POST protection is intentionally default-on.
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $csrfHeader  = $_SERVER['HTTP_X_EVERSHELF_REQUEST'] ?? '';
@@ -1115,6 +1124,18 @@ try {
             break;
         case 'recipe_catalog_grocery_add':
             recipeCatalogApiGroceryAdd($db);
+            break;
+        case 'recipe_catalog_ingredient_override':
+            recipeCatalogApiIngredientOverride($db);
+            break;
+        case 'recipe_catalog_identity_feedback':
+            recipeCatalogApiIdentityFeedback($db);
+            break;
+        case 'recipe_catalog_ingredient_decision':
+            recipeCatalogApiIngredientDecision($db);
+            break;
+        case 'recipe_catalog_planner_add':
+            recipeCatalogApiPlannerAdd($db);
             break;
         case 'macro_stats':
             getMacroStats($db);
@@ -2195,11 +2216,16 @@ function haGetInfo(PDO $db): void {
         'has_token'   => evershelfApiTokenRequired(),
         'api_token_required' => evershelfApiTokenRequired(),
         'api_version' => 1,
-        'capabilities' => [
+        'capabilities' => array_values(array_filter([
             'recipe_catalog_v2',
             'recipe_detail_v1',
             'recipe_grocery_v1',
-        ],
+            'recipe_ingredient_feedback_v1',
+            'recipe_ingredient_feedback_v2',
+            recipePlannerCapabilityEnabled()
+                ? RECIPE_PLANNER_CAPABILITY
+                : null,
+        ])),
         'items_count' => $itemsCount,
     ], JSON_UNESCAPED_UNICODE);
 }
@@ -3865,7 +3891,14 @@ function listInventory(PDO $db): void {
 
 function addToInventory(PDO $db): void {
     EverLog::info('addToInventory');
-    $input = json_decode(file_get_contents('php://input'), true);
+    $input = (
+        defined('RECIPE_BACKEND_TEST_MODE')
+        && RECIPE_BACKEND_TEST_MODE
+        && isset($GLOBALS['INVENTORY_ADD_INPUT'])
+        && is_array($GLOBALS['INVENTORY_ADD_INPUT'])
+    )
+        ? $GLOBALS['INVENTORY_ADD_INPUT']
+        : json_decode(file_get_contents('php://input'), true);
     $productId = (int)($input['product_id'] ?? 0);
     $quantity = (float)($input['quantity'] ?? 1);
     $location = $input['location'] ?? 'dispensa';
@@ -3898,7 +3931,9 @@ function addToInventory(PDO $db): void {
         return;
     }
 
+    $transactionStarted = false;
     $db->exec('BEGIN IMMEDIATE');
+    $transactionStarted = true;
     try {
     // If a different unit was specified, update the product's unit.
     // NOTE: default_quantity is the PACKAGE SIZE, not the quantity being added —
@@ -4013,10 +4048,14 @@ function addToInventory(PDO $db): void {
     
     _syncProductPreparedFood($db, (int)$productId);
     recipeJobEnqueueInventoryChanged($db, (int)$productId, 'inventory_add');
-        $db->commit();
+        $db->exec('COMMIT');
+        $transactionStarted = false;
     } catch (Throwable $e) {
-        if ($db->inTransaction()) {
-            $db->rollBack();
+        if ($transactionStarted) {
+            try {
+                $db->exec('ROLLBACK');
+            } catch (Throwable $rollbackError) {
+            }
         }
         throw $e;
     }

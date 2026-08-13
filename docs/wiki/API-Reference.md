@@ -306,9 +306,12 @@ Return one normalized catalog recipe by `id`.
 Return the bounded source-agnostic `recipe_detail_v1` projection for a positive
 `id`. The DTO contains:
 
-- `source`, attribution, canonical URL, locale, per-origin metadata/topology schema
-  versions, and image URLs
-- `general` yield/unit, active/total seconds, difficulty, category, and equipment
+- `source`, attribution, canonical URL, locale, optional bounded provider
+  content-language evidence, per-origin metadata/topology schema versions, and
+  image URLs
+- `general` yield/unit; prep, cook, active, inactive/rest, and total seconds;
+  difficulty; category; supported/required devices; optional devices; and
+  additional equipment
 - ordered `ingredients` with stable keys, bounded `source_text`, deterministic
   `display_name` (also returned as legacy `name`), display amount facts, mapping
   IDs/labels, current `in_stock|missing|uncertain|staple` inventory states, and an
@@ -324,7 +327,8 @@ Return the bounded source-agnostic `recipe_detail_v1` projection for a positive
 - `instructions` (including optional local group-to-step-position references), user
   state, freshness, inventory/ranking/catalog revision, and
   capability enums (`general`, `ingredients`, `instructions`, `quantities`,
-  `grocery_add`), `score_preview` capability/diagnostics, and explicit active
+  `grocery_add`, `ingredient_feedback`, `ingredient_feedback_v2`, `planner`),
+  `score_preview` capability/diagnostics, and explicit active
   versus preview score/ontology IDs
 
 Cookidoo always returns:
@@ -348,6 +352,59 @@ ranking quantities. Provider `optional: true` is optional; false or null remains
 assumed required. Only exact, pantry-descendant, or normalized-name
 inventory relations can report `in_stock`; contains or broader evidence reports
 `uncertain`.
+
+Ingredient rows add `feedback_token`, `user_override`, `identity_feedback`, and
+`feedback_capabilities`. Overrides are display-only evidence and never replace
+`inventory.state` or alter `grocery.eligible_count`.
+
+### `recipe_catalog_ingredient_override` — POST
+Persist `have`, `missing`, or `clear` for one ingredient key/position and current
+feedback token. The action is idempotent, rejects stale evidence with HTTP 409,
+and does not mutate inventory, ranking, ontology, or grocery truth.
+
+### `recipe_catalog_identity_feedback` — POST
+Record `correct` or `wrong` for the displayed `matched_product` or
+identity-safe `closest_match`. Events are append-only, revision-bound, and settle
+for 14 days before proposal-only export. No event applies an ontology change.
+
+### `recipe_catalog_ingredient_decision` — POST
+The v2 command boundary accepts exactly one action:
+
+- `assume_have`: availability `have`; no identity evidence or proposal row
+- `select_inventory_product`: availability `have`; positive evidence bound to
+  the exact selected currently stocked product; immediate proposal eligibility
+- `reject_current_match`: availability `missing`; negative evidence only when
+  the exact displayed product still matches; otherwise availability-only;
+  negative evidence remains provisional for 48 hours
+
+The command revalidates the feedback token, active score/ontology,
+inventory/catalog revisions, selected product stock, and expected negative
+target under one SQLite transaction. Drift returns HTTP 409
+`ingredient_feedback_stale` with no writes. Provenance retains the v1 source hash
+and product ID while adding `source_fingerprint_v2`, ontology owner-derived
+`target_owner_fingerprint`, action origin, observed revisions, and deterministic
+supersession.
+
+Positive/negative identity events enqueue a proposal outbox row and candidate
+regression fixture in the same transaction. `scripts/recipe-ingredient-proposals.php`
+claims bounded rows, persists immutable prompt/manifest/raw-response artifacts,
+uses the exact configured ontology proposal model without fallback, and only
+stages existing closed-set-validator results. Missing keys/models/network remain
+durable blocked/retry states. The `export`/`import` commands support an
+operator/Copilot artifact handoff when the deployed process cannot call Gemini.
+There is no automatic activation path.
+
+### `recipe_catalog_planner_add` — POST
+Assign a stored Cookidoo-origin recipe to an ISO date from today through 365 days.
+The request includes only `recipe_id`, a revision-bound
+`provider_action_token`, date, and idempotency key; EverShelf resolves the
+provider external ID. Commands are journaled before the network call and never
+hold SQLite over I/O. Capability `recipe_planner_v1` is absent unless the
+EverShelf app gate and authenticated bridge gate both report known
+`append|replace` semantics. The bridge reads before writing, verifies with a
+fresh read, preserves all preexisting IDs, reconciles ambiguous timeouts,
+retries one stale authentication, and opens a circuit on 403/429. This is an
+account planner action, not direct device push.
 
 Primary ingredient and grocery labels always come from conservative source-text
 cleaning/casing. Canonical/taxonomy labels are secondary metadata and never replace
@@ -386,6 +443,11 @@ command; older records may be pruned by later grocery commands.
 Cookidoo discovery hydration is policy-disabled. The action returns local catalog
 results, no remote job, `detail_hydration: false`, and
 `unrefreshable_reason: "provider_detail_policy_disabled"`.
+The disabled request contract forces the separate upstream `languages=en`
+filter. Provider `language`, when present, is bounded undocumented evidence,
+not a guarantee; it remains separate from locale and deterministic local
+content detection. Explicit non-English evidence is rejected/quarantined for
+new ingestion without deleting existing rows.
 
 ### `recipe_jobs_status` — GET
 Read one background job by `id`/`idempotency_key`, list recent jobs, or pass
@@ -400,8 +462,10 @@ List connector capabilities, enabled/configured state, and circuit-breaker healt
 Cookidoo reports `detail_hydration: false`, policy reason/version, cached-catalog
 read, canonical-link, and external-instructions-link capabilities.
 
-`ha_info` advertises `recipe_detail_v1` and `recipe_grocery_v1` alongside
-`recipe_catalog_v2` when these actions are present.
+`ha_info` advertises `recipe_detail_v1`, `recipe_grocery_v1`,
+`recipe_ingredient_feedback_v1`, and `recipe_ingredient_feedback_v2` alongside
+`recipe_catalog_v2`. `recipe_planner_v1` is dynamic and absent under default
+planner gates.
 
 ### Ingredient ontology v3 operator CLI (no public HTTP mutation)
 

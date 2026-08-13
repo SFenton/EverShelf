@@ -97,6 +97,40 @@ function recipeCatalogNormalizeEquipment(mixed $value): array {
     return $equipment;
 }
 
+function recipeCatalogNormalizeFactNameList(
+    mixed $value,
+    string $field
+): array {
+    if ($value === null) {
+        return [];
+    }
+    if (!is_array($value) || !recipeArrayIsList($value)) {
+        throw new InvalidArgumentException($field . ' must be an array');
+    }
+    if (count($value) > 50) {
+        throw new InvalidArgumentException($field . ' has too many entries');
+    }
+    $names = [];
+    $seen = [];
+    foreach ($value as $item) {
+        $name = recipeCatalogNormalizeOptionalText(
+            $item,
+            $field . ' item',
+            120
+        );
+        if ($name === null) {
+            continue;
+        }
+        $key = mb_strtolower($name, 'UTF-8');
+        if (isset($seen[$key])) {
+            continue;
+        }
+        $seen[$key] = true;
+        $names[] = $name;
+    }
+    return $names;
+}
+
 function recipeCatalogFirstValidLocale(array $candidates): string {
     foreach ($candidates as $candidate) {
         if (
@@ -357,6 +391,109 @@ function recipeCatalogNormalizeRecipe(PDO $db, array $recipe, array $metadata = 
     if (!is_array($nutrition)) {
         $nutrition = ['note' => (string)$nutrition];
     }
+    $contentLanguage = trim((string)(
+        $metadata['content_language']
+        ?? $recipe['content_language']
+        ?? ''
+    ));
+    if (
+        $contentLanguage !== ''
+        && (
+            strlen($contentLanguage) > 20
+            || !preg_match(
+                '/^[A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8})*$/D',
+                $contentLanguage
+            )
+        )
+    ) {
+        throw new InvalidArgumentException(
+            'content_language is invalid'
+        );
+    }
+    $contentLanguage = strtolower($contentLanguage);
+    $prepTime = isset($recipe['prep_time'])
+        ? trim((string)$recipe['prep_time'])
+        : (
+            isset($recipe['prepTime'])
+                ? trim((string)$recipe['prepTime'])
+                : null
+        );
+    $cookTime = isset($recipe['cook_time'])
+        ? trim((string)$recipe['cook_time'])
+        : (
+            isset($recipe['cookTime'])
+                ? trim((string)$recipe['cookTime'])
+                : null
+        );
+    $activeTimeSeconds = recipeCatalogNormalizeOptionalSeconds(
+        $recipe['active_time_seconds']
+            ?? $recipe['activeTimeSeconds']
+            ?? null,
+        'active_time_seconds'
+    );
+    $totalTimeSeconds = recipeCatalogNormalizeOptionalSeconds(
+        $recipe['total_time_seconds']
+            ?? $recipe['totalTimeSeconds']
+            ?? null,
+        'total_time_seconds'
+    );
+    $prepTimeSeconds = recipeCatalogNormalizeOptionalSeconds(
+        $recipe['prep_time_seconds']
+            ?? $recipe['prepTimeSeconds']
+            ?? null,
+        'prep_time_seconds'
+    );
+    $cookTimeSeconds = recipeCatalogNormalizeOptionalSeconds(
+        $recipe['cook_time_seconds']
+            ?? $recipe['cookTimeSeconds']
+            ?? null,
+        'cook_time_seconds'
+    );
+    $inactiveTimeSeconds = recipeCatalogNormalizeOptionalSeconds(
+        $recipe['inactive_time_seconds']
+            ?? $recipe['inactiveTimeSeconds']
+            ?? null,
+        'inactive_time_seconds'
+    );
+    if ($connector !== RECIPE_COOKIDOO_CONNECTOR) {
+        $prepTimeSeconds ??= recipeTimeParseDurationSeconds(
+            $prepTime,
+            $ingredientLocale
+        );
+        $cookTimeSeconds ??= recipeTimeParseDurationSeconds(
+            $cookTime,
+            $ingredientLocale
+        );
+    }
+    $inactiveTimeSeconds = recipeTimeDeriveInactiveSeconds(
+        $activeTimeSeconds,
+        $totalTimeSeconds,
+        $prepTimeSeconds,
+        $cookTimeSeconds,
+        $inactiveTimeSeconds
+    );
+    $devices = recipeCatalogNormalizeFactNameList(
+        $recipe['devices'] ?? [],
+        'devices'
+    );
+    $requiredDeviceKeys = array_fill_keys(
+        array_map(
+            static fn(string $name): string =>
+                mb_strtolower($name, 'UTF-8'),
+            $devices
+        ),
+        true
+    );
+    $optionalDevices = array_values(array_filter(
+        recipeCatalogNormalizeFactNameList(
+            $recipe['optional_devices']
+                ?? $recipe['optionalDevices']
+                ?? [],
+            'optional_devices'
+        ),
+        static fn(string $name): bool =>
+            !isset($requiredDeviceKeys[mb_strtolower($name, 'UTF-8')])
+    ));
 
     $normalized = [
         'primary_connector' => $connector,
@@ -371,8 +508,8 @@ function recipeCatalogNormalizeRecipe(PDO $db, array $recipe, array $metadata = 
         'servings' => isset($recipe['servings'])
             ? max(1, (int)$recipe['servings'])
             : (isset($recipe['persons']) ? max(1, (int)$recipe['persons']) : null),
-        'prep_time' => isset($recipe['prep_time']) ? trim((string)$recipe['prep_time']) : null,
-        'cook_time' => isset($recipe['cook_time']) ? trim((string)$recipe['cook_time']) : null,
+        'prep_time' => $prepTime,
+        'cook_time' => $cookTime,
         'total_time' => isset($recipe['total_time']) ? trim((string)$recipe['total_time']) : null,
         'cuisine' => trim((string)($recipe['cuisine'] ?? '')),
         'category' => trim((string)($recipe['category'] ?? $recipe['meal'] ?? '')),
@@ -385,14 +522,11 @@ function recipeCatalogNormalizeRecipe(PDO $db, array $recipe, array $metadata = 
             'yield_unit',
             80
         ),
-        'active_time_seconds' => recipeCatalogNormalizeOptionalSeconds(
-            $recipe['active_time_seconds'] ?? null,
-            'active_time_seconds'
-        ),
-        'total_time_seconds' => recipeCatalogNormalizeOptionalSeconds(
-            $recipe['total_time_seconds'] ?? null,
-            'total_time_seconds'
-        ),
+        'prep_time_seconds' => $prepTimeSeconds,
+        'cook_time_seconds' => $cookTimeSeconds,
+        'active_time_seconds' => $activeTimeSeconds,
+        'inactive_time_seconds' => $inactiveTimeSeconds,
+        'total_time_seconds' => $totalTimeSeconds,
         'difficulty' => recipeCatalogNormalizeOptionalText(
             $recipe['difficulty'] ?? null,
             'difficulty',
@@ -403,6 +537,8 @@ function recipeCatalogNormalizeRecipe(PDO $db, array $recipe, array $metadata = 
             'primary_category',
             160
         ),
+        'devices' => $devices,
+        'optional_devices' => $optionalDevices,
         'equipment' => recipeCatalogNormalizeEquipment($recipe['equipment'] ?? []),
         'keywords' => $keywords,
         'instructions' => $instructions,
@@ -432,6 +568,7 @@ function recipeCatalogNormalizeRecipe(PDO $db, array $recipe, array $metadata = 
             'external_id' => trim((string)($metadata['external_id'] ?? $recipe['external_id'] ?? '')),
             'canonical_url' => trim((string)($metadata['canonical_url'] ?? $recipe['canonical_url'] ?? $recipe['url'] ?? '')),
             'locale' => $ingredientLocale,
+            'content_language' => $contentLanguage,
             'attribution' => trim((string)($metadata['attribution'] ?? $recipe['attribution'] ?? '')),
             'license' => trim((string)($metadata['license'] ?? $recipe['license'] ?? '')),
             'metadata_version' => trim((string)(
@@ -830,10 +967,15 @@ function recipeCatalogSaveVariant(PDO $db, array $recipe, array $metadata = []):
             $normalized['category'],
             $normalized['yield_quantity'],
             $normalized['yield_unit'],
+            $normalized['prep_time_seconds'],
+            $normalized['cook_time_seconds'],
             $normalized['active_time_seconds'],
+            $normalized['inactive_time_seconds'],
             $normalized['total_time_seconds'],
             $normalized['difficulty'],
             $normalized['primary_category'],
+            recipeCatalogJsonEncode($normalized['devices']),
+            recipeCatalogJsonEncode($normalized['optional_devices']),
             recipeCatalogJsonEncode($normalized['equipment']),
             recipeCatalogJsonEncode($normalized['keywords']),
             recipeCatalogJsonEncode($normalized['instructions']),
@@ -855,8 +997,11 @@ function recipeCatalogSaveVariant(PDO $db, array $recipe, array $metadata = []):
                     primary_connector = ?, title = ?, description = ?, image_url = ?,
                     language = ?, servings = ?, prep_time = ?, cook_time = ?, total_time = ?,
                     cuisine = ?, category = ?, yield_quantity = ?, yield_unit = ?,
-                    active_time_seconds = ?, total_time_seconds = ?, difficulty = ?,
-                    primary_category = ?, equipment_json = ?, keywords_json = ?,
+                    prep_time_seconds = ?, cook_time_seconds = ?,
+                    active_time_seconds = ?, inactive_time_seconds = ?,
+                    total_time_seconds = ?, difficulty = ?, primary_category = ?,
+                    devices_json = ?, optional_devices_json = ?,
+                    equipment_json = ?, keywords_json = ?,
                     instructions_json = ?, instruction_groups_json = ?,
                     nutrition_json = ?, storage_policy = ?, rights_basis = ?,
                     cache_expires_at = ?, stale_at = ?, source_payload_json = ?,
@@ -870,15 +1015,17 @@ function recipeCatalogSaveVariant(PDO $db, array $recipe, array $metadata = []):
                 INSERT INTO recipe_catalog (
                     primary_connector, title, description, image_url, language, servings,
                     prep_time, cook_time, total_time, cuisine, category, yield_quantity,
-                    yield_unit, active_time_seconds, total_time_seconds, difficulty,
-                    primary_category, equipment_json, keywords_json, instructions_json,
+                    yield_unit, prep_time_seconds, cook_time_seconds,
+                    active_time_seconds, inactive_time_seconds, total_time_seconds,
+                    difficulty, primary_category, devices_json, optional_devices_json,
+                    equipment_json, keywords_json, instructions_json,
                     instruction_groups_json, nutrition_json, storage_policy, rights_basis,
                     cache_expires_at, stale_at,
                     source_payload_json, retrieved_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?,
-                        ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ");
             $insert->execute($catalogParams);
             $recipeId = (int)$db->lastInsertId();
@@ -920,6 +1067,7 @@ function recipeCatalogSaveVariant(PDO $db, array $recipe, array $metadata = []):
                 UPDATE recipe_origins SET
                     recipe_id = ?, connector = ?, external_id = NULLIF(?, ''),
                     canonical_url = NULLIF(?, ''), locale = NULLIF(?, ''),
+                    content_language = NULLIF(?, ''),
                     attribution = NULLIF(?, ''), license = NULLIF(?, ''),
                     metadata_version = COALESCE(NULLIF(?, ''), metadata_version),
                     metadata_schema_version = COALESCE(
@@ -936,6 +1084,7 @@ function recipeCatalogSaveVariant(PDO $db, array $recipe, array $metadata = []):
                 $origin['external_id'],
                 $origin['canonical_url'],
                 $origin['locale'],
+                $origin['content_language'],
                 $origin['attribution'],
                 $origin['license'],
                 $origin['metadata_version'],
@@ -947,11 +1096,12 @@ function recipeCatalogSaveVariant(PDO $db, array $recipe, array $metadata = []):
             $insertOrigin = $db->prepare("
                 INSERT INTO recipe_origins (
                     recipe_id, connector, external_id, canonical_url, locale,
-                    attribution, license, metadata_version,
+                    content_language, attribution, license, metadata_version,
                     metadata_schema_version, availability
                 )
                 VALUES (?, ?, NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''),
                         NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''),
+                        NULLIF(?, ''),
                         NULLIF(?, ''), ?)
             ");
             $insertOrigin->execute([
@@ -960,6 +1110,7 @@ function recipeCatalogSaveVariant(PDO $db, array $recipe, array $metadata = []):
                 $origin['external_id'],
                 $origin['canonical_url'],
                 $origin['locale'],
+                $origin['content_language'],
                 $origin['attribution'],
                 $origin['license'],
                 $origin['metadata_version'],
@@ -1111,7 +1262,7 @@ function recipeCatalogSaveVariant(PDO $db, array $recipe, array $metadata = []):
         throw $e;
     }
 
-    $saved = recipeCatalogGetById($db, $recipeId);
+    $saved = recipeCatalogGetById($db, $recipeId, true);
     if ($saved === null) {
         throw new RuntimeException('Recipe catalog save could not be read back');
     }
@@ -1123,6 +1274,8 @@ function recipeCatalogSaveVariant(PDO $db, array $recipe, array $metadata = []):
 
 function recipeCatalogDecodeRow(array $row): array {
     foreach ([
+        'devices_json' => 'devices',
+        'optional_devices_json' => 'optional_devices',
         'equipment_json' => 'equipment',
         'keywords_json' => 'keywords',
         'instructions_json' => 'instructions',
@@ -1139,8 +1292,17 @@ function recipeCatalogDecodeRow(array $row): array {
     $row['yield_quantity'] = $row['yield_quantity'] !== null
         ? (float)$row['yield_quantity']
         : null;
+    $row['prep_time_seconds'] = $row['prep_time_seconds'] !== null
+        ? (int)$row['prep_time_seconds']
+        : null;
+    $row['cook_time_seconds'] = $row['cook_time_seconds'] !== null
+        ? (int)$row['cook_time_seconds']
+        : null;
     $row['active_time_seconds'] = $row['active_time_seconds'] !== null
         ? (int)$row['active_time_seconds']
+        : null;
+    $row['inactive_time_seconds'] = $row['inactive_time_seconds'] !== null
+        ? (int)$row['inactive_time_seconds']
         : null;
     $row['total_time_seconds'] = $row['total_time_seconds'] !== null
         ? (int)$row['total_time_seconds']
@@ -1157,6 +1319,9 @@ function recipeCatalogDecodeRow(array $row): array {
 }
 
 function recipeCatalogGetById(PDO $db, int $recipeId, bool $includeDeleted = false): ?array {
+    $languageVisibility = $includeDeleted
+        ? ''
+        : recipeCookidooLanguageVisibilitySql('c');
     $stmt = $db->prepare("
         SELECT c.*, COALESCE(s.favorite, 0) AS favorite, COALESCE(s.hidden, 0) AS hidden,
                s.rating, COALESCE(s.note, '') AS note,
@@ -1169,7 +1334,9 @@ function recipeCatalogGetById(PDO $db, int $recipeId, bool $includeDeleted = fal
         FROM recipe_catalog c
         LEFT JOIN recipe_user_state s ON s.recipe_id = c.id
         LEFT JOIN recipe_clusters cl ON cl.recipe_id = c.id
-        WHERE c.id = ?" . ($includeDeleted ? '' : ' AND c.deleted_at IS NULL') . "
+        WHERE c.id = ?"
+            . ($includeDeleted ? '' : ' AND c.deleted_at IS NULL')
+            . $languageVisibility . "
         LIMIT 1
     ");
     $stmt->execute([$recipeId]);
@@ -1180,7 +1347,8 @@ function recipeCatalogGetById(PDO $db, int $recipeId, bool $includeDeleted = fal
     $recipe = recipeCatalogDecodeRow($row);
 
     $origins = $db->prepare("
-        SELECT connector, external_id, canonical_url, locale, attribution, license,
+        SELECT connector, external_id, canonical_url, locale,
+               content_language, attribution, license,
                metadata_version, metadata_schema_version,
                first_seen_at, last_seen_at, availability
         FROM recipe_origins

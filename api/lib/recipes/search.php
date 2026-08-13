@@ -288,6 +288,8 @@ function recipeCatalogTextSearch(
         $params[] = $source;
         $sourceUsesParam = true;
     }
+    $languageVisibility =
+        recipeCookidooLanguageVisibilitySql('c');
 
     $count = $db->prepare("
         SELECT COUNT(*)
@@ -305,6 +307,7 @@ function recipeCatalogTextSearch(
           )
           AND COALESCE(us.hidden, 0) = 0
           {$sourceWhere}
+          {$languageVisibility}
     ");
     $count->execute($params);
     $total = (int)$count->fetchColumn();
@@ -341,6 +344,7 @@ function recipeCatalogTextSearch(
           )
           AND COALESCE(us.hidden, 0) = 0
           {$sourceWhere}
+          {$languageVisibility}
         ORDER BY text_rank ASC, c.updated_at DESC
         {$limitClause}
     ");
@@ -367,6 +371,8 @@ function recipeCatalogSuggestionIds(PDO $db, ?string $source = null): array {
         ";
         $params[] = $source;
     }
+    $languageVisibility =
+        recipeCookidooLanguageVisibilitySql('c');
     $stmt = $db->prepare("
         SELECT c.id
         FROM recipe_catalog c
@@ -381,6 +387,7 @@ function recipeCatalogSuggestionIds(PDO $db, ?string $source = null): array {
           )
           AND COALESCE(us.hidden, 0) = 0
           {$sourceWhere}
+          {$languageVisibility}
         ORDER BY c.updated_at DESC, c.id DESC
     ");
     $stmt->execute($params);

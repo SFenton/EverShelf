@@ -238,6 +238,161 @@ function recipeCatalogApiGroceryAdd(PDO $db): void {
     );
 }
 
+function recipeCatalogApiIngredientOverride(PDO $db): void {
+    if (!recipeApiRequirePost()) {
+        return;
+    }
+    try {
+        $result = recipeIngredientOverrideSet(
+            $db,
+            recipeApiJsonInput()
+        );
+    } catch (OutOfBoundsException $e) {
+        http_response_code(404);
+        echo json_encode([
+            'success' => false,
+            'error' => 'recipe_not_found',
+        ]);
+        return;
+    } catch (RecipeIngredientFeedbackConflictException $e) {
+        http_response_code(409);
+        echo json_encode([
+            'success' => false,
+            'error' => $e->getMessage(),
+        ]);
+        return;
+    } catch (InvalidArgumentException $e) {
+        http_response_code(400);
+        echo json_encode([
+            'success' => false,
+            'error' => $e->getMessage(),
+        ]);
+        return;
+    }
+    echo json_encode(
+        ['success' => true] + $result,
+        JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES
+    );
+}
+
+function recipeCatalogApiIdentityFeedback(PDO $db): void {
+    if (!recipeApiRequirePost()) {
+        return;
+    }
+    try {
+        $result = recipeIngredientIdentityFeedbackRecord(
+            $db,
+            recipeApiJsonInput()
+        );
+    } catch (OutOfBoundsException $e) {
+        http_response_code(404);
+        echo json_encode([
+            'success' => false,
+            'error' => 'recipe_not_found',
+        ]);
+        return;
+    } catch (RecipeIngredientFeedbackConflictException $e) {
+        http_response_code(409);
+        echo json_encode([
+            'success' => false,
+            'error' => $e->getMessage(),
+        ]);
+        return;
+    } catch (InvalidArgumentException $e) {
+        http_response_code(400);
+        echo json_encode([
+            'success' => false,
+            'error' => $e->getMessage(),
+        ]);
+        return;
+    }
+    echo json_encode(
+        ['success' => true] + $result,
+        JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES
+    );
+}
+
+function recipeCatalogApiIngredientDecision(PDO $db): void {
+    if (!recipeApiRequirePost()) {
+        return;
+    }
+    try {
+        $result = recipeIngredientDecision(
+            $db,
+            recipeApiJsonInput()
+        );
+    } catch (OutOfBoundsException $e) {
+        http_response_code(404);
+        echo json_encode([
+            'success' => false,
+            'error' => 'recipe_not_found',
+        ]);
+        return;
+    } catch (RecipeIngredientFeedbackConflictException $e) {
+        http_response_code(409);
+        echo json_encode([
+            'success' => false,
+            'error' => $e->getMessage(),
+        ]);
+        return;
+    } catch (InvalidArgumentException $e) {
+        http_response_code(400);
+        echo json_encode([
+            'success' => false,
+            'error' => $e->getMessage(),
+        ]);
+        return;
+    }
+    echo json_encode(
+        ['success' => true] + $result,
+        JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES
+    );
+}
+
+function recipeCatalogApiPlannerAdd(PDO $db): void {
+    if (!recipeApiRequirePost()) {
+        return;
+    }
+    try {
+        $result = recipePlannerAdd(
+            $db,
+            recipeApiJsonInput()
+        );
+    } catch (OutOfBoundsException $e) {
+        http_response_code(404);
+        echo json_encode([
+            'success' => false,
+            'error' => $e->getMessage(),
+        ]);
+        return;
+    } catch (RecipePlannerConflictException $e) {
+        http_response_code(409);
+        echo json_encode([
+            'success' => false,
+            'error' => $e->getMessage(),
+        ]);
+        return;
+    } catch (RecipePlannerUnavailableException $e) {
+        http_response_code(503);
+        echo json_encode([
+            'success' => false,
+            'error' => $e->getMessage(),
+        ]);
+        return;
+    } catch (InvalidArgumentException $e) {
+        http_response_code(400);
+        echo json_encode([
+            'success' => false,
+            'error' => $e->getMessage(),
+        ]);
+        return;
+    }
+    echo json_encode(
+        ['success' => true] + $result,
+        JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES
+    );
+}
+
 function recipeCatalogApiJobsStatus(PDO $db): void {
     $id = null;
     if (array_key_exists('id', $_GET)) {
@@ -323,7 +478,8 @@ function recipeCatalogApiSave(PDO $db): void {
     $metadata = is_array($input['origin'] ?? null) ? $input['origin'] : [];
     foreach ([
         'recipe_id', 'connector', 'external_id', 'canonical_url', 'locale',
-        'language', 'attribution', 'license', 'storage_policy', 'rights_basis',
+        'language', 'content_language', 'attribution', 'license',
+        'storage_policy', 'rights_basis',
         'cache_expires_at', 'stale_at', 'retrieved_at', 'availability',
     ] as $key) {
         if (array_key_exists($key, $input)) {

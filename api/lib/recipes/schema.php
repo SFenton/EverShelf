@@ -76,10 +76,15 @@ function recipeSchemaMigrate(PDO $db): void {
             category TEXT NOT NULL DEFAULT '',
             yield_quantity REAL DEFAULT NULL,
             yield_unit TEXT DEFAULT NULL,
+            prep_time_seconds INTEGER DEFAULT NULL,
+            cook_time_seconds INTEGER DEFAULT NULL,
             active_time_seconds INTEGER DEFAULT NULL,
+            inactive_time_seconds INTEGER DEFAULT NULL,
             total_time_seconds INTEGER DEFAULT NULL,
             difficulty TEXT DEFAULT NULL,
             primary_category TEXT DEFAULT NULL,
+            devices_json TEXT NOT NULL DEFAULT '[]',
+            optional_devices_json TEXT NOT NULL DEFAULT '[]',
             equipment_json TEXT NOT NULL DEFAULT '[]',
             keywords_json TEXT NOT NULL DEFAULT '[]',
             instructions_json TEXT NOT NULL DEFAULT '[]',
@@ -103,6 +108,11 @@ function recipeSchemaMigrate(PDO $db): void {
             external_id TEXT DEFAULT NULL,
             canonical_url TEXT DEFAULT NULL,
             locale TEXT DEFAULT NULL,
+            content_language TEXT DEFAULT NULL
+                CHECK(
+                    content_language IS NULL
+                    OR length(content_language) BETWEEN 2 AND 20
+                ),
             attribution TEXT DEFAULT NULL,
             license TEXT DEFAULT NULL,
             metadata_version TEXT DEFAULT NULL,
@@ -214,6 +224,45 @@ function recipeSchemaMigrate(PDO $db): void {
             FOREIGN KEY (recipe_id) REFERENCES recipe_catalog(id) ON DELETE CASCADE
         );
 
+        CREATE TABLE IF NOT EXISTS
+            recipe_cookidoo_language_assessments (
+            recipe_id INTEGER PRIMARY KEY,
+            connector TEXT NOT NULL DEFAULT 'cookidoo'
+                CHECK(connector = 'cookidoo'),
+            content_hash TEXT NOT NULL CHECK(length(content_hash) = 64),
+            verdict TEXT NOT NULL
+                CHECK(verdict IN (
+                    'english', 'non_english', 'undetermined'
+                )),
+            disposition TEXT NOT NULL DEFAULT 'review'
+                CHECK(disposition IN (
+                    'allow', 'review', 'quarantine'
+                )),
+            reason TEXT NOT NULL CHECK(length(reason) BETWEEN 1 AND 80),
+            foreign_language TEXT DEFAULT NULL
+                CHECK(
+                    foreign_language IS NULL
+                    OR length(foreign_language) BETWEEN 2 AND 20
+                ),
+            english_hits INTEGER NOT NULL DEFAULT 0
+                CHECK(english_hits BETWEEN 0 AND 10000),
+            foreign_hits INTEGER NOT NULL DEFAULT 0
+                CHECK(foreign_hits BETWEEN 0 AND 10000),
+            script_hits INTEGER NOT NULL DEFAULT 0
+                CHECK(script_hits BETWEEN 0 AND 10000),
+            token_count INTEGER NOT NULL DEFAULT 0
+                CHECK(token_count BETWEEN 0 AND 100000),
+            detector_version TEXT NOT NULL
+                CHECK(length(detector_version) BETWEEN 1 AND 80),
+            rules_hash TEXT NOT NULL CHECK(length(rules_hash) = 64),
+            manual_override INTEGER NOT NULL DEFAULT 0
+                CHECK(manual_override IN (0, 1)),
+            evaluated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (recipe_id)
+                REFERENCES recipe_catalog(id) ON DELETE CASCADE
+        );
+
         CREATE TABLE IF NOT EXISTS recipe_grocery_requests (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             idempotency_key TEXT NOT NULL UNIQUE,
@@ -223,6 +272,323 @@ function recipeSchemaMigrate(PDO $db): void {
             outcomes_json TEXT NOT NULL DEFAULT '[]',
             created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (recipe_id) REFERENCES recipe_catalog(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS recipe_ingredient_user_overrides (
+            recipe_id INTEGER NOT NULL,
+            ingredient_key TEXT NOT NULL
+                CHECK(length(ingredient_key) BETWEEN 1 AND 64),
+            position INTEGER NOT NULL CHECK(position BETWEEN 0 AND 10000),
+            source_text_hash TEXT NOT NULL CHECK(length(source_text_hash) = 64),
+            availability_override TEXT NOT NULL
+                CHECK(availability_override IN ('have', 'missing')),
+            evidence_token TEXT NOT NULL CHECK(length(evidence_token) = 64),
+            observed_state TEXT NOT NULL
+                CHECK(observed_state IN (
+                    'in_stock', 'missing', 'uncertain', 'staple'
+                )),
+            observed_relation TEXT DEFAULT NULL
+                CHECK(
+                    observed_relation IS NULL
+                    OR length(observed_relation) <= 80
+                ),
+            observed_confidence REAL NOT NULL DEFAULT 0
+                CHECK(observed_confidence BETWEEN 0 AND 1),
+            observed_product_id INTEGER DEFAULT NULL,
+            observed_closest_label TEXT DEFAULT NULL
+                CHECK(
+                    observed_closest_label IS NULL
+                    OR length(observed_closest_label) <= 240
+                ),
+            observed_mapping_source TEXT DEFAULT NULL
+                CHECK(
+                    observed_mapping_source IS NULL
+                    OR length(observed_mapping_source) <= 80
+                ),
+            selected_product_id INTEGER DEFAULT NULL,
+            selected_product_fingerprint TEXT DEFAULT NULL
+                CHECK(
+                    selected_product_fingerprint IS NULL
+                    OR length(selected_product_fingerprint) = 64
+                ),
+            decision_action TEXT DEFAULT NULL
+                CHECK(
+                    decision_action IS NULL
+                    OR decision_action IN (
+                        'assume_have',
+                        'select_inventory_product',
+                        'reject_current_match'
+                    )
+                ),
+            action_origin TEXT DEFAULT NULL
+                CHECK(
+                    action_origin IS NULL
+                    OR length(action_origin) BETWEEN 1 AND 80
+                ),
+            observed_inventory_revision INTEGER DEFAULT NULL,
+            observed_catalog_revision INTEGER DEFAULT NULL,
+            score_revision_id INTEGER DEFAULT NULL,
+            ontology_version_id INTEGER DEFAULT NULL,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY(recipe_id, ingredient_key),
+            FOREIGN KEY (recipe_id)
+                REFERENCES recipe_catalog(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS recipe_ingredient_feedback_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            idempotency_key TEXT NOT NULL UNIQUE
+                CHECK(length(idempotency_key) BETWEEN 1 AND 128),
+            request_fingerprint TEXT NOT NULL CHECK(length(request_fingerprint) = 64),
+            recipe_id INTEGER NOT NULL,
+            ingredient_key TEXT NOT NULL
+                CHECK(length(ingredient_key) BETWEEN 1 AND 64),
+            position INTEGER NOT NULL CHECK(position BETWEEN 0 AND 10000),
+            event_type TEXT NOT NULL
+                CHECK(event_type IN ('availability', 'identity')),
+            availability_override TEXT DEFAULT NULL
+                CHECK(
+                    availability_override IS NULL
+                    OR availability_override IN ('have', 'missing')
+                ),
+            identity_verdict TEXT DEFAULT NULL
+                CHECK(
+                    identity_verdict IS NULL
+                    OR identity_verdict IN ('correct', 'wrong')
+                ),
+            target_kind TEXT DEFAULT NULL
+                CHECK(
+                    target_kind IS NULL
+                    OR target_kind IN (
+                        'matched_product', 'closest_match',
+                        'inventory_product'
+                    )
+                ),
+            target_product_id INTEGER DEFAULT NULL,
+            target_label TEXT DEFAULT NULL
+                CHECK(
+                    target_label IS NULL
+                    OR length(target_label) <= 240
+                ),
+            source_text_hash TEXT NOT NULL CHECK(length(source_text_hash) = 64),
+            evidence_token TEXT NOT NULL CHECK(length(evidence_token) = 64),
+            observed_state TEXT NOT NULL
+                CHECK(observed_state IN (
+                    'in_stock', 'missing', 'uncertain', 'staple'
+                )),
+            observed_relation TEXT DEFAULT NULL
+                CHECK(
+                    observed_relation IS NULL
+                    OR length(observed_relation) <= 80
+                ),
+            observed_confidence REAL NOT NULL DEFAULT 0
+                CHECK(observed_confidence BETWEEN 0 AND 1),
+            observed_product_id INTEGER DEFAULT NULL,
+            observed_closest_label TEXT DEFAULT NULL
+                CHECK(
+                    observed_closest_label IS NULL
+                    OR length(observed_closest_label) <= 240
+                ),
+            observed_mapping_source TEXT DEFAULT NULL
+                CHECK(
+                    observed_mapping_source IS NULL
+                    OR length(observed_mapping_source) <= 80
+                ),
+            score_revision_id INTEGER DEFAULT NULL,
+            ontology_version_id INTEGER DEFAULT NULL,
+            decision_action TEXT DEFAULT NULL
+                CHECK(
+                    decision_action IS NULL
+                    OR decision_action IN (
+                        'assume_have',
+                        'select_inventory_product',
+                        'reject_current_match'
+                    )
+                ),
+            action_origin TEXT DEFAULT NULL
+                CHECK(
+                    action_origin IS NULL
+                    OR length(action_origin) BETWEEN 1 AND 80
+                ),
+            source_fingerprint_v2 TEXT DEFAULT NULL
+                CHECK(
+                    source_fingerprint_v2 IS NULL
+                    OR length(source_fingerprint_v2) = 64
+                ),
+            source_owner_fingerprint TEXT DEFAULT NULL
+                CHECK(
+                    source_owner_fingerprint IS NULL
+                    OR length(source_owner_fingerprint) = 64
+                ),
+            target_owner_fingerprint TEXT DEFAULT NULL
+                CHECK(
+                    target_owner_fingerprint IS NULL
+                    OR length(target_owner_fingerprint) = 64
+                ),
+            observed_inventory_revision INTEGER DEFAULT NULL,
+            observed_catalog_revision INTEGER DEFAULT NULL,
+            supersedes_event_id INTEGER DEFAULT NULL,
+            review_state TEXT NOT NULL DEFAULT 'settling'
+                CHECK(review_state IN (
+                    'settling', 'eligible', 'exported',
+                    'reviewed', 'rejected'
+                )),
+            settle_after DATETIME NOT NULL,
+            result_json TEXT NOT NULL DEFAULT '{}'
+                CHECK(length(result_json) <= 16384),
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (recipe_id)
+                REFERENCES recipe_catalog(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS recipe_ingredient_proposal_outbox (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            feedback_event_id INTEGER NOT NULL UNIQUE,
+            status TEXT NOT NULL DEFAULT 'queued'
+                CHECK(status IN (
+                    'queued', 'processing', 'retry', 'blocked',
+                    'staged', 'superseded'
+                )),
+            attempts INTEGER NOT NULL DEFAULT 0
+                CHECK(attempts BETWEEN 0 AND 1000),
+            next_attempt_at DATETIME DEFAULT NULL,
+            lease_token TEXT DEFAULT NULL
+                CHECK(
+                    lease_token IS NULL
+                    OR length(lease_token) = 64
+                ),
+            input_json TEXT NOT NULL
+                CHECK(length(input_json) BETWEEN 2 AND 32768),
+            prompt_artifact_id INTEGER DEFAULT NULL,
+            response_artifact_id INTEGER DEFAULT NULL,
+            last_error_kind TEXT DEFAULT NULL
+                CHECK(
+                    last_error_kind IS NULL
+                    OR length(last_error_kind) <= 80
+                ),
+            last_error TEXT NOT NULL DEFAULT ''
+                CHECK(length(last_error) <= 1000),
+            claimed_at DATETIME DEFAULT NULL,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (feedback_event_id)
+                REFERENCES recipe_ingredient_feedback_events(id)
+                ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS recipe_ingredient_proposal_prompts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            outbox_id INTEGER NOT NULL UNIQUE,
+            feedback_event_id INTEGER NOT NULL UNIQUE,
+            ontology_version_id INTEGER NOT NULL,
+            model_name TEXT NOT NULL
+                CHECK(length(model_name) BETWEEN 1 AND 100),
+            prompt_text TEXT NOT NULL
+                CHECK(length(prompt_text) BETWEEN 1 AND 120000),
+            prompt_hash TEXT NOT NULL CHECK(length(prompt_hash) = 64),
+            manifest_json TEXT NOT NULL
+                CHECK(length(manifest_json) BETWEEN 2 AND 262144),
+            manifest_hash TEXT NOT NULL CHECK(length(manifest_hash) = 64),
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (outbox_id)
+                REFERENCES recipe_ingredient_proposal_outbox(id)
+                ON DELETE CASCADE,
+            FOREIGN KEY (feedback_event_id)
+                REFERENCES recipe_ingredient_feedback_events(id)
+                ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS recipe_ingredient_proposal_responses (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            prompt_artifact_id INTEGER NOT NULL,
+            feedback_event_id INTEGER NOT NULL,
+            source TEXT NOT NULL
+                CHECK(source IN ('gemini_api', 'operator_import')),
+            raw_response_json TEXT NOT NULL
+                CHECK(length(raw_response_json) BETWEEN 2 AND 65536),
+            response_hash TEXT NOT NULL CHECK(length(response_hash) = 64),
+            validation_json TEXT NOT NULL
+                CHECK(length(validation_json) BETWEEN 2 AND 65536),
+            change_set_id INTEGER DEFAULT NULL,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(prompt_artifact_id, response_hash),
+            FOREIGN KEY (prompt_artifact_id)
+                REFERENCES recipe_ingredient_proposal_prompts(id)
+                ON DELETE CASCADE,
+            FOREIGN KEY (feedback_event_id)
+                REFERENCES recipe_ingredient_feedback_events(id)
+                ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS recipe_ingredient_feedback_regression_fixtures (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            feedback_event_id INTEGER NOT NULL UNIQUE,
+            case_key TEXT NOT NULL UNIQUE
+                CHECK(length(case_key) BETWEEN 1 AND 120),
+            polarity TEXT NOT NULL
+                CHECK(polarity IN ('positive', 'negative')),
+            source_fingerprint_v2 TEXT NOT NULL
+                CHECK(length(source_fingerprint_v2) = 64),
+            target_owner_fingerprint TEXT NOT NULL
+                CHECK(length(target_owner_fingerprint) = 64),
+            fixture_json TEXT NOT NULL
+                CHECK(length(fixture_json) BETWEEN 2 AND 32768),
+            status TEXT NOT NULL DEFAULT 'candidate'
+                CHECK(status IN ('candidate', 'accepted', 'rejected')),
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (feedback_event_id)
+                REFERENCES recipe_ingredient_feedback_events(id)
+                ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS recipe_planner_commands (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            idempotency_key TEXT NOT NULL UNIQUE
+                CHECK(length(idempotency_key) BETWEEN 1 AND 128),
+            request_fingerprint TEXT NOT NULL
+                CHECK(length(request_fingerprint) = 64),
+            recipe_id INTEGER NOT NULL,
+            origin_id INTEGER NOT NULL,
+            external_id TEXT NOT NULL
+                CHECK(length(external_id) BETWEEN 1 AND 160),
+            target_date TEXT NOT NULL
+                CHECK(length(target_date) = 10),
+            provider_action_token TEXT NOT NULL
+                CHECK(length(provider_action_token) = 64),
+            observed_catalog_revision INTEGER NOT NULL,
+            account_scope TEXT NOT NULL DEFAULT 'configured_account'
+                CHECK(account_scope = 'configured_account'),
+            status TEXT NOT NULL DEFAULT 'reserved'
+                CHECK(status IN (
+                    'reserved', 'dispatching', 'succeeded',
+                    'failed', 'blocked'
+                )),
+            result_json TEXT NOT NULL DEFAULT '{}'
+                CHECK(length(result_json) <= 16384),
+            last_error TEXT NOT NULL DEFAULT ''
+                CHECK(length(last_error) <= 1000),
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (recipe_id)
+                REFERENCES recipe_catalog(id) ON DELETE CASCADE,
+            FOREIGN KEY (origin_id)
+                REFERENCES recipe_origins(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS recipe_planner_command_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            command_id INTEGER NOT NULL,
+            state TEXT NOT NULL
+                CHECK(state IN (
+                    'reserved', 'dispatching', 'reconciling',
+                    'succeeded', 'failed', 'blocked', 'replayed'
+                )),
+            detail_json TEXT NOT NULL DEFAULT '{}'
+                CHECK(length(detail_json) <= 8192),
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (command_id)
+                REFERENCES recipe_planner_commands(id) ON DELETE CASCADE
         );
 
         CREATE TABLE IF NOT EXISTS recipe_quantity_parse_proposals (
@@ -512,10 +878,15 @@ function recipeSchemaMigrate(PDO $db): void {
     foreach ([
         'yield_quantity' => 'REAL DEFAULT NULL',
         'yield_unit' => 'TEXT DEFAULT NULL',
+        'prep_time_seconds' => 'INTEGER DEFAULT NULL',
+        'cook_time_seconds' => 'INTEGER DEFAULT NULL',
         'active_time_seconds' => 'INTEGER DEFAULT NULL',
+        'inactive_time_seconds' => 'INTEGER DEFAULT NULL',
         'total_time_seconds' => 'INTEGER DEFAULT NULL',
         'difficulty' => 'TEXT DEFAULT NULL',
         'primary_category' => 'TEXT DEFAULT NULL',
+        'devices_json' => "TEXT NOT NULL DEFAULT '[]'",
+        'optional_devices_json' => "TEXT NOT NULL DEFAULT '[]'",
         'equipment_json' => "TEXT NOT NULL DEFAULT '[]'",
         'instruction_groups_json' => "TEXT NOT NULL DEFAULT '[]'",
     ] as $column => $definition) {
@@ -535,6 +906,11 @@ function recipeSchemaMigrate(PDO $db): void {
         'name'
     );
     foreach ([
+        'content_language' => (
+            'TEXT DEFAULT NULL CHECK('
+            . 'content_language IS NULL '
+            . 'OR length(content_language) BETWEEN 2 AND 20)'
+        ),
         'metadata_version' => 'TEXT DEFAULT NULL',
         'metadata_schema_version' => 'TEXT DEFAULT NULL',
         'metadata_failure_version' => 'TEXT DEFAULT NULL',
@@ -754,6 +1130,89 @@ function recipeSchemaMigrate(PDO $db): void {
             $db->exec("
                 ALTER TABLE recipe_grocery_requests
                 ADD COLUMN request_fingerprint TEXT DEFAULT NULL
+            ");
+        } catch (PDOException $e) {
+            if (!str_contains(strtolower($e->getMessage()), 'duplicate column')) {
+                throw $e;
+            }
+        }
+    }
+    $overrideColumns = array_column(
+        $db->query("PRAGMA table_info(recipe_ingredient_user_overrides)")
+            ->fetchAll(PDO::FETCH_ASSOC),
+        'name'
+    );
+    foreach ([
+        'selected_product_id' => 'INTEGER DEFAULT NULL',
+        'selected_product_fingerprint' => (
+            'TEXT DEFAULT NULL CHECK('
+            . 'selected_product_fingerprint IS NULL '
+            . 'OR length(selected_product_fingerprint) = 64)'
+        ),
+        'decision_action' => (
+            "TEXT DEFAULT NULL CHECK(decision_action IS NULL OR "
+            . "decision_action IN ('assume_have', "
+            . "'select_inventory_product', 'reject_current_match'))"
+        ),
+        'action_origin' => (
+            'TEXT DEFAULT NULL CHECK(action_origin IS NULL '
+            . 'OR length(action_origin) BETWEEN 1 AND 80)'
+        ),
+        'observed_inventory_revision' => 'INTEGER DEFAULT NULL',
+        'observed_catalog_revision' => 'INTEGER DEFAULT NULL',
+    ] as $column => $definition) {
+        if (in_array($column, $overrideColumns, true)) {
+            continue;
+        }
+        try {
+            $db->exec("
+                ALTER TABLE recipe_ingredient_user_overrides
+                ADD COLUMN {$column} {$definition}
+            ");
+        } catch (PDOException $e) {
+            if (!str_contains(strtolower($e->getMessage()), 'duplicate column')) {
+                throw $e;
+            }
+        }
+    }
+    $feedbackColumns = array_column(
+        $db->query("PRAGMA table_info(recipe_ingredient_feedback_events)")
+            ->fetchAll(PDO::FETCH_ASSOC),
+        'name'
+    );
+    foreach ([
+        'decision_action' => (
+            "TEXT DEFAULT NULL CHECK(decision_action IS NULL OR "
+            . "decision_action IN ('assume_have', "
+            . "'select_inventory_product', 'reject_current_match'))"
+        ),
+        'action_origin' => (
+            'TEXT DEFAULT NULL CHECK(action_origin IS NULL '
+            . 'OR length(action_origin) BETWEEN 1 AND 80)'
+        ),
+        'source_fingerprint_v2' => (
+            'TEXT DEFAULT NULL CHECK(source_fingerprint_v2 IS NULL '
+            . 'OR length(source_fingerprint_v2) = 64)'
+        ),
+        'source_owner_fingerprint' => (
+            'TEXT DEFAULT NULL CHECK(source_owner_fingerprint IS NULL '
+            . 'OR length(source_owner_fingerprint) = 64)'
+        ),
+        'target_owner_fingerprint' => (
+            'TEXT DEFAULT NULL CHECK(target_owner_fingerprint IS NULL '
+            . 'OR length(target_owner_fingerprint) = 64)'
+        ),
+        'observed_inventory_revision' => 'INTEGER DEFAULT NULL',
+        'observed_catalog_revision' => 'INTEGER DEFAULT NULL',
+        'supersedes_event_id' => 'INTEGER DEFAULT NULL',
+    ] as $column => $definition) {
+        if (in_array($column, $feedbackColumns, true)) {
+            continue;
+        }
+        try {
+            $db->exec("
+                ALTER TABLE recipe_ingredient_feedback_events
+                ADD COLUMN {$column} {$definition}
             ");
         } catch (PDOException $e) {
             if (!str_contains(strtolower($e->getMessage()), 'duplicate column')) {
@@ -1195,6 +1654,105 @@ function recipeSchemaMigrate(PDO $db): void {
     $db->exec("
         CREATE INDEX IF NOT EXISTS idx_recipe_catalog_visibility
             ON recipe_catalog(deleted_at, stale_at, updated_at DESC)
+    ");
+    $db->exec("
+        CREATE INDEX IF NOT EXISTS idx_recipe_cookidoo_language_visibility
+            ON recipe_cookidoo_language_assessments(
+                disposition, verdict, recipe_id
+            )
+    ");
+    $db->exec("
+        CREATE INDEX IF NOT EXISTS idx_recipe_ingredient_feedback_settlement
+            ON recipe_ingredient_feedback_events(
+                review_state, settle_after, id
+            );
+        CREATE INDEX IF NOT EXISTS idx_recipe_ingredient_feedback_recipe
+            ON recipe_ingredient_feedback_events(
+                recipe_id, ingredient_key, id
+            );
+        CREATE INDEX IF NOT EXISTS idx_recipe_ingredient_proposal_outbox_ready
+            ON recipe_ingredient_proposal_outbox(
+                status, next_attempt_at, id
+            );
+        CREATE INDEX IF NOT EXISTS idx_recipe_feedback_regression_status
+            ON recipe_ingredient_feedback_regression_fixtures(
+                status, polarity, id
+            );
+        CREATE INDEX IF NOT EXISTS idx_recipe_planner_commands_recipe
+            ON recipe_planner_commands(recipe_id, target_date, id);
+        CREATE INDEX IF NOT EXISTS idx_recipe_planner_events_command
+            ON recipe_planner_command_events(command_id, id);
+
+        CREATE TRIGGER IF NOT EXISTS
+            recipe_ingredient_decision_provenance_immutable
+        BEFORE UPDATE OF
+            decision_action,
+            action_origin,
+            source_fingerprint_v2,
+            source_owner_fingerprint,
+            target_owner_fingerprint,
+            observed_inventory_revision,
+            observed_catalog_revision,
+            supersedes_event_id
+        ON recipe_ingredient_feedback_events
+        WHEN OLD.decision_action IS NOT NULL
+        BEGIN
+            SELECT RAISE(
+                ABORT,
+                'ingredient decision provenance is immutable'
+            );
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS
+            recipe_ingredient_proposal_prompts_immutable_update
+        BEFORE UPDATE ON recipe_ingredient_proposal_prompts
+        BEGIN
+            SELECT RAISE(ABORT, 'proposal prompt artifacts are immutable');
+        END;
+        CREATE TRIGGER IF NOT EXISTS
+            recipe_ingredient_proposal_prompts_immutable_delete
+        BEFORE DELETE ON recipe_ingredient_proposal_prompts
+        BEGIN
+            SELECT RAISE(ABORT, 'proposal prompt artifacts are immutable');
+        END;
+        CREATE TRIGGER IF NOT EXISTS
+            recipe_ingredient_proposal_responses_immutable_update
+        BEFORE UPDATE ON recipe_ingredient_proposal_responses
+        BEGIN
+            SELECT RAISE(ABORT, 'proposal response artifacts are immutable');
+        END;
+        CREATE TRIGGER IF NOT EXISTS
+            recipe_ingredient_proposal_responses_immutable_delete
+        BEFORE DELETE ON recipe_ingredient_proposal_responses
+        BEGIN
+            SELECT RAISE(ABORT, 'proposal response artifacts are immutable');
+        END;
+        CREATE TRIGGER IF NOT EXISTS
+            recipe_ingredient_feedback_fixtures_immutable_update
+        BEFORE UPDATE OF
+            feedback_event_id,
+            case_key,
+            polarity,
+            source_fingerprint_v2,
+            target_owner_fingerprint,
+            fixture_json,
+            created_at
+        ON recipe_ingredient_feedback_regression_fixtures
+        BEGIN
+            SELECT RAISE(ABORT, 'feedback regression provenance is immutable');
+        END;
+        CREATE TRIGGER IF NOT EXISTS
+            recipe_planner_command_events_immutable_update
+        BEFORE UPDATE ON recipe_planner_command_events
+        BEGIN
+            SELECT RAISE(ABORT, 'planner command events are append-only');
+        END;
+        CREATE TRIGGER IF NOT EXISTS
+            recipe_planner_command_events_immutable_delete
+        BEFORE DELETE ON recipe_planner_command_events
+        BEGIN
+            SELECT RAISE(ABORT, 'planner command events are append-only');
+        END
     ");
 
     $db->exec("

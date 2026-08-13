@@ -111,6 +111,19 @@ function recipeConnectorsWithState(PDO $db): array {
 
     $out = [];
     foreach (recipeConnectorRegistry() as $name => $metadata) {
+        if ($name === RECIPE_COOKIDOO_CONNECTOR) {
+            $planner = recipePlannerBridgeCapability();
+            $metadata['planner_write'] =
+                !empty($planner['available']);
+            $metadata['planner_reason'] =
+                $planner['reason'] ?? null;
+            $metadata['planner_put_semantics'] =
+                $planner['put_semantics'] ?? null;
+            if (!empty($planner['available'])) {
+                $metadata['capabilities'][] =
+                    RECIPE_PLANNER_CAPABILITY;
+            }
+        }
         $state = $states[$name] ?? [
             'connector' => $name,
             'state_enabled' => true,

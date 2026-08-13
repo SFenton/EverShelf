@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from datetime import date
 import os
 from pathlib import Path
 from types import SimpleNamespace
@@ -17,6 +18,9 @@ from app import (
     DETAIL_HYDRATION_POLICY_REASON,
     DETAIL_HYDRATION_POLICY_VERSION,
     GatewayMetadataResult,
+    GatewayPlannerDisabledError,
+    GatewayPlannerDriftError,
+    GatewayPlannerResult,
     GatewayPolicyDisabledError,
     GatewaySearchResult,
     GatewayResponseError,
@@ -25,6 +29,7 @@ from app import (
     MAX_RESPONSE_BYTES,
     METADATA_SCHEMA_VERSION,
     MetadataRequest,
+    PlannerRequest,
     SearchRequest,
     _allowlisted_recipe,
     _raw_quantity,
@@ -88,10 +93,15 @@ class FakeGateway:
                     "general": {
                         "yield_quantity": 4,
                         "yield_unit": "portions",
+                        "prep_time_seconds": 300,
+                        "cook_time_seconds": 900,
                         "active_time_seconds": 600,
+                        "inactive_time_seconds": 300,
                         "total_time_seconds": 1800,
                         "difficulty": "easy",
                         "primary_category": "Soups",
+                        "devices": ["TM6", "Oven"],
+                        "optional_devices": ["Slow cooker"],
                         "equipment": ["sieve"],
                     },
                     "ingredients": [
@@ -151,10 +161,15 @@ class FakeGateway:
                 "general": {
                     "yield_quantity": None,
                     "yield_unit": None,
+                    "prep_time_seconds": None,
+                    "cook_time_seconds": None,
                     "active_time_seconds": None,
+                    "inactive_time_seconds": None,
                     "total_time_seconds": None,
                     "difficulty": None,
                     "primary_category": None,
+                    "devices": [],
+                    "optional_devices": [],
                     "equipment": [],
                 },
                 "ingredients": [
@@ -286,6 +301,9 @@ class GuardedRawRecipe(dict[str, object]):
         "tags",
         "rawPayload",
         "preparation",
+        "description",
+        "text",
+        "content",
     }
 
     def get(self, key: str, default: object = None) -> object:
@@ -320,6 +338,7 @@ class FakeRawCookidoo(FakeCookidoo):
             {
                 "id": "r200",
                 "title": "Metadata Title",
+                "language": "en-GB",
                 "difficulty": "easy",
                 "categories": [
                     {"id": "soups", "title": "Soups", "subtitle": "prohibited note"}
@@ -415,15 +434,49 @@ class FakeRawCookidoo(FakeCookidoo):
                     ),
                 ],
                 "recipeUtensils": [{"utensilNotation": "sieve"}],
+                "thermomixVersions": [
+                    "TM5",
+                    {"code": "TM6", "name": "Thermomix TM6"},
+                ],
+                "additionalDevices": [
+                    "Oven",
+                    GuardedRawRecipe(
+                        {
+                            "shortName": "Air fryer",
+                            "description": "must never be inspected",
+                        }
+                    ),
+                ],
+                "optionalDevices": [
+                    GuardedRawRecipe(
+                        {
+                            "name": "Slow cooker",
+                            "text": "must never be inspected",
+                        }
+                    ),
+                    "Oven",
+                ],
                 "servingSize": {
                     "quantity": {"value": 4, "from": None, "to": None},
                     "unitNotation": "portions",
                 },
                 "times": [
                     {
+                        "quantity": {"value": 300, "from": None, "to": None},
+                        "type": "preparationTime",
+                    },
+                    {
+                        "quantity": {"value": 900, "from": None, "to": None},
+                        "type": "cookingTime",
+                    },
+                    {
                         "quantity": {"value": 600, "from": None, "to": None},
                         "type": "activeTime",
                         "comment": "",
+                    },
+                    {
+                        "quantity": {"value": 300, "from": None, "to": None},
+                        "type": "restingTime",
                     },
                     {
                         "quantity": {"value": 1800, "from": None, "to": None},
@@ -538,6 +591,98 @@ class MismatchedLocaleCookidoo(FakeCookidoo):
         return details
 
 
+class FakePlannerCookidoo:
+    def __init__(
+        self,
+        *,
+        actual_semantics: str = "append",
+        initial: list[str] | None = None,
+        initial_custom: list[str] | None = None,
+    ) -> None:
+        self.actual_semantics = actual_semantics
+        self.calendar = {"2026-08-20": list(initial or [])}
+        self.custom_calendar = {
+            "2026-08-20": list(initial_custom or [])
+        }
+        self.add_calls: list[list[str]] = []
+        self.login_calls = 0
+        self.auth_once = False
+        self.auth_failed = False
+        self.timeout_after_write = False
+        self.timed_out = False
+        self.error_status: int | None = None
+
+    async def login(self) -> None:
+        self.login_calls += 1
+
+    def save_cookies(self, path: Path) -> None:
+        path.write_text('[{"key":"session","value":"fake"}]', encoding="utf-8")
+
+    def load_cookies(self, _path: Path) -> None:
+        return
+
+    def _days(self, planned_day: date) -> list[object]:
+        ids = self.calendar.get(planned_day.isoformat(), [])
+        custom_ids = self.custom_calendar.get(
+            planned_day.isoformat(),
+            [],
+        )
+        return [
+            SimpleNamespace(
+                id=planned_day.isoformat(),
+                recipes=[
+                    SimpleNamespace(id=recipe_id)
+                    for recipe_id in [*ids, *custom_ids]
+                ],
+                customer_recipe_ids=list(custom_ids),
+            )
+        ]
+
+    async def get_recipes_in_calendar_week(
+        self,
+        planned_day: date,
+    ) -> list[object]:
+        if self.auth_once and not self.auth_failed:
+            self.auth_failed = True
+            raise CookidooAuthException("stale auth")
+        return self._days(planned_day)
+
+    async def add_recipes_to_calendar(
+        self,
+        planned_day: date,
+        recipe_ids: list[str],
+    ) -> object:
+        if self.error_status is not None:
+            cause = aiohttp.ClientResponseError(
+                request_info=SimpleNamespace(
+                    real_url=URL("https://cookidoo.co.uk/planning")
+                ),
+                history=(),
+                status=self.error_status,
+                message="planner failure",
+            )
+            raise CookidooRequestException("planner failure") from cause
+        self.add_calls.append(list(recipe_ids))
+        current = self.calendar.setdefault(planned_day.isoformat(), [])
+        if self.actual_semantics == "replace":
+            self.calendar[planned_day.isoformat()] = list(
+                dict.fromkeys(recipe_ids)
+            )
+        else:
+            current.extend(
+                recipe_id
+                for recipe_id in recipe_ids
+                if recipe_id not in current
+            )
+        if self.timeout_after_write and not self.timed_out:
+            self.timed_out = True
+            raise CookidooRequestException("timeout after write")
+        return SimpleNamespace(
+            id=planned_day.isoformat(),
+            recipes=[],
+        )
+
+
 class BridgeTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         self.runtime = Path.cwd() / f".bridge-test-runtime-{os.getpid()}"
@@ -576,6 +721,9 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                 "detail_hydration": False,
                 "metadata_hydration": False,
                 "ingredient_aware_discovery": False,
+                "planner_write": False,
+                "put_semantics": "unknown",
+                "account_scope": "configured_account",
                 "reason": DETAIL_HYDRATION_POLICY_REASON,
                 "policy_version": DETAIL_HYDRATION_POLICY_VERSION,
             },
@@ -653,6 +801,25 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(script_response.status, 503)
 
         self.assertEqual(gateway.requests, [])
+
+    def test_search_contract_forces_the_separate_language_filter_to_english(
+        self,
+    ) -> None:
+        request = SearchRequest.from_payload(
+            {"query": "soup"},
+            self.config,
+        )
+        self.assertEqual(request.languages, ("en",))
+        request = SearchRequest.from_payload(
+            {"query": "soup", "languages": ["en-US", "en"]},
+            self.config,
+        )
+        self.assertEqual(request.languages, ("en",))
+        with self.assertRaises(BridgeError):
+            SearchRequest.from_payload(
+                {"query": "soup", "languages": ["de"]},
+                self.config,
+            )
 
     async def test_metadata_requires_auth_bounds_ids_and_allowlists_output(
         self,
@@ -745,6 +912,234 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             body = await response.json()
         self.assertEqual(response.status, 503)
         self.assertEqual(body["error"], "metadata_hydration_disabled_policy")
+
+    def _planner_gateway(
+        self,
+        client: FakePlannerCookidoo,
+        semantics: str,
+    ) -> CookidooGateway:
+        config = replace(
+            self.config,
+            planner_write_enabled=True,
+            planner_put_semantics=semantics,
+        )
+        localization = CookidooLocalizationConfig(
+            country_code="gb",
+            language="en-GB",
+            url="https://cookidoo.co.uk/foundation/en-GB",
+        )
+        gateway = CookidooGateway(
+            SimpleNamespace(),
+            config,
+            [localization],
+            client_factory=lambda _session, _cfg: client,
+        )
+        gateway._cookies_loaded = True
+        gateway._cookie_available = True
+        return gateway
+
+    def _planner_request(self, external_id: str = "r-target") -> PlannerRequest:
+        return PlannerRequest(
+            external_id=external_id,
+            day=date(2026, 8, 20),
+            locale="en-GB",
+            account_scope="configured_account",
+            idempotency_key="planner-command-1",
+        )
+
+    async def test_planner_capability_is_absent_under_both_default_off_states(
+        self,
+    ) -> None:
+        async with TestClient(
+            TestServer(create_app(self.config, FakeGateway()))
+        ) as client:
+            disabled = await client.post(
+                "/v1/planner-capabilities",
+                headers={"Authorization": "Bearer test-token"},
+                json={"capability": "recipe_planner_v1"},
+            )
+            disabled_body = await disabled.json()
+        self.assertEqual(disabled.status, 200)
+        self.assertFalse(disabled_body["planner_write"])
+        self.assertEqual(disabled_body["put_semantics"], "unknown")
+
+        unknown = replace(
+            self.config,
+            planner_write_enabled=True,
+            planner_put_semantics="unknown",
+        )
+        async with TestClient(
+            TestServer(create_app(unknown, FakeGateway()))
+        ) as client:
+            response = await client.post(
+                "/v1/planner-capabilities",
+                headers={"Authorization": "Bearer test-token"},
+                json={"capability": "recipe_planner_v1"},
+            )
+            body = await response.json()
+        self.assertFalse(body["planner_write"])
+
+    async def test_planner_append_sends_only_target_and_preserves_prestate(
+        self,
+    ) -> None:
+        client = FakePlannerCookidoo(initial=["r-existing"])
+        result = await self._planner_gateway(
+            client,
+            "append",
+        ).planner_add(self._planner_request())
+        self.assertTrue(result.changed)
+        self.assertTrue(result.verified)
+        self.assertEqual(client.add_calls, [["r-target"]])
+        self.assertEqual(
+            client.calendar["2026-08-20"],
+            ["r-existing", "r-target"],
+        )
+
+    async def test_planner_duplicate_is_a_verified_noop_without_put(self) -> None:
+        client = FakePlannerCookidoo(initial=["r-target"])
+        result = await self._planner_gateway(
+            client,
+            "append",
+        ).planner_add(self._planner_request())
+        self.assertFalse(result.changed)
+        self.assertTrue(result.already_present)
+        self.assertEqual(client.add_calls, [])
+
+    async def test_planner_replace_sends_exact_deduplicated_union(self) -> None:
+        client = FakePlannerCookidoo(
+            actual_semantics="replace",
+            initial=["r-existing", "r-existing"],
+        )
+        result = await self._planner_gateway(
+            client,
+            "replace",
+        ).planner_add(self._planner_request())
+        self.assertTrue(result.changed)
+        self.assertEqual(
+            client.add_calls,
+            [["r-existing", "r-target"]],
+        )
+        self.assertEqual(
+            client.calendar["2026-08-20"],
+            ["r-existing", "r-target"],
+        )
+        self.assertEqual(client.custom_calendar["2026-08-20"], [])
+
+    async def test_planner_replace_refuses_days_with_custom_recipes(
+        self,
+    ) -> None:
+        client = FakePlannerCookidoo(
+            actual_semantics="replace",
+            initial=["r-existing"],
+            initial_custom=["custom-existing"],
+        )
+        with self.assertRaises(GatewayPlannerDisabledError) as context:
+            await self._planner_gateway(
+                client,
+                "replace",
+            ).planner_add(self._planner_request())
+        self.assertEqual(
+            context.exception.code,
+            "planner_replace_custom_recipes_present",
+        )
+        self.assertEqual(client.add_calls, [])
+        self.assertEqual(
+            client.calendar["2026-08-20"],
+            ["r-existing"],
+        )
+        self.assertEqual(
+            client.custom_calendar["2026-08-20"],
+            ["custom-existing"],
+        )
+
+    async def test_planner_ignores_stale_put_body_and_uses_fresh_read(self) -> None:
+        client = FakePlannerCookidoo(initial=["r-existing"])
+        result = await self._planner_gateway(
+            client,
+            "append",
+        ).planner_add(self._planner_request())
+        self.assertTrue(result.verified)
+        self.assertEqual(len(client.add_calls), 1)
+
+    async def test_planner_timeout_after_write_reconciles_before_retry(self) -> None:
+        client = FakePlannerCookidoo(initial=["r-existing"])
+        client.timeout_after_write = True
+        result = await self._planner_gateway(
+            client,
+            "append",
+        ).planner_add(self._planner_request())
+        self.assertTrue(result.changed)
+        self.assertTrue(result.reconciled)
+        self.assertEqual(client.add_calls, [["r-target"]])
+
+    async def test_planner_retries_one_stale_authentication(self) -> None:
+        client = FakePlannerCookidoo(initial=[])
+        client.auth_once = True
+        gateway = self._planner_gateway(client, "append")
+        with patch.dict(
+            os.environ,
+            {
+                "COOKIDOO_EMAIL": "test@example.invalid",
+                "COOKIDOO_PASSWORD": "test-password",
+            },
+        ):
+            result = await gateway.planner_add(self._planner_request())
+        self.assertTrue(result.verified)
+        self.assertEqual(client.login_calls, 1)
+
+    async def test_planner_403_and_429_open_the_circuit(self) -> None:
+        for status in (403, 429):
+            with self.subTest(status=status):
+                client = FakePlannerCookidoo(initial=[])
+                client.error_status = status
+                gateway = self._planner_gateway(client, "append")
+                with self.assertRaises(CookidooRequestException):
+                    await gateway.planner_add(self._planner_request())
+                with self.assertRaises(BridgeError) as context:
+                    await gateway.planner_add(self._planner_request())
+                self.assertEqual(
+                    context.exception.code,
+                    "planner_circuit_open",
+                )
+
+    async def test_planner_detects_configured_semantics_behavior_drift(
+        self,
+    ) -> None:
+        client = FakePlannerCookidoo(
+            actual_semantics="replace",
+            initial=["r-existing"],
+        )
+        gateway = self._planner_gateway(client, "append")
+        with self.assertRaises(GatewayPlannerDriftError):
+            await gateway.planner_add(self._planner_request())
+
+    async def test_planner_http_path_is_account_scoped_and_bounded(self) -> None:
+        client = FakePlannerCookidoo(initial=[])
+        gateway = self._planner_gateway(client, "append")
+        config = replace(
+            self.config,
+            planner_write_enabled=True,
+            planner_put_semantics="append",
+        )
+        async with TestClient(
+            TestServer(create_app(config, gateway))
+        ) as http:
+            response = await http.post(
+                "/v1/planner-add",
+                headers={"Authorization": "Bearer test-token"},
+                json={
+                    "external_id": "r-target",
+                    "date": "2026-08-20",
+                    "locale": "en-GB",
+                    "account_scope": "configured_account",
+                    "idempotency_key": "planner-command-1",
+                },
+            )
+            body = await response.json()
+        self.assertEqual(response.status, 200)
+        self.assertEqual(body["account_scope"], "configured_account")
+        self.assertNotIn("username", body)
+        self.assertNotIn("email", body)
 
     async def test_metadata_preserves_order_and_bounds_per_id_failures(
         self,
@@ -1002,7 +1397,13 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(safe.topology_metrics, topology_metrics(2, 1))
         self.assertIsNone(safe.yield_quantity)
         self.assertIsNone(safe.yield_unit)
+        self.assertIsNone(safe.prep_time_seconds)
+        self.assertIsNone(safe.cook_time_seconds)
         self.assertEqual(safe.active_time_seconds, 600)
+        self.assertEqual(safe.inactive_time_seconds, 1200)
+        self.assertEqual(safe.total_time_seconds, 1800)
+        self.assertEqual(safe.devices, ())
+        self.assertEqual(safe.optional_devices, ())
         self.assertEqual(safe.equipment, ("sieve",))
 
     async def test_language_only_search_returns_effective_localization_locale(
@@ -1170,17 +1571,24 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                 "image_url",
                 "canonical_url",
                 "locale",
+                "provider_language",
             },
         )
+        self.assertEqual(recipe["provider_language"], "en-GB")
         self.assertEqual(
             set(recipe["general"]),
             {
                 "yield_quantity",
                 "yield_unit",
+                "prep_time_seconds",
+                "cook_time_seconds",
                 "active_time_seconds",
+                "inactive_time_seconds",
                 "total_time_seconds",
                 "difficulty",
                 "primary_category",
+                "devices",
+                "optional_devices",
                 "equipment",
             },
         )
@@ -1274,7 +1682,20 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(recipe["general"]["yield_quantity"], 4.0)
         self.assertEqual(recipe["general"]["yield_unit"], "portions")
+        self.assertEqual(recipe["general"]["prep_time_seconds"], 300)
+        self.assertEqual(recipe["general"]["cook_time_seconds"], 900)
+        self.assertEqual(recipe["general"]["active_time_seconds"], 600)
+        self.assertEqual(recipe["general"]["inactive_time_seconds"], 300)
+        self.assertEqual(recipe["general"]["total_time_seconds"], 1800)
         self.assertEqual(recipe["general"]["primary_category"], "Soups")
+        self.assertEqual(
+            recipe["general"]["devices"],
+            ["TM5", "TM6", "Oven", "Air fryer"],
+        )
+        self.assertEqual(
+            recipe["general"]["optional_devices"],
+            ["Slow cooker"],
+        )
         self.assertEqual(recipe["general"]["equipment"], ["sieve"])
         serialized = repr(recipe)
         for prohibited in (
@@ -1288,6 +1709,57 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             "primaryNotation",
         ):
             self.assertNotIn(prohibited, serialized)
+
+    async def test_raw_time_aliases_conflicts_and_inactive_derivation_are_factual(
+        self,
+    ) -> None:
+        fake_client = FakeRawCookidoo()
+        raw = await fake_client._request_json()
+        raw["times"] = [
+            {
+                "quantity": {"value": 900, "from": None, "to": None},
+                "type": "active",
+            },
+            {
+                "quantity": {"value": 600, "from": None, "to": None},
+                "type": "total",
+            },
+        ]
+        safe = _safe_recipe_from_raw(
+            raw,
+            "https://cookidoo.co.uk/recipes/recipe/en-GB/r200",
+        )
+        self.assertIsNone(safe.prep_time_seconds)
+        self.assertIsNone(safe.cook_time_seconds)
+        self.assertEqual(safe.active_time_seconds, 900)
+        self.assertEqual(safe.inactive_time_seconds, 0)
+        self.assertEqual(safe.total_time_seconds, 600)
+
+        raw["times"] = [
+            {
+                "quantity": {"value": 300, "from": None, "to": None},
+                "type": "prep",
+            },
+            {
+                "quantity": {"value": 600, "from": None, "to": None},
+                "type": "preparation",
+            },
+            {
+                "quantity": {"value": 900, "from": None, "to": None},
+                "type": "activeTime",
+            },
+            {
+                "quantity": {"value": 1800, "from": None, "to": None},
+                "type": "totalTime",
+            },
+        ]
+        conflicted = _safe_recipe_from_raw(
+            raw,
+            "https://cookidoo.co.uk/recipes/recipe/en-GB/r200",
+        )
+        self.assertIsNone(conflicted.prep_time_seconds)
+        self.assertIsNone(conflicted.cook_time_seconds)
+        self.assertIsNone(conflicted.inactive_time_seconds)
 
     def test_raw_topology_catalog_join_and_missing_reference(self) -> None:
         mapped = GuardedRawRecipe(

@@ -283,6 +283,7 @@ COOKIDOO_METADATA_BACKFILL_ENABLED=false
 COOKIDOO_METADATA_BACKFILL_BATCH_SIZE=20
 COOKIDOO_METADATA_BACKFILL_INTERVAL_SECONDS=120
 COOKIDOO_METADATA_BACKFILL_JITTER_SECONDS=20
+COOKIDOO_PLANNER_ENABLED=false
 COOKIDOO_QUEUE_CADENCE_MINUTES=1
 COOKIDOO_DISCOVERY_LOCALE=en-US
 COOKIDOO_REFRESH_ENQUEUE_LIMIT=2
@@ -337,8 +338,11 @@ request. EverShelf does not enqueue discovery or metadata backfill jobs. Existin
 cached catalog rows and completed isolated pilot artifacts remain readable.
 
 Policy `metadata-v2` stores only bounded factual metadata: title, remote image and
-canonical URLs/ID, locale/timestamps, yield quantity plus unit, active/total seconds,
-difficulty, one primary category label, provider-listed equipment nouns, and ordered
+canonical URLs/ID, locale/timestamps, optional bounded provider content-language
+evidence, yield quantity plus unit, explicit prep/cook/active/total seconds,
+explicit or deterministically derived inactive/rest seconds, bounded
+supported/required and optional device names, difficulty, one primary category
+label, provider-listed equipment nouns, and ordered
 ingredient names with exact/range/unit/amount display facts. Ingredient group and
 within-group order, short group titles, provider ingredient/default-title/unit
 references, provider-declared optional booleans, and shopping-category references
@@ -346,9 +350,19 @@ are retained as bounded factual topology. Source amounts live in a separate
 display-only table and never feed ranking quantity/unit, coverage, cookable status,
 or internal shopping quantities.
 
+Manual/local recipes derive prep and cook seconds only from existing bounded
+prep/cook duration fields (including deterministic ISO-8601 values). When active
+and total are the only time facts, their non-negative difference is exposed as
+inactive/rest time, never cook time. An inert proposal interface exists for
+unresolved time strings, but it performs no model call or automatic persistence.
+
 Historical isolated imports persisted the selected effective regional/script locale
-and a matching canonical URL. This describes existing cached data, not an active
-discovery path.
+and a matching canonical URL. The separate upstream `languages` search filter is
+forced to English in disabled scaffolding. Provider `language`, when present, is
+stored only as undocumented captured evidence, not a contractual guarantee; locale
+remains separate and deterministic local detection still rejects explicit
+non-English ingestion. This describes existing cached data, not an active discovery
+path.
 
 Official Cookidoo instructions remain external-only. The bridge and EverShelf do
 **not** expose or persist steps, notes/tips, category or collection descriptions,
@@ -363,6 +377,82 @@ accepts selected ingredient keys/positions plus a client idempotency key, rechec
 inventory, and adds only genuine missing items to EverShelf's internal shopping list.
 EverShelf never calls Home Assistant; HA clients may mirror the returned normalized
 names and amount text.
+
+Each detail ingredient also carries an opaque `feedback_token`, persisted
+display-only availability override, latest explicit identity verdict, and bounded
+feedback capabilities. `recipe_catalog_ingredient_override` stores `have`,
+`missing`, or `clear` without changing inventory, scores, ontology, or grocery
+eligibility. `recipe_catalog_identity_feedback` records `correct`/`wrong` evidence
+for a matched product or identity-safe closest label; evidence settles for 14 days
+and exports proposal-only through `scripts/recipe-ingredient-feedback.php`.
+
+New clients use the single atomic
+`recipe_catalog_ingredient_decision` command. `assume_have` writes only a display
+override. `select_inventory_product` revalidates positive stock and records
+positive evidence for that exact product. `reject_current_match` binds negative
+evidence only when the exact displayed product is still current; staples/no-target
+rows remain availability-only. Every positive/negative identity decision writes a
+transactional proposal outbox row and candidate regression fixture in the same
+SQLite transaction. Positive evidence is immediately eligible; negative evidence
+remains provisional for 48 hours. A later decision deterministically supersedes
+the prior provisional outbox item.
+
+Proposal processing is asynchronous, staging-only, and never activates ontology
+content. The worker uses exactly
+`ingredientOntologyV3ConfiguredProposalModel()` with no fallback, persists
+immutable prompt/manifest/raw-response artifacts, runs the existing closed-set
+validator, and stores only reviewable change sets:
+
+```bash
+# Safe default: build immutable prompts for an operator/Copilot handoff.
+php scripts/recipe-ingredient-proposals.php export \
+  --db=/path/to/copy.sqlite --out=proposal-handoff.json --write
+
+# Import returned proposal JSON; deterministic validation still owns staging.
+php scripts/recipe-ingredient-proposals.php import \
+  --db=/path/to/copy.sqlite --input=proposal-result.json --write
+
+# Optional separately keyed worker; never reuses the app/Docker GEMINI_API_KEY.
+php scripts/recipe-ingredient-proposals.php work \
+  --db=/path/to/copy.sqlite --write --allow-network
+```
+
+An imported result echoes the exported `outbox_id`, `feedback_event_id`,
+`model`, `prompt_hash`, and `manifest_hash`, uses schema
+`recipe_ingredient_proposal_handoff_result_v1`, and places the model JSON under
+`response`. Provenance mismatch is rejected.
+
+The optional worker requires a separate
+`INGREDIENT_ONTOLOGY_V3_PROPOSAL_API_KEY`; blank configuration uses the handoff
+path and never falls back to the app/Docker `GEMINI_API_KEY`. Missing/rejected
+keys, unavailable models, and network failures remain durable
+blocked/retry rows. Raw model JSON never writes active entities, labels, relations,
+or mappings; the proposal CLI refuses the active database, and copied-database
+candidate builds, regression/gold gates, shadow
+scoring, human adjudication, and explicit activation/rollback remain mandatory.
+
+Cookidoo My Week write scaffolding is separate from metadata hydration and remains
+disabled by default. EverShelf requires `COOKIDOO_PLANNER_ENABLED=true`; the bridge
+independently requires `COOKIDOO_PLANNER_WRITE_ENABLED=true` and an explicitly
+verified `COOKIDOO_PLANNER_PUT_SEMANTICS=append|replace`. `unknown` suppresses
+`recipe_planner_v1` and refuses writes. The server resolves the stored Cookidoo
+origin, validates a revision-bound provider token and a date from today through
+365 days, journals before network traffic, and never holds SQLite open over the
+request. The bridge performs read-before-write and fresh read-after-write
+verification, preserves preexisting IDs, reconciles ambiguous timeouts, retries
+one stale authentication, and opens a circuit on 403/429. This is an account-level
+planner action, not a direct Thermomix device push.
+
+Cookidoo ingestion has a separate deterministic content-language assessment.
+High-confidence non-English rows can be quarantined from user-facing catalog reads
+without changing catalog membership or ontology materializations:
+
+```bash
+php scripts/cookidoo-language-assessments.php --db=/path/to/copy.sqlite
+```
+
+The CLI is dry-run by default; writes require an explicit copied database,
+`--write`, and a rollback manifest.
 
 The detail DTO keeps the compatibility `ingredients` array and adds
 `ingredient_groups` containing stable local keys, group/order ordinals, ingredient
@@ -385,8 +475,10 @@ nonempty list is supported, while the sibling `grocery` object reports missing,
 uncertain, in-stock, staple, eligible, and blocking state.
 
 Do not configure Cookidoo credentials or start the provider-facing bridge profile
-while detail hydration is policy-disabled. Local recipe search and existing cached
-Cookidoo catalog reads remain available.
+for metadata hydration while detail hydration is policy-disabled. Local recipe
+search and existing cached Cookidoo catalog reads remain available. Planner use is
+a separate explicit dual-gate operation and does not amend the instruction
+prohibition.
 
 Full-corpus crawls, taxonomy-triggered discovery, periodic refresh, and direct
 metadata hydration are policy-disabled. Existing queued jobs terminate as local

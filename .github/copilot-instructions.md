@@ -90,8 +90,9 @@
   reserved queue lane but must not starve background crawl progress.
 - Cookidoo policy `metadata-v2` permits only factual General and Ingredients
   metadata: title, canonical URL/ID, locale/timestamps, allowlisted remote image
-  URLs, yield quantity/unit, active/total time seconds, difficulty, one primary
-  category label, provider-listed equipment/utensil nouns, and ordered
+  URLs, yield quantity/unit, explicit prep/cook/active/inactive/total time
+  seconds, difficulty, one primary category label, bounded supported/required
+  and optional device names, provider-listed equipment/utensil nouns, and ordered
   ingredient names with display-only exact/range values, unit, and bounded
   source amount text. Approved bounded factual ingredient topology also includes
   short ingredient-group titles, group and within-group ordinals, provider
@@ -104,6 +105,11 @@
   quantity/unit fields. Cookidoo uses structured passthrough only, never source-text
   parsing. Model output is proposal-only with exact source evidence and explicit
   review; it has no automatic activation path.
+- Time parsing for manual/local/generated recipes is deterministic and limited
+  to existing bounded prep/cook fields or structured ISO-8601 durations. Never
+  infer cook time from total minus active time; that difference is inactive/rest
+  time only. Device facts remain separate from ordinary equipment, and any model
+  fallback is proposal-only with no automatic activation path.
 - Ingredient primary labels always come from bounded source text plus deterministic
   conservative cleaning/casing. Canonical/taxonomy labels are secondary read-time
   joins only; `closest_match` is limited to `taxonomy_alias`, `taxonomy_slug`, and

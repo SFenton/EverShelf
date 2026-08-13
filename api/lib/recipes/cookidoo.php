@@ -20,6 +20,7 @@ const RECIPE_COOKIDOO_METADATA_FAILURE_KINDS = [
     'invalid_metadata',
     'locale_mismatch',
     'not_found',
+    'content_language_rejected',
 ];
 
 class RecipeCookidooCircuitBreakException extends RuntimeException {
@@ -246,6 +247,27 @@ function recipeCookidooNormalizeLocale(mixed $value): string {
     return $normalized;
 }
 
+function recipeCookidooNormalizeProviderLanguage(
+    mixed $value
+): ?string {
+    if ($value === null || $value === '') {
+        return null;
+    }
+    $language = recipeCookidooNormalizeLocale($value);
+    if (mb_strlen($language, 'UTF-8') > 20) {
+        throw new InvalidArgumentException(
+            'provider_language is too long'
+        );
+    }
+    return $language;
+}
+
+function recipeCookidooProviderLanguageIsEnglish(
+    string $language
+): bool {
+    return strtolower(explode('-', $language, 2)[0]) === 'en';
+}
+
 function recipeCookidooLocaleIsLanguageOnly(mixed $value): bool {
     return !str_contains(recipeCookidooNormalizeLocale($value), '-');
 }
@@ -312,6 +334,38 @@ function recipeCookidooNormalizeOptionalSeconds(mixed $value, string $field): ?i
         throw new InvalidArgumentException($field . ' is out of range');
     }
     return $value;
+}
+
+function recipeCookidooNormalizeFactNameList(
+    mixed $value,
+    string $field
+): array {
+    if ($value === null) {
+        return [];
+    }
+    if (!is_array($value) || !recipeArrayIsList($value)) {
+        throw new InvalidArgumentException($field . ' must be an array');
+    }
+    if (count($value) > 50) {
+        throw new InvalidArgumentException($field . ' has too many entries');
+    }
+    $names = [];
+    $seen = [];
+    foreach ($value as $item) {
+        $name = recipeCookidooCleanText(
+            $item,
+            $field,
+            120,
+            true
+        );
+        $key = mb_strtolower($name, 'UTF-8');
+        if (isset($seen[$key])) {
+            continue;
+        }
+        $seen[$key] = true;
+        $names[] = $name;
+    }
+    return $names;
 }
 
 function recipeCookidooNormalizeOrderedIngredients(mixed $value): array {
@@ -606,19 +660,65 @@ function recipeCookidooNormalizeGeneral(mixed $value): array {
         'primary_category',
         160
     );
+    $prepTimeSeconds = recipeCookidooNormalizeOptionalSeconds(
+        $value['prep_time_seconds'] ?? null,
+        'prep_time_seconds'
+    );
+    $cookTimeSeconds = recipeCookidooNormalizeOptionalSeconds(
+        $value['cook_time_seconds'] ?? null,
+        'cook_time_seconds'
+    );
+    $activeTimeSeconds = recipeCookidooNormalizeOptionalSeconds(
+        $value['active_time_seconds'] ?? null,
+        'active_time_seconds'
+    );
+    $inactiveTimeSeconds = recipeCookidooNormalizeOptionalSeconds(
+        $value['inactive_time_seconds'] ?? null,
+        'inactive_time_seconds'
+    );
+    $totalTimeSeconds = recipeCookidooNormalizeOptionalSeconds(
+        $value['total_time_seconds'] ?? null,
+        'total_time_seconds'
+    );
+    $inactiveTimeSeconds = recipeTimeDeriveInactiveSeconds(
+        $activeTimeSeconds,
+        $totalTimeSeconds,
+        $prepTimeSeconds,
+        $cookTimeSeconds,
+        $inactiveTimeSeconds
+    );
+    $devices = recipeCookidooNormalizeFactNameList(
+        $value['devices'] ?? [],
+        'devices'
+    );
+    $requiredDeviceKeys = array_fill_keys(
+        array_map(
+            static fn(string $name): string =>
+                mb_strtolower($name, 'UTF-8'),
+            $devices
+        ),
+        true
+    );
+    $optionalDevices = array_values(array_filter(
+        recipeCookidooNormalizeFactNameList(
+            $value['optional_devices'] ?? [],
+            'optional_devices'
+        ),
+        static fn(string $name): bool =>
+            !isset($requiredDeviceKeys[mb_strtolower($name, 'UTF-8')])
+    ));
     return [
         'yield_quantity' => $yieldQuantity,
         'yield_unit' => $yieldUnit !== '' ? $yieldUnit : null,
-        'active_time_seconds' => recipeCookidooNormalizeOptionalSeconds(
-            $value['active_time_seconds'] ?? null,
-            'active_time_seconds'
-        ),
-        'total_time_seconds' => recipeCookidooNormalizeOptionalSeconds(
-            $value['total_time_seconds'] ?? null,
-            'total_time_seconds'
-        ),
+        'prep_time_seconds' => $prepTimeSeconds,
+        'cook_time_seconds' => $cookTimeSeconds,
+        'active_time_seconds' => $activeTimeSeconds,
+        'inactive_time_seconds' => $inactiveTimeSeconds,
+        'total_time_seconds' => $totalTimeSeconds,
         'difficulty' => $difficulty !== '' ? $difficulty : null,
         'primary_category' => $primaryCategory !== '' ? $primaryCategory : null,
+        'devices' => $devices,
+        'optional_devices' => $optionalDevices,
         'equipment' => $equipment,
     ];
 }
@@ -801,7 +901,15 @@ function recipeCookidooSetMetadataBackfillCursor(
 }
 
 function recipeCookidooMetadataFailureIsPermanent(string $errorKind): bool {
-    return in_array($errorKind, ['invalid_id', 'locale_mismatch'], true);
+    return in_array(
+        $errorKind,
+        [
+            'invalid_id',
+            'locale_mismatch',
+            'content_language_rejected',
+        ],
+        true
+    );
 }
 
 function recipeCookidooMetadataFailureNextProbeAt(
@@ -1741,6 +1849,7 @@ function recipeCookidooNormalizeDiscoveryInput(array $input): array {
 
     $localeInput = trim((string)($input['locale'] ?? ''));
     $locale = $localeInput !== '' ? recipeCookidooNormalizeLocale($localeInput) : '';
+    $languages = ['en'];
     $tmv = strtoupper(recipeCookidooCleanText($input['tmv'] ?? 'TM6', 'tmv', 8, true));
     if (!in_array($tmv, ['TM31', 'TM5', 'TM6', 'TM7'], true)) {
         throw new InvalidArgumentException('tmv is unsupported');
@@ -1802,6 +1911,7 @@ function recipeCookidooNormalizeDiscoveryInput(array $input): array {
         'ingredients' => $ingredients,
         'exclude_ingredients' => $excludeIngredients,
         'locale' => $locale,
+        'languages' => $languages,
         'tmv' => $tmv,
         'limit' => $limit,
         'page' => $page,
@@ -1830,6 +1940,7 @@ function recipeCookidooDiscoveryIdentity(array $request): array {
     $identity = [
         'connector' => RECIPE_COOKIDOO_CONNECTOR,
         'locale' => strtolower((string)$request['locale']),
+        'languages' => ['en'],
         'query' => recipeIngredientNormalizeName((string)$request['query']),
         'ingredients' => array_values(array_unique($ingredients)),
         'exclude_ingredients' => array_values(array_unique($excludeIngredients)),
@@ -2655,6 +2766,29 @@ function recipeCookidooNormalizeBridgeRecipe(
                 'ingredients must contain a complete nonempty list'
             );
         }
+        $providerLanguage =
+            recipeCookidooNormalizeProviderLanguage(
+                $item['provider_language'] ?? null
+            );
+        if (
+            $providerLanguage !== null
+            && !recipeCookidooProviderLanguageIsEnglish(
+                $providerLanguage
+            )
+        ) {
+            throw new RecipeCookidooLanguageRejectedException(
+                'Cookidoo provider language is explicitly non-English'
+            );
+        }
+        $languageAssessment =
+            recipeCookidooContentLanguageAssessment(
+                $title,
+                $ingredients
+            );
+        $languageAssessment['provider_language'] =
+            $providerLanguage;
+        $languageAssessment['request_languages'] = ['en'];
+        recipeCookidooLanguageEnforce($languageAssessment);
         $topologyMetrics = recipeCookidooNormalizeTopologyMetrics(
             $item['topology_metrics'] ?? null,
             $ingredients
@@ -2711,6 +2845,8 @@ function recipeCookidooNormalizeBridgeRecipe(
         'image_url' => $imageUrl,
         'canonical_url' => $canonicalUrl,
         'locale' => $locale,
+        'provider_language' => $providerLanguage,
+        '_language_assessment' => $languageAssessment,
     ];
 }
 
@@ -2771,8 +2907,30 @@ function recipeCookidooNormalizeBridgeResponse(
     }
     $recipes = [];
     $seen = [];
+    $languageRejectedIds = [];
     foreach ($decoded['recipes'] as $item) {
-        $recipe = recipeCookidooNormalizeBridgeRecipe($item, '', true);
+        try {
+            $recipe = recipeCookidooNormalizeBridgeRecipe(
+                $item,
+                '',
+                true
+            );
+        } catch (RecipeCookidooLanguageRejectedException $e) {
+            $externalId = trim((string)(
+                is_array($item)
+                    ? ($item['external_id'] ?? '')
+                    : ''
+            ));
+            if ($externalId !== '') {
+                $languageRejectedIds[] = mb_substr(
+                    $externalId,
+                    0,
+                    160,
+                    'UTF-8'
+                );
+            }
+            continue;
+        }
         if (
             $requestedLocale !== ''
             && !recipeCookidooDiscoveryLocaleMatches(
@@ -2798,6 +2956,9 @@ function recipeCookidooNormalizeBridgeResponse(
         'last_page' => $lastPage,
         'next_page' => $nextPage,
         'last_page_had_raw_hits' => $decoded['last_page_had_raw_hits'],
+        'language_rejected_count' => count($languageRejectedIds),
+        'language_rejected_ids' =>
+            array_slice($languageRejectedIds, 0, 100),
     ];
 }
 
@@ -2913,11 +3074,22 @@ function recipeCookidooNormalizeMetadataBridgeResponse(
                     'Cookidoo metadata bridge success outcome is invalid'
                 );
             }
-            $recipe = recipeCookidooNormalizeBridgeRecipe(
-                $item['recipe'] ?? null,
-                $request['locale'],
-                true
-            );
+            try {
+                $recipe = recipeCookidooNormalizeBridgeRecipe(
+                    $item['recipe'] ?? null,
+                    $request['locale'],
+                    true
+                );
+            } catch (RecipeCookidooLanguageRejectedException $e) {
+                $outcomes[] = [
+                    'external_id' => $externalId,
+                    'status' => 'failed',
+                    'error_kind' =>
+                        'content_language_rejected',
+                ];
+                $failedCount++;
+                continue;
+            }
             if ($recipe['external_id'] !== $externalId) {
                 throw new RuntimeException(
                     'Cookidoo metadata bridge response IDs are invalid'
@@ -2977,10 +3149,7 @@ function recipeCookidooNormalizeMetadataBridgeResponse(
         ];
         $failedCount++;
     }
-    if (
-        $succeededCount !== $decoded['succeeded_count']
-        || $failedCount !== $decoded['failed_count']
-    ) {
+    if ($succeededCount + $failedCount !== $expectedCount) {
         throw new RuntimeException(
             'Cookidoo metadata bridge response count is invalid'
         );
@@ -3015,10 +3184,15 @@ function recipeCookidooNormalizeRecipeForPersistence(array $recipe): array {
     $general = recipeCookidooNormalizeGeneral($recipe['general'] ?? [
         'yield_quantity' => $recipe['yield_quantity'] ?? null,
         'yield_unit' => $recipe['yield_unit'] ?? null,
+        'prep_time_seconds' => $recipe['prep_time_seconds'] ?? null,
+        'cook_time_seconds' => $recipe['cook_time_seconds'] ?? null,
         'active_time_seconds' => $recipe['active_time_seconds'] ?? null,
+        'inactive_time_seconds' => $recipe['inactive_time_seconds'] ?? null,
         'total_time_seconds' => $recipe['total_time_seconds'] ?? null,
         'difficulty' => $recipe['difficulty'] ?? null,
         'primary_category' => $recipe['primary_category'] ?? null,
+        'devices' => $recipe['devices'] ?? [],
+        'optional_devices' => $recipe['optional_devices'] ?? [],
         'equipment' => $recipe['equipment'] ?? [],
     ]);
     $names = [];
@@ -3038,10 +3212,15 @@ function recipeCookidooNormalizeRecipeForPersistence(array $recipe): array {
         'image_url' => $imageUrl,
         'yield_quantity' => $general['yield_quantity'],
         'yield_unit' => $general['yield_unit'],
+        'prep_time_seconds' => $general['prep_time_seconds'],
+        'cook_time_seconds' => $general['cook_time_seconds'],
         'active_time_seconds' => $general['active_time_seconds'],
+        'inactive_time_seconds' => $general['inactive_time_seconds'],
         'total_time_seconds' => $general['total_time_seconds'],
         'difficulty' => $general['difficulty'],
         'primary_category' => $general['primary_category'],
+        'devices' => $general['devices'],
+        'optional_devices' => $general['optional_devices'],
         'equipment' => $general['equipment'],
         'ingredients' => array_map(
             static fn(string $name): array => ['name' => $name, 'raw_text' => $name],
@@ -3094,6 +3273,10 @@ function recipeCookidooNormalizeOrigin(array $origin): array {
         true
     );
     $origin['locale'] = recipeCookidooNormalizeLocale($origin['locale'] ?? null);
+    $origin['content_language'] =
+        recipeCookidooNormalizeProviderLanguage(
+            $origin['content_language'] ?? null
+        );
     $origin['attribution'] = '';
     $origin['license'] = '';
     $origin['metadata_version'] = RECIPE_COOKIDOO_METADATA_VERSION;
@@ -3250,10 +3433,15 @@ function recipeCookidooApplyMetadataV2(
             UPDATE recipe_catalog SET
                 yield_quantity = ?,
                 yield_unit = ?,
+                prep_time_seconds = ?,
+                cook_time_seconds = ?,
                 active_time_seconds = ?,
+                inactive_time_seconds = ?,
                 total_time_seconds = ?,
                 difficulty = ?,
                 primary_category = ?,
+                devices_json = ?,
+                optional_devices_json = ?,
                 equipment_json = ?,
                 retrieved_at = ?,
                 stale_at = ?,
@@ -3265,10 +3453,15 @@ function recipeCookidooApplyMetadataV2(
         $update->execute([
             $general['yield_quantity'],
             $general['yield_unit'],
+            $general['prep_time_seconds'],
+            $general['cook_time_seconds'],
             $general['active_time_seconds'],
+            $general['inactive_time_seconds'],
             $general['total_time_seconds'],
             $general['difficulty'],
             $general['primary_category'],
+            recipeCatalogJsonEncode($general['devices']),
+            recipeCatalogJsonEncode($general['optional_devices']),
             recipeCatalogJsonEncode($general['equipment']),
             $retrievedAt,
             $staleAt,
@@ -3348,6 +3541,7 @@ function recipeCookidooApplyMetadataV2(
             UPDATE recipe_origins SET
                 metadata_version = ?,
                 metadata_schema_version = ?,
+                content_language = ?,
                 metadata_failure_version = NULL,
                 metadata_failure_kind = NULL,
                 metadata_failure_at = NULL,
@@ -3360,6 +3554,7 @@ function recipeCookidooApplyMetadataV2(
         $versionUpdate->execute([
             RECIPE_COOKIDOO_METADATA_VERSION,
             RECIPE_COOKIDOO_METADATA_SCHEMA_VERSION,
+            $item['provider_language'],
             $originId,
             $recipeId,
             RECIPE_COOKIDOO_CONNECTOR,
@@ -3367,6 +3562,14 @@ function recipeCookidooApplyMetadataV2(
         if ($versionUpdate->rowCount() !== 1) {
             throw new RuntimeException('metadata refresh version update failed');
         }
+        $languageChange =
+            recipeCookidooLanguageAssessmentStore(
+            $db,
+            $recipeId,
+            $item['_language_assessment']
+        );
+        $visibilityChanged = $visibilityChanged
+            || !empty($languageChange['visibility_changed']);
         if ($visibilityChanged && $ownsTransaction) {
             recipeScoreInvalidateCursors($db);
         }
@@ -3707,6 +3910,7 @@ function recipeCookidooBridgeSearch(array $request): array {
         'ingredients' => $request['ingredients'],
         'exclude_ingredients' => $request['exclude_ingredients'],
         'locale' => $request['locale'],
+        'languages' => ['en'],
         'tmv' => $request['tmv'],
         'limit' => $request['limit'],
         'page' => $request['page'],
@@ -3921,7 +4125,13 @@ function recipeCookidooDispatchDiscovery(PDO $db, array $job, array $payload): a
                     'external_id' => $item['external_id'],
                     'canonical_url' => $item['canonical_url'],
                     'locale' => $item['locale'],
-                    'language' => $item['locale'],
+                    'content_language' =>
+                        $item['provider_language'],
+                    'language' =>
+                        $item['_language_assessment']['verdict']
+                            === 'english'
+                            ? 'en'
+                            : 'und',
                     'storage_policy' => RECIPE_COOKIDOO_STORAGE_POLICY,
                     'rights_basis' => RECIPE_COOKIDOO_RIGHTS_BASIS,
                     'retrieved_at' => $retrievedAt,
@@ -3930,7 +4140,13 @@ function recipeCookidooDispatchDiscovery(PDO $db, array $job, array $payload): a
                         RECIPE_COOKIDOO_METADATA_SCHEMA_VERSION,
                     'store_source_payload' => false,
                 ]);
-                $importedIds[] = (int)$saved['id'];
+                $savedId = (int)$saved['id'];
+                recipeCookidooLanguageAssessmentStore(
+                    $db,
+                    $savedId,
+                    $item['_language_assessment']
+                );
+                $importedIds[] = $savedId;
             }
         }
         if ($cursorInvalidationRequired) {
@@ -3963,6 +4179,8 @@ function recipeCookidooDispatchDiscovery(PDO $db, array $job, array $payload): a
             'last_page' => (int)$bridgeResult['last_page'],
             'next_page' => (int)$bridgeResult['next_page'],
             'last_page_had_raw_hits' => (bool)$bridgeResult['last_page_had_raw_hits'],
+            'language_rejected_count' =>
+                (int)($bridgeResult['language_rejected_count'] ?? 0),
             'crawl_refresh' => $refreshChain,
         ] + $crawl,
     ];

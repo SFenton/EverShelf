@@ -16,6 +16,7 @@ $GLOBALS['RECIPE_COOKIDOO_CONFIG'] = [
     'COOKIDOO_METADATA_BACKFILL_ENABLED' => 'false',
     'COOKIDOO_METADATA_BACKFILL_BATCH_SIZE' => '20',
     'COOKIDOO_QUEUE_CADENCE_MINUTES' => '5',
+    'COOKIDOO_INGEST_LANGUAGE_POLICY' => 'observe',
 ];
 $GLOBALS['RECIPE_COOKIDOO_POLICY_TEST_OVERRIDE'] = true;
 $GLOBALS['RECIPE_SCORE_PREVIEW_REVISION_ID'] = '';
@@ -287,6 +288,83 @@ recipeTestAssert(
     ) === 31622400,
     'Generic recipe imports must share the bounded 366-day duration ceiling'
 );
+$derivedCookidooGeneral = recipeCookidooNormalizeGeneral([
+    'active_time_seconds' => 600,
+    'total_time_seconds' => 1800,
+    'devices' => ['TM6', 'Oven'],
+    'optional_devices' => ['Slow cooker', 'tm6'],
+]);
+recipeTestAssert(
+    $derivedCookidooGeneral['prep_time_seconds'] === null
+    && $derivedCookidooGeneral['cook_time_seconds'] === null
+    && $derivedCookidooGeneral['active_time_seconds'] === 600
+    && $derivedCookidooGeneral['inactive_time_seconds'] === 1200
+    && $derivedCookidooGeneral['total_time_seconds'] === 1800
+    && $derivedCookidooGeneral['devices'] === ['TM6', 'Oven']
+    && $derivedCookidooGeneral['optional_devices'] === ['Slow cooker'],
+    'Cookidoo normalization must derive only inactive/rest time from active '
+        . 'and total facts while keeping devices separate'
+);
+recipeTestAssert(
+    recipeTimeParseDurationSeconds('PT1H30M', 'en') === 5400
+    && recipeTimeParseDurationSeconds('15 minuti', 'it') === 900
+    && recipeTimeParseDurationSeconds(
+        '1 Stunde und 5 Minuten',
+        'de'
+    ) === 3900
+    && recipeTimeParseDurationSeconds('P1DT', 'en') === null
+    && recipeTimeParseDurationSeconds('about 20 minutes', 'en') === null
+    && recipeTimeParseDurationSeconds('20-25 min', 'en') === null,
+    'Local time fallback must parse only bounded deterministic duration fields'
+);
+$timeProposal = recipeTimeBuildModelProposal(
+    'prep_time',
+    'a short while',
+    'en',
+    'manual',
+    ['model' => 'review-only']
+);
+$resolvedTimeProposalRejected = false;
+try {
+    recipeTimeBuildModelProposal(
+        'cook_time',
+        '20 minutes',
+        'en',
+        'manual',
+        ['model' => 'review-only']
+    );
+} catch (InvalidArgumentException $e) {
+    $resolvedTimeProposalRejected = true;
+}
+recipeTestAssert(
+    ($timeProposal['manifest']['staging_only'] ?? false) === true
+    && ($timeProposal['manifest']['field'] ?? '') === 'prep_time'
+    && $resolvedTimeProposalRejected,
+    'Time model fallback must remain an inert proposal-only interface for '
+        . 'unresolved non-Cookidoo fields'
+);
+$openApi = file_get_contents(__DIR__ . '/../docs/openapi.yaml');
+recipeTestAssert(
+    is_string($openApi)
+    && preg_match_all(
+        '/^\s+prep_time_seconds:\s*$/m',
+        $openApi
+    ) === 2
+    && preg_match_all(
+        '/^\s+cook_time_seconds:\s*$/m',
+        $openApi
+    ) === 2
+    && preg_match_all(
+        '/^\s+inactive_time_seconds:\s*$/m',
+        $openApi
+    ) === 2
+    && preg_match_all('/^\s+devices:\s*$/m', $openApi) >= 2
+    && preg_match_all(
+        '/^\s+optional_devices:\s*$/m',
+        $openApi
+    ) === 2,
+    'OpenAPI must expose additive bounded recipe time and device facts'
+);
 $durationOverflowRejected = false;
 try {
     recipeCookidooNormalizeOptionalSeconds(
@@ -437,6 +515,7 @@ try {
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             idempotency_key TEXT NOT NULL UNIQUE,
             recipe_id INTEGER NOT NULL,
+            request_fingerprint TEXT DEFAULT NULL,
             selection_hash TEXT NOT NULL,
             outcomes_json TEXT NOT NULL DEFAULT '[]',
             created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -486,8 +565,11 @@ try {
         'name'
     );
     foreach ([
-        'yield_quantity', 'yield_unit', 'active_time_seconds',
-        'total_time_seconds', 'difficulty', 'primary_category', 'equipment_json',
+        'yield_quantity', 'yield_unit', 'prep_time_seconds',
+        'cook_time_seconds', 'active_time_seconds',
+        'inactive_time_seconds', 'total_time_seconds', 'difficulty',
+        'primary_category', 'devices_json', 'optional_devices_json',
+        'equipment_json',
         'instruction_groups_json',
     ] as $column) {
         recipeTestAssert(
@@ -502,8 +584,13 @@ try {
              WHERE title = 'Existing metadata-v1 row'
                AND yield_quantity IS NULL
                AND yield_unit IS NULL
+               AND prep_time_seconds IS NULL
+               AND cook_time_seconds IS NULL
                AND active_time_seconds IS NULL
-               AND total_time_seconds IS NULL"
+               AND inactive_time_seconds IS NULL
+               AND total_time_seconds IS NULL
+               AND devices_json = '[]'
+               AND optional_devices_json = '[]'"
         ) === 1,
         'Existing metadata-v1 rows must remain valid with nullable metadata-v2 fields'
     );
@@ -927,7 +1014,16 @@ try {
              WHERE idempotency_key = 'legacy-upgrade-key'
                AND request_fingerprint IS NULL"
         ) === 1,
-        'Legacy grocery idempotency rows must migrate without losing replay data'
+        'Existing grocery idempotency rows must survive later schema migrations'
+    );
+    $upgradeOriginColumns = array_column(
+        $upgradeDb->query("PRAGMA table_info(recipe_origins)")
+            ->fetchAll(PDO::FETCH_ASSOC),
+        'name'
+    );
+    recipeTestAssert(
+        in_array('content_language', $upgradeOriginColumns, true),
+        'Current installations must add recipe origin language independently of unrelated grocery migrations'
     );
     recipeTestAssert(
         str_contains(
@@ -951,6 +1047,16 @@ try {
     initializeDB($db);
     migrateDB($db);
     $db->exec("
+        DROP TABLE recipe_planner_command_events;
+        DROP TABLE recipe_planner_commands;
+        DROP TABLE recipe_ingredient_proposal_responses;
+        DROP TABLE recipe_ingredient_proposal_prompts;
+        DROP TABLE recipe_ingredient_proposal_outbox;
+        DROP TABLE recipe_ingredient_feedback_regression_fixtures;
+        DROP TABLE recipe_ingredient_feedback_events;
+        DROP TABLE recipe_ingredient_user_overrides;
+        DROP TABLE recipe_cookidoo_language_assessments;
+        DROP TABLE recipe_quantity_parse_proposals;
         DROP TABLE ingredient_ontology_shadow_requirement_matches;
         DROP TABLE ingredient_ontology_shadow_matches;
         DROP TABLE ingredient_ontology_requirement_members;
@@ -1106,8 +1212,11 @@ try {
     );
     recipeTestAssert(in_array('stale_at', $catalogColumns, true), 'Catalog stale_at migration is required');
     foreach ([
-        'yield_quantity', 'yield_unit', 'active_time_seconds',
-        'total_time_seconds', 'difficulty', 'primary_category', 'equipment_json',
+        'yield_quantity', 'yield_unit', 'prep_time_seconds',
+        'cook_time_seconds', 'active_time_seconds',
+        'inactive_time_seconds', 'total_time_seconds', 'difficulty',
+        'primary_category', 'devices_json', 'optional_devices_json',
+        'equipment_json',
     ] as $column) {
         recipeTestAssert(
             in_array($column, $catalogColumns, true),
@@ -1945,6 +2054,28 @@ try {
                 . ':' . (string)$invalidRecipeId
         );
     }
+    $GLOBALS['RECIPE_API_JSON_INPUT'] = [
+        'connector' => 'manual',
+        'content_language' => 'x',
+        'recipe' => [
+            'title' => 'Invalid Content Language',
+            'ingredients' => [['name' => 'Tomato Test']],
+            'steps' => ['No write'],
+        ],
+    ];
+    http_response_code(200);
+    ob_start();
+    recipeCatalogApiSave($db);
+    $invalidContentLanguage = json_decode(
+        (string)ob_get_clean(),
+        true
+    );
+    recipeTestAssert(
+        http_response_code() === 400
+        && ($invalidContentLanguage['error'] ?? '')
+            === 'content_language is invalid',
+        'Catalog save must reject invalid content language before SQLite constraints'
+    );
     unset($GLOBALS['RECIPE_API_JSON_INPUT']);
     http_response_code(200);
     $urlVariant = recipeCatalogSaveVariant($db, [
@@ -2090,10 +2221,15 @@ try {
             'general' => [
                 'yield_quantity' => 4,
                 'yield_unit' => 'portions',
+                'prep_time_seconds' => 300,
+                'cook_time_seconds' => 900,
                 'active_time_seconds' => 600,
+                'inactive_time_seconds' => 300,
                 'total_time_seconds' => 1800,
                 'difficulty' => 'easy',
                 'primary_category' => 'Soups',
+                'devices' => ['TM6', 'Oven'],
+                'optional_devices' => ['Slow cooker'],
                 'equipment' => ['sieve'],
                 'notes' => ['prohibited'],
             ],
@@ -2168,15 +2304,22 @@ try {
         array_keys($allowlisted) === [
             'recipes', 'count', 'pages_scanned', 'last_page',
             'next_page', 'last_page_had_raw_hits',
+            'language_rejected_count', 'language_rejected_ids',
         ]
         && array_keys($allowlisted['recipes'][0]) === [
             'external_id', 'title', 'metadata_schema_version',
             'general', 'ingredients', 'topology_metrics',
             'image_url', 'canonical_url', 'locale',
+            'provider_language',
+            '_language_assessment',
         ]
+        && $allowlisted['language_rejected_count'] === 0
+        && $allowlisted['language_rejected_ids'] === []
         && array_keys($allowlisted['recipes'][0]['general']) === [
-            'yield_quantity', 'yield_unit', 'active_time_seconds',
-            'total_time_seconds', 'difficulty', 'primary_category', 'equipment',
+            'yield_quantity', 'yield_unit', 'prep_time_seconds',
+            'cook_time_seconds', 'active_time_seconds',
+            'inactive_time_seconds', 'total_time_seconds', 'difficulty',
+            'primary_category', 'devices', 'optional_devices', 'equipment',
         ]
         && array_keys($allowlisted['recipes'][0]['ingredients'][0]) === [
             'name', 'source_quantity', 'source_quantity_max',
@@ -2189,6 +2332,145 @@ try {
         && array_column($allowlisted['recipes'][0]['ingredients'], 'name')
             === ['Tomato Test', 'Tomato Test', 'Missing Spice Test'],
         'Cookidoo bridge normalization must retain only allowlisted recipes and scalar progress'
+    );
+    $batchPolicyBefore = $GLOBALS['RECIPE_COOKIDOO_CONFIG'][
+        'COOKIDOO_INGEST_LANGUAGE_POLICY'
+    ];
+    $GLOBALS['RECIPE_COOKIDOO_CONFIG'][
+        'COOKIDOO_INGEST_LANGUAGE_POLICY'
+    ] = 'enforce';
+    $languageFilteredBatch = recipeCookidooNormalizeBridgeResponse([
+        'recipes' => [
+            recipeTestCookidooBridgeRecipe([
+                'external_id' => 'batch-english',
+                'title' => 'Chicken soup',
+                'general' => [
+                    'yield_quantity' => null,
+                    'yield_unit' => null,
+                    'active_time_seconds' => null,
+                    'total_time_seconds' => null,
+                    'difficulty' => null,
+                    'primary_category' => null,
+                    'equipment' => [],
+                ],
+                'ingredients' => [
+                    ['name' => 'water'],
+                    ['name' => 'chicken'],
+                    ['name' => 'salt'],
+                ],
+                'image_url' => '',
+                'canonical_url' => (
+                    'https://cookidoo.co.uk/recipes/recipe/en-GB/'
+                    . 'batch-english'
+                ),
+                'locale' => 'en-GB',
+            ]),
+            recipeTestCookidooBridgeRecipe([
+                'external_id' => 'batch-foreign',
+                'title' => 'Kartoffelsuppe',
+                'general' => [
+                    'yield_quantity' => null,
+                    'yield_unit' => null,
+                    'active_time_seconds' => null,
+                    'total_time_seconds' => null,
+                    'difficulty' => null,
+                    'primary_category' => null,
+                    'equipment' => [],
+                ],
+                'ingredients' => [
+                    ['name' => 'Wasser'],
+                    ['name' => 'Kartoffeln'],
+                    ['name' => 'Salz'],
+                ],
+                'image_url' => '',
+                'canonical_url' => (
+                    'https://cookidoo.co.uk/recipes/recipe/en-GB/'
+                    . 'batch-foreign'
+                ),
+                'locale' => 'en-GB',
+            ]),
+        ],
+        'count' => 2,
+        'pages_scanned' => 1,
+        'last_page' => 0,
+        'next_page' => 1,
+        'last_page_had_raw_hits' => true,
+    ], recipeCookidooNormalizeDiscoveryInput([
+        'query' => 'batch language',
+        'locale' => 'en-GB',
+        'limit' => 2,
+    ]));
+    $GLOBALS['RECIPE_COOKIDOO_CONFIG'][
+        'COOKIDOO_INGEST_LANGUAGE_POLICY'
+    ] = $batchPolicyBefore;
+    recipeTestAssert(
+        $languageFilteredBatch['count'] === 1
+        && $languageFilteredBatch['recipes'][0]['external_id']
+            === 'batch-english'
+        && $languageFilteredBatch['language_rejected_count'] === 1
+        && $languageFilteredBatch['language_rejected_ids']
+            === ['batch-foreign'],
+        'One foreign Cookidoo recipe must be skipped without poisoning the entire discovery batch'
+    );
+    recipeTestAssert(
+        recipeCookidooMetadataFailureIsPermanent(
+            'content_language_rejected'
+        )
+        && recipeCookidooMetadataFailureNextProbeAt(
+            'content_language_rejected',
+            1
+        ) === null,
+        'Rejected Cookidoo content language must be a permanent per-item outcome'
+    );
+    $providerLanguageRejected = false;
+    try {
+        recipeCookidooNormalizeBridgeRecipe(
+            recipeTestCookidooBridgeRecipe([
+                'external_id' => 'provider-language-de',
+                'title' => 'Chicken soup',
+                'ingredients' => [
+                    ['name' => 'water'],
+                    ['name' => 'chicken'],
+                    ['name' => 'salt'],
+                ],
+                'image_url' => '',
+                'canonical_url' => (
+                    'https://cookidoo.co.uk/recipes/recipe/en-GB/'
+                    . 'provider-language-de'
+                ),
+                'locale' => 'en-GB',
+                'provider_language' => 'de',
+            ])
+        );
+    } catch (RecipeCookidooLanguageRejectedException $e) {
+        $providerLanguageRejected = true;
+    }
+    $providerLanguageEnglish = recipeCookidooNormalizeBridgeRecipe(
+        recipeTestCookidooBridgeRecipe([
+            'external_id' => 'provider-language-en',
+            'title' => 'Chicken soup',
+            'ingredients' => [
+                ['name' => 'water'],
+                ['name' => 'chicken'],
+                ['name' => 'salt'],
+            ],
+            'image_url' => '',
+            'canonical_url' => (
+                'https://cookidoo.co.uk/recipes/recipe/en-GB/'
+                . 'provider-language-en'
+            ),
+            'locale' => 'en-GB',
+            'provider_language' => 'en-US',
+        ])
+    );
+    recipeTestAssert(
+        $providerLanguageRejected
+        && $providerLanguageEnglish['provider_language']
+            === 'en-US'
+        && $providerLanguageEnglish['_language_assessment'][
+            'request_languages'
+        ] === ['en'],
+        'Undocumented provider language must remain bounded provenance, stay separate from locale, and explicitly reject non-English ingestion'
     );
     $fallbackGroupedIngredients = recipeCookidooNormalizeOrderedIngredients([
         ['name' => 'Fallback One'],
@@ -2428,12 +2710,24 @@ try {
                     'general' => [
                         'yield_quantity' => $isMetadataRefresh ? 6 : 4,
                         'yield_unit' => 'portions',
+                        'prep_time_seconds' =>
+                            $isMetadataRefresh ? 360 : 300,
+                        'cook_time_seconds' =>
+                            $isMetadataRefresh ? 1200 : 900,
                         'active_time_seconds' => $isMetadataRefresh ? 720 : 600,
+                        'inactive_time_seconds' =>
+                            $isMetadataRefresh ? 180 : 120,
                         'total_time_seconds' => $isMetadataRefresh
                             ? 2100
                             : 2682000,
                         'difficulty' => $isMetadataRefresh ? 'medium' : 'easy',
                         'primary_category' => $isMetadataRefresh ? 'Main dishes' : 'Soups',
+                        'devices' => $isMetadataRefresh
+                            ? ['TM7', 'Air fryer']
+                            : ['TM6', 'Oven'],
+                        'optional_devices' => $isMetadataRefresh
+                            ? ['Slow cooker']
+                            : ['Sous vide cooker'],
                         'equipment' => $isMetadataRefresh ? ['whisk'] : ['sieve'],
                         'notes' => ['must never persist'],
                     ],
@@ -2521,6 +2815,7 @@ try {
                         : 'https://assets.tmecosys.com/image/upload/cookidoo-r1.jpg',
                     'canonical_url' => 'https://cookidoo.co.uk/recipes/recipe/en-GB/r-cookidoo-metadata-1',
                     'locale' => 'en-GB',
+                    'provider_language' => 'en',
                     'instructions' => ['must never persist'],
                     'nutrition' => ['calories' => 123],
                     'quantities' => ['500 g'],
@@ -2736,6 +3031,7 @@ try {
             'ingredients',
             'exclude_ingredients',
             'locale',
+            'languages',
             'tmv',
             'limit',
             'page',
@@ -2745,6 +3041,7 @@ try {
         && $lastBridgePayload['tmv'] === 'TM6'
         && $lastBridgePayload['limit'] === 2
         && $lastBridgePayload['locale'] === 'en'
+        && $lastBridgePayload['languages'] === ['en']
         && !array_key_exists('interactive', $lastBridgePayload)
         && !array_key_exists('force', $lastBridgePayload)
         && !array_key_exists('include_local_results', $lastBridgePayload)
@@ -2793,10 +3090,15 @@ try {
         && $cookidooRecipe['cache_expires_at'] === null
         && abs((float)$cookidooRecipe['yield_quantity'] - 4.0) < 0.000001
         && $cookidooRecipe['yield_unit'] === 'portions'
+        && $cookidooRecipe['prep_time_seconds'] === 300
+        && $cookidooRecipe['cook_time_seconds'] === 900
         && $cookidooRecipe['active_time_seconds'] === 600
+        && $cookidooRecipe['inactive_time_seconds'] === 120
         && $cookidooRecipe['total_time_seconds'] === 2682000
         && $cookidooRecipe['difficulty'] === 'easy'
         && $cookidooRecipe['primary_category'] === 'Soups'
+        && $cookidooRecipe['devices'] === ['TM6', 'Oven']
+        && $cookidooRecipe['optional_devices'] === ['Sous vide cooker']
         && $cookidooRecipe['equipment'] === ['sieve'],
         'Cookidoo recipes must persist only approved metadata policy fields'
     );
@@ -3162,9 +3464,22 @@ try {
         && $cookidooDetail['source']['attribution'] === 'Cookidoo'
         && $cookidooDetail['source']['metadata_schema_version']
             === RECIPE_COOKIDOO_METADATA_SCHEMA_VERSION
-        && $cookidooDetail['general']['yield'] === [
-            'quantity' => 4.0,
-            'unit' => 'portions',
+        && $cookidooDetail['source']['content_language'] === 'en'
+        && $cookidooDetail['general'] === [
+            'yield' => [
+                'quantity' => 4.0,
+                'unit' => 'portions',
+            ],
+            'prep_time_seconds' => 300,
+            'cook_time_seconds' => 900,
+            'active_time_seconds' => 600,
+            'inactive_time_seconds' => 120,
+            'total_time_seconds' => 2682000,
+            'difficulty' => 'easy',
+            'primary_category' => 'Soups',
+            'devices' => ['TM6', 'Oven'],
+            'optional_devices' => ['Sous vide cooker'],
+            'equipment' => ['sieve'],
         ]
         && $cookidooDetail['capabilities'] === [
             'general' => 'full',
@@ -3172,6 +3487,9 @@ try {
             'instructions' => 'external_link',
             'quantities' => 'display_only',
             'grocery_add' => true,
+            'ingredient_feedback' => true,
+            'ingredient_feedback_v2' => true,
+            'planner' => false,
             'score_preview' => [
                 'requested' => false,
                 'active' => false,
@@ -3279,6 +3597,806 @@ try {
         ),
         'Cookidoo ingredient groups must expose stable named ordinal boundaries'
     );
+    $feedbackStateBefore = recipeScoreState($db);
+    $feedbackShoppingBefore = recipeTestCount(
+        $db,
+        'SELECT COUNT(*) FROM shopping_list'
+    );
+    $feedbackMissingIngredient =
+        $cookidooDetail['ingredients'][1];
+    $previewSettingBefore =
+        $GLOBALS['RECIPE_SCORE_PREVIEW_REVISION_ID'];
+    $GLOBALS['RECIPE_SCORE_PREVIEW_REVISION_ID'] = '999999';
+    recipeScoreReadRevisionCacheClear();
+    $activeFeedbackCurrent =
+        recipeIngredientFeedbackCurrentIngredient($db, [
+            'recipe_id' => $cookidooRecipeId,
+            'ingredient_key' =>
+                $feedbackMissingIngredient['key'],
+            'position' =>
+                $feedbackMissingIngredient['position'],
+            'feedback_token' =>
+                $feedbackMissingIngredient['feedback_token'],
+        ]);
+    $GLOBALS['RECIPE_SCORE_PREVIEW_REVISION_ID'] =
+        $previewSettingBefore;
+    recipeScoreReadRevisionCacheClear();
+    recipeTestAssert(
+        $activeFeedbackCurrent['detail']['revision']['preview']
+            === false
+        && $activeFeedbackCurrent['detail'][
+            'preview_diagnostics'
+        ] === [],
+        'Ingredient feedback mutation validation must always use the true active score and ontology, never preview/read mode'
+    );
+    $overrideResult = recipeIngredientOverrideSet($db, [
+        'recipe_id' => $cookidooRecipeId,
+        'ingredient_key' =>
+            $feedbackMissingIngredient['key'],
+        'position' => $feedbackMissingIngredient['position'],
+        'availability' => 'have',
+        'feedback_token' =>
+            $feedbackMissingIngredient['feedback_token'],
+        'idempotency_key' => 'feedback-override-1',
+    ]);
+    $overrideDetail = recipeCatalogDetail(
+        $db,
+        $cookidooRecipeId
+    );
+    $overrideReplay = recipeIngredientOverrideSet($db, [
+        'recipe_id' => $cookidooRecipeId,
+        'ingredient_key' =>
+            $feedbackMissingIngredient['key'],
+        'position' => $feedbackMissingIngredient['position'],
+        'availability' => 'have',
+        'feedback_token' =>
+            $feedbackMissingIngredient['feedback_token'],
+        'idempotency_key' => 'feedback-override-1',
+    ]);
+    $overrideConflict = false;
+    try {
+        recipeIngredientOverrideSet($db, [
+            'recipe_id' => $cookidooRecipeId,
+            'ingredient_key' =>
+                $feedbackMissingIngredient['key'],
+            'position' =>
+                $feedbackMissingIngredient['position'],
+            'availability' => 'missing',
+            'feedback_token' =>
+                $feedbackMissingIngredient['feedback_token'],
+            'idempotency_key' => 'feedback-override-1',
+        ]);
+    } catch (RecipeIngredientFeedbackConflictException $e) {
+        $overrideConflict =
+            $e->getMessage() === 'idempotency_key_conflict';
+    }
+    recipeTestAssert(
+        $overrideResult['availability'] === 'have'
+        && !$overrideResult['replayed']
+        && $overrideReplay['replayed']
+        && $overrideConflict
+        && $overrideDetail['ingredients'][1][
+            'user_override'
+        ]['availability'] === 'have'
+        && $overrideDetail['ingredients'][1]['inventory']['state']
+            === 'missing'
+        && $overrideDetail['grocery'] ===
+            $cookidooDetail['grocery']
+        && recipeScoreState($db) === $feedbackStateBefore
+        && recipeTestCount(
+            $db,
+            'SELECT COUNT(*) FROM shopping_list'
+        ) === $feedbackShoppingBefore,
+        'Availability overrides must be idempotent display evidence without changing inventory, scores, or grocery truth'
+    );
+    $identityIngredient = $cookidooDetail['ingredients'][0];
+    $identityResult = recipeIngredientIdentityFeedbackRecord(
+        $db,
+        [
+            'recipe_id' => $cookidooRecipeId,
+            'ingredient_key' => $identityIngredient['key'],
+            'position' => $identityIngredient['position'],
+            'verdict' => 'wrong',
+            'target_kind' => 'closest_match',
+            'feedback_token' =>
+                $identityIngredient['feedback_token'],
+            'idempotency_key' => 'feedback-identity-1',
+        ]
+    );
+    $identityDetail = recipeCatalogDetail(
+        $db,
+        $cookidooRecipeId
+    );
+    recipeTestAssert(
+        $identityResult['verdict'] === 'wrong'
+        && $identityResult['settle_days'] === 14
+        && $identityDetail['ingredients'][0][
+            'identity_feedback'
+        ]['verdict'] === 'wrong'
+        && recipeTestCount(
+            $db,
+            "SELECT COUNT(*)
+             FROM recipe_ingredient_feedback_events
+             WHERE review_state = 'settling'
+               AND settle_after > CURRENT_TIMESTAMP"
+        ) === 2
+        && recipeScoreState($db) === $feedbackStateBefore,
+        'Explicit identity feedback must remain append-only settling evidence and never mutate ontology or score state'
+    );
+    $db->prepare("
+        UPDATE recipe_ingredient_feedback_events
+        SET target_label = 'Different identity'
+        WHERE idempotency_key = 'feedback-identity-1'
+    ")->execute();
+    recipeTestAssert(
+        recipeCatalogDetail(
+            $db,
+            $cookidooRecipeId
+        )['ingredients'][0]['identity_feedback'] === null,
+        'Identity feedback must not project onto a different current target'
+    );
+    $db->prepare("
+        UPDATE recipe_ingredient_feedback_events
+        SET target_label = ?
+        WHERE idempotency_key = 'feedback-identity-1'
+    ")->execute([
+        $identityIngredient['closest_match']['label'],
+    ]);
+    $selectedProductId = (int)(
+        $identityIngredient['inventory']['matched_product']['id']
+            ?? 0
+    );
+    recipeTestAssert(
+        $selectedProductId > 0,
+        'Ingredient decision tests require one exact stocked product'
+    );
+    $decisionEventsBefore = recipeTestCount(
+        $db,
+        'SELECT COUNT(*) FROM recipe_ingredient_feedback_events'
+    );
+    $decisionOutboxBefore = recipeTestCount(
+        $db,
+        'SELECT COUNT(*) FROM recipe_ingredient_proposal_outbox'
+    );
+    $selectDecision = recipeIngredientDecision($db, [
+        'recipe_id' => $cookidooRecipeId,
+        'ingredient_key' =>
+            $feedbackMissingIngredient['key'],
+        'position' => $feedbackMissingIngredient['position'],
+        'action' => 'select_inventory_product',
+        'selected_product_id' => $selectedProductId,
+        'feedback_token' =>
+            $feedbackMissingIngredient['feedback_token'],
+        'idempotency_key' => 'feedback-v2-select-1',
+        'action_origin' => 'react_dashboard',
+    ]);
+    $selectReplay = recipeIngredientDecision($db, [
+        'recipe_id' => $cookidooRecipeId,
+        'ingredient_key' =>
+            $feedbackMissingIngredient['key'],
+        'position' => $feedbackMissingIngredient['position'],
+        'action' => 'select_inventory_product',
+        'selected_product_id' => $selectedProductId,
+        'feedback_token' =>
+            $feedbackMissingIngredient['feedback_token'],
+        'idempotency_key' => 'feedback-v2-select-1',
+        'action_origin' => 'react_dashboard',
+    ]);
+    $selectDetail = recipeCatalogDetail(
+        $db,
+        $cookidooRecipeId
+    );
+    $selectEvent = $db->query("
+        SELECT *
+        FROM recipe_ingredient_feedback_events
+        WHERE idempotency_key = 'feedback-v2-select-1'
+    ")->fetch(PDO::FETCH_ASSOC);
+    $selectOutbox = $db->query("
+        SELECT *
+        FROM recipe_ingredient_proposal_outbox
+        WHERE feedback_event_id = " . (int)$selectEvent['id']
+    )->fetch(PDO::FETCH_ASSOC);
+    recipeTestAssert(
+        $selectDecision['identity_evidence'] === true
+        && $selectDecision['proposal_enqueued'] === true
+        && $selectDecision['availability'] === 'have'
+        && $selectReplay['replayed'] === true
+        && $selectDetail['ingredients'][1]['user_override'][
+            'selected_product'
+        ]['id'] === $selectedProductId
+        && $selectEvent['decision_action']
+            === 'select_inventory_product'
+        && $selectEvent['target_kind'] === 'inventory_product'
+        && $selectEvent['review_state'] === 'eligible'
+        && $selectEvent['source_fingerprint_v2'] !== null
+        && strlen((string)$selectEvent[
+            'target_owner_fingerprint'
+        ]) === 64
+        && (int)$selectEvent['observed_inventory_revision']
+            === (int)$feedbackStateBefore['inventory_revision']
+        && (int)$selectEvent['observed_catalog_revision']
+            === (int)$feedbackStateBefore['catalog_revision']
+        && $selectDetail['ingredients'][1][
+            'identity_feedback'
+        ]['target_kind'] === 'inventory_product'
+        && $selectOutbox['status'] === 'queued'
+        && recipeTestCount(
+            $db,
+            'SELECT COUNT(*)
+             FROM recipe_ingredient_feedback_regression_fixtures
+             WHERE feedback_event_id = '
+                . (int)$selectEvent['id']
+                . " AND polarity = 'positive'"
+        ) === 1,
+        'Positive ingredient decisions must atomically persist the display override, immutable product-bound evidence, outbox row, and candidate regression fixture'
+    );
+    $db->prepare("
+        UPDATE recipe_ingredient_proposal_outbox
+        SET status = 'processing'
+        WHERE id = ?
+    ")->execute([(int)$selectOutbox['id']]);
+    $proposalStateLinked = recipeIngredientProposalSetState(
+        $db,
+        (int)$selectOutbox['id'],
+        'retry',
+        'synthetic_retry',
+        'Synthetic successful-link probe.'
+    );
+    $db->prepare("
+        UPDATE recipe_ingredient_proposal_outbox
+        SET status = 'superseded'
+        WHERE id = ?
+    ")->execute([(int)$selectOutbox['id']]);
+    $proposalStateLostRace = recipeIngredientProposalSetState(
+        $db,
+        (int)$selectOutbox['id'],
+        'staged'
+    );
+    $db->prepare("
+        UPDATE recipe_ingredient_proposal_outbox
+        SET status = 'queued',
+            next_attempt_at = NULL,
+            last_error_kind = NULL,
+            last_error = ''
+        WHERE id = ?
+    ")->execute([(int)$selectOutbox['id']]);
+    recipeTestAssert(
+        $proposalStateLinked
+        && !$proposalStateLostRace,
+        'Proposal state linking must distinguish a live processing row from a superseded race loser'
+    );
+    $db->prepare("
+        INSERT INTO ingredient_ontology_versions (
+            version, status, schema_hash, prompt_hash,
+            model_hash, model_name, corpus_hash, content_hash
+        )
+        VALUES (?, 'building', ?, ?, ?, ?, ?, ?)
+    ")->execute([
+        'feedback-worker-test',
+        str_repeat('1', 64),
+        str_repeat('2', 64),
+        ingredientOntologyV3ModelHash(
+            ingredientOntologyV3ConfiguredProposalModel()
+        ),
+        ingredientOntologyV3ConfiguredProposalModel(),
+        str_repeat('3', 64),
+        str_repeat('4', 64),
+    ]);
+    $feedbackWorkerVersionId = (int)$db->lastInsertId();
+    $db->prepare("
+        INSERT INTO ingredient_ontology_entities (
+            ontology_version_id, local_key, slug,
+            canonical_name, entity_kind, active, provenance
+        )
+        VALUES (?, 'feedback-target', 'feedback-target',
+                'Feedback Target', 'ingredient', 1, 'test')
+    ")->execute([$feedbackWorkerVersionId]);
+    $selectOutboxInput = json_decode(
+        (string)$selectOutbox['input_json'],
+        true
+    );
+    $selectOutboxInput['ontology_version_id'] =
+        $feedbackWorkerVersionId;
+    $db->prepare("
+        UPDATE recipe_ingredient_proposal_outbox
+        SET input_json = ?
+        WHERE id = ?
+    ")->execute([
+        recipeCatalogJsonEncode($selectOutboxInput),
+        (int)$selectOutbox['id'],
+    ]);
+    $proposalBlocked = recipeIngredientProposalProcessQueue(
+        $db,
+        1
+    );
+    $selectOutboxState = $db->query("
+        SELECT status, last_error_kind
+        FROM recipe_ingredient_proposal_outbox
+        WHERE id = " . (int)$selectOutbox['id']
+    )->fetch(PDO::FETCH_ASSOC);
+    recipeTestAssert(
+        $proposalBlocked['claimed'] === 1
+        && $selectOutboxState['status'] === 'blocked'
+        && $selectOutboxState['last_error_kind']
+            === 'gemini_api_key_unavailable'
+        && recipeTestCount(
+            $db,
+            'SELECT COUNT(*)
+             FROM recipe_ingredient_proposal_prompts
+             WHERE outbox_id = ' . (int)$selectOutbox['id']
+                . ' AND model_name = '
+                . $db->quote(
+                    ingredientOntologyV3ConfiguredProposalModel()
+                )
+        ) === 1,
+        'Proposal intake must persist the frozen prompt/manifest and remain durably blocked without a runtime Gemini key, with no fallback model'
+    );
+    $handoff = recipeIngredientProposalExportPackages($db, 1);
+    recipeTestAssert(
+        $handoff['runtime_model_calls'] === false
+        && $handoff['operator_or_copilot_handoff_required'] === true
+        && count($handoff['packages']) === 1
+        && $handoff['packages'][0]['outbox_id']
+            === (int)$selectOutbox['id']
+        && $handoff['packages'][0]['model']
+            === ingredientOntologyV3ConfiguredProposalModel(),
+        'The proposal worker must expose an immutable operator/Copilot artifact handoff without silently calling or substituting a model'
+    );
+    recipeIngredientOverrideSet($db, [
+        'recipe_id' => $cookidooRecipeId,
+        'ingredient_key' =>
+            $feedbackMissingIngredient['key'],
+        'position' => $feedbackMissingIngredient['position'],
+        'availability' => 'missing',
+        'feedback_token' =>
+            $feedbackMissingIngredient['feedback_token'],
+        'idempotency_key' =>
+            'feedback-v1-after-v2-selection-1',
+    ]);
+    $legacyOverrideAfterDecision = $db->query("
+        SELECT selected_product_id,
+               selected_product_fingerprint,
+               decision_action, action_origin,
+               observed_inventory_revision,
+               observed_catalog_revision
+        FROM recipe_ingredient_user_overrides
+        WHERE recipe_id = {$cookidooRecipeId}
+          AND ingredient_key = "
+            . $db->quote($feedbackMissingIngredient['key'])
+    )->fetch(PDO::FETCH_ASSOC);
+    recipeTestAssert(
+        $legacyOverrideAfterDecision['selected_product_id'] === null
+        && $legacyOverrideAfterDecision[
+            'selected_product_fingerprint'
+        ] === null
+        && $legacyOverrideAfterDecision['decision_action'] === null
+        && $legacyOverrideAfterDecision['action_origin'] === null
+        && (int)$legacyOverrideAfterDecision[
+            'observed_inventory_revision'
+        ] === (int)$feedbackStateBefore['inventory_revision']
+        && (int)$legacyOverrideAfterDecision[
+            'observed_catalog_revision'
+        ] === (int)$feedbackStateBefore['catalog_revision']
+        && recipeCatalogDetail(
+            $db,
+            $cookidooRecipeId
+        )['ingredients'][1]['user_override'][
+            'selected_product'
+        ] === null,
+        'Legacy availability overrides must clear v2 product and action provenance rather than retaining a revoked ontology target'
+    );
+    $feedbackPrompt = $db->query("
+        SELECT *
+        FROM recipe_ingredient_proposal_prompts
+        WHERE outbox_id = " . (int)$selectOutbox['id']
+    )->fetch(PDO::FETCH_ASSOC);
+    $feedbackManifest = json_decode(
+        (string)$feedbackPrompt['manifest_json'],
+        true
+    );
+    $db->prepare("
+        INSERT INTO ingredient_ontology_change_sets (
+            ontology_version_id, change_set_key, input_hash,
+            prompt_hash, model_hash, schema_hash, model_name,
+            raw_model_json, validator_result_json, review_state
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, '{}', ?, 'pending')
+    ")->execute([
+        $feedbackWorkerVersionId,
+        'feedback-supersede-test',
+        $feedbackManifest['input_hash'],
+        $feedbackManifest['prompt_hash'],
+        $feedbackManifest['model_hash'],
+        $feedbackManifest['schema_hash'],
+        $feedbackManifest['model'],
+        recipeCatalogJsonEncode(['valid' => true]),
+    ]);
+    $feedbackChangeSetId = (int)$db->lastInsertId();
+    $db->prepare("
+        INSERT INTO ingredient_ontology_proposals (
+            change_set_id, input_id, decision,
+            normalized_json, raw_json, validator_result_json,
+            merge_key, review_state
+        )
+        VALUES (?, 'feedback_supersede', 'reject',
+                '{}', '{}', '{}', ?, 'pending')
+    ")->execute([
+        $feedbackChangeSetId,
+        str_repeat('5', 64),
+    ]);
+    $feedbackProposalId = (int)$db->lastInsertId();
+    $db->prepare("
+        INSERT INTO recipe_ingredient_proposal_responses (
+            prompt_artifact_id, feedback_event_id, source,
+            raw_response_json, response_hash,
+            validation_json, change_set_id
+        )
+        VALUES (?, ?, 'operator_import', '{}', ?, ?, ?)
+    ")->execute([
+        (int)$feedbackPrompt['id'],
+        (int)$selectEvent['id'],
+        hash('sha256', '{}'),
+        recipeCatalogJsonEncode(['valid' => true]),
+        $feedbackChangeSetId,
+    ]);
+    $feedbackResponseId = (int)$db->lastInsertId();
+    $db->prepare("
+        UPDATE recipe_ingredient_proposal_outbox
+        SET status = 'staged', response_artifact_id = ?
+        WHERE id = ?
+    ")->execute([
+        $feedbackResponseId,
+        (int)$selectOutbox['id'],
+    ]);
+    $assumeDecision = recipeIngredientDecision($db, [
+        'recipe_id' => $cookidooRecipeId,
+        'ingredient_key' =>
+            $feedbackMissingIngredient['key'],
+        'position' => $feedbackMissingIngredient['position'],
+        'action' => 'assume_have',
+        'feedback_token' =>
+            $feedbackMissingIngredient['feedback_token'],
+        'idempotency_key' => 'feedback-v2-assume-1',
+        'action_origin' => 'react_dashboard',
+    ]);
+    $supersededOutbox = $db->query("
+        SELECT status
+        FROM recipe_ingredient_proposal_outbox
+        WHERE id = " . (int)$selectOutbox['id']
+    )->fetchColumn();
+    recipeTestAssert(
+        $assumeDecision['identity_evidence'] === false
+        && $assumeDecision['proposal_enqueued'] === false
+        && (int)$db->query("
+            SELECT supersedes_event_id
+            FROM recipe_ingredient_feedback_events
+            WHERE idempotency_key = 'feedback-v2-assume-1'
+        ")->fetchColumn() === (int)$selectEvent['id']
+        && $supersededOutbox === 'superseded'
+        && $db->query("
+            SELECT review_state
+            FROM ingredient_ontology_change_sets
+            WHERE id = {$feedbackChangeSetId}
+        ")->fetchColumn() === 'rejected'
+        && $db->query("
+            SELECT review_state
+            FROM ingredient_ontology_proposals
+            WHERE id = {$feedbackProposalId}
+        ")->fetchColumn() === 'rejected'
+        && $db->query("
+            SELECT status
+            FROM recipe_ingredient_feedback_regression_fixtures
+            WHERE feedback_event_id = " . (int)$selectEvent['id']
+        )->fetchColumn() === 'rejected'
+        && recipeCatalogDetail(
+            $db,
+            $cookidooRecipeId
+        )['ingredients'][1]['identity_feedback'] === null
+        && recipeTestCount(
+            $db,
+            "SELECT COUNT(*)
+             FROM recipe_ingredient_proposal_outbox
+             WHERE feedback_event_id IN (
+                 SELECT id
+                 FROM recipe_ingredient_feedback_events
+                 WHERE idempotency_key = 'feedback-v2-assume-1'
+             )"
+        ) === 0,
+        'Assume-have must remain availability-only and deterministically supersede any prior provisional proposal'
+    );
+    $db->prepare("
+        INSERT INTO ingredient_ontology_change_sets (
+            ontology_version_id, change_set_key, input_hash,
+            prompt_hash, model_hash, schema_hash, model_name,
+            raw_model_json, validator_result_json, review_state
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, '{}', ?, 'pending')
+    ")->execute([
+        $feedbackWorkerVersionId,
+        'feedback-detached-stage-test',
+        $feedbackManifest['input_hash'],
+        $feedbackManifest['prompt_hash'],
+        $feedbackManifest['model_hash'],
+        $feedbackManifest['schema_hash'],
+        $feedbackManifest['model'],
+        recipeCatalogJsonEncode(['valid' => true]),
+    ]);
+    $detachedChangeSetId = (int)$db->lastInsertId();
+    $db->prepare("
+        INSERT INTO ingredient_ontology_proposals (
+            change_set_id, input_id, decision,
+            normalized_json, raw_json, validator_result_json,
+            merge_key, review_state
+        )
+        VALUES (?, 'feedback_detached', 'reject',
+                '{}', '{}', '{}', ?, 'pending')
+    ")->execute([
+        $detachedChangeSetId,
+        str_repeat('7', 64),
+    ]);
+    recipeIngredientProposalRejectDetachedStage($db, [
+        'stage' => ['change_set_id' => $detachedChangeSetId],
+    ]);
+    recipeTestAssert(
+        $db->query("
+            SELECT review_state
+            FROM ingredient_ontology_change_sets
+            WHERE id = {$detachedChangeSetId}
+        ")->fetchColumn() === 'rejected'
+        && recipeTestCount(
+            $db,
+            "SELECT COUNT(*)
+             FROM ingredient_ontology_proposals
+             WHERE change_set_id = {$detachedChangeSetId}
+               AND review_state = 'rejected'"
+        ) === 1,
+        'A staged proposal that loses the outbox-link race must be rejected immediately'
+    );
+    $rejectDecision = recipeIngredientDecision($db, [
+        'recipe_id' => $cookidooRecipeId,
+        'ingredient_key' => $identityIngredient['key'],
+        'position' => $identityIngredient['position'],
+        'action' => 'reject_current_match',
+        'expected_target_product_id' => $selectedProductId,
+        'feedback_token' =>
+            $identityIngredient['feedback_token'],
+        'idempotency_key' => 'feedback-v2-reject-1',
+        'action_origin' => 'react_dashboard',
+    ]);
+    $rejectEvent = $db->query("
+        SELECT *
+        FROM recipe_ingredient_feedback_events
+        WHERE idempotency_key = 'feedback-v2-reject-1'
+    ")->fetch(PDO::FETCH_ASSOC);
+    $rejectOutboxId = (int)$db->query("
+        SELECT id
+        FROM recipe_ingredient_proposal_outbox
+        WHERE feedback_event_id = " . (int)$rejectEvent['id']
+    )->fetchColumn();
+    $settlingHandoff =
+        recipeIngredientProposalExportPackages($db, 100);
+    $settlingHandoffIds = array_map(
+        static fn(array $package): int =>
+            (int)($package['outbox_id'] ?? 0),
+        $settlingHandoff['packages']
+    );
+    $settlingImportBlocked = false;
+    try {
+        recipeIngredientProposalImportPackage($db, [
+            'schema_version' =>
+                'recipe_ingredient_proposal_handoff_result_v1',
+            'outbox_id' => $rejectOutboxId,
+        ]);
+    } catch (InvalidArgumentException $e) {
+        $settlingImportBlocked =
+            $e->getMessage()
+                === 'proposal feedback is still settling';
+    }
+    recipeTestAssert(
+        $rejectDecision['availability'] === 'missing'
+        && $rejectDecision['identity_evidence'] === true
+        && $rejectDecision['proposal_enqueued'] === true
+        && $rejectEvent['identity_verdict'] === 'wrong'
+        && (int)$rejectEvent['target_product_id']
+            === $selectedProductId
+        && $rejectEvent['review_state'] === 'settling'
+        && strtotime((string)$rejectEvent['settle_after'])
+            >= time() + (47 * 3600)
+        && recipeTestCount(
+            $db,
+            'SELECT COUNT(*)
+             FROM recipe_ingredient_feedback_regression_fixtures
+             WHERE feedback_event_id = '
+                . (int)$rejectEvent['id']
+                . " AND polarity = 'negative'"
+        ) === 1,
+        'Negative exact-match decisions must be product-bound, immediately queued, and remain provisional for 48 hours'
+    );
+    recipeTestAssert(
+        $rejectOutboxId > 0
+        && !in_array(
+            $rejectOutboxId,
+            $settlingHandoffIds,
+            true
+        )
+        && $settlingImportBlocked,
+        'Negative proposal handoff export and import must enforce the same 48-hour settlement gate as the runtime worker'
+    );
+    $availabilityOnlyIngredient =
+        $cookidooDetail['ingredients'][4];
+    $outboxBeforeAvailabilityOnly = recipeTestCount(
+        $db,
+        'SELECT COUNT(*) FROM recipe_ingredient_proposal_outbox'
+    );
+    $availabilityOnlyReject = recipeIngredientDecision($db, [
+        'recipe_id' => $cookidooRecipeId,
+        'ingredient_key' =>
+            $availabilityOnlyIngredient['key'],
+        'position' => $availabilityOnlyIngredient['position'],
+        'action' => 'reject_current_match',
+        'feedback_token' =>
+            $availabilityOnlyIngredient['feedback_token'],
+        'idempotency_key' =>
+            'feedback-v2-reject-no-target-1',
+        'action_origin' => 'react_dashboard',
+    ]);
+    recipeTestAssert(
+        $availabilityOnlyReject['identity_evidence'] === false
+        && $availabilityOnlyReject['proposal_enqueued'] === false
+        && recipeTestCount(
+            $db,
+            'SELECT COUNT(*) FROM recipe_ingredient_proposal_outbox'
+        ) === $outboxBeforeAvailabilityOnly,
+        'Rejecting without an exact displayed target must change availability only and never fabricate identity evidence'
+    );
+    $staleWritesBefore = [
+        'events' => recipeTestCount(
+            $db,
+            'SELECT COUNT(*) FROM recipe_ingredient_feedback_events'
+        ),
+        'outbox' => recipeTestCount(
+            $db,
+            'SELECT COUNT(*) FROM recipe_ingredient_proposal_outbox'
+        ),
+    ];
+    $staleDecisionRejected = false;
+    try {
+        recipeIngredientDecision($db, [
+            'recipe_id' => $cookidooRecipeId,
+            'ingredient_key' => $identityIngredient['key'],
+            'position' => $identityIngredient['position'],
+            'action' => 'reject_current_match',
+            'expected_target_product_id' => 999999,
+            'feedback_token' =>
+                $identityIngredient['feedback_token'],
+            'idempotency_key' => 'feedback-v2-stale-1',
+            'action_origin' => 'react_dashboard',
+        ]);
+    } catch (RecipeIngredientFeedbackConflictException $e) {
+        $staleDecisionRejected =
+            $e->getMessage() === 'ingredient_feedback_stale';
+    }
+    $noStockProduct = $db->prepare("
+        INSERT INTO products (
+            name, brand, category, prepared_food
+        )
+        VALUES ('No Stock Decision Product', '', '', 0)
+    ");
+    $noStockProduct->execute();
+    $noStockProductId = (int)$db->lastInsertId();
+    $noStockRejected = false;
+    try {
+        recipeIngredientDecision($db, [
+            'recipe_id' => $cookidooRecipeId,
+            'ingredient_key' =>
+                $feedbackMissingIngredient['key'],
+            'position' => $feedbackMissingIngredient['position'],
+            'action' => 'select_inventory_product',
+            'selected_product_id' => $noStockProductId,
+            'feedback_token' =>
+                $feedbackMissingIngredient['feedback_token'],
+            'idempotency_key' => 'feedback-v2-no-stock-1',
+            'action_origin' => 'react_dashboard',
+        ]);
+    } catch (RecipeIngredientFeedbackConflictException $e) {
+        $noStockRejected =
+            $e->getMessage() === 'ingredient_feedback_stale';
+    }
+    recipeTestAssert(
+        $staleDecisionRejected
+        && $noStockRejected
+        && recipeTestCount(
+            $db,
+            'SELECT COUNT(*) FROM recipe_ingredient_feedback_events'
+        ) === $staleWritesBefore['events']
+        && recipeTestCount(
+            $db,
+            'SELECT COUNT(*) FROM recipe_ingredient_proposal_outbox'
+        ) === $staleWritesBefore['outbox'],
+        'Submit-time target and positive-stock drift must return stale with no partial writes'
+    );
+    recipeIngredientOverrideSet($db, [
+        'recipe_id' => $cookidooRecipeId,
+        'ingredient_key' =>
+            $feedbackMissingIngredient['key'],
+        'position' => $feedbackMissingIngredient['position'],
+        'availability' => 'clear',
+        'feedback_token' =>
+            $feedbackMissingIngredient['feedback_token'],
+        'idempotency_key' => 'feedback-override-clear-1',
+    ]);
+    recipeTestAssert(
+        recipeCatalogDetail(
+            $db,
+            $cookidooRecipeId
+        )['ingredients'][1]['user_override'] === null,
+        'Availability overrides must support an explicit reset to system truth'
+    );
+    $_SERVER['REQUEST_METHOD'] = 'POST';
+    $GLOBALS['RECIPE_API_JSON_INPUT'] = [
+        'recipe_id' => $cookidooRecipeId,
+        'ingredient_key' =>
+            $feedbackMissingIngredient['key'],
+        'position' => $feedbackMissingIngredient['position'],
+        'availability' => 'missing',
+        'feedback_token' =>
+            $feedbackMissingIngredient['feedback_token'],
+        'idempotency_key' => 'feedback-api-override-1',
+    ];
+    ob_start();
+    recipeCatalogApiIngredientOverride($db);
+    $feedbackApi = json_decode((string)ob_get_clean(), true);
+    unset($GLOBALS['RECIPE_API_JSON_INPUT']);
+    recipeTestAssert(
+        http_response_code() === 200
+        && ($feedbackApi['success'] ?? false) === true
+        && ($feedbackApi['availability'] ?? null) === 'missing',
+        'Ingredient feedback API must expose bounded availability overrides'
+    );
+    $GLOBALS['RECIPE_API_JSON_INPUT'] = [
+        'recipe_id' => $cookidooRecipeId,
+        'ingredient_key' =>
+            $availabilityOnlyIngredient['key'],
+        'position' => $availabilityOnlyIngredient['position'],
+        'action' => 'assume_have',
+        'feedback_token' =>
+            $availabilityOnlyIngredient['feedback_token'],
+        'idempotency_key' => 'feedback-v2-api-assume-1',
+        'action_origin' => 'home_assistant',
+    ];
+    ob_start();
+    recipeCatalogApiIngredientDecision($db);
+    $decisionApi = json_decode((string)ob_get_clean(), true);
+    unset($GLOBALS['RECIPE_API_JSON_INPUT']);
+    recipeTestAssert(
+        http_response_code() === 200
+        && ($decisionApi['success'] ?? false) === true
+        && ($decisionApi['action'] ?? null) === 'assume_have'
+        && ($decisionApi['identity_evidence'] ?? true) === false,
+        'Ingredient decision v2 API must expose one closed atomic action command'
+    );
+    recipeIngredientOverrideSet($db, [
+        'recipe_id' => $cookidooRecipeId,
+        'ingredient_key' =>
+            $availabilityOnlyIngredient['key'],
+        'position' => $availabilityOnlyIngredient['position'],
+        'availability' => 'clear',
+        'feedback_token' =>
+            $availabilityOnlyIngredient['feedback_token'],
+        'idempotency_key' =>
+            'feedback-v2-api-assume-clear-1',
+    ]);
+    recipeIngredientOverrideSet($db, [
+        'recipe_id' => $cookidooRecipeId,
+        'ingredient_key' =>
+            $feedbackMissingIngredient['key'],
+        'position' => $feedbackMissingIngredient['position'],
+        'availability' => 'clear',
+        'feedback_token' =>
+            $feedbackMissingIngredient['feedback_token'],
+        'idempotency_key' => 'feedback-api-override-clear-1',
+    ]);
+    $_SERVER['REQUEST_METHOD'] = 'GET';
     $cookidooTopologyRows = recipeDetailLoadIngredients(
         $db,
         $cookidooRecipeId
@@ -4271,6 +5389,58 @@ try {
         $retentionRecentReplay['replayed'] === true,
         'Recent grocery idempotency records must remain replayable during pruning'
     );
+    $overrideGroceryDetail = recipeCatalogDetail(
+        $db,
+        $cookidooRecipeId
+    );
+    $overrideGroceryIngredient = null;
+    foreach ($overrideGroceryDetail['ingredients'] as $ingredient) {
+        if (
+            (string)$ingredient['key']
+                === (string)$missingSelections[0]['key']
+        ) {
+            $overrideGroceryIngredient = $ingredient;
+            break;
+        }
+    }
+    recipeIngredientOverrideSet($db, [
+        'recipe_id' => $cookidooRecipeId,
+        'ingredient_key' =>
+            $overrideGroceryIngredient['key'],
+        'position' => $overrideGroceryIngredient['position'],
+        'availability' => 'have',
+        'feedback_token' =>
+            $overrideGroceryIngredient['feedback_token'],
+        'idempotency_key' =>
+            'feedback-grocery-have-override-1',
+    ]);
+    $overrideSuppressedGrocery = recipeGroceryAddMissing(
+        $db,
+        [
+            'recipe_id' => $cookidooRecipeId,
+            'idempotency_key' =>
+                'metadata-v2-grocery-have-override',
+            'ingredient_keys' => [
+                $overrideGroceryIngredient['key'],
+            ],
+        ]
+    );
+    recipeTestAssert(
+        $overrideSuppressedGrocery['outcomes'][0]['outcome']
+            === 'now_in_stock',
+        'Grocery mutations must honor trusted have overrides server-side'
+    );
+    recipeIngredientOverrideSet($db, [
+        'recipe_id' => $cookidooRecipeId,
+        'ingredient_key' =>
+            $overrideGroceryIngredient['key'],
+        'position' => $overrideGroceryIngredient['position'],
+        'availability' => 'clear',
+        'feedback_token' =>
+            $overrideGroceryIngredient['feedback_token'],
+        'idempotency_key' =>
+            'feedback-grocery-have-override-clear-1',
+    ]);
     $db->prepare("DELETE FROM recipe_catalog WHERE id = ?")
         ->execute([(int)$retentionRecipe['id']]);
 
@@ -4461,8 +5631,13 @@ try {
     $haInfo = json_decode((string)ob_get_clean(), true);
     recipeTestAssert(
         in_array('recipe_detail_v1', $haInfo['capabilities'] ?? [], true)
-        && in_array('recipe_grocery_v1', $haInfo['capabilities'] ?? [], true),
-        'ha_info must advertise detail and grocery capabilities when actions exist'
+        && in_array('recipe_grocery_v1', $haInfo['capabilities'] ?? [], true)
+        && in_array(
+            'recipe_ingredient_feedback_v1',
+            $haInfo['capabilities'] ?? [],
+            true
+        ),
+        'ha_info must advertise detail, grocery, and ingredient-feedback capabilities'
     );
 
     $discoveryUpdated = recipeCookidooDiscover($db, [
@@ -4519,10 +5694,15 @@ try {
         $metadataOnlyAfter['title'] === $metadataOnlyBefore['title']
         && $metadataOnlyAfter['image_url'] === $metadataOnlyBefore['image_url']
         && (float)$metadataOnlyAfter['yield_quantity'] === 6.0
+        && $metadataOnlyAfter['prep_time_seconds'] === 360
+        && $metadataOnlyAfter['cook_time_seconds'] === 1200
         && $metadataOnlyAfter['active_time_seconds'] === 720
+        && $metadataOnlyAfter['inactive_time_seconds'] === 180
         && $metadataOnlyAfter['total_time_seconds'] === 2100
         && $metadataOnlyAfter['difficulty'] === 'medium'
         && $metadataOnlyAfter['primary_category'] === 'Main dishes'
+        && $metadataOnlyAfter['devices'] === ['TM7', 'Air fryer']
+        && $metadataOnlyAfter['optional_devices'] === ['Slow cooker']
         && $metadataOnlyAfter['equipment'] === ['whisk']
         && ($metadataOnlyOrigin['metadata_version'] ?? null)
             === RECIPE_COOKIDOO_METADATA_VERSION
@@ -4737,6 +5917,337 @@ try {
     recipeTestAssert(
         $emptyMetadataSuccessRejected,
         'Empty Cookidoo metadata success must not erase stored source rows'
+    );
+    $englishLanguageAssessment =
+        recipeCookidooContentLanguageAssessment(
+            'Chicken and vegetable soup',
+            [
+                ['name' => 'water'],
+                ['name' => 'chicken'],
+                ['name' => 'salt'],
+            ]
+        );
+    $foreignLanguageAssessment =
+        recipeCookidooContentLanguageAssessment(
+            'Kartoffelsuppe',
+            [
+                ['name' => 'Wasser'],
+                ['name' => 'Kartoffeln'],
+                ['name' => 'Salz'],
+            ]
+        );
+    $scriptLanguageAssessment =
+        recipeCookidooContentLanguageAssessment(
+            'Πίτα',
+            [['name' => 'νερό']]
+        );
+    $ambiguousLanguageAssessment =
+        recipeCookidooContentLanguageAssessment(
+            'Miso udon',
+            [['name' => 'miso']]
+        );
+    $mixedScriptLanguageAssessment =
+        recipeCookidooContentLanguageAssessment(
+            'English miso soup (味噌)',
+            [
+                ['name' => 'water'],
+                ['name' => 'miso paste'],
+                ['name' => 'green onion'],
+            ]
+        );
+    $accentedGermanAssessment =
+        recipeCookidooContentLanguageAssessment(
+            'Käsesuppe',
+            [
+                ['name' => 'Käse'],
+                ['name' => 'Öl'],
+                ['name' => 'Eier'],
+            ]
+        );
+    $db->beginTransaction();
+    try {
+        foreach ([
+            0 => 'Wasser',
+            1 => 'Kartoffeln',
+            2 => 'Salz',
+        ] as $position => $name) {
+            $db->prepare("
+                UPDATE recipe_source_ingredients
+                SET name = ?, normalized_name = lower(?)
+                WHERE recipe_id = ? AND position = ?
+            ")->execute([
+                $name,
+                $name,
+                $cookidooRecipeId,
+                $position,
+            ]);
+        }
+        $sourcePreferredAssessment =
+            recipeCookidooLanguageRecipeAssessment(
+                $db,
+                $cookidooRecipeId
+            );
+    } finally {
+        $db->rollBack();
+    }
+    recipeTestAssert(
+        $englishLanguageAssessment['verdict'] === 'english'
+        && $foreignLanguageAssessment['verdict'] === 'non_english'
+        && $foreignLanguageAssessment['foreign_language'] === 'de'
+        && $scriptLanguageAssessment['verdict'] === 'non_english'
+        && $scriptLanguageAssessment['reason'] === 'foreign_script'
+        && $ambiguousLanguageAssessment['verdict'] === 'undetermined'
+        && $mixedScriptLanguageAssessment['verdict']
+            === 'english'
+        && $accentedGermanAssessment['verdict']
+            === 'non_english'
+        && $sourcePreferredAssessment['verdict']
+            === 'non_english'
+        && strlen(recipeCookidooLanguageRulesHash()) === 64,
+        'Cookidoo language classification must be deterministic and fail open on ambiguous culinary text'
+    );
+    $saturatedAssessment =
+        recipeCookidooContentLanguageAssessment(
+            str_repeat('界', 400),
+            array_fill(
+                0,
+                200,
+                ['name' => str_repeat('界', 240)]
+            )
+        );
+    $saturatedAssessmentBefore =
+        recipeCookidooLanguageAssessmentRow(
+            $db,
+            $cookidooRecipeId
+        );
+    $saturatedStored = recipeCookidooLanguageAssessmentStore(
+        $db,
+        $cookidooRecipeId,
+        $saturatedAssessment,
+        'review'
+    );
+    recipeTestAssert(
+        $saturatedAssessment['verdict'] === 'non_english'
+        && $saturatedAssessment['script_hits']
+            === RECIPE_COOKIDOO_LANGUAGE_MAX_SCRIPT_HITS
+        && (int)$saturatedStored['current']['script_hits']
+            === RECIPE_COOKIDOO_LANGUAGE_MAX_SCRIPT_HITS,
+        'Large valid foreign-script assessments must saturate within the persisted schema bound'
+    );
+    recipeCookidooLanguageAssessmentRestore(
+        $db,
+        $cookidooRecipeId,
+        $saturatedAssessmentBefore
+    );
+    $languagePolicyBefore = $GLOBALS['RECIPE_COOKIDOO_CONFIG'][
+        'COOKIDOO_INGEST_LANGUAGE_POLICY'
+    ];
+    $GLOBALS['RECIPE_COOKIDOO_CONFIG'][
+        'COOKIDOO_INGEST_LANGUAGE_POLICY'
+    ] = 'enforce';
+    $foreignCookidooRejected = false;
+    try {
+        recipeCookidooNormalizeBridgeRecipe(
+            recipeTestCookidooBridgeRecipe([
+                'external_id' => 'foreign-language',
+                'title' => 'Kartoffelsuppe',
+                'general' => [
+                    'yield_quantity' => null,
+                    'yield_unit' => null,
+                    'active_time_seconds' => null,
+                    'total_time_seconds' => null,
+                    'difficulty' => null,
+                    'primary_category' => null,
+                    'equipment' => [],
+                ],
+                'ingredients' => [
+                    ['name' => 'Wasser'],
+                    ['name' => 'Kartoffeln'],
+                    ['name' => 'Salz'],
+                ],
+                'image_url' => '',
+                'canonical_url' => (
+                    'https://cookidoo.co.uk/recipes/recipe/en-GB/'
+                    . 'foreign-language'
+                ),
+                'locale' => 'en-GB',
+            ]),
+            'en-GB',
+            true
+        );
+    } catch (RuntimeException $e) {
+        $foreignCookidooRejected = str_contains(
+            $e->getMessage(),
+            'language'
+        );
+    }
+    $GLOBALS['RECIPE_COOKIDOO_CONFIG'][
+        'COOKIDOO_INGEST_LANGUAGE_POLICY'
+    ] = 'observe';
+    $foreignCookidooObserved = recipeCookidooNormalizeBridgeRecipe(
+        recipeTestCookidooBridgeRecipe([
+            'external_id' => 'foreign-language-observe',
+            'title' => 'Kartoffelsuppe',
+            'general' => [
+                'yield_quantity' => null,
+                'yield_unit' => null,
+                'active_time_seconds' => null,
+                'total_time_seconds' => null,
+                'difficulty' => null,
+                'primary_category' => null,
+                'equipment' => [],
+            ],
+            'ingredients' => [
+                ['name' => 'Wasser'],
+                ['name' => 'Kartoffeln'],
+                ['name' => 'Salz'],
+            ],
+            'image_url' => '',
+            'canonical_url' => (
+                'https://cookidoo.co.uk/recipes/recipe/en-GB/'
+                . 'foreign-language-observe'
+            ),
+            'locale' => 'en-GB',
+        ]),
+        'en-GB',
+        true
+    );
+    $GLOBALS['RECIPE_COOKIDOO_CONFIG'][
+        'COOKIDOO_INGEST_LANGUAGE_POLICY'
+    ] = $languagePolicyBefore;
+    recipeTestAssert(
+        $foreignCookidooRejected
+        && $foreignCookidooObserved['_language_assessment']['verdict']
+            === 'non_english',
+        'Cookidoo ingestion must reject high-confidence foreign content only in enforce mode'
+    );
+    $GLOBALS['RECIPE_COOKIDOO_CONFIG'][
+        'COOKIDOO_INGEST_LANGUAGE_POLICY'
+    ] = 'enforce';
+    $metadataLanguageFiltered =
+        recipeCookidooNormalizeMetadataBridgeResponse([
+            'outcomes' => [[
+                'external_id' => 'foreign-metadata-item',
+                'status' => 'succeeded',
+                'recipe' => recipeTestCookidooBridgeRecipe([
+                    'external_id' => 'foreign-metadata-item',
+                    'title' => 'Kartoffelsuppe',
+                    'general' => [
+                        'yield_quantity' => null,
+                        'yield_unit' => null,
+                        'active_time_seconds' => null,
+                        'total_time_seconds' => null,
+                        'difficulty' => null,
+                        'primary_category' => null,
+                        'equipment' => [],
+                    ],
+                    'ingredients' => [
+                        ['name' => 'Wasser'],
+                        ['name' => 'Kartoffeln'],
+                        ['name' => 'Salz'],
+                    ],
+                    'image_url' => '',
+                    'canonical_url' => (
+                        'https://cookidoo.co.uk/recipes/recipe/en-GB/'
+                        . 'foreign-metadata-item'
+                    ),
+                    'locale' => 'en-GB',
+                ]),
+            ]],
+            'count' => 1,
+            'succeeded_count' => 1,
+            'failed_count' => 0,
+            'locale' => 'en-GB',
+            'metadata_schema_version' =>
+                RECIPE_COOKIDOO_METADATA_SCHEMA_VERSION,
+        ], [
+            'locale' => 'en-GB',
+            'recipes' => [[
+                'recipe_id' => 1,
+                'origin_id' => 1,
+                'external_id' => 'foreign-metadata-item',
+            ]],
+        ]);
+    $GLOBALS['RECIPE_COOKIDOO_CONFIG'][
+        'COOKIDOO_INGEST_LANGUAGE_POLICY'
+    ] = $languagePolicyBefore;
+    recipeTestAssert(
+        $metadataLanguageFiltered['succeeded_count'] === 0
+        && $metadataLanguageFiltered['failed_count'] === 1
+        && $metadataLanguageFiltered['outcomes'][0][
+            'error_kind'
+        ] === 'content_language_rejected',
+        'Foreign metadata items must become permanent per-item failures without aborting sibling outcomes'
+    );
+    $languageVisibilityBefore =
+        recipeCookidooLanguageAssessmentRow(
+        $db,
+        $cookidooRecipeId
+    );
+    $languageVisibilityTitle = (string)recipeCatalogGetById(
+        $db,
+        $cookidooRecipeId
+    )['title'];
+    $languageScoreStateBefore = recipeScoreState($db);
+    recipeCookidooLanguageAssessmentStore(
+        $db,
+        $cookidooRecipeId,
+        recipeCookidooLanguageRecipeAssessment(
+            $db,
+            $cookidooRecipeId
+        ),
+        'quarantine'
+    );
+    $preservedQuarantine = recipeCookidooLanguageAssessmentStore(
+        $db,
+        $cookidooRecipeId,
+        recipeCookidooLanguageRecipeAssessment(
+            $db,
+            $cookidooRecipeId
+        )
+    );
+    recipeTestAssert(
+        recipeCatalogGetById($db, $cookidooRecipeId) === null
+        && recipeCatalogGetById(
+            $db,
+            $cookidooRecipeId,
+            true
+        )['id'] === $cookidooRecipeId
+        && recipeCatalogDetail($db, $cookidooRecipeId) === null
+        && $preservedQuarantine['current']['disposition']
+            === 'quarantine'
+        && !$preservedQuarantine['visibility_changed']
+        && !in_array(
+            $cookidooRecipeId,
+            array_map(
+                static fn(array $row): int =>
+                    (int)$row['recipe_id'],
+                recipeCatalogTextSearch(
+                    $db,
+                    $languageVisibilityTitle,
+                    'cookidoo',
+                    100,
+                    0
+                )['rows']
+            ),
+            true
+        ),
+        'Quarantined Cookidoo recipes must be absent from user-facing reads and search'
+    );
+    recipeCookidooLanguageAssessmentRestore(
+        $db,
+        $cookidooRecipeId,
+        $languageVisibilityBefore
+    );
+    $languageScoreStateAfter = recipeScoreState($db);
+    unset(
+        $languageScoreStateBefore['cursor_revision'],
+        $languageScoreStateAfter['cursor_revision']
+    );
+    recipeTestAssert(
+        recipeCatalogGetById($db, $cookidooRecipeId) !== null
+        && $languageScoreStateAfter === $languageScoreStateBefore,
+        'Language visibility must restore without changing inventory, catalog, or ontology score state'
     );
     $metadataSchemaRejected = false;
     try {
@@ -7687,6 +9198,522 @@ try {
         'Transactions that changed package structure must be explicitly non-undoable'
     );
     http_response_code(200);
+
+    $GLOBALS['RECIPE_COOKIDOO_CONFIG'][
+        'COOKIDOO_PLANNER_ENABLED'
+    ] = 'true';
+    $plannerProbeCallsInTransaction = 0;
+    $GLOBALS['RECIPE_COOKIDOO_BRIDGE_TRANSPORT'] =
+        static function () use (
+            &$plannerProbeCallsInTransaction
+        ): array {
+            $plannerProbeCallsInTransaction++;
+            return ['status' => 500, 'body' => '{}'];
+        };
+    $db->exec('BEGIN IMMEDIATE');
+    try {
+        $plannerMutationDetail = recipeCatalogDetailBuild(
+            $db,
+            $cookidooRecipeId,
+            true,
+            'active',
+            false
+        );
+    } finally {
+        $db->exec('ROLLBACK');
+    }
+    recipeTestAssert(
+        $plannerProbeCallsInTransaction === 0
+        && $plannerMutationDetail['planner']['available'] === false
+        && $plannerMutationDetail['planner']['reason']
+            === 'planner_probe_unavailable',
+        'Detail projections used by mutations must suppress planner bridge probes while SQLite holds a transaction'
+    );
+    $GLOBALS['RECIPE_PLANNER_CAPABILITY'] = [
+        'available' => true,
+        'reason' => null,
+        'put_semantics' => 'append',
+        'account_scope' => 'configured_account',
+    ];
+    $plannerBridgeCalls = 0;
+    $plannerLastPayload = null;
+    $GLOBALS['RECIPE_COOKIDOO_BRIDGE_TRANSPORT'] =
+        static function (
+            string $url,
+            string $token,
+            array $payload,
+            int $timeout
+        ) use (
+            &$plannerBridgeCalls,
+            &$plannerLastPayload,
+            $db
+        ): array {
+            recipeTestAssert(
+                !$db->inTransaction(),
+                'Planner bridge traffic must never run inside a SQLite transaction'
+            );
+            recipeTestAssert(
+                str_ends_with($url, '/v1/planner-add')
+                && $token === 'unit-test-token'
+                && $timeout === 5,
+                'Planner bridge requests must retain internal auth and timeout bounds'
+            );
+            $plannerBridgeCalls++;
+            $plannerLastPayload = $payload;
+            return [
+                'status' => 200,
+                'body' => recipeCatalogJsonEncode([
+                    'changed' => true,
+                    'already_present' => false,
+                    'verified' => true,
+                    'date' => $payload['date'],
+                    'account_scope' => 'configured_account',
+                    'reconciled' => false,
+                ]),
+            ];
+        };
+    $plannerDetail = recipeCatalogDetail(
+        $db,
+        $cookidooRecipeId
+    );
+    $plannerDate = recipePlannerDateBounds()['minimum'];
+    $plannerDate = (new DateTimeImmutable(
+        $plannerDate,
+        new DateTimeZone('UTC')
+    ))->modify('+1 day')->format('Y-m-d');
+    recipeTestAssert(
+        $plannerDetail['capabilities']['planner'] === true
+        && $plannerDetail['planner']['available'] === true
+        && strlen((string)$plannerDetail['planner'][
+            'provider_action_token'
+        ]) === 64
+        && $plannerDetail['planner']['account_scope']
+            === 'configured_account',
+        'Cookidoo details must expose a revision-bound planner token only through the enabled capability chain'
+    );
+    $plannerRequest = [
+        'recipe_id' => $cookidooRecipeId,
+        'date' => $plannerDate,
+        'provider_action_token' =>
+            $plannerDetail['planner']['provider_action_token'],
+        'idempotency_key' => 'planner-command-success-1',
+    ];
+    $plannerResult = recipePlannerAdd($db, $plannerRequest);
+    $plannerReplay = recipePlannerAdd($db, $plannerRequest);
+    recipeTestAssert(
+        $plannerResult['changed'] === true
+        && $plannerResult['verified'] === true
+        && $plannerReplay['replayed'] === true
+        && $plannerBridgeCalls === 1
+        && $plannerLastPayload['external_id']
+            === $plannerDetail['source']['external_id']
+        && !array_key_exists('external_id', $plannerRequest)
+        && $plannerLastPayload['account_scope']
+            === 'configured_account'
+        && recipeTestCount(
+            $db,
+            "SELECT COUNT(*)
+             FROM recipe_planner_command_events
+             WHERE command_id = (
+                 SELECT id FROM recipe_planner_commands
+                 WHERE idempotency_key = 'planner-command-success-1'
+             )
+               AND state IN ('reserved', 'dispatching', 'succeeded', 'replayed')"
+        ) === 4,
+        'Planner commands must resolve provider identity server-side, journal append-only states, and replay without a second write'
+    );
+    $plannerConflict = false;
+    try {
+        recipePlannerAdd($db, array_merge($plannerRequest, [
+            'date' => (new DateTimeImmutable(
+                $plannerDate,
+                new DateTimeZone('UTC')
+            ))->modify('+1 day')->format('Y-m-d'),
+        ]));
+    } catch (RecipePlannerConflictException $e) {
+        $plannerConflict =
+            $e->getMessage() === 'idempotency_key_conflict';
+    }
+    recipeTestAssert(
+        $plannerConflict && $plannerBridgeCalls === 1,
+        'Planner idempotency keys must reject conflicting request fingerprints'
+    );
+    $plannerStaleToken = $plannerDetail['planner'][
+        'provider_action_token'
+    ];
+    recipeScoreMarkCatalogDirty($db);
+    $plannerStale = false;
+    try {
+        recipePlannerAdd($db, [
+            'recipe_id' => $cookidooRecipeId,
+            'date' => $plannerDate,
+            'provider_action_token' => $plannerStaleToken,
+            'idempotency_key' => 'planner-command-stale-1',
+        ]);
+    } catch (RecipePlannerConflictException $e) {
+        $plannerStale =
+            $e->getMessage() === 'recipe_planner_stale';
+    }
+    recipeTestAssert(
+        $plannerStale
+        && recipeTestCount(
+            $db,
+            "SELECT COUNT(*) FROM recipe_planner_commands
+             WHERE idempotency_key = 'planner-command-stale-1'"
+        ) === 0,
+        'Provider action tokens must fail closed after catalog revision drift'
+    );
+    $plannerDetail = recipeCatalogDetail(
+        $db,
+        $cookidooRecipeId
+    );
+    $plannerTransientCalls = 0;
+    $GLOBALS['RECIPE_COOKIDOO_BRIDGE_TRANSPORT'] =
+        static function (
+            string $url,
+            string $token,
+            array $payload,
+            int $timeout
+        ) use (&$plannerTransientCalls, $db): array {
+            recipeTestAssert(
+                !$db->inTransaction(),
+                'Planner retry transport must remain outside SQLite transactions'
+            );
+            $plannerTransientCalls++;
+            if ($plannerTransientCalls === 1) {
+                throw new RuntimeException(
+                    'synthetic ambiguous planner timeout'
+                );
+            }
+            return [
+                'status' => 200,
+                'body' => recipeCatalogJsonEncode([
+                    'changed' => false,
+                    'already_present' => true,
+                    'verified' => true,
+                    'date' => $payload['date'],
+                    'account_scope' => 'configured_account',
+                    'reconciled' => true,
+                ]),
+            ];
+        };
+    $transientRequest = [
+        'recipe_id' => $cookidooRecipeId,
+        'date' => $plannerDate,
+        'provider_action_token' =>
+            $plannerDetail['planner']['provider_action_token'],
+        'idempotency_key' => 'planner-command-transient-1',
+    ];
+    $plannerTransientFailed = false;
+    try {
+        recipePlannerAdd($db, $transientRequest);
+    } catch (RecipePlannerUnavailableException $e) {
+        $plannerTransientFailed =
+            $e->getMessage() === 'recipe_planner_retryable';
+    }
+    $plannerTransientResult = recipePlannerAdd(
+        $db,
+        $transientRequest
+    );
+    recipeTestAssert(
+        $plannerTransientFailed
+        && $plannerTransientResult['already_present'] === true
+        && $plannerTransientCalls === 2
+        && recipeTestCount(
+            $db,
+            "SELECT COUNT(*) FROM recipe_planner_commands
+             WHERE idempotency_key = 'planner-command-transient-1'
+               AND status = 'succeeded'"
+        ) === 1,
+        'Ambiguous planner transport failures must keep the same command resumable for bridge-side reconciliation'
+    );
+    $GLOBALS['RECIPE_COOKIDOO_BRIDGE_TRANSPORT'] =
+        static fn(
+            string $url,
+            string $token,
+            array $payload,
+            int $timeout
+        ): array => [
+            'status' => 403,
+            'body' => recipeCatalogJsonEncode([
+                'error' => 'cookidoo_upstream_forbidden',
+            ]),
+        ];
+    $plannerBlockedRequest = [
+        'recipe_id' => $cookidooRecipeId,
+        'date' => $plannerDate,
+        'provider_action_token' =>
+            $plannerDetail['planner']['provider_action_token'],
+        'idempotency_key' => 'planner-command-blocked-1',
+    ];
+    $plannerBlocked = false;
+    try {
+        recipePlannerAdd($db, $plannerBlockedRequest);
+    } catch (RecipePlannerUnavailableException $e) {
+        $plannerBlocked =
+            $e->getMessage() === 'recipe_planner_circuit_open';
+    }
+    $plannerBlockedReplay = false;
+    try {
+        recipePlannerAdd($db, $plannerBlockedRequest);
+    } catch (RecipePlannerUnavailableException $e) {
+        $plannerBlockedReplay =
+            $e->getMessage() === 'recipe_planner_circuit_open';
+    }
+    recipeTestAssert(
+        $plannerBlocked
+        && $plannerBlockedReplay
+        && recipeTestCount(
+            $db,
+            "SELECT COUNT(*) FROM recipe_planner_commands
+             WHERE idempotency_key = 'planner-command-blocked-1'
+               AND status = 'blocked'"
+        ) === 1,
+        'Planner 403/429 circuit outcomes must be durable and replayed without blind writes'
+    );
+    $manualPlannerDetail = recipeCatalogDetail(
+        $db,
+        (int)$variantOne['id']
+    );
+    recipeTestAssert(
+        $manualPlannerDetail['capabilities']['planner'] === false
+        && $manualPlannerDetail['planner']['reason'] === 'not_cookidoo',
+        'Non-Cookidoo recipes must never advertise planner actions'
+    );
+    $nonCookidooRejected = false;
+    try {
+        recipePlannerAdd($db, [
+            'recipe_id' => (int)$variantOne['id'],
+            'date' => $plannerDate,
+            'provider_action_token' => str_repeat('a', 64),
+            'idempotency_key' => 'planner-command-manual-1',
+        ]);
+    } catch (OutOfBoundsException $e) {
+        $nonCookidooRejected =
+            $e->getMessage() ===
+                'recipe_planner_recipe_unavailable';
+    }
+    $invalidPlannerDate = false;
+    try {
+        recipePlannerNormalizeDate('2020-01-01');
+    } catch (InvalidArgumentException $e) {
+        $invalidPlannerDate = true;
+    }
+    recipeTestAssert(
+        $nonCookidooRejected && $invalidPlannerDate,
+        'Planner commands must reject non-Cookidoo recipes and out-of-range ISO dates'
+    );
+    $quarantinedPlannerRecipe = recipeCatalogSaveVariant($db, [
+        'title' => 'Quarantined Planner Recipe',
+        'source_ingredients' => [
+            ['name' => 'water'],
+            ['name' => 'salt'],
+        ],
+    ], [
+        'connector' => RECIPE_COOKIDOO_CONNECTOR,
+        'external_id' => 'planner-quarantined',
+        'canonical_url' => (
+            'https://cookidoo.co.uk/recipes/recipe/en-GB/'
+            . 'planner-quarantined'
+        ),
+        'locale' => 'en-GB',
+    ]);
+    recipeCookidooLanguageAssessmentStore(
+        $db,
+        (int)$quarantinedPlannerRecipe['id'],
+        recipeCookidooContentLanguageAssessment(
+            'Quarantined Planner Recipe',
+            [['name' => 'water'], ['name' => 'salt']]
+        ),
+        'quarantine',
+        true
+    );
+    $quarantinedPlannerRejected = false;
+    try {
+        recipePlannerAdd($db, [
+            'recipe_id' => (int)$quarantinedPlannerRecipe['id'],
+            'date' => $plannerDate,
+            'provider_action_token' => str_repeat('b', 64),
+            'idempotency_key' =>
+                'planner-command-quarantined-1',
+        ]);
+    } catch (OutOfBoundsException $e) {
+        $quarantinedPlannerRejected = true;
+    }
+    recipeTestAssert(
+        $quarantinedPlannerRejected,
+        'Quarantined Cookidoo recipes must remain ineligible for planner writes'
+    );
+    $GLOBALS['RECIPE_COOKIDOO_CONFIG'][
+        'COOKIDOO_PLANNER_ENABLED'
+    ] = 'false';
+    unset($GLOBALS['RECIPE_PLANNER_CAPABILITY']);
+    $plannerCallsWhileDisabled = 0;
+    $GLOBALS['RECIPE_COOKIDOO_BRIDGE_TRANSPORT'] =
+        static function () use (&$plannerCallsWhileDisabled): array {
+            $plannerCallsWhileDisabled++;
+            return ['status' => 500, 'body' => '{}'];
+        };
+    $plannerDefaultOff = false;
+    try {
+        recipePlannerAdd($db, [
+            'recipe_id' => $cookidooRecipeId,
+            'date' => $plannerDate,
+            'provider_action_token' => str_repeat('c', 64),
+            'idempotency_key' => 'planner-command-disabled-1',
+        ]);
+    } catch (RecipePlannerUnavailableException $e) {
+        $plannerDefaultOff = true;
+    }
+    recipeTestAssert(
+        $plannerDefaultOff
+        && $plannerCallsWhileDisabled === 0
+        && !recipePlannerCapabilityEnabled(),
+        'Default-off planner gates must suppress capability and make zero bridge requests'
+    );
+    unset($GLOBALS['RECIPE_COOKIDOO_BRIDGE_TRANSPORT']);
+
+    $db->prepare("
+        INSERT INTO products (
+            name, unit, default_quantity, prepared_food
+        )
+        VALUES ('Inventory Add Transaction Regression', 'pz', 1, 0)
+    ")->execute();
+    $inventoryAddRegressionProductId = (int)$db->lastInsertId();
+    $GLOBALS['INVENTORY_ADD_INPUT'] = [
+        'product_id' => $inventoryAddRegressionProductId,
+        'quantity' => 1,
+        'location' => 'frigo',
+    ];
+    ob_start();
+    addToInventory($db);
+    $inventoryAddRegression = json_decode(
+        (string)ob_get_clean(),
+        true
+    );
+    unset($GLOBALS['INVENTORY_ADD_INPUT']);
+    recipeTestAssert(
+        ($inventoryAddRegression['success'] ?? false) === true
+        && !$db->inTransaction()
+        && recipeTestCount(
+            $db,
+            "SELECT COUNT(*)
+             FROM inventory
+             WHERE product_id = ?
+               AND location = 'frigo'
+               AND quantity = 1",
+            [$inventoryAddRegressionProductId]
+        ) === 1
+        && recipeTestCount(
+            $db,
+            "SELECT COUNT(*)
+             FROM recipe_jobs
+             WHERE product_id = ?
+               AND job_type = 'inventory_changed'
+               AND status = 'pending'",
+            [$inventoryAddRegressionProductId]
+        ) === 1,
+        'Inventory add must commit an immediate transaction without mixing PDO transaction APIs'
+    );
+
+    $manualTimeRecipe = recipeCatalogSaveVariant($db, [
+        'title' => 'Deterministic Manual Time Facts',
+        'servings' => 2,
+        'prep_time' => 'PT15M',
+        'cook_time' => '30 minuti',
+        'active_time_seconds' => 600,
+        'total_time_seconds' => 3600,
+        'difficulty' => 'easy',
+        'category' => 'Dinner',
+        'devices' => ['Oven', 'oven'],
+        'optional_devices' => ['Slow cooker', 'OVEN'],
+        'equipment' => ['Mixing bowl'],
+        'ingredients' => [['name' => 'Test ingredient']],
+        'instructions' => ['Ignore this synthetic instruction duration: 99 hours.'],
+    ], [
+        'connector' => 'manual',
+        'language' => 'it',
+        'locale' => 'it-IT',
+    ]);
+    recipeTestAssert(
+        $manualTimeRecipe['prep_time_seconds'] === 900
+        && $manualTimeRecipe['cook_time_seconds'] === 1800
+        && $manualTimeRecipe['inactive_time_seconds'] === null
+        && $manualTimeRecipe['devices'] === ['Oven']
+        && $manualTimeRecipe['optional_devices'] === ['Slow cooker']
+        && $manualTimeRecipe['equipment'] === ['Mixing bowl'],
+        'Manual catalog saves must derive only deterministic prep/cook fields '
+            . 'and keep devices distinct from equipment'
+    );
+    $db->prepare("
+        UPDATE recipe_catalog
+        SET prep_time_seconds = NULL,
+            cook_time_seconds = NULL,
+            inactive_time_seconds = NULL
+        WHERE id = ?
+    ")->execute([(int)$manualTimeRecipe['id']]);
+    $legacyManualTimeDetail = recipeCatalogDetail(
+        $db,
+        (int)$manualTimeRecipe['id']
+    );
+    recipeTestAssert(
+        $legacyManualTimeDetail !== null
+        && $legacyManualTimeDetail['general']['prep_time_seconds'] === 900
+        && $legacyManualTimeDetail['general']['cook_time_seconds'] === 1800
+        && $legacyManualTimeDetail['general']['inactive_time_seconds'] === null
+        && $legacyManualTimeDetail['general']['devices'] === ['Oven']
+        && $legacyManualTimeDetail['general']['optional_devices']
+            === ['Slow cooker']
+        && $legacyManualTimeDetail['general']['equipment'] === ['Mixing bowl'],
+        'Legacy manual rows must derive bounded time facts at read time without '
+            . 'using instruction text'
+    );
+    $inactiveOnlyRecipe = recipeCatalogSaveVariant($db, [
+        'title' => 'Inactive Only Derivation',
+        'active_time_seconds' => 900,
+        'total_time_seconds' => 600,
+        'ingredients' => [['name' => 'Second test ingredient']],
+        'instructions' => ['Cook for 4 hours in this ignored synthetic step.'],
+    ], [
+        'connector' => 'manual',
+        'language' => 'en',
+        'locale' => 'en-US',
+    ]);
+    $inactiveOnlyDetail = recipeCatalogDetail(
+        $db,
+        (int)$inactiveOnlyRecipe['id']
+    );
+    recipeTestAssert(
+        $inactiveOnlyDetail !== null
+        && $inactiveOnlyDetail['general']['prep_time_seconds'] === null
+        && $inactiveOnlyDetail['general']['cook_time_seconds'] === null
+        && $inactiveOnlyDetail['general']['active_time_seconds'] === 900
+        && $inactiveOnlyDetail['general']['inactive_time_seconds'] === 0
+        && $inactiveOnlyDetail['general']['total_time_seconds'] === 600,
+        'Total minus active must be labeled only as non-negative inactive/rest '
+            . 'time and never as cook time'
+    );
+    $explicitTimeRecipe = recipeCatalogSaveVariant($db, [
+        'title' => 'Explicit Time Fact Precedence',
+        'prep_time' => '99 minutes',
+        'cook_time' => '88 minutes',
+        'prep_time_seconds' => 120,
+        'cook_time_seconds' => 240,
+        'inactive_time_seconds' => 30,
+        'active_time_seconds' => 300,
+        'total_time_seconds' => 600,
+        'ingredients' => [['name' => 'Third test ingredient']],
+    ], [
+        'connector' => 'manual',
+        'language' => 'en',
+        'locale' => 'en-US',
+    ]);
+    recipeTestAssert(
+        $explicitTimeRecipe['prep_time_seconds'] === 120
+        && $explicitTimeRecipe['cook_time_seconds'] === 240
+        && $explicitTimeRecipe['inactive_time_seconds'] === 30,
+        'Explicit structured seconds must take precedence over legacy time strings'
+    );
 
     echo 'Recipe backend tests passed: '
         . number_format($recipeTestAssertions)

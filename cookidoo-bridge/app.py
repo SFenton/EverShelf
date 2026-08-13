@@ -7,6 +7,7 @@ import asyncio
 from collections import deque
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
+from datetime import date
 import hmac
 import json
 import logging
@@ -30,6 +31,7 @@ from cookidoo_api.exceptions import (
     CookidooConfigException,
     CookidooException,
     CookidooParseException,
+    CookidooRequestException,
     CookidooResponseException,
 )
 from cookidoo_api.helpers import get_localization_options
@@ -50,6 +52,8 @@ MAX_GROUP_TITLE_TEXT = 160
 MAX_PROVIDER_REFERENCE_TEXT = 200
 MAX_DEFAULT_TITLE_TEXT = 200
 MAX_RECIPE_EQUIPMENT = 50
+MAX_RECIPE_DEVICES = 50
+MAX_DEVICE_TEXT = 120
 MAX_SOURCE_AMOUNT_TEXT = 160
 MAX_SOURCE_UNIT_TEXT = 80
 MAX_GENERAL_TEXT = 160
@@ -60,6 +64,43 @@ METADATA_SCHEMA_VERSION = "ingredient-topology-v1"
 DETAIL_HYDRATION_POLICY_VERSION = "metadata-v2-detail-disabled"
 DETAIL_HYDRATION_POLICY_REASON = "provider_detail_policy_disabled"
 ALLOWED_TMV = frozenset({"TM31", "TM5", "TM6", "TM7"})
+TIME_FACT_ALIASES = {
+    "prep": "prep",
+    "preptime": "prep",
+    "preparation": "prep",
+    "preparationtime": "prep",
+    "cook": "cook",
+    "cooktime": "cook",
+    "cooking": "cook",
+    "cookingtime": "cook",
+    "bake": "cook",
+    "baketime": "cook",
+    "baking": "cook",
+    "bakingtime": "cook",
+    "rest": "inactive",
+    "resttime": "inactive",
+    "resting": "inactive",
+    "restingtime": "inactive",
+    "wait": "inactive",
+    "waittime": "inactive",
+    "waiting": "inactive",
+    "waitingtime": "inactive",
+    "inactive": "inactive",
+    "inactivetime": "inactive",
+    "active": "active",
+    "activetime": "active",
+    "total": "total",
+    "totaltime": "total",
+}
+THERMOMIX_VERSION_FIELDS = ("code", "id", "name", "shortName", "value")
+DEVICE_SHORT_NAME_FIELDS = (
+    "shortName",
+    "name",
+    "title",
+    "label",
+    "deviceName",
+    "displayName",
+)
 PROVIDER_REFERENCE_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]*")
 PUBLIC_AMOUNT_NUMBER_PATTERN = (
     r"(?:"
@@ -126,10 +167,13 @@ COOKIDOO_HOSTS = frozenset(
 SEARCH_FIELDS = frozenset(
     {
         "query", "ingredients", "exclude_ingredients", "locale", "tmv",
-        "limit", "page", "exclude_ids", "max_pages",
+        "languages", "limit", "page", "exclude_ids", "max_pages",
     }
 )
 METADATA_FIELDS = frozenset({"locale", "external_ids"})
+PLANNER_FIELDS = frozenset(
+    {"external_id", "date", "locale", "account_scope", "idempotency_key"}
+)
 METADATA_FAILURE_KINDS = frozenset(
     {"invalid_id", "invalid_metadata", "locale_mismatch", "not_found"}
 )
@@ -163,6 +207,28 @@ class GatewayPolicyDisabledError(BridgeError):
         )
 
 
+class GatewayPlannerDisabledError(BridgeError):
+    """Planner writes are unavailable under default-off policy."""
+
+    def __init__(self, reason: str = "planner_write_disabled") -> None:
+        super().__init__(
+            503,
+            reason,
+            "Cookidoo My Week planner writes are disabled",
+        )
+
+
+class GatewayPlannerDriftError(BridgeError):
+    """Observed PUT behavior did not preserve the verified pre-state."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            502,
+            "planner_behavior_drift",
+            "Cookidoo planner behavior did not match configured semantics",
+        )
+
+
 class GatewayResponseError(BridgeError):
     """The upstream client returned an invalid normalized object."""
 
@@ -193,6 +259,24 @@ def _env_int(name: str, default: int, minimum: int, maximum: int) -> int:
     return value
 
 
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name, "true" if default else "false").strip().lower()
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    if raw in {"0", "false", "no", "off", ""}:
+        return False
+    raise GatewayConfigurationError(f"{name} must be true or false")
+
+
+def _planner_semantics(value: object) -> str:
+    semantics = str(value).strip().lower()
+    if semantics not in {"unknown", "append", "replace"}:
+        raise GatewayConfigurationError(
+            "COOKIDOO_PLANNER_PUT_SEMANTICS must be unknown, append, or replace"
+        )
+    return semantics
+
+
 @dataclass(frozen=True)
 class BridgeConfig:
     """Runtime limits and non-account bridge configuration."""
@@ -206,6 +290,8 @@ class BridgeConfig:
     max_concurrency: int
     detail_concurrency: int
     max_results: int
+    planner_write_enabled: bool = False
+    planner_put_semantics: str = "unknown"
 
     @classmethod
     def from_env(cls) -> BridgeConfig:
@@ -231,6 +317,12 @@ class BridgeConfig:
                 "COOKIDOO_DETAIL_CONCURRENCY", 1, 1, 4
             ),
             max_results=_env_int("COOKIDOO_MAX_RESULTS", 20, 1, 20),
+            planner_write_enabled=_env_bool(
+                "COOKIDOO_PLANNER_WRITE_ENABLED", False
+            ),
+            planner_put_semantics=_planner_semantics(
+                os.getenv("COOKIDOO_PLANNER_PUT_SEMANTICS", "unknown")
+            ),
         )
 
 
@@ -279,6 +371,24 @@ def _normalize_names(value: object, field_name: str, maximum_items: int) -> tupl
         names.setdefault(name.casefold(), name)
     return tuple(names[key] for key in sorted(names))
 
+
+def _normalize_search_languages(value: object) -> tuple[str, ...]:
+    if value is None:
+        return ("en",)
+    languages = _normalize_names(value, "languages", 5)
+    normalized: list[str] = []
+    for language in languages:
+        code = language.replace("_", "-").lower()
+        if re.fullmatch(r"en(?:-[a-z]{2})?", code) is None:
+            raise BridgeError(
+                400,
+                "invalid_request",
+                "Cookidoo search languages are forced to English",
+            )
+        normalized.append("en")
+    return tuple(sorted(set(normalized))) or ("en",)
+
+
 def _normalize_recipe_ids(value: object) -> tuple[str, ...]:
     if value is None:
         return ()
@@ -308,6 +418,7 @@ class SearchRequest:
     page: int
     exclude_ids: tuple[str, ...]
     max_pages: int
+    languages: tuple[str, ...] = ("en",)
 
     @classmethod
     def from_payload(
@@ -348,6 +459,7 @@ class SearchRequest:
             )
 
         locale = _normalize_locale(payload.get("locale", config.default_locale))
+        languages = _normalize_search_languages(payload.get("languages"))
         tmv_raw = payload.get("tmv", "TM6")
         tmv = _clean_text(tmv_raw, "tmv", 8, True).upper()
         if tmv not in ALLOWED_TMV:
@@ -374,15 +486,16 @@ class SearchRequest:
         if max_pages_raw < 1 or max_pages_raw > 50:
             raise BridgeError(400, "invalid_request", "max_pages must be between 1 and 50")
         return cls(
-            query,
-            ingredients,
-            excluded,
-            locale,
-            tmv,
-            limit_raw,
-            page_raw,
-            exclude_ids,
-            max_pages_raw,
+            query=query,
+            ingredients=ingredients,
+            exclude_ingredients=excluded,
+            locale=locale,
+            tmv=tmv,
+            limit=limit_raw,
+            page=page_raw,
+            exclude_ids=exclude_ids,
+            max_pages=max_pages_raw,
+            languages=languages,
         )
 
 
@@ -442,6 +555,59 @@ class MetadataRequest:
 
 
 @dataclass(frozen=True)
+class PlannerRequest:
+    """One bounded account-level My Week assignment command."""
+
+    external_id: str
+    day: date
+    locale: str
+    account_scope: str
+    idempotency_key: str
+
+    @classmethod
+    def from_payload(
+        cls, payload: object, config: BridgeConfig
+    ) -> PlannerRequest:
+        if not isinstance(payload, Mapping):
+            raise BridgeError(400, "invalid_request", "JSON body must be an object")
+        unexpected = sorted(set(payload) - PLANNER_FIELDS)
+        if unexpected:
+            raise BridgeError(
+                400,
+                "invalid_request",
+                "Unexpected request fields: " + ", ".join(unexpected),
+            )
+        external_id = _clean_text(
+            payload.get("external_id"), "external_id", 160, True
+        )
+        if re.fullmatch(r"[A-Za-z0-9._:-]+", external_id) is None:
+            raise BridgeError(400, "invalid_request", "external_id is invalid")
+        raw_day = _clean_text(payload.get("date"), "date", 10, True)
+        try:
+            planned_day = date.fromisoformat(raw_day)
+        except ValueError as exc:
+            raise BridgeError(400, "invalid_request", "date is invalid") from exc
+        locale = _normalize_locale(payload.get("locale", config.default_locale))
+        account_scope = _clean_text(
+            payload.get("account_scope"), "account_scope", 40, True
+        )
+        if account_scope != "configured_account":
+            raise BridgeError(400, "invalid_request", "account_scope is invalid")
+        idempotency_key = _clean_text(
+            payload.get("idempotency_key"), "idempotency_key", 128, True
+        )
+        if re.fullmatch(r"[A-Za-z0-9._:-]+", idempotency_key) is None:
+            raise BridgeError(400, "invalid_request", "idempotency_key is invalid")
+        return cls(
+            external_id=external_id,
+            day=planned_day,
+            locale=locale,
+            account_scope=account_scope,
+            idempotency_key=idempotency_key,
+        )
+
+
+@dataclass(frozen=True)
 class GatewaySearchResult:
     """Allowlisted recipes and bounded page progress."""
 
@@ -458,6 +624,18 @@ class GatewayMetadataResult:
 
     outcomes: list[dict[str, object]]
     locale: str
+
+
+@dataclass(frozen=True)
+class GatewayPlannerResult:
+    """Verified planner write result without account identity or provider bodies."""
+
+    changed: bool
+    already_present: bool
+    verified: bool
+    day: date
+    account_scope: str
+    reconciled: bool = False
 
 
 @dataclass(frozen=True)
@@ -490,11 +668,17 @@ class SafeRecipeMetadata:
     url: str
     yield_quantity: float | None
     yield_unit: str | None
+    prep_time_seconds: int | None
+    cook_time_seconds: int | None
     active_time_seconds: int | None
+    inactive_time_seconds: int | None
     total_time_seconds: int | None
     difficulty: str | None
     primary_category: str | None
+    devices: tuple[str, ...]
+    optional_devices: tuple[str, ...]
     equipment: tuple[str, ...]
+    provider_language: str | None
     topology_metrics: dict[str, int]
 
 
@@ -595,6 +779,24 @@ def _optional_upstream_text(
         return None
     text = _upstream_text(value, field_name, maximum, False)
     return text or None
+
+
+def _provider_content_language(value: object) -> str | None:
+    if value is None or value == "":
+        return None
+    language = _upstream_text(value, "provider_language", 20, True).replace(
+        "_", "-"
+    )
+    if re.fullmatch(
+        r"[A-Za-z]{2,3}(?:-[A-Za-z]{2}|-[A-Za-z]{4}(?:-[A-Za-z]{2})?)?",
+        language,
+    ) is None:
+        raise GatewayResponseError()
+    parts = language.split("-")
+    normalized = parts[0].lower()
+    for part in parts[1:]:
+        normalized += "-" + (part.title() if len(part) == 4 else part.upper())
+    return normalized
 
 
 def _optional_upstream_bool(
@@ -781,6 +983,177 @@ def _upstream_mapping(value: object, *, optional: bool = False) -> Mapping[str, 
     if not isinstance(value, Mapping):
         raise GatewayResponseError()
     return value
+
+
+def _raw_time_facts(
+    raw: Mapping[str, object],
+) -> tuple[int | None, int | None, int | None, int | None, int | None]:
+    values: dict[str, int | None] = {
+        "prep": None,
+        "cook": None,
+        "active": None,
+        "inactive": None,
+        "total": None,
+    }
+    seen = {key: False for key in values}
+    invalid = set()
+    for time_value in _upstream_sequence(raw.get("times"), 20, optional=True):
+        time_item = _upstream_mapping(time_value)
+        time_type = _optional_upstream_text(
+            time_item.get("type"), "time_type", 80
+        )
+        if time_type is None:
+            continue
+        alias = re.sub(r"[^a-z0-9]", "", time_type.casefold())
+        fact = TIME_FACT_ALIASES.get(alias)
+        if fact is None:
+            continue
+        value, value_max = _raw_quantity(time_item.get("quantity"))
+        if value is None or value_max is not None or not value.is_integer():
+            seen[fact] = True
+            values[fact] = None
+            invalid.add(fact)
+            continue
+        seconds = _upstream_seconds(int(value))
+        if fact in invalid:
+            continue
+        if not seen[fact]:
+            values[fact] = seconds
+            seen[fact] = True
+        elif values[fact] != seconds:
+            values[fact] = None
+            invalid.add(fact)
+
+    if (
+        not seen["prep"]
+        and not seen["cook"]
+        and not seen["inactive"]
+        and values["active"] is not None
+        and values["total"] is not None
+    ):
+        values["inactive"] = max(values["total"] - values["active"], 0)
+
+    return (
+        values["prep"],
+        values["cook"],
+        values["active"],
+        values["inactive"],
+        values["total"],
+    )
+
+
+def _structured_device_values(value: object) -> Sequence[object]:
+    if value is None:
+        return ()
+    if isinstance(value, str) or isinstance(value, Mapping):
+        return (value,)
+    return _upstream_sequence(value, MAX_RECIPE_DEVICES)
+
+
+def _structured_device_name(
+    value: object,
+    fields: Sequence[str],
+    field_name: str,
+) -> str | None:
+    if isinstance(value, str):
+        return _optional_upstream_text(value, field_name, MAX_DEVICE_TEXT)
+    if not isinstance(value, Mapping):
+        return None
+    names: dict[str, str] = {}
+    for field in fields:
+        if field not in value:
+            continue
+        name = _optional_upstream_text(
+            value.get(field), field_name, MAX_DEVICE_TEXT
+        )
+        if name is not None:
+            names.setdefault(name.casefold(), name)
+    if len(names) != 1:
+        return None
+    return next(iter(names.values()))
+
+
+def _thermomix_version_name(value: object) -> str | None:
+    candidates: Sequence[object]
+    if isinstance(value, str):
+        candidates = (value,)
+    elif isinstance(value, Mapping):
+        candidates = tuple(
+            value.get(field)
+            for field in THERMOMIX_VERSION_FIELDS
+            if field in value
+        )
+    else:
+        return None
+    versions = set()
+    for candidate in candidates:
+        name = _optional_upstream_text(
+            candidate,
+            "thermomix_version",
+            MAX_DEVICE_TEXT,
+        )
+        if name is None:
+            continue
+        match = re.fullmatch(
+            r"(?:thermomix\s*)?(TM31|TM5|TM6|TM7)",
+            name,
+            re.IGNORECASE,
+        )
+        if match is not None:
+            versions.add(match.group(1).upper())
+    if len(versions) != 1:
+        return None
+    return next(iter(versions))
+
+
+def _append_device(
+    values: list[str],
+    seen: set[str],
+    name: str | None,
+) -> None:
+    if name is None:
+        return
+    key = name.casefold()
+    if key in seen or len(values) >= MAX_RECIPE_DEVICES:
+        return
+    seen.add(key)
+    values.append(name)
+
+
+def _raw_devices(
+    raw: Mapping[str, object],
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    devices: list[str] = []
+    device_keys: set[str] = set()
+    for value in _structured_device_values(raw.get("thermomixVersions")):
+        _append_device(
+            devices,
+            device_keys,
+            _thermomix_version_name(value),
+        )
+    for value in _structured_device_values(raw.get("additionalDevices")):
+        _append_device(
+            devices,
+            device_keys,
+            _structured_device_name(
+                value,
+                DEVICE_SHORT_NAME_FIELDS,
+                "additional_device",
+            ),
+        )
+
+    optional_devices: list[str] = []
+    optional_keys: set[str] = set()
+    for value in _structured_device_values(raw.get("optionalDevices")):
+        name = _structured_device_name(
+            value,
+            DEVICE_SHORT_NAME_FIELDS,
+            "optional_device",
+        )
+        if name is None or name.casefold() in device_keys:
+            continue
+        _append_device(optional_devices, optional_keys, name)
+    return tuple(devices), tuple(optional_devices)
 
 
 def _format_source_number(value: float) -> str:
@@ -1038,21 +1411,14 @@ def _safe_recipe_from_raw(
         serving_quantity = None
         serving_unit = None
 
-    active_time: int | None = None
-    total_time: int | None = None
-    for time_value in _upstream_sequence(raw.get("times"), 20, optional=True):
-        time_item = _upstream_mapping(time_value)
-        time_type = _optional_upstream_text(time_item.get("type"), "time_type", 80)
-        if time_type not in {"activeTime", "totalTime"}:
-            continue
-        value, value_max = _raw_quantity(time_item.get("quantity"))
-        if value is None or value_max is not None or not value.is_integer():
-            continue
-        seconds = _upstream_seconds(int(value))
-        if time_type == "activeTime" and active_time is None:
-            active_time = seconds
-        if time_type == "totalTime" and total_time is None:
-            total_time = seconds
+    (
+        prep_time,
+        cook_time,
+        active_time,
+        inactive_time,
+        total_time,
+    ) = _raw_time_facts(raw)
+    devices, optional_devices = _raw_devices(raw)
 
     primary_category: str | None = None
     categories = _upstream_sequence(raw.get("categories"), 100, optional=True)
@@ -1082,13 +1448,21 @@ def _safe_recipe_from_raw(
         url=canonical_url,
         yield_quantity=serving_quantity,
         yield_unit=serving_unit,
+        prep_time_seconds=prep_time,
+        cook_time_seconds=cook_time,
         active_time_seconds=active_time,
+        inactive_time_seconds=inactive_time,
         total_time_seconds=total_time,
         difficulty=_optional_upstream_text(
             raw.get("difficulty"), "difficulty", 80
         ),
         primary_category=primary_category,
+        devices=devices,
+        optional_devices=optional_devices,
         equipment=tuple(equipment),
+        provider_language=_provider_content_language(
+            raw.get("language", raw.get("recipeLanguage"))
+        ),
         topology_metrics=topology_metrics,
     )
 
@@ -1149,6 +1523,8 @@ def _safe_recipe_from_public(details: object) -> SafeRecipeMetadata:
     topology_metrics["group_count"] = 1 if ingredients else 0
     topology_metrics["ingredient_count"] = len(ingredients)
     topology_metrics["optional_null_count"] = len(ingredients)
+    active_time = _upstream_seconds(getattr(details, "active_time", None))
+    total_time = _upstream_seconds(getattr(details, "total_time", None))
     return SafeRecipeMetadata(
         id=_upstream_text(getattr(details, "id", ""), "external_id", 160, True),
         name=_upstream_text(getattr(details, "name", ""), "title", 400, True),
@@ -1162,17 +1538,25 @@ def _safe_recipe_from_public(details: object) -> SafeRecipeMetadata:
         ),
         yield_quantity=None,
         yield_unit=None,
-        active_time_seconds=_upstream_seconds(
-            getattr(details, "active_time", None)
+        prep_time_seconds=None,
+        cook_time_seconds=None,
+        active_time_seconds=active_time,
+        inactive_time_seconds=(
+            max(total_time - active_time, 0)
+            if active_time is not None and total_time is not None
+            else None
         ),
-        total_time_seconds=_upstream_seconds(
-            getattr(details, "total_time", None)
-        ),
+        total_time_seconds=total_time,
         difficulty=_optional_upstream_text(
             getattr(details, "difficulty", None), "difficulty", 80
         ),
         primary_category=primary_category,
+        devices=(),
+        optional_devices=(),
         equipment=equipment,
+        provider_language=_provider_content_language(
+            getattr(details, "language", None)
+        ),
         topology_metrics=topology_metrics,
     )
 
@@ -1241,10 +1625,15 @@ def _allowlisted_recipe(
         "general": {
             "yield_quantity": details.yield_quantity,
             "yield_unit": details.yield_unit,
+            "prep_time_seconds": details.prep_time_seconds,
+            "cook_time_seconds": details.cook_time_seconds,
             "active_time_seconds": details.active_time_seconds,
+            "inactive_time_seconds": details.inactive_time_seconds,
             "total_time_seconds": details.total_time_seconds,
             "difficulty": details.difficulty,
             "primary_category": details.primary_category,
+            "devices": list(details.devices),
+            "optional_devices": list(details.optional_devices),
             "equipment": list(details.equipment),
         },
         "ingredients": [
@@ -1271,6 +1660,7 @@ def _allowlisted_recipe(
         "image_url": image_url,
         "canonical_url": canonical_url,
         "locale": locale,
+        "provider_language": details.provider_language,
     }
 
 
@@ -1329,6 +1719,86 @@ def _metadata_failure_kind(exc: BaseException) -> str | None:
     return None
 
 
+@dataclass(frozen=True)
+class PlannerDayState:
+    regular_ids: tuple[str, ...]
+    custom_ids: tuple[str, ...]
+
+    @property
+    def all_ids(self) -> tuple[str, ...]:
+        return tuple(dict.fromkeys([*self.regular_ids, *self.custom_ids]))
+
+
+def _planner_day_state(
+    days: Sequence[object],
+    planned_day: date,
+) -> PlannerDayState:
+    day_key = planned_day.isoformat()
+    target = next(
+        (
+            item
+            for item in days
+            if str(getattr(item, "id", "")) == day_key
+        ),
+        None,
+    )
+    if target is None:
+        return PlannerDayState(regular_ids=(), custom_ids=())
+    recipes = getattr(target, "recipes", None)
+    if isinstance(recipes, str) or not isinstance(recipes, Sequence):
+        raise GatewayResponseError()
+    custom_value = getattr(target, "customer_recipe_ids", ())
+    if isinstance(custom_value, str) or not isinstance(
+        custom_value,
+        Sequence,
+    ):
+        raise GatewayResponseError()
+    custom_ids: list[str] = []
+    custom_seen: set[str] = set()
+    for value in custom_value:
+        custom_id = _upstream_text(
+            value,
+            "planner_custom_recipe_id",
+            160,
+            True,
+        )
+        if re.fullmatch(r"[A-Za-z0-9._:-]+", custom_id) is None:
+            raise GatewayResponseError()
+        if custom_id not in custom_seen:
+            custom_seen.add(custom_id)
+            custom_ids.append(custom_id)
+    ids: list[str] = []
+    seen: set[str] = set()
+    for recipe in recipes:
+        recipe_id = _upstream_text(
+            getattr(recipe, "id", ""),
+            "planner_recipe_id",
+            160,
+            True,
+        )
+        if re.fullmatch(r"[A-Za-z0-9._:-]+", recipe_id) is None:
+            raise GatewayResponseError()
+        if recipe_id not in seen and recipe_id not in custom_seen:
+            seen.add(recipe_id)
+            ids.append(recipe_id)
+    return PlannerDayState(
+        regular_ids=tuple(ids),
+        custom_ids=tuple(custom_ids),
+    )
+
+
+def _planner_verified(
+    state: PlannerDayState,
+    target_id: str,
+    required: PlannerDayState,
+) -> bool:
+    return (
+        target_id in set(state.regular_ids)
+        and set(required.regular_ids).issubset(state.regular_ids)
+        and set(required.custom_ids).issubset(state.custom_ids)
+    )
+
+
 ClientFactory = Callable[[aiohttp.ClientSession, CookidooConfig], Any]
 
 
@@ -1354,6 +1824,8 @@ class CookidooGateway:
         self._authenticated: set[str] = set()
         self._login_lock = asyncio.Lock()
         self._detail_semaphore = asyncio.Semaphore(config.detail_concurrency)
+        self._planner_semaphore = asyncio.Semaphore(1)
+        self._planner_circuit_open_until = 0.0
         config.cookie_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         os.chmod(config.cookie_path.parent, 0o700)
 
@@ -1491,6 +1963,205 @@ class CookidooGateway:
     async def metadata(self, request: MetadataRequest) -> GatewayMetadataResult:
         raise GatewayPolicyDisabledError()
 
+    async def _planner_read(
+        self,
+        client: Any,
+        key: str,
+        planned_day: date,
+        runner: Callable[
+            [Callable[[], Awaitable[Any]]],
+            Awaitable[Any],
+        ] | None = None,
+    ) -> PlannerDayState:
+        operation = lambda: client.get_recipes_in_calendar_week(planned_day)
+        days = await (
+            runner(operation)
+            if runner is not None
+            else self._with_lazy_login(client, key, operation)
+        )
+        if isinstance(days, str) or not isinstance(days, Sequence):
+            raise GatewayResponseError()
+        return _planner_day_state(days, planned_day)
+
+    def _planner_open_circuit(self, status: int) -> None:
+        delay = 15 * 60 if status == 403 else 60
+        self._planner_circuit_open_until = max(
+            self._planner_circuit_open_until,
+            time.monotonic() + delay,
+        )
+
+    async def planner_add(
+        self,
+        request: PlannerRequest,
+    ) -> GatewayPlannerResult:
+        if not self._config.planner_write_enabled:
+            raise GatewayPlannerDisabledError()
+        semantics = _planner_semantics(
+            self._config.planner_put_semantics
+        )
+        if semantics == "unknown":
+            raise GatewayPlannerDisabledError("planner_put_semantics_unknown")
+        if time.monotonic() < self._planner_circuit_open_until:
+            raise BridgeError(
+                503,
+                "planner_circuit_open",
+                "Cookidoo planner circuit is open",
+            )
+        localization = self._select_localization(
+            request.locale,
+            exact=True,
+        )
+        client = self._client_for(localization)
+        key = f"{localization.language}|{localization.url}"
+        stale_relogin_used = False
+
+        async def planner_run(
+            operation: Callable[[], Awaitable[Any]],
+        ) -> Any:
+            nonlocal stale_relogin_used
+            await self._load_cookies_once(client)
+            logged_in_now = False
+            if not self._cookie_available and key not in self._authenticated:
+                await self._login(client, key, force=False)
+                logged_in_now = True
+            try:
+                return await operation()
+            except CookidooAuthException:
+                if logged_in_now or stale_relogin_used:
+                    raise
+                stale_relogin_used = True
+                await self._login(client, key, force=True)
+                return await operation()
+
+        async with self._planner_semaphore:
+            pre_state = await self._planner_read(
+                client,
+                key,
+                request.day,
+                planner_run,
+            )
+            if request.external_id in pre_state.all_ids:
+                return GatewayPlannerResult(
+                    changed=False,
+                    already_present=True,
+                    verified=True,
+                    day=request.day,
+                    account_scope=request.account_scope,
+                )
+            if semantics == "replace" and pre_state.custom_ids:
+                raise GatewayPlannerDisabledError(
+                    "planner_replace_custom_recipes_present"
+                )
+            write_ids = (
+                [request.external_id]
+                if semantics == "append"
+                else list(
+                    dict.fromkeys([
+                        *pre_state.regular_ids,
+                        request.external_id,
+                    ])
+                )
+            )
+
+            async def write_once() -> None:
+                await planner_run(
+                    lambda: client.add_recipes_to_calendar(
+                        request.day,
+                        write_ids,
+                    ),
+                )
+
+            reconciled = False
+            try:
+                await write_once()
+            except BaseException as exc:
+                status = _metadata_exception_status(exc)
+                if status in {403, 429}:
+                    self._planner_open_circuit(status)
+                    raise
+                if not isinstance(
+                    exc,
+                    (TimeoutError, CookidooRequestException, aiohttp.ClientError),
+                ):
+                    raise
+                reconciled_state = await self._planner_read(
+                    client,
+                    key,
+                    request.day,
+                    planner_run,
+                )
+                if _planner_verified(
+                    reconciled_state,
+                    request.external_id,
+                    pre_state,
+                ):
+                    return GatewayPlannerResult(
+                        changed=True,
+                        already_present=False,
+                        verified=True,
+                        day=request.day,
+                        account_scope=request.account_scope,
+                        reconciled=True,
+                    )
+                try:
+                    await write_once()
+                except BaseException as retry_exc:
+                    retry_status = _metadata_exception_status(retry_exc)
+                    if retry_status in {403, 429}:
+                        self._planner_open_circuit(retry_status)
+                        raise
+                    if not isinstance(
+                        retry_exc,
+                        (
+                            TimeoutError,
+                            CookidooRequestException,
+                            aiohttp.ClientError,
+                        ),
+                    ):
+                        raise
+                    final_state = await self._planner_read(
+                        client,
+                        key,
+                        request.day,
+                        planner_run,
+                    )
+                    if not _planner_verified(
+                        final_state,
+                        request.external_id,
+                        pre_state,
+                    ):
+                        raise
+                    return GatewayPlannerResult(
+                        changed=True,
+                        already_present=False,
+                        verified=True,
+                        day=request.day,
+                        account_scope=request.account_scope,
+                        reconciled=True,
+                    )
+                reconciled = True
+
+            post_state = await self._planner_read(
+                client,
+                key,
+                request.day,
+                planner_run,
+            )
+            if not _planner_verified(
+                post_state,
+                request.external_id,
+                pre_state,
+            ):
+                raise GatewayPlannerDriftError()
+            return GatewayPlannerResult(
+                changed=True,
+                already_present=False,
+                verified=True,
+                day=request.day,
+                account_scope=request.account_scope,
+                reconciled=reconciled,
+            )
+
 
 CONFIG_KEY = web.AppKey("config", BridgeConfig)
 RATE_LIMITER_KEY = web.AppKey("rate_limiter", SlidingWindowRateLimiter)
@@ -1569,28 +2240,39 @@ async def error_middleware(
         )
 
 
-def _policy_capabilities() -> dict[str, object]:
+def _policy_capabilities(config: BridgeConfig) -> dict[str, object]:
+    planner_available = (
+        config.planner_write_enabled
+        and config.planner_put_semantics in {"append", "replace"}
+    )
     return {
         "detail_hydration": False,
         "metadata_hydration": False,
         "ingredient_aware_discovery": False,
+        "planner_write": planner_available,
+        "put_semantics": (
+            config.planner_put_semantics
+            if planner_available
+            else "unknown"
+        ),
+        "account_scope": "configured_account",
         "reason": DETAIL_HYDRATION_POLICY_REASON,
         "policy_version": DETAIL_HYDRATION_POLICY_VERSION,
     }
 
 
-async def health_handler(_request: web.Request) -> web.Response:
+async def health_handler(request: web.Request) -> web.Response:
     return web.json_response(
         {
             "status": "ok",
             "service": "cookidoo-bridge",
-            "capabilities": _policy_capabilities(),
+            "capabilities": _policy_capabilities(request.app[CONFIG_KEY]),
         }
     )
 
 
-async def capabilities_handler(_request: web.Request) -> web.Response:
-    return web.json_response(_policy_capabilities())
+async def capabilities_handler(request: web.Request) -> web.Response:
+    return web.json_response(_policy_capabilities(request.app[CONFIG_KEY]))
 
 
 def _authorize(request: web.Request, config: BridgeConfig) -> None:
@@ -1642,6 +2324,91 @@ async def metadata_handler(request: web.Request) -> web.Response:
     raise GatewayPolicyDisabledError()
 
 
+async def planner_capabilities_handler(request: web.Request) -> web.Response:
+    config = request.app[CONFIG_KEY]
+    _authorize(request, config)
+    if not request.content_type == "application/json":
+        raise BridgeError(
+            415,
+            "unsupported_media_type",
+            "Content-Type must be application/json",
+        )
+    try:
+        payload = await request.json(loads=json.loads)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        raise BridgeError(
+            400,
+            "invalid_json",
+            "Request body is not valid JSON",
+        ) from None
+    if payload != {"capability": "recipe_planner_v1"}:
+        raise BridgeError(
+            400,
+            "invalid_request",
+            "Planner capability request is invalid",
+        )
+    capabilities = _policy_capabilities(config)
+    return web.json_response(
+        {
+            "planner_write": capabilities["planner_write"],
+            "put_semantics": capabilities["put_semantics"],
+            "account_scope": "configured_account",
+        }
+    )
+
+
+async def planner_add_handler(request: web.Request) -> web.Response:
+    config = request.app[CONFIG_KEY]
+    _authorize(request, config)
+    limiter = request.app[RATE_LIMITER_KEY]
+    if not await limiter.allow():
+        raise BridgeError(429, "rate_limited", "Bridge rate limit exceeded")
+    if not request.content_type == "application/json":
+        raise BridgeError(
+            415,
+            "unsupported_media_type",
+            "Content-Type must be application/json",
+        )
+    try:
+        payload = await request.json(loads=json.loads)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        raise BridgeError(
+            400,
+            "invalid_json",
+            "Request body is not valid JSON",
+        ) from None
+    planner_request = PlannerRequest.from_payload(payload, config)
+    gateway = request.app.get(GATEWAY_KEY)
+    if gateway is None:
+        raise GatewayConfigurationError(
+            "Cookidoo planner gateway is unavailable"
+        )
+    async with request.app[REQUEST_SEMAPHORE_KEY]:
+        result = await asyncio.wait_for(
+            gateway.planner_add(planner_request),
+            timeout=config.request_timeout_seconds,
+        )
+    return web.json_response(
+        {
+            "changed": result.changed,
+            "already_present": result.already_present,
+            "verified": result.verified,
+            "date": result.day.isoformat(),
+            "account_scope": result.account_scope,
+            "reconciled": result.reconciled,
+        }
+    )
+
+
+async def _gateway_context(app: web.Application):
+    gateway = await CookidooGateway.create(app[CONFIG_KEY])
+    app[GATEWAY_KEY] = gateway
+    try:
+        yield
+    finally:
+        await gateway.close()
+
+
 def create_app(
     config: BridgeConfig | None = None, gateway: CookidooGateway | None = None
 ) -> web.Application:
@@ -1653,11 +2420,21 @@ def create_app(
 
     if gateway is not None:
         app[GATEWAY_KEY] = gateway
+    elif (
+        config.planner_write_enabled
+        and config.planner_put_semantics in {"append", "replace"}
+    ):
+        app.cleanup_ctx.append(_gateway_context)
 
     app.router.add_get("/health", health_handler)
     app.router.add_get("/v1/capabilities", capabilities_handler)
     app.router.add_post("/v1/search", search_handler)
     app.router.add_post("/v1/metadata", metadata_handler)
+    app.router.add_post(
+        "/v1/planner-capabilities",
+        planner_capabilities_handler,
+    )
+    app.router.add_post("/v1/planner-add", planner_add_handler)
     return app
 
 

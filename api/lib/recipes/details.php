@@ -9,6 +9,7 @@ const RECIPE_DETAIL_MAX_INSTRUCTIONS_JSON_BYTES = 210000;
 const RECIPE_DETAIL_MAX_INSTRUCTION_GROUPS = 50;
 const RECIPE_DETAIL_MAX_INSTRUCTION_GROUPS_JSON_BYTES = 16384;
 const RECIPE_DETAIL_MAX_EQUIPMENT_JSON_BYTES = 8192;
+const RECIPE_DETAIL_MAX_DEVICE_JSON_BYTES = 8192;
 const RECIPE_DETAIL_MAX_USER_NOTE_LENGTH = 2000;
 const RECIPE_GROCERY_MAX_SELECTIONS = 100;
 const RECIPE_GROCERY_REQUEST_RETENTION_DAYS = 30;
@@ -29,21 +30,64 @@ function recipeDetailSourceAttribution(string $connector, ?string $stored): stri
     };
 }
 
+function recipeDetailDecodeFactList(
+    mixed $value,
+    bool $scalarOnly = false,
+    bool $deduplicate = true
+): array {
+    $decoded = json_decode((string)$value, true);
+    if (!is_array($decoded) || !recipeArrayIsList($decoded)) {
+        return [];
+    }
+    $names = [];
+    $seen = [];
+    foreach (array_slice($decoded, 0, 50) as $item) {
+        if ($scalarOnly && !is_string($item)) {
+            continue;
+        }
+        $name = mb_substr(trim((string)$item), 0, 120, 'UTF-8');
+        if ($name === '') {
+            continue;
+        }
+        $key = mb_strtolower($name, 'UTF-8');
+        if ($deduplicate && isset($seen[$key])) {
+            continue;
+        }
+        if ($deduplicate) {
+            $seen[$key] = true;
+        }
+        $names[] = $name;
+    }
+    return $names;
+}
+
 function recipeDetailLoadBase(PDO $db, int $recipeId): ?array {
     $equipmentBytes = RECIPE_DETAIL_MAX_EQUIPMENT_JSON_BYTES;
+    $deviceBytes = RECIPE_DETAIL_MAX_DEVICE_JSON_BYTES;
     $instructionBytes = RECIPE_DETAIL_MAX_INSTRUCTIONS_JSON_BYTES;
     $instructionGroupBytes =
         RECIPE_DETAIL_MAX_INSTRUCTION_GROUPS_JSON_BYTES;
     $noteLength = RECIPE_DETAIL_MAX_USER_NOTE_LENGTH;
+    $languageVisibility =
+        recipeCookidooLanguageVisibilitySql('c');
     $stmt = $db->prepare("
         SELECT c.id, c.primary_connector, substr(c.title, 1, 400) AS title,
                substr(c.image_url, 1, 2048) AS image_url,
                substr(c.language, 1, 16) AS language,
                c.servings, substr(c.category, 1, 160) AS category,
+               substr(c.prep_time, 1, 80) AS prep_time,
+               length(c.prep_time) AS prep_time_length,
+               substr(c.cook_time, 1, 80) AS cook_time,
+               length(c.cook_time) AS cook_time_length,
                c.yield_quantity, substr(c.yield_unit, 1, 80) AS yield_unit,
-               c.active_time_seconds, c.total_time_seconds,
+               c.prep_time_seconds, c.cook_time_seconds,
+               c.active_time_seconds, c.inactive_time_seconds,
+               c.total_time_seconds,
                substr(c.difficulty, 1, 80) AS difficulty,
                substr(c.primary_category, 1, 160) AS primary_category,
+               substr(c.devices_json, 1, {$deviceBytes}) AS devices_json,
+               substr(c.optional_devices_json, 1, {$deviceBytes})
+                   AS optional_devices_json,
                substr(c.equipment_json, 1, {$equipmentBytes}) AS equipment_json,
                substr(c.instructions_json, 1, {$instructionBytes}) AS instructions_json,
                length(c.instructions_json) AS instructions_json_length,
@@ -67,8 +111,10 @@ function recipeDetailLoadBase(PDO $db, int $recipeId): ?array {
                s.rating, substr(COALESCE(s.note, ''), 1, {$noteLength}) AS note,
                COALESCE(s.cooked_count, 0) AS cooked_count, s.last_cooked,
                substr(o.external_id, 1, 160) AS external_id,
+               o.id AS origin_id,
                substr(o.canonical_url, 1, 2048) AS canonical_url,
                substr(o.locale, 1, 16) AS locale,
+               substr(o.content_language, 1, 20) AS content_language,
                substr(o.attribution, 1, 160) AS attribution,
                substr(o.metadata_version, 1, 40) AS metadata_version,
                substr(o.metadata_schema_version, 1, 40)
@@ -100,6 +146,7 @@ function recipeDetailLoadBase(PDO $db, int $recipeId): ?array {
         LEFT JOIN recipe_score_revisions active_revision
           ON active_revision.id = ss.active_score_revision_id
         WHERE c.id = ? AND c.deleted_at IS NULL
+        {$languageVisibility}
         LIMIT 1
     ");
     $stmt->execute([$recipeId]);
@@ -841,6 +888,11 @@ function recipeDetailBuildIngredientPresence(
             ],
             '_canonical_key' => recipeDetailCanonicalShoppingKey($ingredient),
             '_shopping_name' => recipeDetailShoppingName($ingredient),
+            '_ingredient_source' =>
+                (string)$ingredient['ingredient_source'],
+            '_ingredient_id' => (int)$ingredient['ingredient_id'],
+            '_ranking_ingredient_id' =>
+                (int)($ingredient['ranking_ingredient_id'] ?? 0),
             '_source_group_index' =>
                 (int)$ingredient['source_group_index'],
             '_source_group_position' =>
@@ -1064,7 +1116,8 @@ function recipeCatalogDetailBuild(
     PDO $db,
     int $recipeId,
     bool $includeInternal = false,
-    string $scoreMode = 'read'
+    string $scoreMode = 'read',
+    bool $allowProviderProbe = true
 ): ?array {
     if ($recipeId <= 0) {
         throw new InvalidArgumentException('invalid_recipe_id');
@@ -1095,28 +1148,98 @@ function recipeCatalogDetailBuild(
         $read
     );
     $ingredients = $presence['ingredients'];
+    $ingredients = recipeIngredientFeedbackDecorate(
+        $db,
+        $recipeId,
+        $ingredients,
+        [
+            'inventory' =>
+                (int)($base['inventory_revision'] ?? 0),
+            'ranking' => $readMetadata['score_revision_id'],
+            'catalog' =>
+                (int)($base['catalog_revision'] ?? 0),
+            'ontology' => $readMetadata['ontology_version_id'],
+        ]
+    );
     $ingredientGroups = recipeDetailIngredientGroups(
         $recipeId,
         $ingredients
     );
 
-    $equipment = json_decode((string)($base['equipment_json'] ?? ''), true);
-    if (!is_array($equipment) || !recipeArrayIsList($equipment)) {
-        $equipment = [];
-    }
-    $equipment = array_values(array_slice(array_filter(
+    $equipment = recipeDetailDecodeFactList(
+        $base['equipment_json'] ?? '',
+        false,
+        false
+    );
+    $devices = recipeDetailDecodeFactList(
+        $base['devices_json'] ?? '',
+        true
+    );
+    $deviceKeys = array_fill_keys(
         array_map(
-            static fn(mixed $value): string =>
-                mb_substr(trim((string)$value), 0, 120, 'UTF-8'),
-            $equipment
+            static fn(string $name): string =>
+                mb_strtolower($name, 'UTF-8'),
+            $devices
         ),
-        static fn(string $value): bool => $value !== ''
-    ), 0, 50));
+        true
+    );
+    $optionalDevices = array_values(array_filter(
+        recipeDetailDecodeFactList(
+            $base['optional_devices_json'] ?? '',
+            true
+        ),
+        static fn(string $name): bool =>
+            !isset($deviceKeys[mb_strtolower($name, 'UTF-8')])
+    ));
+    $connector = (string)$base['primary_connector'];
+    $prepTimeSeconds = $base['prep_time_seconds'] !== null
+        ? (int)$base['prep_time_seconds']
+        : null;
+    $cookTimeSeconds = $base['cook_time_seconds'] !== null
+        ? (int)$base['cook_time_seconds']
+        : null;
+    if ($connector !== RECIPE_COOKIDOO_CONNECTOR) {
+        if (
+            $prepTimeSeconds === null
+            && (int)($base['prep_time_length'] ?? 0)
+                <= RECIPE_TIME_MAX_SOURCE_LENGTH
+        ) {
+            $prepTimeSeconds = recipeTimeParseDurationSeconds(
+                $base['prep_time'] ?? null,
+                (string)($base['language'] ?? 'und')
+            );
+        }
+        if (
+            $cookTimeSeconds === null
+            && (int)($base['cook_time_length'] ?? 0)
+                <= RECIPE_TIME_MAX_SOURCE_LENGTH
+        ) {
+            $cookTimeSeconds = recipeTimeParseDurationSeconds(
+                $base['cook_time'] ?? null,
+                (string)($base['language'] ?? 'und')
+            );
+        }
+    }
+    $activeTimeSeconds = $base['active_time_seconds'] !== null
+        ? (int)$base['active_time_seconds']
+        : null;
+    $totalTimeSeconds = $base['total_time_seconds'] !== null
+        ? (int)$base['total_time_seconds']
+        : null;
+    $inactiveTimeSeconds = recipeTimeDeriveInactiveSeconds(
+        $activeTimeSeconds,
+        $totalTimeSeconds,
+        $prepTimeSeconds,
+        $cookTimeSeconds,
+        $base['inactive_time_seconds'] !== null
+            ? (int)$base['inactive_time_seconds']
+            : null
+    );
     $yieldQuantity = $base['yield_quantity'] !== null
         ? (float)$base['yield_quantity']
         : null;
     $yieldUnit = trim((string)($base['yield_unit'] ?? ''));
-    if ((string)$base['primary_connector'] === RECIPE_COOKIDOO_CONNECTOR) {
+    if ($connector === RECIPE_COOKIDOO_CONNECTOR) {
         if ($yieldQuantity === null || $yieldUnit === '') {
             $yieldQuantity = null;
             $yieldUnit = '';
@@ -1125,7 +1248,7 @@ function recipeCatalogDetailBuild(
         $yieldQuantity = (float)$base['servings'];
     }
     $primaryCategory = trim((string)($base['primary_category'] ?? ''));
-    if ($primaryCategory === '' && (string)$base['primary_connector'] !== RECIPE_COOKIDOO_CONNECTOR) {
+    if ($primaryCategory === '' && $connector !== RECIPE_COOKIDOO_CONNECTOR) {
         $primaryCategory = trim((string)($base['category'] ?? ''));
     }
     $general = [
@@ -1133,16 +1256,17 @@ function recipeCatalogDetailBuild(
             'quantity' => $yieldQuantity,
             'unit' => $yieldUnit !== '' ? $yieldUnit : null,
         ],
-        'active_time_seconds' => $base['active_time_seconds'] !== null
-            ? (int)$base['active_time_seconds']
-            : null,
-        'total_time_seconds' => $base['total_time_seconds'] !== null
-            ? (int)$base['total_time_seconds']
-            : null,
+        'prep_time_seconds' => $prepTimeSeconds,
+        'cook_time_seconds' => $cookTimeSeconds,
+        'active_time_seconds' => $activeTimeSeconds,
+        'inactive_time_seconds' => $inactiveTimeSeconds,
+        'total_time_seconds' => $totalTimeSeconds,
         'difficulty' => trim((string)($base['difficulty'] ?? '')) !== ''
             ? (string)$base['difficulty']
             : null,
         'primary_category' => $primaryCategory !== '' ? $primaryCategory : null,
+        'devices' => $devices,
+        'optional_devices' => $optionalDevices,
         'equipment' => $equipment,
     ];
     $generalValues = [
@@ -1153,9 +1277,20 @@ function recipeCatalogDetailBuild(
         $general['primary_category'] !== null,
     ];
     $generalCount = count(array_filter($generalValues));
+    $supplementalGeneral = $general['prep_time_seconds'] !== null
+        || $general['cook_time_seconds'] !== null
+        || $general['inactive_time_seconds'] !== null
+        || $devices
+        || $optionalDevices;
     $generalCapability = $generalCount === count($generalValues)
         ? 'full'
-        : ($generalCount > 0 || $equipment ? 'partial' : 'none');
+        : (
+            $generalCount > 0
+            || $supplementalGeneral
+            || $equipment
+                ? 'partial'
+                : 'none'
+        );
 
     $instructions = recipeDetailInstructions($base);
     $instructionCapability = $instructions['available']
@@ -1202,6 +1337,10 @@ function recipeCatalogDetailBuild(
     $connectorMetadata = recipeConnectorRegistry()[$connector] ?? [
         'label' => $connector,
     ];
+    $planner = recipePlannerDetailProjection(
+        $base,
+        $allowProviderProbe && !$db->inTransaction()
+    );
     $imageUrl = trim((string)($base['image_url'] ?? ''));
     $thumbnailUrl = $imageUrl !== ''
         ? recipeCatalogCookidooThumbnail($imageUrl)
@@ -1226,6 +1365,10 @@ function recipeCatalogDetailBuild(
             'locale' => trim((string)($base['locale'] ?? $base['language'] ?? '')) !== ''
                 ? (string)($base['locale'] ?? $base['language'])
                 : null,
+            'content_language' =>
+                trim((string)($base['content_language'] ?? '')) !== ''
+                    ? (string)$base['content_language']
+                    : null,
             'rights_basis' => (string)$base['rights_basis'],
             'metadata_version' => trim((string)($base['metadata_version'] ?? '')) !== ''
                 ? (string)$base['metadata_version']
@@ -1243,6 +1386,7 @@ function recipeCatalogDetailBuild(
                 : null,
         ],
         'general' => $general,
+        'planner' => $planner,
         'ingredients' => $ingredients,
         'ingredient_groups' => $ingredientGroups,
         'ingredients_truncated' => (bool)$loaded['truncated'],
@@ -1287,6 +1431,9 @@ function recipeCatalogDetailBuild(
             'instructions' => $instructionCapability,
             'quantities' => $quantityCapability,
             'grocery_add' => $groceryCapability,
+            'ingredient_feedback' => true,
+            'ingredient_feedback_v2' => true,
+            'planner' => (bool)$planner['available'],
             'score_preview' =>
                 $readMetadata['preview_capability'],
         ],
@@ -1297,6 +1444,9 @@ function recipeCatalogDetailBuild(
             unset(
                 $ingredient['_canonical_key'],
                 $ingredient['_shopping_name'],
+                $ingredient['_ingredient_source'],
+                $ingredient['_ingredient_id'],
+                $ingredient['_ranking_ingredient_id'],
                 $ingredient['_source_group_index'],
                 $ingredient['_source_group_position'],
                 $ingredient['_source_group_title']
@@ -1501,7 +1651,8 @@ function recipeGroceryAddMissing(PDO $db, array $input): array {
             $db,
             $recipeId,
             true,
-            'active'
+            'active',
+            false
         );
         if ($detail === null) {
             throw new OutOfBoundsException('recipe_not_found');
@@ -1609,7 +1760,14 @@ function recipeGroceryAddMissing(PDO $db, array $input): array {
                 'amount_text' => $ingredient['amount']['text'],
             ];
             $state = (string)($ingredient['inventory']['state'] ?? 'uncertain');
-            if ($state === 'in_stock' || $state === 'staple') {
+            $availabilityOverride = (string)(
+                $ingredient['user_override']['availability'] ?? ''
+            );
+            if (
+                $availabilityOverride === 'have'
+                || $state === 'in_stock'
+                || $state === 'staple'
+            ) {
                 $outcome['outcome'] = 'now_in_stock';
                 $outcomes[] = $outcome;
                 continue;

@@ -12,6 +12,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Recipe scraps tips** — During cooking steps, detect "waste" generated (peels, cores, bones, eggshells, coffee grounds, citrus zest, etc.) and surface AI-powered tips on how to reuse them (compost, natural cleaner, broth, candied peel, etc.). Could be shown as an optional collapsible hint card below the step that generates the scrap.
 
 ### Added
+- **Atomic ingredient decision v2** — Added one revision-bound
+  `assume_have|select_inventory_product|reject_current_match` command with
+  product-level validation, immutable v2 source/target fingerprints, exact
+  action provenance, transactional availability/evidence writes, idempotent
+  replay/conflict handling, and 48-hour negative settlement.
+- **Durable ontology proposal intake** — Positive/negative decisions now enqueue
+  a transactional outbox row and candidate regression fixture. A bounded worker
+  persists immutable prompt/manifest/response artifacts, uses the one configured
+  ontology proposal model without fallback, stages only deterministic
+  closed-set-validated proposals, and supports operator/Copilot export/import.
+- **Cookidoo My Week scaffolding** — Added a fully fake-tested, account-level
+  React/HA/API/bridge planner path with dual default-off gates, revision tokens,
+  command journaling, read/write verification, append/replace safety, timeout
+  reconciliation, authentication retry, and 403/429 circuit behavior.
+- **Cookidoo content-language quarantine** — Added deterministic high-confidence
+  English/non-English assessments, future ingestion enforcement, user-facing
+  quarantine visibility, and copied-database dry-run/apply/rollback tooling
+  without changing recipe/ontology corpus membership.
+- **Ingredient availability and identity feedback** — Added revision-bound
+  display-only have/missing overrides, append-only correct/wrong match evidence,
+  stale-token/idempotency guards, detail capabilities, and a 14-day
+  proposal-export workflow. Feedback never mutates inventory, scores, grocery
+  eligibility, or ontology automatically.
 - **Manual production ontology activation profile** — Added an exact frozen
   production corpus profile and explicit `manual_review` activation policy for
   regular faceted-v3 score revisions. Requirement/source-aware revisions remain
@@ -42,13 +65,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Responsive recommendation totals** — Carousel clients may request 5–100 deterministic cards while preserving the availability/expiry/fill mix.
 - **Recipe detail contract** — Added the bounded `recipe_detail_v1` projection with source/freshness/revision metadata, General facts, ordered inventory-aware ingredients, local-or-external instruction capability, and explicit display-only quantity semantics.
 - **Idempotent missing groceries** — Added `recipe_catalog_grocery_add` to revalidate selected ingredient positions, canonicalize equivalents, and add only genuine missing items to EverShelf's internal shopping list without calling Home Assistant.
-- **Cookidoo metadata-v2** — Approved factual yield/unit, active/total seconds, difficulty, primary category, equipment nouns, and ordered ingredient source amounts now populate through normal discovery while existing metadata-v1 rows remain nullable.
+- **Cookidoo metadata-v2** — The disabled bridge adapter allowlist now preserves approved factual yield/unit, explicit prep/cook/active/inactive/total seconds, supported/required and optional devices, difficulty, primary category, equipment nouns, and ordered ingredient source amounts. Existing cached rows remain nullable and readable; production hydration stays policy-disabled.
 - **Disabled direct-ID metadata backfill** — Added authenticated 1–20 ID bridge batches, per-origin metadata versioning, resumable `recipe_metadata_refresh` jobs, and a status/dry-run/enqueue CLI guarded by `COOKIDOO_METADATA_BACKFILL_ENABLED=false`.
 - **Complete factual ingredient topology** — Source ingredients retain bounded named group/within-group topology, provider ingredient/default-title/unit references, provider-declared optionality, and shopping-category references. Recipe detail exposes named groups and additive provider metadata without changing the flat compatibility list.
 - **Versioned source mapping/remap** — Source mappings record the active `legacy-v1` mapper and can be remapped in bounded local jobs when a future resolver is registered, without another provider fetch; ontology v3 remains inactive.
 - **Authorized instruction groups** — Local/manual/generated recipes may persist bounded group labels and step-position references, while Cookidoo detail is structurally fixed to external-only instructions with no groups.
 
 ### Changed
+- **English-only Cookidoo request evidence** — Disabled search scaffolding now
+  forces the separate upstream `languages=en` filter, retains bounded provider
+  language as undocumented provenance distinct from locale, and combines it
+  with deterministic local rejection of explicit non-English ingestion.
 - **Cookidoo detail hydration policy-disabled** — Because the available provider detail response co-transports official steps, production bridge search/direct metadata routes now return `503 metadata_hydration_disabled_policy` without provider requests. EverShelf refuses discovery/backfill enqueue, skips legacy queued jobs locally without connector accounting, and keeps existing cached catalog rows readable.
 - **AI ontology proposals are staging-only** — Gemini 3.5 Flash is the frozen
   default proposal model. Closed candidate IDs, facet enums, exact evidence,
@@ -66,6 +93,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Topology schema gating** — The metadata policy remains `metadata-v2`, while the separate `ingredient-topology-v1` marker prevents partial/older source rows from being treated as current. Pilot metrics count topology key presence, bounded group-title lengths, reference/default-title/unit fill, and optional true/false/null rates without logging values.
 
 ### Fixed
+- **Mutation revision correctness** — Ingredient feedback submit-time detail
+  validation now always uses the true active score/ontology rather than a
+  development preview revision.
 - **Production activation and migration safety** — Ontology schema v3.17
   version-gates protection-trigger migrations, requires a validated rollback
   baseline for manual activation, and preserves retained shadow matches as
