@@ -62,6 +62,8 @@ services:
       - no-new-privileges:true
     logging:
       driver: "none"
+    healthcheck:
+      disable: true
 
   cookidoo-bridge:
     profiles: ["cookidoo"]
