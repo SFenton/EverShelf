@@ -2642,6 +2642,22 @@ try {
         && $promotionReplay['revision_id'] === $negativeScoreId,
         'Post-commit promotion reconciliation must be idempotent'
     );
+    $db->prepare("
+        UPDATE ontology_generations
+        SET last_monitored_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+    ")->execute([$negativeGenerationId]);
+    $throttledMonitors =
+        ingredientOntologyControllerMonitorActiveGenerations($db);
+    controllerTestAssert(
+        count(array_filter(
+            $throttledMonitors,
+            static fn(array $monitor): bool =>
+                (int)($monitor['generation_id'] ?? 0)
+                    === $negativeGenerationId
+        )) === 0,
+        'Recently checked generations must not rerun heavy monitoring before the durable cadence expires'
+    );
     $unrelatedAfterPromotion =
         ingredientOntologyControllerRecordCorrection(
             $db,
@@ -5314,6 +5330,11 @@ try {
             $db,
             $fallbackVersionId
         );
+    $provisionalBlast =
+        ingredientOntologyControllerBlastAudit(
+            $db,
+            (int)$fallback['generation_id']
+        );
     controllerTestAssert(
         $outageResult['status'] === 'abstained'
         && !empty($fallback['materialized'])
@@ -5328,6 +5349,13 @@ try {
         && $provisionalCoverage[
             'subject_resolution_counts'
         ]['unresolved'] >= 1
+        && $provisionalBlast['valid'] === true
+        && $provisionalBlast['accepted_relation_delta'] === 2
+        && $provisionalBlast[
+            'realized_provisional_relation_delta'
+        ] === 2
+        && $provisionalBlast['provisional_relation_allowance'] === 2
+        && $provisionalBlast['generalized_relation_delta'] === 0
         && controllerTestCount(
             $db,
             "SELECT COUNT(*) FROM ontology_quarantine_retries

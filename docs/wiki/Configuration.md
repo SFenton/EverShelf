@@ -211,11 +211,20 @@ ordinary product or recipe save still commits. The older
 `INGREDIENT_ONTOLOGY_CONTROLLER_ENABLED` name remains a compatibility fallback
 when the new gate is absent.
 
-For this release, production cron/work is intake-only even when the model gate
-is enabled: no active-database fork, generation, shadow, monitor, or promotion
-is permitted. `INGREDIENT_ONTOLOGY_CONTROLLER_PROMOTION_ENABLED` must remain
-`false`. Copy-only generation requires the controller CLI
-`--copy-generation --run-generation` path against a non-active database.
+Production remains intake-only unless the dedicated worker supplies every
+active-generation guard. Autonomous production generation requires
+`INGREDIENT_ONTOLOGY_CONTROLLER_PROMOTION_ENABLED=true` together with
+`--allow-active-db --copy-generation --run-generation --promote
+--allow-active-generation`. Omitting any guard fails closed before a fork.
+The same generation path remains usable against a copied database without the
+active-generation switch.
+
+Active generations are immutable children of the current ontology. Plans are
+debounced for 30 quiet seconds (maximum five minutes), shadow-scored, checked
+against exact constraints, blast limits, immutable gold, integrity, and
+materialized-value parity, then promoted with a compare-and-swap pointer
+update. A failed, abstained, or quarantined subject receives a unique
+non-satisfying provisional leaf and durable retry rather than being dropped.
 Live product observations enqueue subject resolution at priority `100`, and
 live recipe ingestion uses priority `50`; both refresh queued/retry work and
 safely revive terminal jobs with fresh immutable input and lease fences.
@@ -226,8 +235,16 @@ historical work is retained but not drained:
 ```bash
 php scripts/ontology-controller.php work \
   --db=/path/to/evershelf.db --write --allow-active-db --loop \
-  --minimum-priority=50
+  --minimum-priority=50 --allow-network \
+  --copy-generation --run-generation --promote \
+  --allow-active-generation
 ```
+
+The repository Compose file exposes the supervised worker under the
+`ontology` profile. Start it with `docker compose --profile ontology up -d`
+after enabling all three controller gates. The worker runs as its own
+container rather than through a host `docker exec` service, so stop/restart
+signals cannot orphan a second controller process.
 
 An offline copied-database historical batch may opt in later with
 `--minimum-priority=0`.

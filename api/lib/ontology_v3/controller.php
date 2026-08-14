@@ -1204,6 +1204,7 @@ function ingredientOntologyControllerSchemaMigrate(PDO $db): void {
             gate_report_json TEXT NOT NULL DEFAULT '{}',
             critique_json TEXT NOT NULL DEFAULT '{}',
             monitor_until DATETIME DEFAULT NULL,
+            last_monitored_at DATETIME DEFAULT NULL,
             created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
             promoted_at DATETIME DEFAULT NULL,
             rolled_back_at DATETIME DEFAULT NULL
@@ -1467,6 +1468,12 @@ function ingredientOntologyControllerSchemaMigrate(PDO $db): void {
         $db,
         'ontology_generations',
         'last_plan_at',
+        'DATETIME DEFAULT NULL'
+    );
+    ingredientOntologyControllerAddColumn(
+        $db,
+        'ontology_generations',
+        'last_monitored_at',
         'DATETIME DEFAULT NULL'
     );
     ingredientOntologyControllerAddColumn(
@@ -9081,9 +9088,16 @@ function ingredientOntologyControllerCreateGenerationContinue(
             $riskCounts = [];
             $ownerIds = [];
             $r3EntityIds = [];
+            $provisionalPlanCount = 0;
             foreach ($planRows as $plan) {
                 $risk = (string)$plan['risk_tier'];
                 $riskCounts[$risk] = ($riskCounts[$risk] ?? 0) + 1;
+                if (
+                    (string)$plan['repair_kind']
+                    === 'materialize_provisional_subject'
+                ) {
+                    $provisionalPlanCount++;
+                }
                 if ($risk === 'R3') {
                     $planPayload = json_decode(
                         (string)$plan['plan_json'],
@@ -9144,6 +9158,50 @@ function ingredientOntologyControllerCreateGenerationContinue(
                 WHERE ontology_version_id = {$parentVersionId}
                   AND review_state = 'accepted'
             ")->fetchColumn();
+            $parentHasUnclassified = (int)$db->query("
+                SELECT COUNT(*)
+                FROM ingredient_ontology_entities
+                WHERE ontology_version_id = {$parentVersionId}
+                  AND slug = 'unclassified-ingredient'
+                  AND active = 1
+            ")->fetchColumn() > 0;
+            $maximumProvisionalRelationAllowance = $provisionalPlanCount
+                + (
+                    $provisionalPlanCount > 0
+                    && !$parentHasUnclassified
+                        ? 1
+                        : 0
+                );
+            $provisionalRelations = $db->prepare("
+                SELECT COUNT(*)
+                FROM ingredient_ontology_relations relation
+                JOIN ingredient_ontology_entities source
+                  ON source.id = relation.from_entity_id
+                WHERE relation.ontology_version_id = ?
+                  AND relation.review_state = 'accepted'
+                  AND (
+                      source.slug LIKE 'provisional-subject-%'
+                      OR source.slug = 'unclassified-ingredient'
+                  )
+            ");
+            $provisionalRelations->execute([$childVersionId]);
+            $childProvisionalRelations =
+                (int)$provisionalRelations->fetchColumn();
+            $provisionalRelations->execute([$parentVersionId]);
+            $parentProvisionalRelations =
+                (int)$provisionalRelations->fetchColumn();
+            $realizedProvisionalRelationDelta = max(
+                0,
+                $childProvisionalRelations - $parentProvisionalRelations
+            );
+            $provisionalRelationAllowance = min(
+                $realizedProvisionalRelationDelta,
+                $maximumProvisionalRelationAllowance
+            );
+            $generalizedRelationDelta = max(
+                0,
+                $relationDelta - $provisionalRelationAllowance
+            );
             $maximumR3Descendants = 0;
             if ($r3EntityIds) {
                 $context = new IngredientOntologyV3MatcherContext(
@@ -9240,7 +9298,7 @@ function ingredientOntologyControllerCreateGenerationContinue(
             }
             if (
                 ($riskCounts['R3'] ?? 0) > 1
-                || $relationDelta > 1
+                || $generalizedRelationDelta > 1
                 || $maximumR3Descendants > 32
             ) {
                 $errors[] = 'R3 relation budget exceeded';
@@ -9281,6 +9339,12 @@ function ingredientOntologyControllerCreateGenerationContinue(
                 'owner_count' => $ownerCount,
                 'entity_delta' => $entityDelta,
                 'accepted_relation_delta' => $relationDelta,
+                'realized_provisional_relation_delta' =>
+                    $realizedProvisionalRelationDelta,
+                'provisional_relation_allowance' =>
+                    $provisionalRelationAllowance,
+                'generalized_relation_delta' =>
+                    $generalizedRelationDelta,
                 'maximum_r3_descendants' => $maximumR3Descendants,
                 'deactivated_entity_count' => $deactivated,
                 'recipe_count' => $recipeCount,
@@ -13279,15 +13343,42 @@ function ingredientOntologyControllerResumeDurableJob(
                     WHERE status = 'promoted'
                       AND monitor_until IS NOT NULL
                       AND monitor_until >= CURRENT_TIMESTAMP
+                      AND (
+                          last_monitored_at IS NULL
+                          OR last_monitored_at <= datetime(
+                              'now',
+                              '-1 minute'
+                          )
+                      )
                     ORDER BY promoted_at DESC, id DESC
                     LIMIT 5
                 ")->fetchAll(PDO::FETCH_COLUMN);
                 $results = [];
                 foreach ($rows as $generationId) {
-                    $results[] = ingredientOntologyControllerMonitorGeneration(
-                        $db,
-                        (int)$generationId
-                    );
+                    $claim = $db->prepare("
+                        UPDATE ontology_generations
+                        SET last_monitored_at = CURRENT_TIMESTAMP
+                        WHERE id = ?
+                          AND status = 'promoted'
+                          AND monitor_until IS NOT NULL
+                          AND monitor_until >= CURRENT_TIMESTAMP
+                          AND (
+                              last_monitored_at IS NULL
+                              OR last_monitored_at <= datetime(
+                                  'now',
+                                  '-1 minute'
+                              )
+                          )
+                    ");
+                    $claim->execute([(int)$generationId]);
+                    if ($claim->rowCount() !== 1) {
+                        continue;
+                    }
+                    $results[] =
+                        ingredientOntologyControllerMonitorGeneration(
+                            $db,
+                            (int)$generationId
+                        );
                 }
                 return $results;
             }

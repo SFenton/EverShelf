@@ -11,7 +11,7 @@ function ontologyControllerCliUsage(): never {
         "Usage:\n"
         . "  php scripts/ontology-controller.php status --db=copy.sqlite\n"
         . "  php scripts/ontology-controller.php backfill --db=copy.sqlite [--write] [--json-out=report.json]\n"
-        . "  php scripts/ontology-controller.php work --db=copy.sqlite --write [--limit=10] [--minimum-priority=50] [--provider=fake] [--model=ID] [--critic-provider=KEY] [--critic-model=ID] [--allow-network] [--copy-generation --run-generation [--promote]] [--loop] [--max-cycles=N]\n"
+        . "  php scripts/ontology-controller.php work --db=copy.sqlite --write [--limit=10] [--minimum-priority=50] [--provider=fake] [--model=ID] [--critic-provider=KEY] [--critic-model=ID] [--allow-network] [--copy-generation --run-generation [--promote] [--allow-active-generation]] [--loop] [--max-cycles=N]\n"
         . "  php scripts/ontology-controller.php generation --db=copy.sqlite --generation-id=N --write [--promote]\n"
         . "  php scripts/ontology-controller.php monitor --db=copy.sqlite --generation-id=N --write\n"
         . "  php scripts/ontology-controller.php gold-build --db=copy.sqlite --write\n"
@@ -23,7 +23,10 @@ function ontologyControllerCliUsage(): never {
         . "Network calls additionally require --allow-network and the "
         . "separate controller feature flags/API key. Backfill is dry-run "
         . "unless --write is supplied. Mutating commands refuse the active "
-        . "database unless --allow-active-db is explicitly provided.\n"
+        . "database unless --allow-active-db is explicitly provided. "
+        . "Active-database generation additionally requires "
+        . "--allow-active-generation, --run-generation, --promote, and the "
+        . "promotion feature gate.\n"
     );
     exit(1);
 }
@@ -217,13 +220,29 @@ switch ($command) {
         );
         if (
             $copyGeneration
-            && realpath($databasePath) === realpath(
-                __DIR__ . '/../data/evershelf.db'
+            && (
+                $databasePath === recipeCliCanonicalPath(DB_PATH)
+                || recipeCliSameFile($databasePath, DB_PATH)
             )
         ) {
-            throw new RuntimeException(
-                'copy generation is forbidden on the active database'
-            );
+            if (!isset($options['allow-active-generation'])) {
+                throw new RuntimeException(
+                    'active generation requires --allow-active-generation'
+                );
+            }
+            if (
+                !isset($options['run-generation'])
+                || !isset($options['promote'])
+            ) {
+                throw new RuntimeException(
+                    'active generation requires --run-generation and --promote'
+                );
+            }
+            if (!ingredientOntologyControllerPromotionEnabled()) {
+                throw new RuntimeException(
+                    'active generation requires the promotion feature gate'
+                );
+            }
         }
         $workOptions = [
             'provider' => (string)(

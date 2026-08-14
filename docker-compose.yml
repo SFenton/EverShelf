@@ -20,6 +20,47 @@ services:
     group_add:
       - "${EVERSHELF_ONTOLOGY_SOCKET_GID:-1000}"
 
+  ontology-worker:
+    profiles: ["ontology"]
+    build: .
+    container_name: evershelf-ontology-worker
+    entrypoint: ["php", "/var/www/html/scripts/ontology-controller.php"]
+    command:
+      - work
+      - --db=/var/www/html/data/evershelf.db
+      - --write
+      - --allow-active-db
+      - --loop
+      - --provider=copilot_socket
+      - --model=gemini-3.7-flash
+      - --critic-provider=copilot_socket
+      - --critic-model=claude-sonnet-5
+      - --minimum-priority=50
+      - --allow-network
+      - --copy-generation
+      - --run-generation
+      - --promote
+      - --allow-active-generation
+    volumes:
+      - evershelf_data:/var/www/html/data
+      - ./.env:/var/www/html/.env:ro
+      - ${EVERSHELF_ONTOLOGY_SOCKET_DIR:-/run/evershelf-ontology-disabled}:/run/evershelf-ontology:ro
+    env_file:
+      - ./.env
+    group_add:
+      - "${EVERSHELF_ONTOLOGY_SOCKET_GID:-1000}"
+    depends_on:
+      - evershelf
+    restart: unless-stopped
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+
   cookidoo-bridge:
     profiles: ["cookidoo"]
     build:

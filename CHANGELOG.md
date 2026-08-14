@@ -44,14 +44,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   coverage status, SQL-bounded candidate retrieval, attachment-based 160 KB
   prompt/schema delivery, Gemini effort omission, and user-unit runtime/socket
   alignment.
-  Production cron is now strictly intake-only; all fork/generation/shadow/
-  promotion work is copy-only. Added group-readable user-runtime socket
-  permissions, base-owned queue lease schemas, safe prepared/delete/merge
-  deactivation, shared-subject job preservation, resumable keyset backfill
-  under 128 MB, and fingerprint-aware cached coverage. Production intake now
-  uses an indexed minimum-priority fence: live products run at 100, live recipe
-  ingredients at 50, terminal jobs revive with fresh fences, and priority-0
-  historical backfill remains queued for explicit offline processing.
+  Production cron remains intake-only. A separate default-off Compose worker
+  can now run guarded active-database fork/generation/shadow/promotion when all
+  CLI and environment gates are explicit. Unsafe or exhausted plans promote a
+  deterministic unresolved, confidence-zero, non-satisfying provisional leaf
+  so every non-prepared subject enters the active ontology without changing
+  recipe matches. Added realized provisional-edge blast accounting, inode-safe
+  active-DB guards, one-minute CAS-claimed monitoring, group-readable
+  user-runtime socket permissions, base-owned queue lease schemas, safe
+  prepared/delete/merge deactivation, shared-subject job preservation,
+  resumable keyset backfill under 128 MB, and fingerprint-aware cached
+  coverage. Production intake uses an indexed minimum-priority fence: live
+  products run at 100, live recipe ingredients at 50, terminal jobs revive with
+  fresh fences, and priority-0 historical backfill remains queued for explicit
+  offline processing.
 - **Atomic ingredient decision v2** — Added one revision-bound
   `assume_have|select_inventory_product|reject_current_match` command with
   product-level validation, immutable v2 source/target fingerprints, exact
