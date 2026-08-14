@@ -5364,6 +5364,60 @@ try {
         ) === 1,
         'Model outage must preserve total coverage with one non-satisfying provisional subject and durable retry'
     );
+    $fallbackGenerationId = (int)$fallback['generation_id'];
+    $busyHookCalls = [];
+    $GLOBALS['ONTOLOGY_CONTROLLER_TEST_HOOK'] =
+        static function (
+            string $name,
+            array $context
+        ) use (&$busyHookCalls, $fallbackGenerationId): void {
+            if (
+                $name === 'before_generation_seal'
+                && (int)($context['generation_id'] ?? 0)
+                    === $fallbackGenerationId
+            ) {
+                $busyHookCalls[$fallbackGenerationId] =
+                    ($busyHookCalls[$fallbackGenerationId] ?? 0) + 1;
+                throw new PDOException('database table is locked');
+            }
+        };
+    $busyGeneration = ingredientOntologyControllerProcessDueGenerations(
+        $db,
+        [
+            'bypass_debounce' => true,
+            'bypass_cadence' => true,
+            'skip_shadow' => true,
+            'allow_test_fixture' => true,
+        ]
+    );
+    unset($GLOBALS['ONTOLOGY_CONTROLLER_TEST_HOOK']);
+    $busyGenerationResult = null;
+    foreach ($busyGeneration as $generationResult) {
+        if (
+            (int)($generationResult['generation_id'] ?? 0)
+            === $fallbackGenerationId
+        ) {
+            $busyGenerationResult = $generationResult;
+            break;
+        }
+    }
+    $busyGenerationStatus = $db->query("
+        SELECT status FROM ontology_generations
+        WHERE id = {$fallbackGenerationId}
+    ")->fetchColumn();
+    controllerTestAssert(
+        ($busyGenerationResult['status'] ?? '') === 'retry'
+        && ($busyGenerationResult['reason'] ?? '') === 'database_busy'
+        && ($busyHookCalls[$fallbackGenerationId] ?? 0) === 4
+        && $busyGenerationStatus === 'building',
+        'Transient SQLite contention must preserve a finalizable generation for retry: '
+            . ingredientOntologyControllerStableJson([
+                'result' => $busyGenerationResult,
+                'hook_calls' =>
+                    $busyHookCalls[$fallbackGenerationId] ?? 0,
+                'generation_status' => $busyGenerationStatus,
+            ])
+    );
     ingredientOntologyControllerEnsureProvisionalSubject(
         $db,
         $fallbackVersionId,

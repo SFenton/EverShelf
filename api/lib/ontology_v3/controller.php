@@ -1878,6 +1878,22 @@ function ingredientOntologyControllerStableJson(mixed $value): string {
     );
 }
 
+function ingredientOntologyControllerDatabaseBusy(Throwable $error): bool {
+    return $error instanceof PDOException
+        && (
+            str_contains($error->getMessage(), 'database is locked')
+            || str_contains(
+                $error->getMessage(),
+                'database table is locked'
+            )
+            || in_array(
+                (int)($error->errorInfo[1] ?? 0),
+                [5, 6],
+                true
+            )
+        );
+}
+
 function ingredientOntologyControllerBoundedText(
     mixed $value,
     int $maximum = 500
@@ -9623,10 +9639,13 @@ function ingredientOntologyControllerProcessGenerationJob(
     try {
         $input = json_decode((string)$lease['input_json'], true);
         $generationId = (int)($input['generation_id'] ?? 0);
-        $result = ingredientOntologyControllerFinalizeGeneration(
-            $db,
-            $generationId,
-            $options
+        $result = dbWithRetry(
+            static fn(): array =>
+                ingredientOntologyControllerFinalizeGeneration(
+                    $db,
+                    $generationId,
+                    $options
+                )
         );
         $generation = $db->prepare("
             SELECT candidate_version_id, candidate_score_revision_id
@@ -10268,6 +10287,13 @@ function ingredientOntologyControllerProcessCriticJob(
                 );
             }
             if ((string)$generation['status'] === 'promoted') {
+                ingredientOntologyControllerSetPlanJobStatus(
+                    $db,
+                    $generationId,
+                    'promoted',
+                    (int)($generation['candidate_score_revision_id'] ?? 0)
+                        ?: null
+                );
                 return [
                     'generation_id' => $generationId,
                     'status' => 'promoted',
@@ -10791,6 +10817,12 @@ function ingredientOntologyControllerProcessCriticJob(
                 && (int)(recipeScoreState($db)['active_score_revision_id'] ?? 0)
                     === $candidateScoreId
             ) {
+                ingredientOntologyControllerSetPlanJobStatus(
+                    $db,
+                    $generationId,
+                    'promoted',
+                    $candidateScoreId
+                );
                 return [
                     'generation_id' => $generationId,
                     'status' => 'promoted',
@@ -11369,10 +11401,13 @@ function ingredientOntologyControllerFinishPersistedPlan(
             || ingredientOntologyControllerPromotionEnabled()
         )
     ) {
-        $final = ingredientOntologyControllerFinalizeGeneration(
-            $db,
-            (int)$generation['id'],
-            $options
+        $final = dbWithRetry(
+            static fn(): array =>
+                ingredientOntologyControllerFinalizeGeneration(
+                    $db,
+                    (int)$generation['id'],
+                    $options
+                )
         );
         return [
             'job_id' => (int)$lease['id'],
@@ -12257,10 +12292,13 @@ function ingredientOntologyControllerResumeDurableJob(
                         !empty($options['run_generation'])
                         || ingredientOntologyControllerPromotionEnabled()
                     ) {
-                        $final = ingredientOntologyControllerFinalizeGeneration(
-                            $db,
-                            (int)$generation['id'],
-                            $options
+                        $final = dbWithRetry(
+                            static fn(): array =>
+                                ingredientOntologyControllerFinalizeGeneration(
+                                    $db,
+                                    (int)$generation['id'],
+                                    $options
+                                )
                         );
                         $jobStatus = (string)($final['status'] ?? 'promotable');
                         $targetJobStatus = in_array($jobStatus, [
@@ -12389,7 +12427,8 @@ function ingredientOntologyControllerResumeDurableJob(
                     }
                     $retryable = str_contains($kind, 'timeout')
                         || str_contains($kind, 'retryable')
-                        || str_contains($kind, 'network');
+                        || str_contains($kind, 'network')
+                        || ingredientOntologyControllerDatabaseBusy($e);
                     $retryExhausted =
                         (int)($lease['attempts'] ?? 0)
                             >= (int)($lease['max_attempts'] ?? 8);
@@ -13288,21 +13327,42 @@ function ingredientOntologyControllerResumeDurableJob(
                                 || ingredientOntologyControllerPromotionEnabled()
                             )
                         ) {
-                            $results[] =
-                                ingredientOntologyControllerPromoteGeneration(
+                            $results[] = dbWithRetry(
+                                static fn(): array =>
+                                    ingredientOntologyControllerPromoteGeneration(
+                                        $db,
+                                        (int)$generation['id'],
+                                        $options
+                                    )
+                            );
+                            continue;
+                        }
+                        $results[] = dbWithRetry(
+                            static fn(): array =>
+                                ingredientOntologyControllerFinalizeGeneration(
                                     $db,
                                     (int)$generation['id'],
                                     $options
-                                );
+                                )
+                        );
+                    } catch (Throwable $error) {
+                        if (
+                            ingredientOntologyControllerDatabaseBusy($error)
+                        ) {
+                            $results[] = [
+                                'generation_id' =>
+                                    (int)$generation['id'],
+                                'status' => 'retry',
+                                'reason' => 'database_busy',
+                                'error' => mb_substr(
+                                    $error->getMessage(),
+                                    0,
+                                    1000,
+                                    'UTF-8'
+                                ),
+                            ];
                             continue;
                         }
-                        $results[] =
-                            ingredientOntologyControllerFinalizeGeneration(
-                                $db,
-                                (int)$generation['id'],
-                                $options
-                            );
-                    } catch (Throwable $error) {
                         $db->prepare("
                             UPDATE ontology_generations
                             SET status = 'failed',

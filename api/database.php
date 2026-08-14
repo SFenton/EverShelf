@@ -91,7 +91,7 @@ function getDB(): PDO {
 }
 
 /**
- * Retry a DB write when SQLite returns "database is locked" (concurrent cron + API).
+ * Retry a DB write when SQLite returns SQLITE_BUSY/SQLITE_LOCKED.
  *
  * @template T
  * @param callable(): T $fn
@@ -104,7 +104,17 @@ function dbWithRetry(callable $fn, int $maxAttempts = 4): mixed {
             return $fn();
         } catch (\PDOException $e) {
             $attempt++;
-            $locked = str_contains($e->getMessage(), 'database is locked');
+            $locked = str_contains(
+                $e->getMessage(),
+                'database is locked'
+            ) || str_contains(
+                $e->getMessage(),
+                'database table is locked'
+            ) || in_array(
+                (int)($e->errorInfo[1] ?? 0),
+                [5, 6],
+                true
+            );
             if (!$locked || $attempt >= $maxAttempts) {
                 throw $e;
             }

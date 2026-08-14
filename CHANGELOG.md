@@ -50,7 +50,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   deterministic unresolved, confidence-zero, non-satisfying provisional leaf
   so every non-prepared subject enters the active ontology without changing
   recipe matches. Added realized provisional-edge blast accounting, inode-safe
-  active-DB guards, one-minute CAS-claimed monitoring, group-readable
+  active-DB guards, SQLITE_BUSY/SQLITE_LOCKED generation replay, post-commit
+  job reconciliation, one-minute CAS-claimed monitoring, group-readable
   user-runtime socket permissions, base-owned queue lease schemas, safe
   prepared/delete/merge deactivation, shared-subject job preservation,
   resumable keyset backfill under 128 MB, and fingerprint-aware cached
