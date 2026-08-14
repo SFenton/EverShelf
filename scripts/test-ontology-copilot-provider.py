@@ -124,11 +124,8 @@ class ProviderTests(unittest.TestCase):
         def runner(argv, **kwargs):
             captured["argv"] = argv
             captured["kwargs"] = kwargs
-            attachment_index = argv.index("--attachment")
-            attachment = Path(argv[attachment_index + 1])
-            captured["request"] = json.loads(
-                attachment.read_text(encoding="utf-8")
-            )
+            prompt_index = argv.index("--prompt")
+            captured["request_prompt"] = argv[prompt_index + 1]
             return success_runner()
 
         invoker = provider.CopilotInvoker(
@@ -159,14 +156,10 @@ class ProviderTests(unittest.TestCase):
         self.assertNotIn("--deny-tool=*", argv)
         self.assertFalse(captured["kwargs"]["shell"])
         self.assertNotIn("--effort", argv)
-        self.assertNotIn(req["prompt"], argv)
-        self.assertEqual(captured["request"]["prompt"], req["prompt"])
-        self.assertEqual(captured["request"]["schema"], req["schema"])
-        self.assertEqual(
-            provider.sha256_text(
-                provider.stable_json(captured["request"]["schema"])
-            ),
-            req["schema_hash"],
+        self.assertIn(req["prompt"], captured["request_prompt"])
+        self.assertIn(
+            provider.stable_json(req["schema"]),
+            captured["request_prompt"],
         )
 
     def test_socket_group_permission_model(self):
@@ -270,30 +263,53 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         self.assertIn("gemini-3.7-flash", calls[0])
 
-    def test_max_prompt_uses_attachment_not_argv(self):
+    def test_large_prompt_and_schema_are_bounded_in_argv(self):
         captured = {}
 
         def runner(argv, **kwargs):
             del kwargs
             captured["argv"] = argv
-            attachment_index = argv.index("--attachment")
-            captured["request"] = json.loads(
-                Path(argv[attachment_index + 1]).read_text(
-                    encoding="utf-8"
-                )
-            )
             return success_runner()
 
-        prompt = "x" * provider.MAX_PROMPT_BYTES
+        prompt = "x" * 50000
         invoker = provider.CopilotInvoker(
             runner=runner,
             work_dir=str(self.root / "large-prompt"),
         )
         plan, _usage = invoker.invoke(request(prompt=prompt))
         self.assertEqual(plan, {"ok": True})
-        self.assertEqual(captured["request"]["prompt"], prompt)
-        self.assertLess(sum(len(value) for value in captured["argv"]), 4096)
-        self.assertNotIn(prompt, captured["argv"])
+        request_prompt = captured["argv"][
+            captured["argv"].index("--prompt") + 1
+        ]
+        self.assertIn(prompt, request_prompt)
+        self.assertIn(provider.stable_json(request()["schema"]), request_prompt)
+        self.assertLess(
+            len(request_prompt.encode("utf-8")),
+            provider.MAX_COPILOT_ARGUMENT_BYTES,
+        )
+
+    def test_oversized_copilot_argument_fails_before_runner(self):
+        calls = 0
+
+        def runner(*args, **kwargs):
+            nonlocal calls
+            del args, kwargs
+            calls += 1
+            return success_runner()
+
+        invoker = provider.CopilotInvoker(
+            runner=runner,
+            work_dir=str(self.root / "oversized-argument"),
+        )
+        with self.assertRaises(provider.ProviderError) as caught:
+            invoker.invoke(
+                request(prompt="x" * provider.MAX_PROMPT_BYTES)
+            )
+        self.assertEqual(
+            caught.exception.code,
+            "copilot_argument_oversized",
+        )
+        self.assertEqual(calls, 0)
 
     def test_e2big_is_classified_without_fallback(self):
         calls = 0

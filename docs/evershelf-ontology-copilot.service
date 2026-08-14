@@ -23,7 +23,7 @@ ReadWritePaths=%t/evershelf-ontology %S/evershelf-ontology -%h/.copilot -%h/.cop
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 LockPersonality=true
 MemoryMax=2G
-TasksMax=64
+TasksMax=512
 
 [Install]
 WantedBy=default.target
