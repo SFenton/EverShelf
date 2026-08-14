@@ -24,6 +24,7 @@ services:
     profiles: ["ontology"]
     build: .
     container_name: evershelf-ontology-worker
+    user: "33:33"
     entrypoint: ["php", "/var/www/html/scripts/ontology-controller.php"]
     command:
       - work
