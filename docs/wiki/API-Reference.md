@@ -372,10 +372,11 @@ The v2 command boundary accepts exactly one action:
 
 - `assume_have`: availability `have`; no identity evidence or proposal row
 - `select_inventory_product`: availability `have`; positive evidence bound to
-  the exact selected currently stocked product; immediate proposal eligibility
+  the exact selected currently stocked product; immediate
+  `must_equal(subject,target)` constraint
 - `reject_current_match`: availability `missing`; negative evidence only when
   the exact displayed product still matches; otherwise availability-only;
-  negative evidence remains provisional for 48 hours
+  immediate `must_not_equal(subject,target)` constraint
 
 The command revalidates the feedback token, active score/ontology,
 inventory/catalog revisions, selected product stock, and expected negative
@@ -383,7 +384,10 @@ target under one SQLite transaction. Drift returns HTTP 409
 `ingredient_feedback_stale` with no writes. Provenance retains the v1 source hash
 and product ID while adding `source_fingerprint_v2`, ontology owner-derived
 `target_owner_fingerprint`, action origin, observed revisions, and deterministic
-supersession.
+supersession. The same transaction appends an immutable controller observation,
+advances the monotonic constraint epoch, deactivates the prior live constraint
+for the stream, and queues one fenced autonomous job. `assume_have` clears prior
+identity intent without creating a new identity constraint.
 
 Positive/negative identity events enqueue a proposal outbox row and candidate
 regression fixture in the same transaction. `scripts/recipe-ingredient-proposals.php`
@@ -392,7 +396,25 @@ uses the exact configured ontology proposal model without fallback, and only
 stages existing closed-set-validator results. Missing keys/models/network remain
 durable blocked/retry states. The `export`/`import` commands support an
 operator/Copilot artifact handoff when the deployed process cannot call Gemini.
-There is no automatic activation path.
+That legacy proposal path retains its 48-hour negative handoff delay and has no
+automatic activation path.
+
+The separate default-off autonomous controller stages only against a forked
+building child. It applies closed repairs deterministically, evaluates every
+live exact constraint through the actual matcher, validates graph/gold/source/
+materialization/blast/rollback gates, and can atomically activate only when its
+promotion feature flag is enabled. Disagreement abstains and unsafe work is
+quarantined; quarantine isolates the mutation, never the subject. Missing model
+output receives an unresolved non-satisfying provisional mapping and bounded
+retry state.
+
+### `ontology_controller_status` — GET
+Returns runtime/model/promotion flags, configured provider/model and local
+provider health, a cached/stale non-prepared owner coverage summary,
+resolution/mapping/provisional counts, the configured intake minimum priority
+plus eligible/historical pending counts, quarantine/retry totals, and active
+benchmark policy metadata for each risk tier. `include_coverage=1` never scans
+the corpus synchronously and is honored only for authenticated admin requests.
 
 ### `recipe_catalog_planner_add` — POST
 Assign a stored Cookidoo-origin recipe to an ISO date from today through 365 days.

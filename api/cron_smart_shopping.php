@@ -122,6 +122,74 @@ try {
         echo '[' . date('Y-m-d H:i:s') . '] Canonical queue warning: ' . $qe->getMessage() . "\n";
     }
 
+    // ── Autonomous ontology controller (triple default-off) ───────────────
+    // Exact correction constraints are already durable before HTTP response.
+    // This fallback drain supplements the low-latency polling worker and cannot
+    // call a model or move an active pointer unless its independent gates are on.
+    if (ingredientOntologyControllerEnabled()) {
+        try {
+            $controllerResult =
+                ingredientOntologyControllerProcessQueue(
+                    $db,
+                    max(
+                        1,
+                        min(
+                            100,
+                            (int)env(
+                                'INGREDIENT_ONTOLOGY_CONTROLLER_CRON_LIMIT',
+                                '10'
+                            )
+                        )
+                    ),
+                    [
+                        'provider' => ingredientOntologyControllerModelEnabled()
+                            ? ingredientOntologyControllerProvider()
+                            : 'fake',
+                        'model' => ingredientOntologyControllerModelEnabled()
+                            ? ingredientOntologyControllerProposerModel()
+                            : 'deterministic-r0',
+                        'critic_provider' =>
+                            ingredientOntologyControllerCriticProvider()
+                                ?: ingredientOntologyControllerProvider(),
+                        'critic_model' =>
+                            ingredientOntologyControllerCriticModel(),
+                        'allow_network' =>
+                            ingredientOntologyControllerModelEnabled(),
+                        'intake_only' => true,
+                        'job_types' => [
+                            'subject_resolution',
+                            'correction',
+                            'compensation',
+                        ],
+                        'minimum_priority' =>
+                            ingredientOntologyControllerMinimumPriority(),
+                        'run_generation' => false,
+                        'promote' => false,
+                        'lease_seconds' => max(
+                            30,
+                            (int)env(
+                                'INGREDIENT_ONTOLOGY_CONTROLLER_LEASE_SECONDS',
+                                '600'
+                            )
+                        ),
+                    ]
+                );
+            if (($controllerResult['claimed'] ?? 0) > 0) {
+                echo '[' . date('Y-m-d H:i:s')
+                    . '] Ontology controller — claimed: '
+                    . (int)$controllerResult['claimed']
+                    . ', generations: '
+                    . count($controllerResult['generations'] ?? [])
+                    . "\n";
+            }
+        } catch (Throwable $controllerError) {
+            echo '[' . date('Y-m-d H:i:s')
+                . '] Ontology controller warning: '
+                . $controllerError->getMessage()
+                . "\n";
+        }
+    }
+
     // ── Recipe discovery/index queue ───────────────────────────────────────
     // Local jobs run every cycle; the experimental Cookidoo connector has its
     // own bounded cadence and still executes only inside cron/CLI workers.

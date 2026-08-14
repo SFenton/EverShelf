@@ -344,6 +344,11 @@ function initializeDB(PDO $db): void {
             started_at DATETIME DEFAULT NULL,
             processed_at DATETIME DEFAULT NULL,
             updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            request_generation INTEGER NOT NULL DEFAULT 1,
+            lease_token TEXT DEFAULT NULL,
+            lease_generation INTEGER NOT NULL DEFAULT 0,
+            lease_expires_at DATETIME DEFAULT NULL,
+            request_fingerprint TEXT NOT NULL DEFAULT '',
             FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE CASCADE
         );
 
@@ -524,6 +529,21 @@ function migrateDB(PDO $db): void {
     if (!$productsExists) {
         initializeDB($db);
         return;
+    }
+
+    foreach ([
+        'request_generation' => 'INTEGER NOT NULL DEFAULT 1',
+        'lease_token' => 'TEXT DEFAULT NULL',
+        'lease_generation' => 'INTEGER NOT NULL DEFAULT 0',
+        'lease_expires_at' => 'DATETIME DEFAULT NULL',
+        'request_fingerprint' => "TEXT NOT NULL DEFAULT ''",
+    ] as $column => $definition) {
+        databaseAddColumnIfMissing(
+            $db,
+            'canonical_processing_queue',
+            $column,
+            $definition
+        );
     }
 
     // Add package_unit column if missing
@@ -946,6 +966,11 @@ function migrateDB(PDO $db): void {
             started_at DATETIME DEFAULT NULL,
             processed_at DATETIME DEFAULT NULL,
             updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            request_generation INTEGER NOT NULL DEFAULT 1,
+            lease_token TEXT DEFAULT NULL,
+            lease_generation INTEGER NOT NULL DEFAULT 0,
+            lease_expires_at DATETIME DEFAULT NULL,
+            request_fingerprint TEXT NOT NULL DEFAULT '',
             FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE CASCADE
         );
 

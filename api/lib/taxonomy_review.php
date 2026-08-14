@@ -1,19 +1,16 @@
 <?php
 /**
- * EverShelf — taxonomy history reuse + Gemini taxonomy review.
+ * EverShelf — taxonomy history reuse + disabled legacy Gemini compatibility.
  *
  * Sits between the heuristic rule matcher (canonicalIngredientInferProduct) and the
  * database write performed by canonicalIngredientSyncProduct:
  *
  *   1. history reuse  — if we have classified this item before, replay that decision
  *                       verbatim and skip the model entirely
- *   2. Gemini review  — otherwise hand the heuristic proposal plus the whole taxonomy
- *                       tree to Gemini so it can confirm/adjust the placement and judge
- *                       whether the heuristic was actually correct
+ *   2. legacy request — record an ontology-controller observation and retain
+ *                       the deterministic heuristic result
  *
- * Guardrail: the review may introduce NEW nodes and edges, but may never rename, reparent
- * or deactivate an existing node. That is enforced here in code — the prompt asks for the
- * same thing, but the prompt is not what protects the tree.
+ * Legacy model calls and unversioned topology writes are permanently disabled.
  */
 declare(strict_types=1);
 
@@ -23,6 +20,13 @@ const TAXONOMY_HISTORY_SOURCE = 'taxonomy_history';
 const TAXONOMY_PREPARED_SOURCE = 'prepared_food_flag';
 
 function taxonomyReviewEnabled(): bool {
+    // Legacy model output must never mutate unversioned taxonomy topology.
+    // The compatibility flag is retained only so an attempted enablement can
+    // be recorded as controller evidence.
+    return false;
+}
+
+function taxonomyReviewRequested(): bool {
     return canonicalIngredientEnvBool('TAXONOMY_AI_REVIEW', false);
 }
 
@@ -652,6 +656,56 @@ function taxonomyResolveForProduct(PDO $db, array $product, array $heuristicMapp
 
     if (!$allowAi) {
         return ['mappings' => $heuristicMappings, 'decision' => 'heuristic', 'detail' => ['reason' => 'ai_disabled']];
+    }
+
+    if (taxonomyReviewRequested()) {
+        if (
+            function_exists(
+                'ingredientOntologyControllerObserveProductSafely'
+            )
+            && (int)($product['id'] ?? 0) > 0
+        ) {
+            try {
+                $observed =
+                    ingredientOntologyControllerObserveProductSafely(
+                    $db,
+                    (int)$product['id'],
+                    $product,
+                    'product_ingestion'
+                );
+                if (empty($observed['observed'])) {
+                    throw new RuntimeException(
+                        'controller observation unavailable'
+                    );
+                }
+                ingredientOntologyControllerInsertObservation(
+                    $db,
+                    'legacy-ai-suppressed:'
+                        . (int)$product['id']
+                        . ':'
+                        . (string)$observed['subject'][
+                            'subject_fingerprint'
+                        ],
+                    'legacy_ai_suppressed',
+                    [
+                        'product_id' => (int)$product['id'],
+                        'reason' =>
+                            'legacy_unversioned_topology_mutation_disabled',
+                    ],
+                    (int)$observed['subject']['id']
+                );
+            } catch (Throwable $ignored) {
+                // Canonical fallback must remain available even if optional
+                // controller evidence cannot be recorded.
+            }
+        }
+        return [
+            'mappings' => $heuristicMappings,
+            'decision' => 'heuristic',
+            'detail' => [
+                'reason' => 'legacy_ai_observation_only',
+            ],
+        ];
     }
 
     $review = taxonomyGeminiReview($db, $product, $heuristicMappings);

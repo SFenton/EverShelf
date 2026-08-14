@@ -9,9 +9,14 @@ services:
       - evershelf_data:/var/www/html/data
       # Mount your local .env configuration
       - ./.env:/var/www/html/.env:ro
+      # Set EVERSHELF_ONTOLOGY_SOCKET_DIR=$XDG_RUNTIME_DIR/evershelf-ontology
+      # when enabling the host user service. The default remains inert.
+      - ${EVERSHELF_ONTOLOGY_SOCKET_DIR:-/run/evershelf-ontology-disabled}:/run/evershelf-ontology:ro
     restart: unless-stopped
     environment:
       - TZ=Europe/Rome
+    group_add:
+      - "${EVERSHELF_ONTOLOGY_SOCKET_GID:-1000}"
 
   cookidoo-bridge:
     profiles: ["cookidoo"]

@@ -8,6 +8,7 @@ final class IngredientOntologyV3MatcherContext {
     public array $defaults = [];
     public array $relations = [];
     public array $ancestry = [];
+    public array $pairConstraints = [];
 
     public function __construct(PDO $db, int $versionId) {
         $this->versionId = $versionId;
@@ -87,6 +88,26 @@ final class IngredientOntologyV3MatcherContext {
             }
         }
         $this->buildAncestry();
+        if (ingredientOntologyV3TableExists(
+            $db,
+            'ingredient_ontology_pair_constraints'
+        )) {
+            $constraints = $db->prepare("
+                SELECT subject_id, target_owner_fingerprint,
+                       constraint_kind, constraint_epoch
+                FROM ingredient_ontology_pair_constraints
+                WHERE ontology_version_id = ?
+                ORDER BY constraint_epoch
+            ");
+            $constraints->execute([$versionId]);
+            while ($row = $constraints->fetch(PDO::FETCH_ASSOC)) {
+                $this->pairConstraints[
+                    (int)$row['subject_id']
+                ][
+                    (string)$row['target_owner_fingerprint']
+                ] = (string)$row['constraint_kind'];
+            }
+        }
     }
 
     private function buildAncestry(): void {
@@ -210,11 +231,36 @@ function ingredientOntologyV3LoadMapping(
             'provenance' => (string)$relation['provenance'],
         ];
     }
+    $subjectId = null;
+    if (ingredientOntologyV3TableExists(
+        $db,
+        'ontology_subject_occurrences'
+    )) {
+        $subject = $db->prepare("
+            SELECT subject_id
+            FROM ontology_subject_occurrences
+            WHERE owner_type = ?
+              AND owner_id = ?
+              AND owner_fingerprint = ?
+              AND active = 1
+            ORDER BY id DESC
+            LIMIT 1
+        ");
+        $subject->execute([
+            (string)$row['owner_type'],
+            (int)$row['owner_id'],
+            (string)$row['owner_fingerprint'],
+        ]);
+        $value = $subject->fetchColumn();
+        $subjectId = $value === false ? null : (int)$value;
+    }
     return [
         'mapping_id' => (int)$row['id'],
         'ontology_version_id' => (int)$row['ontology_version_id'],
         'owner_type' => (string)$row['owner_type'],
         'owner_id' => (int)$row['owner_id'],
+        'owner_fingerprint' => (string)$row['owner_fingerprint'],
+        'subject_id' => $subjectId,
         'source_label' => (string)$row['source_label'],
         'normalized_label' => (string)$row['normalized_label'],
         'language' => (string)$row['language'],
@@ -288,6 +334,12 @@ function ingredientOntologyV3NormalizeAssertion(
             $assertion['mapping_source'] ?? 'manual'
         ),
         'source_label' => (string)($assertion['source_label'] ?? ''),
+        'owner_fingerprint' => (string)(
+            $assertion['owner_fingerprint'] ?? ''
+        ),
+        'subject_id' => isset($assertion['subject_id'])
+            ? (int)$assertion['subject_id']
+            : null,
         'attributes' => $attributes,
         'assertion_relations' => $assertion['assertion_relations'] ?? [],
     ];
@@ -398,6 +450,33 @@ function ingredientOntologyV3MatchWithContext(
         $context,
         $inventoryAssertion
     );
+    $constraint = (
+        $required['subject_id'] !== null
+        && $inventory['owner_fingerprint'] !== ''
+    )
+        ? (
+            $context->pairConstraints[
+                $required['subject_id']
+            ][
+                $inventory['owner_fingerprint']
+            ] ?? null
+        )
+        : null;
+    if ($constraint === 'must_not_equal') {
+        return [
+            'outcome' => 'explicit_negative_constraint',
+            'score' => 0.0,
+            'confidence' => 1.0,
+            'satisfies_required' => false,
+            'relationship' => 'constraint_deny',
+            'required' => $required,
+            'inventory' => $inventory,
+            'conflicts' => [],
+            'unknown_attributes' => [],
+            'attribute_differences' => [],
+            'reason' => 'latest_exact_negative_constraint',
+        ];
+    }
     $deniedSources = [
         'taxonomy_rule',
         'taxonomy_rule_evidence',

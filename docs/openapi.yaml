@@ -201,6 +201,33 @@ paths:
         "200":
           description: Coverage summary and examples
 
+  /index.php?action=ontology_controller_status:
+    get:
+      summary: Get autonomous ontology runtime and coverage status
+      tags: [Products]
+      parameters:
+        - name: include_coverage
+          in: query
+          required: false
+          description: Returns the cached/stale coverage snapshot only for authenticated admin requests; never performs a synchronous corpus scan.
+          schema:
+            type: boolean
+            default: false
+      responses:
+        "200":
+          description: Runtime/model/promotion flags, provider health, intake minimum priority and eligible/historical pending counts, owner coverage, provisional and quarantine/retry counts, and active risk policies
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, controller]
+                properties:
+                  success:
+                    type: boolean
+                  controller:
+                    type: object
+                    additionalProperties: true
+
   /index.php?action=inventory_list:
     get:
       summary: List all inventory items
@@ -758,10 +785,12 @@ paths:
       description: >-
         Atomically stores the availability override and, only for an exact
         selected/rejected inventory product, immutable identity provenance plus
-        a transactional proposal outbox row. assume_have never creates identity
-        evidence. The active score/ontology and inventory/catalog revisions are
-        revalidated at submit time; drift returns ingredient_feedback_stale with
-        no writes.
+        a transactional proposal outbox row and immediate exact autonomous
+        must_equal/must_not_equal constraint. The same transaction advances a
+        monotonic constraint epoch and supersedes stale work. assume_have never
+        creates identity evidence. The active score/ontology and
+        inventory/catalog revisions are revalidated at submit time; drift
+        returns ingredient_feedback_stale with no writes.
       tags: [Recipes]
       requestBody:
         required: true
@@ -2056,6 +2085,10 @@ components:
         - identity_evidence
         - proposal_enqueued
         - proposal_outbox_id
+        - constraint_epoch
+        - constraint_id
+        - autonomous_job_id
+        - autonomous_compensation
         - settle_after
         - replayed
       properties:
@@ -2081,6 +2114,10 @@ components:
         identity_evidence: { type: boolean }
         proposal_enqueued: { type: boolean }
         proposal_outbox_id: { type: [integer, "null"], minimum: 1 }
+        constraint_epoch: { type: integer, minimum: 0 }
+        constraint_id: { type: [integer, "null"], minimum: 1 }
+        autonomous_job_id: { type: [integer, "null"], minimum: 1 }
+        autonomous_compensation: { type: boolean }
         settle_after: { type: [string, "null"] }
         replayed: { type: boolean }
 
@@ -2354,6 +2391,20 @@ components:
           enum: [pending, in_progress, done, failed]
         canonical_count:
           type: integer
+        controller_observation:
+          type: object
+          description: Bounded autonomous-controller outcome; degradation never rolls back the product save.
+          properties:
+            observed:
+              type: boolean
+            disabled:
+              type: boolean
+            degraded:
+              type: boolean
+            skipped:
+              type: boolean
+            error:
+              type: string
         canonical_ingredients:
           type: array
           items:

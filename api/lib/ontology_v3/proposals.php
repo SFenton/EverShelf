@@ -661,6 +661,12 @@ function ingredientOntologyV3StageProposals(
     array $options = []
 ): array {
     ingredientOntologyV3SchemaMigrate($db);
+    $version = ingredientOntologyV3Version($db, $versionId);
+    if ($version === null || $version['status'] !== 'building') {
+        throw new InvalidArgumentException(
+            'proposal staging requires an unreferenced building child version'
+        );
+    }
     if ((int)($manifest['ontology_version_id'] ?? 0) !== $versionId) {
         throw new InvalidArgumentException('prompt manifest version mismatch');
     }
@@ -682,6 +688,44 @@ function ingredientOntologyV3ChangeSetLifecycle(
 ): array {
     ingredientOntologyV3SchemaMigrate($db);
     $action = strtolower(trim($action));
+    if ($action === 'apply') {
+        $actor = trim($actor);
+        $reason = trim($reason);
+        if (
+            $changeSetId <= 0
+            || $actor === ''
+            || strlen($actor) > 120
+            || $reason === ''
+            || strlen($reason) > 1000
+        ) {
+            throw new InvalidArgumentException(
+                'apply actor, reason, and change-set id are required'
+            );
+        }
+        if (!function_exists('ingredientOntologyV3ApplyChangeSet')) {
+            throw new RuntimeException(
+                'controller change-set applier is unavailable'
+            );
+        }
+        $controllerPlan = $db->prepare("
+            SELECT 1
+            FROM ontology_mutation_plans
+            WHERE change_set_id = ?
+            LIMIT 1
+        ");
+        $controllerPlan->execute([$changeSetId]);
+        if ($controllerPlan->fetchColumn() === false) {
+            throw new RuntimeException(
+                'ordinary stage-proposals change sets are staging-only '
+                . 'and cannot use the autonomous controller applier'
+            );
+        }
+        return ingredientOntologyV3ApplyChangeSet(
+            $db,
+            $changeSetId,
+            ['actor' => $actor, 'reason' => $reason]
+        );
+    }
     if (!in_array($action, ['reject', 'dispose', 'revert'], true)) {
         throw new InvalidArgumentException('unsupported lifecycle action');
     }

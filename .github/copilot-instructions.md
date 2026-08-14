@@ -43,15 +43,21 @@
   against copied databases. The active ontology is derived solely from the active
   score revision's nullable `ontology_version_id`; never add or read a separate
   active-ontology pointer.
-- Gemini 3.5 Flash is the frozen default proposal model, but proposals are staging
-  records only. Deterministic closed-set validators and human review own changes;
-  model output must never create entities, labels, relations, or mappings directly.
-- Initial v3 activation is an explicit manual CLI operation after graph, corpus,
+- Gemini 3.5 Flash is the frozen legacy proposal default. Model output never
+  writes entities, labels, relations, or mappings directly. The default-off
+  autonomous controller uses strict provider-neutral schemas, deterministic
+  closed repair application into a forked building child, abstention/quarantine,
+  exact constraint, shadow, gold, blast, and rollback gates with no human
+  approval state.
+- Legacy/manual v3 activation is an explicit CLI operation after graph, corpus,
   frozen-gold, input-revision, score-completeness, and change-set gates. Once v3
   is active, scheduled replacements stay on that exact ontology version, repeat
   the same validation under write reservation, and retain the prior pointer on
   failure. Activation changes only the active score pointer and cursor revision;
   lower cookability from removing false positives is expected correctness.
+  Autonomous child versions may move the same score pointer only through the
+  separately disabled controller policy after all equivalent and controller-
+  specific epoch/constraint/critic/blast gates pass under reservation.
 - Full-resolution regular v3 score revisions may be activated only by the
   explicit manual CLI after the frozen production corpus, reviewed subjects,
   graph, gold, source, exact ID/value materialization, integrity, and
@@ -61,11 +67,13 @@
 - Retained and retargeted prior-label decisions are gates on realized
   post-quarantine resolver outcomes, not manifest row counts. Demotions must
   remain nonaccepted with their reviewed terminal semantics.
-- Resolution gold is the pinned hand-adjudicated source workbook plus exact
+- Eternal seed resolution gold is the pinned adjudicated source workbook plus exact
   frozen-source, owner/provider, product-fingerprint, supersession, and
   maintainer review metadata. Code does not infer model independence.
   Generated accepted-row snapshots are conformance artifacts only and never
-  gold.
+  gold. Future autonomous gold consists only of immutable hash-linked releases
+  reproducible from mature direct correction constraints and permanent
+  rollback/quarantine adversarial evidence.
 - `RECIPE_SCORE_PREVIEW_REVISION_ID` is a development/testing-only read
   override for one explicit validated regular v3 revision. It never activates,
   never selects latest, never affects mutations/rebuilds, and must fail closed

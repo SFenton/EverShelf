@@ -2800,6 +2800,32 @@ try {
             'Gold mismatch for ' . $case['id'] . ': ' . $result['outcome']
         );
     }
+    $retrievalTargets = [];
+    foreach ($gold['cases'] as $case) {
+        $retrievalTargets[(string)$case['required']['entity_slug']] = true;
+        $retrievalTargets[(string)$case['inventory']['entity_slug']] = true;
+    }
+    $retrievedTargets = 0;
+    foreach (array_keys($retrievalTargets) as $slug) {
+        $candidates = ingredientOntologyControllerCandidateRows(
+            $db,
+            $versionId,
+            str_replace('-', ' ', $slug),
+            0,
+            64
+        );
+        if (in_array(
+            $slug,
+            array_column($candidates, 'slug'),
+            true
+        )) {
+            $retrievedTargets++;
+        }
+    }
+    ontologyV3TestAssert(
+        $retrievedTargets === count($retrievalTargets),
+        'The 64-candidate controller retrieval must retain 100% of current gold entities'
+    );
     $goldResult = ingredientOntologyV3EvaluateGold($db, $versionId);
     ontologyV3TestAssert(
         $goldResult['valid']
@@ -3086,6 +3112,19 @@ try {
         'ingredient',
         'test'
     );
+    foreach ([$equivalentA, $equivalentB] as $syntheticEntityId) {
+        ingredientOntologyV3InsertRelation(
+            $db,
+            $versionId,
+            $syntheticEntityId,
+            $entityIds['ingredient'],
+            'is_a',
+            true,
+            false,
+            1.0,
+            'test'
+        );
+    }
     $relationSatisfactionRejected = false;
     try {
         ingredientOntologyV3InsertRelation(
@@ -3319,9 +3358,26 @@ try {
             'language' => 'en',
         ],
     ];
-    $prompt = ingredientOntologyV3BuildProposalPrompt(
+    $readyPrompt = ingredientOntologyV3BuildProposalPrompt(
         $db,
         $versionId,
+        $promptInputs
+    );
+    $proposalFork = ingredientOntologyV3ForkVersion(
+        $db,
+        $versionId,
+        [
+            'generation_key' => ingredientOntologyV3Hash([
+                'test' => 'proposal-staging-child',
+                'parent' => $versionId,
+            ]),
+            'activation_policy' => 'manual',
+        ]
+    );
+    $proposalVersionId = (int)$proposalFork['version_id'];
+    $prompt = ingredientOntologyV3BuildProposalPrompt(
+        $db,
+        $proposalVersionId,
         $promptInputs
     );
     ontologyV3TestAssert(
@@ -3420,17 +3476,36 @@ try {
         $db,
         "SELECT COUNT(*) FROM ingredient_ontology_entities
          WHERE ontology_version_id = ?",
-        [$versionId]
+        [$proposalVersionId]
     );
     $mappingCountBeforeStage = ontologyV3TestCount(
         $db,
         "SELECT COUNT(*) FROM ingredient_ontology_mappings
          WHERE ontology_version_id = ?",
-        [$versionId]
+        [$proposalVersionId]
+    );
+    $readyStageRejected = false;
+    try {
+        ingredientOntologyV3StageProposals(
+            $db,
+            $versionId,
+            $validPayload,
+            $readyPrompt['manifest'],
+            ['change_set_key' => 'ready-stage-must-fail']
+        );
+    } catch (InvalidArgumentException $e) {
+        $readyStageRejected = str_contains(
+            $e->getMessage(),
+            'building child'
+        );
+    }
+    ontologyV3TestAssert(
+        $readyStageRejected,
+        'Ready-version proposal staging must fail closed'
     );
     $staged = ingredientOntologyV3StageProposals(
         $db,
-        $versionId,
+        $proposalVersionId,
         $validPayload,
         $prompt['manifest'],
         ['change_set_key' => 'valid-synthetic-proposals']
@@ -3503,7 +3578,7 @@ try {
 
     $libraryRevertSet = ingredientOntologyV3StageProposals(
         $db,
-        $versionId,
+        $proposalVersionId,
         $validPayload,
         $prompt['manifest'],
         ['change_set_key' => 'library-revert-synthetic-proposals']
@@ -3567,7 +3642,7 @@ try {
 
     $cliRevertSet = ingredientOntologyV3StageProposals(
         $db,
-        $versionId,
+        $proposalVersionId,
         $validPayload,
         $prompt['manifest'],
         ['change_set_key' => 'cli-revert-synthetic-proposals']
@@ -3630,7 +3705,7 @@ try {
         'Example Garlic 12 oz';
     $invalid = ingredientOntologyV3StageProposals(
         $db,
-        $versionId,
+        $proposalVersionId,
         $invalidPayload,
         $prompt['manifest'],
         ['change_set_key' => 'invalid-synthetic-proposals']
@@ -3664,7 +3739,7 @@ try {
     ];
     $cycleValidation = ingredientOntologyV3ValidateProposalPayload(
         $db,
-        $versionId,
+        $proposalVersionId,
         $cyclePayload,
         $prompt['manifest']
     );

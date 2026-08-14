@@ -7845,20 +7845,35 @@ function ingredientOntologyV3HashIntegrityAudit(
             );
             $content = ingredientOntologyV3ContentHash($db, $versionId);
             $profile = (string)($version['corpus_profile'] ?? '');
-            $frozenCorpus = ingredientOntologyV3FrozenCorpusAudit(
-                $db,
-                $profile
-            );
-            $subjects = ingredientOntologyV3SubjectUniverseAudit(
-                $db,
-                $versionId,
-                $profile
-            );
-            $policyHash = ingredientOntologyV3VersionPolicyHash(
-                $profile,
-                (string)$version['activation_policy'],
-                (string)$version['activation_block_reason']
-            );
+            $dynamicPins = function_exists(
+                'ingredientOntologyControllerUsesDynamicPins'
+            ) && ingredientOntologyControllerUsesDynamicPins($version)
+                ? ingredientOntologyControllerDynamicVersionPins(
+                    $db,
+                    $versionId,
+                    $version
+                )
+                : null;
+            $frozenCorpus = $dynamicPins !== null
+                ? $dynamicPins['corpus']
+                : ingredientOntologyV3FrozenCorpusAudit(
+                    $db,
+                    $profile
+                );
+            $subjects = $dynamicPins !== null
+                ? $dynamicPins['subjects']
+                : ingredientOntologyV3SubjectUniverseAudit(
+                    $db,
+                    $versionId,
+                    $profile
+                );
+            $policyHash = $dynamicPins !== null
+                ? (string)$dynamicPins['policy_hash']
+                : ingredientOntologyV3VersionPolicyHash(
+                    $profile,
+                    (string)$version['activation_policy'],
+                    (string)$version['activation_block_reason']
+                );
             $seal = ingredientOntologyV3Hash([
                 'schema_hash' => (string)$version['schema_hash'],
                 'prompt_hash' => (string)$version['prompt_hash'],

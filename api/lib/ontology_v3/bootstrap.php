@@ -11,3 +11,4 @@ require_once __DIR__ . '/provider_requirements.php';
 require_once __DIR__ . '/proposals.php';
 require_once __DIR__ . '/scores.php';
 require_once __DIR__ . '/requirement_scores.php';
+require_once __DIR__ . '/controller.php';

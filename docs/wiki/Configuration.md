@@ -162,10 +162,26 @@ INGREDIENT_ONTOLOGY_V3_PROMPT_MAX_ITEMS=50
 INGREDIENT_ONTOLOGY_V3_RAW_JSON_MAX_BYTES=65536
 INGREDIENT_ONTOLOGY_V3_QUANTITY_SUFFICIENCY_GATE=false
 RECIPE_SCORE_PREVIEW_REVISION_ID=
+
+INGREDIENT_ONTOLOGY_CONTROLLER_ENABLED=false
+INGREDIENT_ONTOLOGY_CONTROLLER_MODEL_ENABLED=false
+INGREDIENT_ONTOLOGY_CONTROLLER_PROMOTION_ENABLED=false
+INGREDIENT_ONTOLOGY_CONTROLLER_POLL_MS=250
+INGREDIENT_ONTOLOGY_CONTROLLER_LEASE_SECONDS=600
+INGREDIENT_ONTOLOGY_CONTROLLER_CRON_LIMIT=10
+INGREDIENT_ONTOLOGY_CONTROLLER_MINIMUM_PRIORITY=50
+INGREDIENT_ONTOLOGY_CONTROLLER_CANDIDATE_LIMIT=64
+INGREDIENT_ONTOLOGY_CONTROLLER_GOOGLE_API_KEY=
+INGREDIENT_ONTOLOGY_CONTROLLER_GOOGLE_MODEL=gemini-3.7-flash
+INGREDIENT_ONTOLOGY_CONTROLLER_GOOGLE_THINKING_LEVEL=medium
+INGREDIENT_ONTOLOGY_CONTROLLER_WAKE_SOCKET=
+INGREDIENT_ONTOLOGY_CONTROLLER_MODEL_ROSTER_JSON=
 ```
 
-`TAXONOMY_AI_REVIEW` controls only the legacy v2 immediate-write path and is
-opt-in. A regular ontology v3 revision may be manually activated only after the
+`TAXONOMY_AI_REVIEW` is retained only as a legacy v2 compatibility signal and is
+observation-only; it can no longer call a
+model or write unversioned nodes/edges. A regular ontology v3 revision may be
+manually activated only after the
 CLI passes the frozen production-corpus and subject-set, graph, pinned matcher
 and resolution gold, score/materialization, unchanged-input, integrity, and
 approved-change-set gates. Requirement/source-aware revisions remain
@@ -179,6 +195,96 @@ does not convert a valid identity match into a missing ingredient unless enabled
 The gate participates in each v3 revision's deterministic
 `scoring_config_hash`; toggling it makes existing v3 scores stale and prevents
 reuse, activation, or rollback of scores built under the other setting.
+
+The autonomous controller records immutable ingestion subjects only when its
+live-ingestion gate is enabled; explicit correction constraints remain
+transactional. It performs no model call or automatic promotion unless the
+controller model/promotion gates are enabled. Its Google key is separate from both
+`GEMINI_API_KEY` and the legacy proposal key. Candidate limits support benchmark
+rungs `64|96|128|277|500`; 64 is the default. Provider/model selection is
+versioned data and has no silent fallback.
+
+`ONTOLOGY_AUTONOMOUS_ENABLED=false` is the default live-ingestion gate.
+Disabled product/recipe hooks perform no controller write. Enabled hooks run in
+savepoints: a controller failure is logged and returned as degradation while the
+ordinary product or recipe save still commits. The older
+`INGREDIENT_ONTOLOGY_CONTROLLER_ENABLED` name remains a compatibility fallback
+when the new gate is absent.
+
+For this release, production cron/work is intake-only even when the model gate
+is enabled: no active-database fork, generation, shadow, monitor, or promotion
+is permitted. `INGREDIENT_ONTOLOGY_CONTROLLER_PROMOTION_ENABLED` must remain
+`false`. Copy-only generation requires the controller CLI
+`--copy-generation --run-generation` path against a non-active database.
+Live product observations enqueue subject resolution at priority `100`, and
+live recipe ingestion uses priority `50`; both refresh queued/retry work and
+safely revive terminal jobs with fresh immutable input and lease fences.
+Historical backfill remains priority `0`. Production cron and the dedicated
+live worker use `INGREDIENT_ONTOLOGY_CONTROLLER_MINIMUM_PRIORITY=50`, so
+historical work is retained but not drained:
+
+```bash
+php scripts/ontology-controller.php work \
+  --db=/path/to/evershelf.db --write --allow-active-db --loop \
+  --minimum-priority=50
+```
+
+An offline copied-database historical batch may opt in later with
+`--minimum-priority=0`.
+
+`INGREDIENT_ONTOLOGY_CONTROLLER_CRITIC_PROVIDER` and
+`INGREDIENT_ONTOLOGY_CONTROLLER_CRITIC_MODEL` select the separately persisted P7
+critic lane; blank values fail closed for generalized mutations. Measured model
+policies are imported on a copied database with
+`scripts/ontology-controller.php benchmark-import --file=... --write --activate`.
+Policy documents are immutable, risk-specific benchmark evidence; disagreement
+abstains unless that measured policy explicitly authorizes adjudication.
+
+For host-authenticated models without a Docker Google key:
+
+```dotenv
+INGREDIENT_ONTOLOGY_CONTROLLER_PROVIDER=copilot_socket
+INGREDIENT_ONTOLOGY_CONTROLLER_PROPOSER_MODEL=gemini-3.7-flash
+INGREDIENT_ONTOLOGY_CONTROLLER_CRITIC_PROVIDER=copilot_socket
+INGREDIENT_ONTOLOGY_CONTROLLER_CRITIC_MODEL=claude-sonnet-5
+INGREDIENT_ONTOLOGY_CONTROLLER_COPILOT_SOCKET=/run/evershelf-ontology/copilot.sock
+INGREDIENT_ONTOLOGY_CONTROLLER_COPILOT_TIMEOUT_SECONDS=90
+```
+
+The socket service accepts only the versioned Gemini 3.7 Flash, Claude Sonnet
+5, GPT-5.6 Terra, and Claude Opus 5 roster with fixed roles/effort. It has no
+silent fallback and must be installed separately from the sample
+`docs/evershelf-ontology-copilot.service`. Quarantine retains subject coverage
+through non-satisfying provisional leaves and bounded retry/circuit state.
+
+Install the sample explicitly as the EverShelf host user, not as a system
+service:
+
+```bash
+mkdir -p ~/.config/systemd/user
+cp docs/evershelf-ontology-copilot.service \
+  ~/.config/systemd/user/evershelf-ontology-copilot.service
+systemctl --user daemon-reload
+```
+
+The user unit creates
+`$XDG_RUNTIME_DIR/evershelf-ontology/copilot.sock`. Compose bind-mounts that
+directory read-only at `/run/evershelf-ontology`, matching the PHP path above.
+Before Compose deployment, export
+`EVERSHELF_ONTOLOGY_SOCKET_DIR=$XDG_RUNTIME_DIR/evershelf-ontology` and set
+`EVERSHELF_ONTOLOGY_SOCKET_GID` to the host user's numeric primary group
+(`1000` in the sample). The host directory is `0750`, socket `0660`, and the
+container joins only that supplementary group; neither path is world-writable.
+The unit intentionally allows AF_INET/AF_INET6 for Copilot HTTPS and writable
+`~/.copilot`/`~/.cache/copilot` state, while retaining a read-only home and
+other sandboxing. Node/V8 requires executable memory, so
+`MemoryDenyWriteExecute` is intentionally not used.
+
+Large prompts and the exact strict JSON schema are written to a mode-`0600`
+request attachment inside the provider state directory; only a tiny immutable
+instruction and attachment path appear in argv. Gemini 3.7 Flash omits the
+unsupported effort flag. Request files are deleted after each invocation, and
+server error codes remain visible to PHP without model fallback.
 
 Copy-only candidate builds require an explicit frozen corpus profile:
 `--corpus-profile=eval` for the 174-product/402,284-ingredient corpus with zero

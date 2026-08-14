@@ -254,6 +254,7 @@ switch ($command) {
             SET status = 'retry',
                 next_attempt_at = CURRENT_TIMESTAMP,
                 lease_token = NULL,
+                lease_expires_at = NULL,
                 last_error_kind = NULL,
                 last_error = '',
                 updated_at = CURRENT_TIMESTAMP

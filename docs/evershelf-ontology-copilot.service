@@ -1,0 +1,29 @@
+[Unit]
+Description=EverShelf ontology Copilot socket provider
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+UMask=0007
+RuntimeDirectory=evershelf-ontology
+RuntimeDirectoryMode=0750
+StateDirectory=evershelf-ontology
+StateDirectoryMode=0700
+WorkingDirectory=%S/evershelf-ontology
+Environment=EVERSHELF_ONTOLOGY_SOCKET_GID=1000
+ExecStart=/usr/bin/python3 %h/repos/EverShelf/scripts/ontology-copilot-provider.py --socket=%t/evershelf-ontology/copilot.sock --work-dir=%S/evershelf-ontology/empty --timeout=90 --concurrency=2 --rate=30
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%t/evershelf-ontology %S/evershelf-ontology -%h/.copilot -%h/.copilot/session-store.db -%h/.copilot/session-store.db-wal -%h/.copilot/session-store.db-shm -%h/.cache/copilot
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+LockPersonality=true
+MemoryMax=2G
+TasksMax=64
+
+[Install]
+WantedBy=default.target

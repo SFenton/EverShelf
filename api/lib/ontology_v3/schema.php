@@ -2422,7 +2422,7 @@ function ingredientOntologyV3SchemaMigrate(PDO $db): void {
             change_set_id INTEGER NOT NULL,
             proposal_id INTEGER DEFAULT NULL,
             action TEXT NOT NULL
-                CHECK(action IN ('reject', 'dispose', 'revert')),
+                CHECK(action IN ('apply', 'reject', 'dispose', 'revert')),
             from_state TEXT NOT NULL CHECK(length(from_state) <= 20),
             to_state TEXT NOT NULL CHECK(length(to_state) <= 20),
             actor TEXT NOT NULL CHECK(length(actor) BETWEEN 1 AND 120),
@@ -3779,6 +3779,9 @@ function ingredientOntologyV3SchemaMigrate(PDO $db): void {
     );
     ingredientOntologyV3EnsureHistoricalShadowMatchOwners($db);
     ingredientOntologyV3EnsurePendingEdgeReviewDisposition($db);
+    if (function_exists('ingredientOntologyControllerSchemaMigrate')) {
+        ingredientOntologyControllerSchemaMigrate($db);
+    }
     ingredientOntologyV3MigrateReadyGuards($db);
     ingredientOntologyV3MigrateMaterializationGuards($db);
 }

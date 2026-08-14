@@ -1143,9 +1143,30 @@ function canonicalIngredientEnqueueProduct(PDO $db, int $productId, string $reas
     if ($productId <= 0) {
         return ['queued' => false, 'status' => 'invalid_product'];
     }
+    $productStmt = $db->prepare("SELECT * FROM products WHERE id = ?");
+    $productStmt->execute([$productId]);
+    $product = $productStmt->fetch(PDO::FETCH_ASSOC);
+    if (!$product) {
+        return ['queued' => false, 'status' => 'missing_product'];
+    }
+    $requestFingerprint = function_exists(
+        'ingredientOntologyControllerProductFingerprint'
+    )
+        ? ingredientOntologyControllerProductFingerprint($product)
+        : hash('sha256', canonicalIngredientNormalizeText(
+            (string)$product['name']
+        ));
     $stmt = $db->prepare("
-        INSERT INTO canonical_processing_queue (product_id, reason, status, attempts, last_error, requested_at, started_at, processed_at, updated_at)
-        VALUES (?, ?, 'pending', 0, '', CURRENT_TIMESTAMP, NULL, NULL, CURRENT_TIMESTAMP)
+        INSERT INTO canonical_processing_queue (
+            product_id, reason, status, attempts, last_error,
+            requested_at, started_at, processed_at, updated_at,
+            request_generation, request_fingerprint,
+            lease_token, lease_expires_at
+        )
+        VALUES (
+            ?, ?, 'pending', 0, '', CURRENT_TIMESTAMP,
+            NULL, NULL, CURRENT_TIMESTAMP, 1, ?, NULL, NULL
+        )
         ON CONFLICT(product_id) DO UPDATE SET
             reason = excluded.reason,
             status = 'pending',
@@ -1154,9 +1175,18 @@ function canonicalIngredientEnqueueProduct(PDO $db, int $productId, string $reas
             requested_at = CURRENT_TIMESTAMP,
             started_at = NULL,
             processed_at = NULL,
+            request_generation =
+                canonical_processing_queue.request_generation + 1,
+            request_fingerprint = excluded.request_fingerprint,
+            lease_token = NULL,
+            lease_expires_at = NULL,
             updated_at = CURRENT_TIMESTAMP
     ");
-    $stmt->execute([$productId, mb_substr($reason, 0, 80, 'UTF-8')]);
+    $stmt->execute([
+        $productId,
+        mb_substr($reason, 0, 80, 'UTF-8'),
+        $requestFingerprint,
+    ]);
 
     $status = canonicalIngredientQueueStatusForProduct($db, $productId);
     return [
@@ -1164,6 +1194,8 @@ function canonicalIngredientEnqueueProduct(PDO $db, int $productId, string $reas
         'queue_id' => (int)($status['id'] ?? 0),
         'status' => $status['status'] ?? 'pending',
         'reason' => $reason,
+        'request_generation' =>
+            (int)($status['request_generation'] ?? 1),
     ];
 }
 
@@ -1248,8 +1280,36 @@ function canonicalIngredientProcessQueue(PDO $db, int $limit = 5, int $maxAttemp
 
 function canonicalIngredientProcessQueueBatch(PDO $db, int $limit, int $maxAttempts): array {
     $maxAttempts = max(1, $maxAttempts);
+    $leaseSeconds = max(
+        30,
+        min(
+            3600,
+            function_exists('env')
+                ? (int)env('CANONICAL_QUEUE_LEASE_SECONDS', '600')
+                : 600
+        )
+    );
+    $db->prepare("
+        UPDATE canonical_processing_queue
+        SET status = CASE
+                WHEN attempts >= ? THEN 'failed'
+                ELSE 'pending'
+            END,
+            last_error = CASE
+                WHEN attempts >= ? THEN 'lease_exhausted'
+                ELSE 'processing lease expired'
+            END,
+            lease_token = NULL,
+            lease_expires_at = NULL,
+            started_at = NULL,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE status = 'in_progress'
+          AND lease_expires_at IS NOT NULL
+          AND lease_expires_at <= CURRENT_TIMESTAMP
+    ")->execute([$maxAttempts, $maxAttempts]);
     $stmt = $db->prepare("
-        SELECT q.id, q.product_id, q.attempts
+        SELECT q.id, q.product_id, q.attempts,
+               q.request_generation, q.request_fingerprint
         FROM canonical_processing_queue q
         JOIN products p ON p.id = q.product_id
         WHERE q.status IN ('pending', 'failed')
@@ -1263,28 +1323,118 @@ function canonicalIngredientProcessQueueBatch(PDO $db, int $limit, int $maxAttem
     $processed = 0;
     $succeeded = 0;
     $failed = 0;
+    $superseded = 0;
     $items = [];
     foreach ($queueRows as $queueRow) {
         $queueId = (int)$queueRow['id'];
         $productId = (int)$queueRow['product_id'];
-        $processed++;
-        $db->prepare("
+        $requestGeneration = (int)$queueRow['request_generation'];
+        $leaseToken = hash(
+            'sha256',
+            random_bytes(32) . ':' . $queueId . ':' . hrtime(true)
+        );
+        $claim = $db->prepare("
             UPDATE canonical_processing_queue
-            SET status = 'in_progress', attempts = attempts + 1, started_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+            SET status = 'in_progress',
+                attempts = attempts + 1,
+                lease_token = ?,
+                lease_generation = lease_generation + 1,
+                lease_expires_at = datetime(
+                    'now',
+                    '+' || ? || ' seconds'
+                ),
+                started_at = CURRENT_TIMESTAMP,
+                updated_at = CURRENT_TIMESTAMP
             WHERE id = ?
-        ")->execute([$queueId]);
+              AND request_generation = ?
+              AND status IN ('pending', 'failed')
+        ");
+        $claim->execute([
+            $leaseToken,
+            $leaseSeconds,
+            $queueId,
+            $requestGeneration,
+        ]);
+        if ($claim->rowCount() !== 1) {
+            continue;
+        }
+        $leaseRead = $db->prepare("
+            SELECT lease_generation
+            FROM canonical_processing_queue
+            WHERE id = ? AND lease_token = ?
+        ");
+        $leaseRead->execute([$queueId, $leaseToken]);
+        $leaseGeneration = (int)($leaseRead->fetchColumn() ?: 0);
+        if ($leaseGeneration <= 0) {
+            continue;
+        }
+        $processed++;
+        if (function_exists('ingredientOntologyControllerHook')) {
+            ingredientOntologyControllerHook(
+                'canonical_claimed',
+                [
+                    'queue_id' => $queueId,
+                    'product_id' => $productId,
+                    'request_generation' => $requestGeneration,
+                    'lease_token' => $leaseToken,
+                    'lease_generation' => $leaseGeneration,
+                ]
+            );
+        }
 
         try {
-            $result = canonicalIngredientSyncProduct($db, $productId);
+            $processor = $GLOBALS[
+                'CANONICAL_QUEUE_TEST_PROCESSOR'
+            ] ?? null;
+            $result = (
+                defined('RECIPE_BACKEND_TEST_MODE')
+                && RECIPE_BACKEND_TEST_MODE
+                && is_callable($processor)
+            )
+                ? $processor(
+                    $db,
+                    $productId,
+                    [
+                        'queue_id' => $queueId,
+                        'request_generation' => $requestGeneration,
+                        'lease_token' => $leaseToken,
+                        'lease_generation' => $leaseGeneration,
+                    ]
+                )
+                : canonicalIngredientSyncProduct($db, $productId);
             $mapped = (int)($result['mapped'] ?? 0);
+            $complete = $db->prepare("
+                UPDATE canonical_processing_queue
+                SET status = 'done',
+                    processed_at = CURRENT_TIMESTAMP,
+                    updated_at = CURRENT_TIMESTAMP,
+                    last_error = '',
+                    lease_token = NULL,
+                    lease_expires_at = NULL
+                WHERE id = ?
+                  AND status = 'in_progress'
+                  AND request_generation = ?
+                  AND lease_token = ?
+                  AND lease_generation = ?
+            ");
+            $complete->execute([
+                $queueId,
+                $requestGeneration,
+                $leaseToken,
+                $leaseGeneration,
+            ]);
+            if ($complete->rowCount() !== 1) {
+                $superseded++;
+                $items[] = [
+                    'product_id' => $productId,
+                    'status' => 'superseded',
+                    'mapped' => $mapped,
+                ];
+                continue;
+            }
             if (function_exists('recipeJobEnqueueTaxonomyReady')) {
                 recipeJobEnqueueTaxonomyReady($db, $productId);
             }
-            $db->prepare("
-                UPDATE canonical_processing_queue
-                SET status = 'done', processed_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP, last_error = ''
-                WHERE id = ?
-            ")->execute([$queueId]);
             $succeeded++;
             $items[] = [
                 'product_id' => $productId,
@@ -1294,11 +1444,45 @@ function canonicalIngredientProcessQueueBatch(PDO $db, int $limit, int $maxAttem
             ];
         } catch (Throwable $e) {
             $message = mb_substr($e->getMessage(), 0, 500, 'UTF-8');
-            $db->prepare("
+            $failure = $db->prepare("
                 UPDATE canonical_processing_queue
-                SET status = 'failed', last_error = ?, updated_at = CURRENT_TIMESTAMP
+                SET status = 'failed',
+                    last_error = ?,
+                    lease_token = NULL,
+                    lease_expires_at = NULL,
+                    updated_at = CURRENT_TIMESTAMP
                 WHERE id = ?
-            ")->execute([$message, $queueId]);
+                  AND status = 'in_progress'
+                  AND request_generation = ?
+                  AND lease_token = ?
+                  AND lease_generation = ?
+            ");
+            $failure->execute([
+                $message,
+                $queueId,
+                $requestGeneration,
+                $leaseToken,
+                $leaseGeneration,
+            ]);
+            if ($failure->rowCount() !== 1) {
+                $superseded++;
+                if (class_exists('EverLog', false)) {
+                    EverLog::warn(
+                        'canonical queue crash superseded by newer request',
+                        [
+                            'product_id' => $productId,
+                            'queue_id' => $queueId,
+                            'request_generation' => $requestGeneration,
+                            'error' => $message,
+                        ]
+                    );
+                }
+                $items[] = [
+                    'product_id' => $productId,
+                    'status' => 'superseded',
+                ];
+                continue;
+            }
             if (class_exists('EverLog', false)) {
                 EverLog::exception($e, 'canonical_queue');
             }
@@ -1312,6 +1496,7 @@ function canonicalIngredientProcessQueueBatch(PDO $db, int $limit, int $maxAttem
         'processed' => $processed,
         'succeeded' => $succeeded,
         'failed' => $failed,
+        'superseded' => $superseded,
         'pending' => $stats['pending'] ?? 0,
         'items' => $items,
     ];

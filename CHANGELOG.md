@@ -12,11 +12,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Recipe scraps tips** — During cooking steps, detect "waste" generated (peels, cores, bones, eggshells, coffee grounds, citrus zest, etc.) and surface AI-powered tips on how to reuse them (compost, natural cleaner, broth, candied peel, etc.). Could be shown as an optional collapsible hint card below the step that generates the scrap.
 
 ### Added
+- **Autonomous ingredient ontology controller (default off)** — Added immutable
+  recipe-independent product/ingredient subjects, occurrence conservation,
+  immediate latest-intent exact allow/deny constraints, fenced durable jobs,
+  child-version forking and closed deterministic change-set application,
+  strict seven-contract prompts/provider abstractions, generation
+  debounce/blast/gold/rollback gates, immutable gold-release lineage, and
+  copied-database backfill/controller CLIs. Model and automatic promotion paths
+  remain independently disabled by default; no human approval state is required.
+  Added canonical owner-fingerprint enforcement, artifact-preserving abandoned
+  child handling, crash-resumable staged/applied/shadow phases, relevant-stream
+  freshness instead of global-epoch rollback, shared debounced children,
+  immutable benchmark-policy import, durable subtract-only P7 critic jobs,
+  active adversarial-gold blocking, and scheduler-driven generation/gold cycles.
+  Occurrence uniqueness now includes the immutable owner row ID without changing
+  canonical fingerprints; legacy schemas rebuild compatibly, recipe retirement
+  uses an expression index, late-phase failures terminalize from their actual
+  fence, and pending generation keys have database-enforced uniqueness.
+  Product observation keys now bind the full semantic subject payload. Mutable
+  recipe quantity/unit/requiredness/staple/group context moved from occurrence
+  provenance into payload-hashed append-only observations. Default-disabled,
+  savepoint-isolated live hooks can no longer roll back ordinary saves.
+  Added total non-prepared owner coverage audits, prepared-meal exclusion and
+  toggle semantics, portable non-satisfying provisional leaves for quarantined
+  subjects, bounded policy/evidence retry circuits, provider health/status
+  reporting, and a hardened host Copilot Unix-socket provider with a versioned
+  model whitelist and sample systemd user unit.
+  Final enablement hardening adds crash-safe product/fork transactions,
+  transactional row-count-verified table swaps, strict lease ABA fences,
+  manual legacy proposal children when disabled, gated decision writes, cached
+  coverage status, SQL-bounded candidate retrieval, attachment-based 160 KB
+  prompt/schema delivery, Gemini effort omission, and user-unit runtime/socket
+  alignment.
+  Production cron is now strictly intake-only; all fork/generation/shadow/
+  promotion work is copy-only. Added group-readable user-runtime socket
+  permissions, base-owned queue lease schemas, safe prepared/delete/merge
+  deactivation, shared-subject job preservation, resumable keyset backfill
+  under 128 MB, and fingerprint-aware cached coverage. Production intake now
+  uses an indexed minimum-priority fence: live products run at 100, live recipe
+  ingredients at 50, terminal jobs revive with fresh fences, and priority-0
+  historical backfill remains queued for explicit offline processing.
 - **Atomic ingredient decision v2** — Added one revision-bound
   `assume_have|select_inventory_product|reject_current_match` command with
   product-level validation, immutable v2 source/target fingerprints, exact
   action provenance, transactional availability/evidence writes, idempotent
-  replay/conflict handling, and 48-hour negative settlement.
+  replay/conflict handling, immediate autonomous exact-pair constraints, and
+  retained 48-hour settlement only for the legacy proposal-export path.
 - **Durable ontology proposal intake** — Positive/negative decisions now enqueue
   a transactional outbox row and candidate regression fixture. A bounded worker
   persists immutable prompt/manifest/response artifacts, uses the one configured

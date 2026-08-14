@@ -124,6 +124,88 @@ dispensa/
   revert lifecycle operations update unapplied pending/approved sets and children
   transactionally and append immutable actor/reason/timestamp events. Applied sets
   fail closed without representable inverse provenance.
+- The autonomous controller adds a recipe-independent identity substrate above
+  owner mappings. Immutable subjects exclude recipe/position/quantity/requiredness
+  from identity. Occurrence provenance is derived only from its immutable key;
+  mutable quantity/unit/requiredness/staple/group context is retained in
+  payload-hashed append-only ingestion observations. Product subjects
+  include barcode/name/brand/category/generic/ingredient/prepared facts but not
+  inventory quantity or package size. Occurrence identity includes subject,
+  owner type, owner row ID, and the unchanged canonical owner fingerprint, so
+  content-equivalent legacy recipe rows remain distinct. Unique subject jobs
+  still prevent recipe-by-recipe model work.
+- Explicit decisions append immutable observations and a monotonic global
+  constraint epoch in the same `BEGIN IMMEDIATE` transaction as the visible
+  override. One partial unique index permits only one live exact constraint per
+  correction stream. Exact `must_equal`/`must_not_equal` constraints are
+  immediate; model work may generalize them only inside a forked building child.
+- Controller jobs use lease token, lease generation, required epoch, and
+  controller generation as one completion fence. Prompts precede calls, responses
+  precede staging, and every phase is content-hashed/idempotent. Generation waits
+  for 30 seconds of quiet with a five-minute maximum debounce and initial
+  six/hour, twenty-four/day ceilings.
+- Recipe occurrence retirement uses an indexed recipe-ID JSON expression and
+  active-row predicate. Late-phase failures transition from their actual fenced
+  state immediately, and a partial database unique index prevents duplicate
+  pending children for one parent/generation key.
+- Product and recipe persistence call savepoint-isolated observation wrappers.
+  `ONTOLOGY_AUTONOMOUS_ENABLED=false` skips them; when enabled, controller
+  failure rolls back only controller evidence, logs bounded degradation, and
+  never rolls back the core product/recipe transaction.
+- Each generation records only the exact correction-stream heads consumed by
+  its plans. Promotion rechecks those heads plus the complete active constraint
+  snapshot; monitoring ignores unrelated later epochs but rolls back on a
+  same-stream reversal. Compatible feedback work shares one debounced child.
+- Generalized repairs require an immutable imported benchmark policy and a
+  durable provider-neutral P7 critic artifact after realized shadow impact is
+  available. The critic is subtract-only; block, malformed output, or
+  unavailability quarantines. Finalization, critic, and gold maturity/dual-run
+  cycles are scheduler-driven job types.
+- Proposals never target a ready version. `ingredientOntologyV3ForkVersion()`
+  rebinds portable references into an unreferenced child; unchanged forks retain
+  the same portable content hash. The deterministic applier supports only
+  table-driven closed repairs and materializes exact constraints before all-edge
+  graph, corpus, gold, shadow, blast, and activation gates.
+- One primary navigation `is_a` plus at most two secondary parents is supported
+  only when all accepted `is_a` edges form a food-rooted DAG with depth, ancestor,
+  and path caps. Secondary ancestry and all typed relations remain non-satisfying.
+- Gold authority is an immutable hash-linked release registry. Mature direct
+  correction pairs and rollback/quarantine adversarial cases dual-run before an
+  autonomous hash-CAS advances the active release; insufficient evidence remains
+  a candidate without creating a human review queue. Adversarial cases actively
+  reject recurrence of a quarantined plan hash; correction candidates must be
+  stable, non-oscillating, and survive the required promoted-version lineage.
+- Coverage is independent from generalized mutation quality. Every enabled,
+  non-prepared product and nonempty recipe owner has an immutable subject and
+  active occurrence. Abstention/quarantine creates an unresolved owner mapping
+  and portable, non-satisfying provisional leaf beneath the structural
+  `Unclassified ingredient` node; quarantine isolates the mutation, never the
+  subject. Backoff/circuit records permit bounded retry after policy/evidence
+  changes or a retry horizon.
+- Prepared products stay in the existing prepared-meal taxonomy path and are
+  excluded from autonomous ingredient expansion and backfill totals. Raw to
+  prepared deactivates live occurrences/jobs; prepared to raw observes and
+  requeues without deleting history.
+- The optional `copilot_socket` provider uses a user-only Unix socket and a
+  bounded local Python service. The service runs the exact host Copilot CLI with
+  a versioned model whitelist, no available tools, custom instructions, MCP
+  servers, remote export, or shell interpolation. PHP records the exact
+  provider/model and never silently falls back.
+- Production cron is intake-only: it records subjects/occurrences, exact R0
+  constraints, immutable model responses, and provisional queue intents, but
+  never forks ontology versions, builds shadow scores, monitors, or promotes.
+  Generation/shadow/promotion commands remain copy-only CLI operations;
+  production promotion stays false for this release.
+- Intake claims are SQL-bounded by priority. Live products enqueue/reset
+  subject resolution at priority 100 and live recipe ingredients at 50;
+  historical backfill stays at 0. Production cron/work uses a minimum of 50,
+  preserving the historical backlog for an explicit copied-database batch while
+  allowing fresh evidence to revive terminal jobs under new lease fences.
+- Backfill uses keyset pages, bounded per-batch transactions, durable
+  checkpoints, and indexed temporary fingerprint/collision tables; copied
+  production validation runs within 128 MB. Coverage validity binds each owner
+  to its recomputed canonical owner and subject fingerprints, while the status
+  endpoint serves only a cached/stale materialization.
 - A candidate ontology can build a complete materialized shadow score revision.
   The active ontology is derived by joining the single active score revision to
   its nullable `ontology_version_id`; there is no separate active ontology setting.
@@ -164,7 +246,7 @@ dispensa/
   `scoring_config_hash` covers the v3 scoring model/version and gate state,
   participates in freshness/reuse, and is rechecked by reports, activation, and
   v3 rollback.
-- Hand-adjudicated resolution gold contains 60 positives and 50 critical
+- Hand-adjudicated resolution gold contains 84 positives and 52 critical
   negatives with exact outcomes, facets, evidence, owner/product/source
   bindings, supersession provenance, a code-pinned SHA-256, and explicit
   maintainer review metadata. Code validates the artifact but does not claim

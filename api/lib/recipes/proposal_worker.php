@@ -109,6 +109,45 @@ function recipeIngredientProposalEnsurePrompt(
     ) {
         throw new RuntimeException('ontology_version_unavailable');
     }
+    if ((string)$version['status'] === 'ready') {
+        $constraintEpoch = (int)(
+            $input['constraint_epoch']
+                ?? $db->query("
+                    SELECT constraint_epoch
+                    FROM ontology_controller_state WHERE id = 1
+                ")->fetchColumn()
+        );
+        if (ingredientOntologyControllerEnabled()) {
+            $fork = ingredientOntologyControllerAcquireBuildingChild(
+                $db,
+                $versionId,
+                $constraintEpoch,
+                ingredientOntologyControllerPolicyHash(),
+                'autonomous'
+            );
+        } else {
+            $fork = ingredientOntologyV3ForkVersion(
+                $db,
+                $versionId,
+                [
+                    'generation_key' => ingredientOntologyV3Hash([
+                        'kind' => 'legacy_manual_proposal_child',
+                        'base_version_id' => $versionId,
+                        'time_bucket' => (int)floor(time() / 300),
+                    ]),
+                    'constraint_epoch' => $constraintEpoch,
+                    'activation_policy' => 'manual',
+                ]
+            );
+        }
+        $versionId = (int)$fork['version_id'];
+        $version = ingredientOntologyV3Version($db, $versionId);
+        if ($version === null || $version['status'] !== 'building') {
+            throw new RuntimeException(
+                'ontology_child_version_unavailable'
+            );
+        }
+    }
     $model = ingredientOntologyV3ConfiguredProposalModel();
     $candidateIds = ($input['polarity'] ?? '') === 'positive'
         ? recipeIngredientProposalTargetEntityIds(
@@ -242,14 +281,21 @@ function recipeIngredientProposalClaim(
             UPDATE recipe_ingredient_proposal_outbox
             SET status = 'retry',
                 lease_token = NULL,
+                lease_expires_at = NULL,
                 last_error_kind = 'claim_expired',
                 last_error = 'The prior worker claim expired.',
                 next_attempt_at = CURRENT_TIMESTAMP,
                 updated_at = CURRENT_TIMESTAMP
             WHERE status = 'processing'
-              AND claimed_at < datetime(
-                  'now',
-                  '-" . RECIPE_INGREDIENT_PROPOSAL_LEASE_SECONDS . " seconds'
+              AND (
+                  lease_expires_at <= CURRENT_TIMESTAMP
+                  OR (
+                      lease_expires_at IS NULL
+                      AND claimed_at < datetime(
+                          'now',
+                          '-" . RECIPE_INGREDIENT_PROPOSAL_LEASE_SECONDS . " seconds'
+                      )
+                  )
               )
         ");
         $ids = $db->query("
@@ -273,6 +319,11 @@ function recipeIngredientProposalClaim(
                 SET status = 'processing',
                     attempts = attempts + 1,
                     lease_token = ?,
+                    lease_generation = lease_generation + 1,
+                    lease_expires_at = datetime(
+                        'now',
+                        '+" . RECIPE_INGREDIENT_PROPOSAL_LEASE_SECONDS . " seconds'
+                    ),
                     claimed_at = CURRENT_TIMESTAMP,
                     updated_at = CURRENT_TIMESTAMP
                 WHERE id IN ({$placeholders})
@@ -313,7 +364,9 @@ function recipeIngredientProposalSetState(
     ?string $errorKind = null,
     string $error = '',
     ?string $nextAttemptAt = null,
-    ?int $responseArtifactId = null
+    ?int $responseArtifactId = null,
+    ?string $leaseToken = null,
+    ?int $leaseGeneration = null
 ): bool {
     if (!in_array($status, [
         'retry', 'blocked', 'staged', 'superseded',
@@ -322,17 +375,28 @@ function recipeIngredientProposalSetState(
             'proposal outbox status is invalid'
         );
     }
+    if (
+        !is_string($leaseToken)
+        || !preg_match('/^[a-f0-9]{64}$/D', $leaseToken)
+        || $leaseGeneration === null
+        || $leaseGeneration <= 0
+    ) {
+        return false;
+    }
     $stmt = $db->prepare("
         UPDATE recipe_ingredient_proposal_outbox
         SET status = ?,
             next_attempt_at = ?,
             lease_token = NULL,
+            lease_expires_at = NULL,
             response_artifact_id = COALESCE(?, response_artifact_id),
             last_error_kind = ?,
             last_error = ?,
             updated_at = CURRENT_TIMESTAMP
         WHERE id = ?
           AND status = 'processing'
+          AND lease_token = ?
+          AND lease_generation = ?
     ");
     $stmt->execute([
         $status,
@@ -341,6 +405,8 @@ function recipeIngredientProposalSetState(
         $errorKind,
         mb_substr($error, 0, 1000, 'UTF-8'),
         $outboxId,
+        $leaseToken,
+        $leaseGeneration,
     ]);
     return $stmt->rowCount() > 0;
 }
@@ -653,7 +719,10 @@ function recipeIngredientProposalProcessRow(
             'Negative feedback remains provisional for 48 hours.',
             $settleAfter === false
                 ? null
-                : gmdate('Y-m-d H:i:s', $settleAfter)
+                : gmdate('Y-m-d H:i:s', $settleAfter),
+            null,
+            (string)($outbox['lease_token'] ?? ''),
+            (int)($outbox['lease_generation'] ?? 0)
         );
         return [
             'outbox_id' => (int)$outbox['id'],
@@ -700,7 +769,9 @@ function recipeIngredientProposalProcessRow(
                 ? ''
                 : 'The model artifact failed deterministic validation.',
             null,
-            (int)$staged['response_artifact_id']
+            (int)$staged['response_artifact_id'],
+            (string)($outbox['lease_token'] ?? ''),
+            (int)($outbox['lease_generation'] ?? 0)
         );
         if (!$linked) {
             recipeIngredientProposalRejectDetachedStage($db, $staged);
@@ -743,7 +814,10 @@ function recipeIngredientProposalProcessRow(
             recipeIngredientProposalBoundedError($error),
             $retryable
                 ? gmdate('Y-m-d H:i:s', time() + $delay)
-                : null
+                : null,
+            null,
+            (string)($outbox['lease_token'] ?? ''),
+            (int)($outbox['lease_generation'] ?? 0)
         );
         return [
             'outbox_id' => (int)$outbox['id'],

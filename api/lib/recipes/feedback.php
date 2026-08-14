@@ -969,7 +969,12 @@ function recipeIngredientDecisionLatestProvisional(
         WHERE recipe_id = ?
           AND ingredient_key = ?
           AND decision_action IS NOT NULL
-          AND review_state IN ('settling', 'eligible')
+          AND NOT EXISTS (
+              SELECT 1
+              FROM recipe_ingredient_feedback_events superseder
+              WHERE superseder.supersedes_event_id =
+                    recipe_ingredient_feedback_events.id
+          )
         ORDER BY id DESC
         LIMIT 1
     ");
@@ -1062,6 +1067,7 @@ function recipeIngredientDecisionSupersedeOutbox(
         UPDATE recipe_ingredient_proposal_outbox
         SET status = 'superseded',
             lease_token = NULL,
+            lease_expires_at = NULL,
             last_error_kind = 'superseded_by_new_decision',
             last_error = 'A later ingredient decision superseded this proposal.',
             updated_at = CURRENT_TIMESTAMP
@@ -1268,6 +1274,14 @@ function recipeIngredientDecision(
             $detail,
             $ingredient
         );
+        $controllerSubjectResult =
+            ingredientOntologyControllerSubjectForDetailIngredientSafely(
+                $db,
+                $detail,
+                $ingredient
+            );
+        $controllerSubject =
+            $controllerSubjectResult['subject'] ?? null;
         $selectedProduct = null;
         $targetProduct = null;
         $currentTargetId = isset(
@@ -1484,6 +1498,35 @@ function recipeIngredientDecision(
             );
             $proposalEnqueued = true;
         }
+        $controllerCorrection = [
+            'constraint_epoch' => 0,
+            'constraint_id' => null,
+            'job_id' => null,
+            'compensation' => false,
+        ];
+        if ($controllerSubject !== null) {
+            $controllerCorrection =
+                ingredientOntologyControllerRecordCorrectionSafely(
+                    $db,
+                    [
+                        'recipe_id' => $request['recipe_id'],
+                        'ingredient_key' => $request['ingredient_key'],
+                        'action' => $identityEvidence
+                            ? $request['action']
+                            : 'assume_have',
+                        'feedback_event_id' => $eventId,
+                        'subject_id' => (int)$controllerSubject['id'],
+                        'subject_fingerprint' =>
+                            (string)$controllerSubject[
+                                'subject_fingerprint'
+                            ],
+                        'target_product_id' =>
+                            $targetProduct['id'] ?? null,
+                        'target_owner_fingerprint' =>
+                            $targetProduct['owner_fingerprint'] ?? null,
+                    ]
+                );
+        }
         $result = [
             'recipe_id' => $request['recipe_id'],
             'ingredient_key' => $request['ingredient_key'],
@@ -1502,6 +1545,17 @@ function recipeIngredientDecision(
             'identity_evidence' => $identityEvidence,
             'proposal_enqueued' => $proposalEnqueued,
             'proposal_outbox_id' => $outboxId,
+            'constraint_epoch' =>
+                $controllerCorrection['constraint_epoch'],
+            'constraint_id' =>
+                $controllerCorrection['constraint_id'],
+            'autonomous_job_id' =>
+                $controllerCorrection['job_id'],
+            'autonomous_compensation' =>
+                $controllerCorrection['compensation'],
+            'controller_degraded' =>
+                !empty($controllerSubjectResult['degraded'])
+                || !empty($controllerCorrection['degraded']),
             'settle_after' => $identityEvidence
                 ? $settleAfter
                 : null,
@@ -1527,5 +1581,6 @@ function recipeIngredientDecision(
         }
         throw $e;
     }
+    ingredientOntologyControllerWake();
     return $result;
 }

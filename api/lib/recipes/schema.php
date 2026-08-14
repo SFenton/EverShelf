@@ -458,6 +458,8 @@ function recipeSchemaMigrate(PDO $db): void {
                     lease_token IS NULL
                     OR length(lease_token) = 64
                 ),
+            lease_generation INTEGER NOT NULL DEFAULT 0,
+            lease_expires_at DATETIME DEFAULT NULL,
             input_json TEXT NOT NULL
                 CHECK(length(input_json) BETWEEN 2 AND 32768),
             prompt_artifact_id INTEGER DEFAULT NULL,
@@ -1220,6 +1222,24 @@ function recipeSchemaMigrate(PDO $db): void {
             }
         }
     }
+    foreach ([
+        'lease_generation' => 'INTEGER NOT NULL DEFAULT 0',
+        'lease_expires_at' => 'DATETIME DEFAULT NULL',
+    ] as $column => $definition) {
+        try {
+            $db->exec("
+                ALTER TABLE recipe_ingredient_proposal_outbox
+                ADD COLUMN {$column} {$definition}
+            ");
+        } catch (PDOException $e) {
+            if (!str_contains(
+                strtolower($e->getMessage()),
+                'duplicate column'
+            )) {
+                throw $e;
+            }
+        }
+    }
     $jobColumns = array_column(
         $db->query("PRAGMA table_info(recipe_jobs)")->fetchAll(PDO::FETCH_ASSOC),
         'name'
@@ -1669,6 +1689,10 @@ function recipeSchemaMigrate(PDO $db): void {
         CREATE INDEX IF NOT EXISTS idx_recipe_ingredient_feedback_recipe
             ON recipe_ingredient_feedback_events(
                 recipe_id, ingredient_key, id
+            );
+        CREATE INDEX IF NOT EXISTS idx_recipe_ingredient_feedback_supersedes
+            ON recipe_ingredient_feedback_events(
+                supersedes_event_id, id
             );
         CREATE INDEX IF NOT EXISTS idx_recipe_ingredient_proposal_outbox_ready
             ON recipe_ingredient_proposal_outbox(

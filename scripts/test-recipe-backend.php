@@ -406,11 +406,15 @@ recipeTestAssert(
 
 $dbPath = __DIR__ . '/../data/.recipe-backend-test-' . getmypid() . '.sqlite';
 $upgradePath = __DIR__ . '/../data/.recipe-backend-upgrade-test-' . getmypid() . '.sqlite';
+$disabledPath = __DIR__ . '/../data/.recipe-backend-disabled-test-' . getmypid() . '.sqlite';
 $cleanupPaths = [
     $dbPath, $dbPath . '-wal', $dbPath . '-shm',
     dirname($dbPath) . '/.' . basename($dbPath) . '.recipe-score.lock',
     $upgradePath, $upgradePath . '-wal', $upgradePath . '-shm',
     dirname($upgradePath) . '/.' . basename($upgradePath)
+        . '.recipe-score.lock',
+    $disabledPath, $disabledPath . '-wal', $disabledPath . '-shm',
+    dirname($disabledPath) . '/.' . basename($disabledPath)
         . '.recipe-score.lock',
 ];
 foreach ($cleanupPaths as $path) {
@@ -1047,6 +1051,29 @@ try {
     initializeDB($db);
     migrateDB($db);
     $db->exec("
+        DROP TABLE ontology_quarantine_retries;
+        DROP TABLE ontology_provisional_queue;
+        DROP TABLE ontology_generation_constraint_heads;
+        DROP TABLE ontology_artifact_supersessions;
+        DROP TABLE ontology_gold_cases;
+        DROP TABLE ontology_gold_adversarial_candidates;
+        DROP TABLE ontology_gold_releases;
+        DROP TABLE ontology_generation_plans;
+        DROP TABLE ontology_generations;
+        DROP TABLE ontology_mutation_plans;
+        DROP TABLE ontology_controller_benchmark_policies;
+        DROP TABLE ontology_controller_responses;
+        DROP TABLE ontology_controller_prompts;
+        DROP TABLE ontology_controller_jobs;
+        DROP TABLE ingredient_ontology_pair_constraints;
+        DROP TABLE ingredient_ontology_subject_resolutions;
+        DROP TABLE ontology_constraint_ledger;
+        DROP TABLE ontology_observation_events;
+        DROP TABLE ontology_subject_occurrences;
+        DROP TABLE ontology_subjects;
+        DROP TABLE ontology_coverage_state;
+        DROP TABLE ontology_backfill_state;
+        DROP TABLE ontology_controller_state;
         DROP TABLE recipe_planner_command_events;
         DROP TABLE recipe_planner_commands;
         DROP TABLE recipe_ingredient_proposal_responses;
@@ -1129,6 +1156,17 @@ try {
         'ingredient_ontology_change_sets', 'ingredient_ontology_proposals',
         'ingredient_ontology_change_events',
         'ingredient_ontology_shadow_matches',
+        'ontology_controller_state', 'ontology_subjects',
+        'ontology_subject_occurrences', 'ontology_observation_events',
+        'ontology_constraint_ledger', 'ontology_controller_jobs',
+        'ontology_controller_prompts', 'ontology_controller_responses',
+        'ontology_mutation_plans', 'ontology_generations',
+        'ontology_controller_benchmark_policies',
+        'ontology_generation_plans',
+        'ingredient_ontology_subject_resolutions',
+        'ingredient_ontology_pair_constraints',
+        'ontology_gold_releases', 'ontology_gold_cases',
+        'ontology_gold_adversarial_candidates',
         'ingredient_ontology_provider_terms',
         'ingredient_ontology_provider_observations',
         'ingredient_ontology_curated_product_assertions',
@@ -3758,6 +3796,7 @@ try {
         $db,
         'SELECT COUNT(*) FROM recipe_ingredient_proposal_outbox'
     );
+    $GLOBALS['ONTOLOGY_AUTONOMOUS_ENABLED_OVERRIDE'] = true;
     $selectDecision = recipeIngredientDecision($db, [
         'recipe_id' => $cookidooRecipeId,
         'ingredient_key' =>
@@ -3830,17 +3869,33 @@ try {
         ) === 1,
         'Positive ingredient decisions must atomically persist the display override, immutable product-bound evidence, outbox row, and candidate regression fixture'
     );
+    $proposalLeaseToken = hash('sha256', 'proposal-state-link-test');
     $db->prepare("
         UPDATE recipe_ingredient_proposal_outbox
-        SET status = 'processing'
+        SET status = 'processing',
+            lease_token = ?,
+            lease_generation = lease_generation + 1,
+            lease_expires_at = datetime('now', '+10 minutes')
         WHERE id = ?
-    ")->execute([(int)$selectOutbox['id']]);
+    ")->execute([
+        $proposalLeaseToken,
+        (int)$selectOutbox['id'],
+    ]);
+    $proposalLeaseGeneration = (int)$db->query("
+        SELECT lease_generation
+        FROM recipe_ingredient_proposal_outbox
+        WHERE id = " . (int)$selectOutbox['id']
+    )->fetchColumn();
     $proposalStateLinked = recipeIngredientProposalSetState(
         $db,
         (int)$selectOutbox['id'],
         'retry',
         'synthetic_retry',
-        'Synthetic successful-link probe.'
+        'Synthetic successful-link probe.',
+        null,
+        null,
+        $proposalLeaseToken,
+        $proposalLeaseGeneration
     );
     $db->prepare("
         UPDATE recipe_ingredient_proposal_outbox
@@ -3850,19 +3905,55 @@ try {
     $proposalStateLostRace = recipeIngredientProposalSetState(
         $db,
         (int)$selectOutbox['id'],
-        'staged'
+        'staged',
+        null,
+        '',
+        null,
+        null,
+        $proposalLeaseToken,
+        $proposalLeaseGeneration
     );
+    $newProposalLeaseToken = hash(
+        'sha256',
+        'proposal-state-link-new-worker'
+    );
+    $db->prepare("
+        UPDATE recipe_ingredient_proposal_outbox
+        SET status = 'processing',
+            lease_token = ?,
+            lease_generation = lease_generation + 1,
+            lease_expires_at = datetime('now', '+10 minutes')
+        WHERE id = ?
+    ")->execute([
+        $newProposalLeaseToken,
+        (int)$selectOutbox['id'],
+    ]);
+    $staleProposalWorkerRejected =
+        !recipeIngredientProposalSetState(
+            $db,
+            (int)$selectOutbox['id'],
+            'staged',
+            null,
+            '',
+            null,
+            null,
+            $proposalLeaseToken,
+            $proposalLeaseGeneration
+        );
     $db->prepare("
         UPDATE recipe_ingredient_proposal_outbox
         SET status = 'queued',
             next_attempt_at = NULL,
+            lease_token = NULL,
+            lease_expires_at = NULL,
             last_error_kind = NULL,
             last_error = ''
         WHERE id = ?
     ")->execute([(int)$selectOutbox['id']]);
     recipeTestAssert(
         $proposalStateLinked
-        && !$proposalStateLostRace,
+        && !$proposalStateLostRace
+        && $staleProposalWorkerRejected,
         'Proposal state linking must distinguish a live processing row from a superseded race loser'
     );
     $db->prepare("
@@ -4222,6 +4313,157 @@ try {
         && $settlingImportBlocked,
         'Negative proposal handoff export and import must enforce the same 48-hour settlement gate as the runtime worker'
     );
+    $rejectOutbox = $db->query("
+        SELECT * FROM recipe_ingredient_proposal_outbox
+        WHERE id = {$rejectOutboxId}
+    ")->fetch(PDO::FETCH_ASSOC);
+    ingredientOntologyV3WithPublicationGuard(
+        $db,
+        static function () use (
+            $db,
+            $feedbackWorkerVersionId
+        ): void {
+            $db->prepare("
+                UPDATE ingredient_ontology_versions
+                SET status = 'ready', ready_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+            ")->execute([$feedbackWorkerVersionId]);
+        }
+    );
+    $proposalBaseVersionId = $feedbackWorkerVersionId;
+    $rejectPromptInput = json_decode(
+        (string)$rejectOutbox['input_json'],
+        true
+    );
+    $rejectPromptInput['ontology_version_id'] =
+        $proposalBaseVersionId;
+    $rejectOutbox['input_json'] =
+        recipeCatalogJsonEncode($rejectPromptInput);
+    $db->prepare("
+        UPDATE recipe_ingredient_proposal_outbox
+        SET input_json = ?
+        WHERE id = ?
+    ")->execute([
+        $rejectOutbox['input_json'],
+        $rejectOutboxId,
+    ]);
+    unset($GLOBALS['ONTOLOGY_AUTONOMOUS_ENABLED_OVERRIDE']);
+    $manualProposalPrompt =
+        recipeIngredientProposalEnsurePrompt(
+            $db,
+            $rejectOutbox
+        );
+    $manualProposalVersion = ingredientOntologyV3Version(
+        $db,
+        (int)$manualProposalPrompt['ontology_version_id']
+    );
+    recipeTestAssert(
+        $manualProposalVersion['controller_activation_policy']
+            === 'manual',
+        'Default-off legacy proposal prompts must fork manual-policy children'
+    );
+    $GLOBALS['ONTOLOGY_AUTONOMOUS_ENABLED_OVERRIDE'] = true;
+    $detailAfterReject = recipeCatalogDetail(
+        $db,
+        $cookidooRecipeId
+    );
+    $reselectIngredient = null;
+    foreach ($detailAfterReject['ingredients'] as $candidate) {
+        if (
+            (string)$candidate['key']
+                === (string)$identityIngredient['key']
+        ) {
+            $reselectIngredient = $candidate;
+            break;
+        }
+    }
+    $reselectDecision = recipeIngredientDecision($db, [
+        'recipe_id' => $cookidooRecipeId,
+        'ingredient_key' => $reselectIngredient['key'],
+        'position' => $reselectIngredient['position'],
+        'action' => 'select_inventory_product',
+        'selected_product_id' => $selectedProductId,
+        'feedback_token' => $reselectIngredient['feedback_token'],
+        'idempotency_key' => 'feedback-v2-reselect-same-1',
+        'action_origin' => 'react_dashboard',
+    ]);
+    $reselectEventId = (int)$db->query("
+        SELECT id FROM recipe_ingredient_feedback_events
+        WHERE idempotency_key = 'feedback-v2-reselect-same-1'
+    ")->fetchColumn();
+    $reselectOutbox = $db->query("
+        SELECT * FROM recipe_ingredient_proposal_outbox
+        WHERE feedback_event_id = {$reselectEventId}
+    ")->fetch(PDO::FETCH_ASSOC);
+    $reselectPromptInput = json_decode(
+        (string)$reselectOutbox['input_json'],
+        true
+    );
+    $reselectPromptInput['ontology_version_id'] =
+        $proposalBaseVersionId;
+    $reselectOutbox['input_json'] =
+        recipeCatalogJsonEncode($reselectPromptInput);
+    $db->prepare("
+        UPDATE recipe_ingredient_proposal_outbox
+        SET input_json = ?
+        WHERE id = ?
+    ")->execute([
+        $reselectOutbox['input_json'],
+        (int)$reselectOutbox['id'],
+    ]);
+    $GLOBALS['ONTOLOGY_AUTONOMOUS_ENABLED_OVERRIDE'] = true;
+    $autonomousProposalPrompt =
+        recipeIngredientProposalEnsurePrompt(
+            $db,
+            $reselectOutbox
+        );
+    unset($GLOBALS['ONTOLOGY_AUTONOMOUS_ENABLED_OVERRIDE']);
+    $autonomousProposalVersion = ingredientOntologyV3Version(
+        $db,
+        (int)$autonomousProposalPrompt['ontology_version_id']
+    );
+    recipeTestAssert(
+        $autonomousProposalVersion['controller_activation_policy']
+            === 'autonomous',
+        'Controller-enabled proposal prompts must join autonomous-policy children'
+    );
+    $reselectConstraint = $db->prepare("
+        SELECT constraint_kind, constraint_epoch
+        FROM ontology_constraint_ledger
+        WHERE id = ?
+    ");
+    $reselectConstraint->execute([
+        (int)$reselectDecision['constraint_id'],
+    ]);
+    $reselectConstraint = $reselectConstraint->fetch(PDO::FETCH_ASSOC);
+    recipeTestAssert(
+        $reselectDecision['availability'] === 'have'
+        && $reselectDecision['selected_product']['id']
+            === $selectedProductId
+        && $reselectDecision['constraint_epoch']
+            > (int)$rejectDecision['constraint_epoch']
+        && $reselectConstraint['constraint_kind'] === 'must_equal'
+        && $db->query("
+            SELECT status
+            FROM recipe_ingredient_proposal_outbox
+            WHERE id = {$rejectOutboxId}
+        ")->fetchColumn() === 'superseded'
+        && recipeTestCount(
+            $db,
+            "SELECT COUNT(*)
+             FROM ontology_constraint_ledger
+             WHERE stream_key = "
+                . $db->quote(
+                    ingredientOntologyControllerStreamKey(
+                        $cookidooRecipeId,
+                        (string)$identityIngredient['key']
+                    )
+                )
+                . " AND active = 1"
+        ) === 1,
+        'Same-product reselect must immediately supersede the negative and install one latest positive constraint'
+    );
+    unset($GLOBALS['ONTOLOGY_AUTONOMOUS_ENABLED_OVERRIDE']);
     $availabilityOnlyIngredient =
         $cookidooDetail['ingredients'][4];
     $outboxBeforeAvailabilityOnly = recipeTestCount(
@@ -4315,6 +4557,149 @@ try {
         ) === $staleWritesBefore['outbox'],
         'Submit-time target and positive-stock drift must return stale with no partial writes'
     );
+    $underivableRecipe = recipeCatalogSaveVariant($db, [
+        'title' => 'Underivable Controller Subject Fixture',
+        'ingredients' => [['name' => 'Placeholder Ingredient']],
+        'steps' => ['Use it.'],
+    ], [
+        'connector' => 'manual',
+        'external_id' => 'underivable-controller-subject',
+    ]);
+    $underivableRecipeId = (int)$underivableRecipe['id'];
+    $db->prepare("
+        UPDATE recipe_ingredients
+        SET raw_text = '---', normalized_name = ''
+        WHERE recipe_id = ?
+    ")->execute([$underivableRecipeId]);
+    $underivableDetail = recipeCatalogDetail(
+        $db,
+        $underivableRecipeId
+    );
+    $underivableIngredient = $underivableDetail['ingredients'][0];
+    $underivableBefore = [
+        'events' => recipeTestCount(
+            $db,
+            'SELECT COUNT(*) FROM recipe_ingredient_feedback_events'
+        ),
+        'outbox' => recipeTestCount(
+            $db,
+            'SELECT COUNT(*) FROM recipe_ingredient_proposal_outbox'
+        ),
+        'jobs' => recipeTestCount(
+            $db,
+            'SELECT COUNT(*) FROM ontology_controller_jobs'
+        ),
+        'epoch' => (int)$db->query("
+            SELECT constraint_epoch
+            FROM ontology_controller_state WHERE id = 1
+        ")->fetchColumn(),
+    ];
+    $underivableDecision = recipeIngredientDecision($db, [
+        'recipe_id' => $underivableRecipeId,
+        'ingredient_key' => $underivableIngredient['key'],
+        'position' => $underivableIngredient['position'],
+        'action' => 'select_inventory_product',
+        'selected_product_id' => $selectedProductId,
+        'feedback_token' => $underivableIngredient['feedback_token'],
+        'idempotency_key' =>
+            'feedback-v2-underivable-controller-subject',
+        'action_origin' => 'react_dashboard',
+    ]);
+    recipeTestAssert(
+        $underivableDecision['availability'] === 'have'
+        && $underivableDecision['proposal_enqueued'] === true
+        && recipeTestCount(
+            $db,
+            'SELECT COUNT(*) FROM recipe_ingredient_feedback_events'
+        ) === $underivableBefore['events'] + 1
+        && recipeTestCount(
+            $db,
+            'SELECT COUNT(*) FROM recipe_ingredient_proposal_outbox'
+        ) === $underivableBefore['outbox'] + 1
+        && recipeTestCount(
+            $db,
+            'SELECT COUNT(*) FROM ontology_controller_jobs'
+        ) === $underivableBefore['jobs']
+        && (int)$db->query("
+            SELECT constraint_epoch
+            FROM ontology_controller_state WHERE id = 1
+        ")->fetchColumn() === $underivableBefore['epoch']
+        && empty($underivableDecision['controller_degraded']),
+        'Default-off ingredient decisions must preserve feedback without controller writes'
+    );
+    $degradedDecisionRecipe = recipeCatalogSaveVariant($db, [
+        'title' => 'Controller Degraded Decision Fixture',
+        'ingredients' => [['name' => 'Degraded decision ingredient']],
+        'steps' => ['Use it.'],
+    ], [
+        'connector' => 'manual',
+        'external_id' => 'controller-degraded-decision',
+    ]);
+    $degradedDecisionDetail = recipeCatalogDetail(
+        $db,
+        (int)$degradedDecisionRecipe['id']
+    );
+    $degradedDecisionIngredient =
+        $degradedDecisionDetail['ingredients'][0];
+    $degradedControllerBefore = [
+        'subjects' => recipeTestCount(
+            $db,
+            'SELECT COUNT(*) FROM ontology_subjects'
+        ),
+        'jobs' => recipeTestCount(
+            $db,
+            'SELECT COUNT(*) FROM ontology_controller_jobs'
+        ),
+        'constraints' => recipeTestCount(
+            $db,
+            'SELECT COUNT(*) FROM ontology_constraint_ledger'
+        ),
+    ];
+    $db->exec("
+        CREATE TRIGGER recipe_test_controller_degradation
+        BEFORE INSERT ON ontology_observation_events
+        BEGIN
+            SELECT RAISE(
+                ABORT,
+                'controller degradation fixture'
+            );
+        END
+    ");
+    $GLOBALS['ONTOLOGY_AUTONOMOUS_ENABLED_OVERRIDE'] = true;
+    $degradedDecision = recipeIngredientDecision($db, [
+        'recipe_id' => (int)$degradedDecisionRecipe['id'],
+        'ingredient_key' => $degradedDecisionIngredient['key'],
+        'position' => $degradedDecisionIngredient['position'],
+        'action' => 'select_inventory_product',
+        'selected_product_id' => $selectedProductId,
+        'feedback_token' =>
+            $degradedDecisionIngredient['feedback_token'],
+        'idempotency_key' =>
+            'feedback-v2-controller-degraded',
+        'action_origin' => 'react_dashboard',
+    ]);
+    unset($GLOBALS['ONTOLOGY_AUTONOMOUS_ENABLED_OVERRIDE']);
+    $db->exec('DROP TRIGGER recipe_test_controller_degradation');
+    recipeTestAssert(
+        $degradedDecision['availability'] === 'have'
+        && !empty($degradedDecision['controller_degraded'])
+        && recipeTestCount(
+            $db,
+            'SELECT COUNT(*) FROM ontology_subjects'
+        ) === $degradedControllerBefore['subjects']
+        && recipeTestCount(
+            $db,
+            'SELECT COUNT(*) FROM ontology_controller_jobs'
+        ) === $degradedControllerBefore['jobs']
+        && recipeTestCount(
+            $db,
+            'SELECT COUNT(*) FROM ontology_constraint_ledger'
+        ) === $degradedControllerBefore['constraints'],
+        'Enabled controller degradation must never fail or partially write an ingredient decision'
+    );
+    $cookidooDetail = recipeCatalogDetail($db, $cookidooRecipeId);
+    $feedbackMissingIngredient = $cookidooDetail['ingredients'][1];
+    $availabilityOnlyIngredient = $cookidooDetail['ingredients'][4];
     recipeIngredientOverrideSet($db, [
         'recipe_id' => $cookidooRecipeId,
         'ingredient_key' =>
@@ -9714,6 +10099,390 @@ try {
         && $explicitTimeRecipe['inactive_time_seconds'] === 30,
         'Explicit structured seconds must take precedence over legacy time strings'
     );
+
+    $duplicateRaceInserted = false;
+    $GLOBALS['PRODUCT_API_JSON_INPUT'] = [
+        'name' => 'Duplicate Barcode Race Product',
+        'brand' => 'Test',
+        'category' => 'Test',
+        'barcode' => 'duplicate-barcode-race',
+    ];
+    $GLOBALS['PRODUCT_SAVE_TEST_HOOK'] =
+        static function (
+            string $name,
+            array $context
+        ) use ($db, &$duplicateRaceInserted): void {
+            if (
+                $name !== 'before_transaction'
+                || $duplicateRaceInserted
+                || !empty($context['id'])
+            ) {
+                return;
+            }
+            $duplicateRaceInserted = true;
+            $db->exec("
+                INSERT INTO products (
+                    barcode, name, brand, category
+                )
+                VALUES (
+                    'duplicate-barcode-race',
+                    'Duplicate Barcode Race Product',
+                    'Test',
+                    'Test'
+                )
+            ");
+        };
+    ob_start();
+    saveProduct($db);
+    $duplicateRaceResponse = json_decode(
+        (string)ob_get_clean(),
+        true
+    );
+    unset(
+        $GLOBALS['PRODUCT_API_JSON_INPUT'],
+        $GLOBALS['PRODUCT_SAVE_TEST_HOOK']
+    );
+    $db->exec('BEGIN IMMEDIATE');
+    $db->exec('ROLLBACK');
+    recipeTestAssert(
+        $duplicateRaceInserted
+        && !empty($duplicateRaceResponse['success'])
+        && !empty($duplicateRaceResponse['merged'])
+        && recipeTestCount(
+            $db,
+            "SELECT COUNT(*) FROM products
+             WHERE barcode = 'duplicate-barcode-race'"
+        ) === 1,
+        'Duplicate-barcode race recovery must roll back the failed insert and leave the connection transaction-ready'
+    );
+
+    $GLOBALS['PRODUCT_API_JSON_INPUT'] = [
+        'name' => 'Injected Product Rollback',
+        'brand' => 'Test',
+        'category' => 'Test',
+        'barcode' => 'injected-product-rollback',
+    ];
+    $GLOBALS['PRODUCT_SAVE_TEST_HOOK'] =
+        static function (string $name): void {
+            if ($name === 'before_commit') {
+                throw new RuntimeException(
+                    'injected_product_save_failure'
+                );
+            }
+        };
+    $injectedProductRollback = false;
+    ob_start();
+    try {
+        saveProduct($db);
+    } catch (RuntimeException $error) {
+        $injectedProductRollback =
+            $error->getMessage()
+                === 'injected_product_save_failure';
+    } finally {
+        ob_end_clean();
+        unset(
+            $GLOBALS['PRODUCT_API_JSON_INPUT'],
+            $GLOBALS['PRODUCT_SAVE_TEST_HOOK']
+        );
+    }
+    $db->exec('BEGIN IMMEDIATE');
+    $db->exec('ROLLBACK');
+    recipeTestAssert(
+        $injectedProductRollback
+        && recipeTestCount(
+            $db,
+            "SELECT COUNT(*) FROM products
+             WHERE barcode = 'injected-product-rollback'"
+        ) === 0,
+        'Injected product-save failure must roll back fully and leave subsequent transactions available'
+    );
+
+    $db->exec("
+        INSERT INTO products (
+            barcode, name, brand, category, prepared_food
+        )
+        VALUES (
+            'inventory-prepared-controller-test',
+            'Inventory Prepared Controller Test',
+            'Test',
+            'Test',
+            0
+        )
+    ");
+    $preparedFlipProductId = (int)$db->lastInsertId();
+    $db->prepare("
+        INSERT INTO inventory (
+            product_id, location, quantity, prepared_food
+        )
+        VALUES (?, 'dispensa', 2, 0)
+    ")->execute([$preparedFlipProductId]);
+    $GLOBALS['ONTOLOGY_AUTONOMOUS_ENABLED_OVERRIDE'] = true;
+    ingredientOntologyControllerObserveProductSafely(
+        $db,
+        $preparedFlipProductId
+    );
+    $preparedFlipSubject = ingredientOntologyControllerSubjectForOwner(
+        $db,
+        'product',
+        $preparedFlipProductId
+    );
+    $db->prepare("
+        UPDATE inventory
+        SET prepared_food = 1
+        WHERE product_id = ? AND quantity > 0
+    ")->execute([$preparedFlipProductId]);
+    $preparedFromInventory =
+        _syncProductPreparedFood($db, $preparedFlipProductId);
+    recipeTestAssert(
+        $preparedFromInventory === 1
+        && recipeTestCount(
+            $db,
+            "SELECT COUNT(*) FROM ontology_subject_occurrences
+             WHERE owner_type = 'product'
+               AND owner_id = ? AND active = 1",
+            [$preparedFlipProductId]
+        ) === 0
+        && recipeTestCount(
+            $db,
+            "SELECT COUNT(*) FROM ontology_controller_jobs
+             WHERE subject_id = ? AND finished_at IS NULL",
+            [(int)$preparedFlipSubject['id']]
+        ) === 0,
+        'Inventory aggregation raw-to-prepared must deactivate controller occurrence/jobs'
+    );
+    $db->prepare("
+        UPDATE inventory
+        SET prepared_food = 0
+        WHERE product_id = ? AND quantity > 0
+    ")->execute([$preparedFlipProductId]);
+    $rawFromInventory =
+        _syncProductPreparedFood($db, $preparedFlipProductId);
+    recipeTestAssert(
+        $rawFromInventory === 0
+        && recipeTestCount(
+            $db,
+            "SELECT COUNT(*) FROM ontology_subject_occurrences
+             WHERE owner_type = 'product'
+               AND owner_id = ? AND active = 1",
+            [$preparedFlipProductId]
+        ) === 1
+        && recipeTestCount(
+            $db,
+            "SELECT COUNT(*) FROM ontology_controller_jobs
+             WHERE subject_id = ?
+               AND status = 'queued'",
+            [(int)$preparedFlipSubject['id']]
+        ) >= 1,
+        'Inventory aggregation prepared-to-raw must observe and requeue controller coverage'
+    );
+    $GLOBALS['PRODUCT_API_JSON_INPUT'] = [
+        'id' => $preparedFlipProductId,
+    ];
+    ob_start();
+    deleteProduct($db);
+    $deletePreparedResponse = json_decode(
+        (string)ob_get_clean(),
+        true
+    );
+    unset($GLOBALS['PRODUCT_API_JSON_INPUT']);
+    recipeTestAssert(
+        !empty($deletePreparedResponse['success'])
+        && recipeTestCount(
+            $db,
+            'SELECT COUNT(*) FROM products WHERE id = ?',
+            [$preparedFlipProductId]
+        ) === 0
+        && recipeTestCount(
+            $db,
+            "SELECT COUNT(*) FROM ontology_subject_occurrences
+             WHERE owner_type = 'product'
+               AND owner_id = ? AND active = 1",
+            [$preparedFlipProductId]
+        ) === 0
+        && recipeTestCount(
+            $db,
+            "SELECT COUNT(*) FROM ontology_subject_occurrences
+             WHERE owner_type = 'product' AND owner_id = ?",
+            [$preparedFlipProductId]
+        ) >= 1
+        && recipeTestCount(
+            $db,
+            "SELECT COUNT(*) FROM ontology_controller_jobs
+             WHERE subject_id = ? AND finished_at IS NULL",
+            [(int)$preparedFlipSubject['id']]
+        ) === 0,
+        'deleteProduct must deactivate controller occurrence/jobs while retaining immutable history'
+    );
+    unset($GLOBALS['ONTOLOGY_AUTONOMOUS_ENABLED_OVERRIDE']);
+
+    $disabledDb = new PDO('sqlite:' . $disabledPath);
+    $disabledDb->setAttribute(
+        PDO::ATTR_ERRMODE,
+        PDO::ERRMODE_EXCEPTION
+    );
+    $disabledDb->setAttribute(
+        PDO::ATTR_DEFAULT_FETCH_MODE,
+        PDO::FETCH_ASSOC
+    );
+    $disabledDb->exec('PRAGMA foreign_keys=ON');
+    initializeDB($disabledDb);
+    migrateDB($disabledDb);
+    $disabledDb->exec('PRAGMA foreign_keys=OFF');
+    $disabledDb->exec("
+        DROP TABLE IF EXISTS ontology_quarantine_retries;
+        DROP TABLE IF EXISTS ontology_provisional_queue;
+        DROP TABLE IF EXISTS ontology_generation_constraint_heads;
+        DROP TABLE IF EXISTS ontology_generation_plans;
+        DROP TABLE IF EXISTS ontology_gold_cases;
+        DROP TABLE IF EXISTS ontology_gold_adversarial_candidates;
+        DROP TABLE IF EXISTS ontology_gold_releases;
+        DROP TABLE IF EXISTS ontology_generations;
+        DROP TABLE IF EXISTS ontology_mutation_plans;
+        DROP TABLE IF EXISTS ontology_controller_responses;
+        DROP TABLE IF EXISTS ontology_controller_prompts;
+        DROP TABLE IF EXISTS ontology_controller_jobs;
+        DROP TABLE IF EXISTS ingredient_ontology_pair_constraints;
+        DROP TABLE IF EXISTS ingredient_ontology_subject_resolutions;
+        DROP TABLE IF EXISTS ontology_constraint_ledger;
+        DROP TABLE IF EXISTS ontology_observation_events;
+        DROP TABLE IF EXISTS ontology_subject_occurrences;
+        DROP TABLE IF EXISTS ontology_subjects;
+        DROP TABLE IF EXISTS ontology_coverage_state;
+        DROP TABLE IF EXISTS ontology_backfill_state;
+        DROP TABLE IF EXISTS ontology_controller_state;
+        DROP TABLE IF EXISTS ontology_artifact_supersessions
+    ");
+    $disabledDb->exec('PRAGMA foreign_keys=ON');
+    $disabledDb->exec("
+        INSERT INTO products (
+            barcode, name, brand, category
+        )
+        VALUES (
+            'disabled-no-controller',
+            'Disabled No Controller Product',
+            'Test',
+            'Test'
+        )
+    ");
+    $disabledProductId = (int)$disabledDb->lastInsertId();
+    $disabledDb->prepare("
+        INSERT INTO inventory (product_id, location, quantity)
+        VALUES (?, 'dispensa', 2)
+    ")->execute([$disabledProductId]);
+    $disabledQueue = canonicalIngredientEnqueueProduct(
+        $disabledDb,
+        $disabledProductId,
+        'disabled_controller_test'
+    );
+    $disabledRecipe = recipeCatalogSaveVariant(
+        $disabledDb,
+        [
+            'title' => 'Disabled Controller Decision',
+            'ingredients' => [['name' => 'Disabled ingredient']],
+            'steps' => ['Use it.'],
+        ],
+        [
+            'connector' => 'manual',
+            'external_id' => 'disabled-controller-decision',
+        ]
+    );
+    $disabledDetail = recipeCatalogDetail(
+        $disabledDb,
+        (int)$disabledRecipe['id']
+    );
+    $disabledIngredient = $disabledDetail['ingredients'][0];
+    $disabledDecision = recipeIngredientDecision(
+        $disabledDb,
+        [
+            'recipe_id' => (int)$disabledRecipe['id'],
+            'ingredient_key' => $disabledIngredient['key'],
+            'position' => $disabledIngredient['position'],
+            'action' => 'select_inventory_product',
+            'selected_product_id' => $disabledProductId,
+            'feedback_token' => $disabledIngredient['feedback_token'],
+            'idempotency_key' => 'disabled-no-controller-decision',
+            'action_origin' => 'test',
+        ]
+    );
+    $GLOBALS['PRODUCT_API_JSON_INPUT'] = [
+        'name' => 'Disabled Product Save',
+        'brand' => 'Test',
+        'category' => 'Test',
+        'barcode' => 'disabled-product-save',
+    ];
+    ob_start();
+    saveProduct($disabledDb);
+    $disabledSave = json_decode((string)ob_get_clean(), true);
+    unset($GLOBALS['PRODUCT_API_JSON_INPUT']);
+    $disabledSavedId = (int)($disabledSave['id'] ?? 0);
+    $disabledDb->exec("
+        INSERT INTO products (name, brand, category)
+        VALUES ('Disabled Merge Keep', 'Test', 'Test')
+    ");
+    $disabledMergeKeep = (int)$disabledDb->query("
+        SELECT id FROM products
+        WHERE name = 'Disabled Merge Keep'
+        ORDER BY id DESC LIMIT 1
+    ")->fetchColumn();
+    $disabledDb->exec("
+        INSERT INTO products (name, brand, category)
+        VALUES ('Disabled Merge Drop', 'Test', 'Test')
+    ");
+    $disabledMergeDrop = (int)$disabledDb->query("
+        SELECT id FROM products
+        WHERE name = 'Disabled Merge Drop'
+        ORDER BY id DESC LIMIT 1
+    ")->fetchColumn();
+    mergeProducts(
+        $disabledDb,
+        $disabledMergeKeep,
+        $disabledMergeDrop
+    );
+    $GLOBALS['PRODUCT_API_JSON_INPUT'] = ['id' => $disabledSavedId];
+    ob_start();
+    deleteProduct($disabledDb);
+    $disabledDelete = json_decode((string)ob_get_clean(), true);
+    unset($GLOBALS['PRODUCT_API_JSON_INPUT']);
+    $disabledCanonicalColumns = array_column(
+        $disabledDb->query("
+            PRAGMA table_info(canonical_processing_queue)
+        ")->fetchAll(PDO::FETCH_ASSOC),
+        'name'
+    );
+    $disabledProposalColumns = array_column(
+        $disabledDb->query("
+            PRAGMA table_info(recipe_ingredient_proposal_outbox)
+        ")->fetchAll(PDO::FETCH_ASSOC),
+        'name'
+    );
+    recipeTestAssert(
+        !empty($disabledQueue['queued'])
+        && $disabledDecision['availability'] === 'have'
+        && $disabledDecision['constraint_epoch'] === 0
+        && $disabledDecision['constraint_id'] === null
+        && $disabledDecision['autonomous_job_id'] === null
+        && !empty($disabledSave['success'])
+        && !empty($disabledDelete['success'])
+        && recipeTestCount(
+            $disabledDb,
+            'SELECT COUNT(*) FROM products WHERE id = ?',
+            [$disabledMergeDrop]
+        ) === 0
+        && !ingredientOntologyControllerTableExists(
+            $disabledDb,
+            'ontology_controller_state'
+        )
+        && count(array_diff([
+            'request_generation', 'lease_token',
+            'lease_generation', 'lease_expires_at',
+            'request_fingerprint',
+        ], $disabledCanonicalColumns)) === 0
+        && count(array_diff([
+            'lease_token', 'lease_generation', 'lease_expires_at',
+        ], $disabledProposalColumns)) === 0,
+        'Disabled core product/canonical/recipe decision paths must work without controller tables'
+    );
+    $disabledDb = null;
 
     echo 'Recipe backend tests passed: '
         . number_format($recipeTestAssertions)

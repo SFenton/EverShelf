@@ -48,6 +48,7 @@ Usage:
   php scripts/ingredient-ontology-v3.php validate --db=copy.sqlite --revision-id=N [--json]
   php scripts/ingredient-ontology-v3.php prompt --db=copy.sqlite --version-id=N --inputs=inputs.json [--prompt-out=prompt.txt] [--manifest-out=manifest.json]
   php scripts/ingredient-ontology-v3.php stage-proposals --db=copy.sqlite --version-id=N --payload=proposals.json --manifest=manifest.json --write
+  php scripts/ingredient-ontology-v3.php apply --db=copy.sqlite --change-set-id=N --actor=autonomous_controller --reason=TEXT --write
   php scripts/ingredient-ontology-v3.php reject --db=copy.sqlite --change-set-id=N --actor=NAME --reason=TEXT --write
   php scripts/ingredient-ontology-v3.php dispose --db=copy.sqlite --change-set-id=N --actor=NAME --reason=TEXT --write
   php scripts/ingredient-ontology-v3.php revert --db=copy.sqlite --change-set-id=N --actor=NAME --reason=TEXT --write
@@ -201,6 +202,7 @@ $mutatingCommands = [
     'build-shadow',
     'build-requirement-shadow',
     'stage-proposals',
+    'apply',
     'reject',
     'dispose',
     'revert',
@@ -226,6 +228,7 @@ try {
         'build-shadow',
         'build-requirement-shadow',
         'stage-proposals',
+        'apply',
         'reject',
         'dispose',
         'revert',
@@ -792,6 +795,7 @@ try {
         case 'reject':
         case 'dispose':
         case 'revert':
+        case 'apply':
             $changeSetId = ontologyV3CliRequireInt(
                 $options,
                 'change-set-id'

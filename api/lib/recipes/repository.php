@@ -849,6 +849,12 @@ function recipeCatalogSaveVariant(PDO $db, array $recipe, array $metadata = []):
         : 0;
     $normalized = recipeCatalogNormalizeRecipe($db, $recipe, $metadata);
     $saveLock = recipeCatalogSaveLock();
+    $controllerObservation = [
+        'observed' => false,
+        'disabled' => true,
+        'degraded' => false,
+        'surface' => 'recipe',
+    ];
     try {
     $origin = $normalized['origin'];
     $recipeId = 0;
@@ -1242,6 +1248,16 @@ function recipeCatalogSaveVariant(PDO $db, array $recipe, array $metadata = []):
             WHERE recipe_id = ? AND position >= ?
         ")->execute([$recipeId, count($normalized['source_ingredients'])]);
 
+        if (function_exists(
+            'ingredientOntologyControllerObserveRecipeSafely'
+        )) {
+            $controllerObservation =
+                ingredientOntologyControllerObserveRecipeSafely(
+                    $db,
+                    $recipeId
+                );
+        }
+
         $db->prepare("
             INSERT OR IGNORE INTO recipe_user_state (recipe_id)
             VALUES (?)
@@ -1262,10 +1278,18 @@ function recipeCatalogSaveVariant(PDO $db, array $recipe, array $metadata = []):
         throw $e;
     }
 
+    if (
+        !empty($controllerObservation['observed'])
+        && function_exists('ingredientOntologyControllerWake')
+    ) {
+        ingredientOntologyControllerWake();
+    }
+
     $saved = recipeCatalogGetById($db, $recipeId, true);
     if ($saved === null) {
         throw new RuntimeException('Recipe catalog save could not be read back');
     }
+    $saved['controller_observation'] = $controllerObservation;
     return $saved;
     } finally {
         recipeCatalogSaveUnlock($saveLock);

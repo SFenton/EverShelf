@@ -48,6 +48,13 @@ function ingredientOntologyV3MappingFromRow(array $row): ?array {
     }
     return [
         'mapping_id' => (int)$row['mapping_id'],
+        'owner_fingerprint' => (string)(
+            $row['owner_fingerprint'] ?? ''
+        ),
+        'subject_id' => isset($row['subject_id'])
+            && $row['subject_id'] !== null
+                ? (int)$row['subject_id']
+                : null,
         'entity_id' => $row['entity_id'] !== null
             ? (int)$row['entity_id']
             : null,
@@ -71,6 +78,18 @@ function ingredientOntologyV3Inventory(
         SELECT m.id AS mapping_id, m.entity_id, m.status AS mapping_status,
                m.confidence AS mapping_confidence_v3,
                m.mapping_source AS mapping_source_v3,
+               m.owner_fingerprint,
+               (
+                   SELECT occurrence.subject_id
+                   FROM ontology_subject_occurrences occurrence
+                   WHERE occurrence.owner_type = 'product'
+                     AND occurrence.owner_id = m.owner_id
+                     AND occurrence.owner_fingerprint =
+                         m.owner_fingerprint
+                     AND occurrence.active = 1
+                   ORDER BY occurrence.id DESC
+                   LIMIT 1
+               ) AS subject_id,
                m.source_label, m.attributes_json,
                m.is_staple AS mapping_is_staple,
                e.slug AS entity_slug, e.canonical_name AS entity_name
@@ -220,23 +239,50 @@ function ingredientOntologyV3RevisionIntegrityAudit(
     )) {
         $errors[] = 'ontology frozen corpus profile is invalid';
     }
-    $frozenCorpus = in_array(
-        $profile,
-        ['eval', 'provider', 'production', 'test'],
-        true
-    ) ? ingredientOntologyV3FrozenCorpusAudit(
-        $db,
-        $profile
-    ) : ['valid' => false];
-    $subjectUniverse = in_array(
-        $profile,
-        ['eval', 'provider', 'production', 'test'],
-        true
-    ) ? ingredientOntologyV3SubjectUniverseAudit(
-        $db,
-        $versionId,
-        $profile
-    ) : ['valid' => false];
+    $dynamicPins = function_exists(
+        'ingredientOntologyControllerUsesDynamicPins'
+    ) && ingredientOntologyControllerUsesDynamicPins($version)
+        ? ingredientOntologyControllerDynamicVersionPins(
+            $db,
+            $versionId,
+            $version
+        )
+        : null;
+    $frozenCorpus = $dynamicPins !== null
+        ? $dynamicPins['corpus']
+        : (
+            in_array(
+                $profile,
+                ['eval', 'provider', 'production', 'test'],
+                true
+            ) ? ingredientOntologyV3FrozenCorpusAudit(
+                $db,
+                $profile
+            ) : ['valid' => false]
+        );
+    $subjectUniverse = $dynamicPins !== null
+        ? $dynamicPins['subjects']
+        : (
+            in_array(
+                $profile,
+                ['eval', 'provider', 'production', 'test'],
+                true
+            ) ? ingredientOntologyV3SubjectUniverseAudit(
+                $db,
+                $versionId,
+                $profile
+            ) : ['valid' => false]
+        );
+    if ($dynamicPins !== null) {
+        $frozenCorpus['valid'] = hash_equals(
+            (string)$version['frozen_corpus_hash'],
+            (string)$frozenCorpus['actual_hash']
+        );
+        $subjectUniverse['valid'] = hash_equals(
+            (string)$version['frozen_subjects_hash'],
+            (string)$subjectUniverse['subject_universe_hash']
+        );
+    }
     if (empty($frozenCorpus['valid'])) {
         $errors[] = 'frozen source corpus profile changed';
     }
@@ -274,10 +320,16 @@ function ingredientOntologyV3RevisionIntegrityAudit(
         $version['activation_block_reason'] ?? ''
     );
     $manifest = ingredientOntologyV3ResolutionManifest();
-    $expectedActivationPolicy = $profile === 'test'
+    $expectedActivationPolicy = (
+        $profile === 'test'
+        || $dynamicPins !== null
+    )
         ? $activationPolicy
         : (string)($manifest['activation_policy'] ?? 'blocked');
-    $expectedActivationBlockReason = $profile === 'test'
+    $expectedActivationBlockReason = (
+        $profile === 'test'
+        || $dynamicPins !== null
+    )
         ? $activationBlockReason
         : (string)($manifest['activation_block_reason'] ?? '');
     if (
@@ -286,7 +338,9 @@ function ingredientOntologyV3RevisionIntegrityAudit(
     ) {
         $errors[] = 'ontology activation policy or reason changed';
     }
-    $expectedPolicyHash = in_array(
+    $expectedPolicyHash = $dynamicPins !== null
+        ? (string)$dynamicPins['policy_hash']
+        : (in_array(
         $profile,
         ['eval', 'provider', 'production', 'test'],
         true
@@ -294,7 +348,7 @@ function ingredientOntologyV3RevisionIntegrityAudit(
         $profile,
         $expectedActivationPolicy,
         $expectedActivationBlockReason
-    ) : '';
+    ) : '');
     if (
         !is_string($version['policy_hash'] ?? null)
         || !hash_equals(
@@ -533,6 +587,18 @@ function ingredientOntologyV3LoadRecipeBatch(
                m.status AS mapping_status,
                m.confidence AS mapping_confidence_v3,
                m.mapping_source AS mapping_source_v3,
+               m.owner_fingerprint,
+               (
+                   SELECT occurrence.subject_id
+                   FROM ontology_subject_occurrences occurrence
+                   WHERE occurrence.owner_type = 'recipe_ingredient'
+                     AND occurrence.owner_id = m.owner_id
+                     AND occurrence.owner_fingerprint =
+                         m.owner_fingerprint
+                     AND occurrence.active = 1
+                   ORDER BY occurrence.id DESC
+                   LIMIT 1
+               ) AS subject_id,
                m.source_label, m.attributes_json,
                m.is_staple AS mapping_is_staple,
                e.slug AS entity_slug, e.canonical_name AS entity_name

@@ -3934,67 +3934,108 @@ function ingredientOntologyV3GraphValidate(
     int $versionId
 ): array {
     $entities = [];
+    $entitySlugs = [];
     $stmt = $db->prepare("
-        SELECT id FROM ingredient_ontology_entities
+        SELECT id, slug FROM ingredient_ontology_entities
         WHERE ontology_version_id = ? AND active = 1
     ");
     $stmt->execute([$versionId]);
-    while ($id = $stmt->fetchColumn()) {
-        $entities[(int)$id] = true;
+    while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
+        $id = (int)$row['id'];
+        $entities[$id] = true;
+        $entitySlugs[$id] = (string)$row['slug'];
     }
     $parents = [];
-    $children = [];
+    $primaryParents = [];
+    $secondaryParents = [];
     $dangling = [];
     $stmt = $db->prepare("
-        SELECT id, from_entity_id, to_entity_id
+        SELECT id, from_entity_id, to_entity_id, relation,
+               direction, is_primary, provenance
         FROM ingredient_ontology_relations
         WHERE ontology_version_id = ?
-          AND relation = 'is_a'
-          AND is_primary = 1
           AND review_state = 'accepted'
         ORDER BY id
     ");
     $stmt->execute([$versionId]);
+    $acceptedRelations = [];
     while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
         $from = (int)$row['from_entity_id'];
         $to = (int)$row['to_entity_id'];
         if (!isset($entities[$from], $entities[$to])) {
-            $dangling[] = (int)$row['id'];
+            if ((string)$row['relation'] === 'is_a') {
+                $dangling[] = (int)$row['id'];
+            }
             continue;
         }
-        $parents[$from][] = $to;
-        $children[$to][] = $from;
+        $relation = (string)$row['relation'];
+        $acceptedRelations[] = [
+            'id' => (int)$row['id'],
+            'from' => $from,
+            'to' => $to,
+            'relation' => $relation,
+            'direction' => (string)$row['direction'],
+            'primary' => !empty($row['is_primary']),
+            'provenance' => (string)$row['provenance'],
+        ];
+        if ($relation !== 'is_a') {
+            continue;
+        }
+        $parents[$from][$to] = true;
+        if (!empty($row['is_primary'])) {
+            $primaryParents[$from][$to] = true;
+        } else {
+            $secondaryParents[$from][$to] = true;
+        }
     }
     $multipleParents = [];
-    foreach ($parents as $entityId => $values) {
-        if (count(array_unique($values)) > 1) {
+    $excessSecondaryParents = [];
+    foreach ($entities as $entityId => $_present) {
+        if (count($primaryParents[$entityId] ?? []) > 1) {
             $multipleParents[] = $entityId;
         }
+        if (count($secondaryParents[$entityId] ?? []) > 2) {
+            $excessSecondaryParents[] = $entityId;
+        }
     }
-    $state = [];
-    $cycles = [];
-    $visit = static function (int $node, array $path = []) use (
-        &$visit,
-        &$state,
-        &$parents,
-        &$cycles
-    ): void {
-        if (($state[$node] ?? 0) === 2) {
-            return;
-        }
-        if (($state[$node] ?? 0) === 1) {
-            $cycles[] = array_merge($path, [$node]);
-            return;
-        }
-        $state[$node] = 1;
-        foreach ($parents[$node] ?? [] as $parent) {
-            $visit($parent, array_merge($path, [$node]));
-        }
-        $state[$node] = 2;
-    };
+    $children = [];
+    $indegree = [];
     foreach (array_keys($entities) as $entityId) {
-        $visit($entityId);
+        $indegree[$entityId] = count($parents[$entityId] ?? []);
+        foreach (array_keys($parents[$entityId] ?? []) as $parentId) {
+            $children[(int)$parentId][$entityId] = true;
+        }
     }
+    $queue = [];
+    foreach ($indegree as $entityId => $count) {
+        if ($count === 0) {
+            $queue[] = (int)$entityId;
+        }
+    }
+    sort($queue, SORT_NUMERIC);
+    $topological = [];
+    for ($offset = 0; $offset < count($queue); $offset++) {
+        $node = $queue[$offset];
+        $topological[] = $node;
+        foreach (array_keys($children[$node] ?? []) as $childId) {
+            $childId = (int)$childId;
+            $indegree[$childId]--;
+            if ($indegree[$childId] === 0) {
+                $queue[] = $childId;
+            }
+        }
+    }
+    $cyclicEntityIds = [];
+    if (count($topological) !== count($entities)) {
+        foreach ($indegree as $entityId => $count) {
+            if ($count > 0) {
+                $cyclicEntityIds[] = (int)$entityId;
+            }
+        }
+    }
+    $cycles = $cyclicEntityIds
+        ? [array_slice($cyclicEntityIds, 0, 100)]
+        : [];
     $crossVersion = (int)$db->query("
         SELECT COUNT(*)
         FROM ingredient_ontology_relations r
@@ -4006,22 +4047,227 @@ function ingredientOntologyV3GraphValidate(
               OR t.ontology_version_id != r.ontology_version_id
           )
     ")->fetchColumn();
-    $roots = 0;
+    $roots = [];
     foreach (array_keys($entities) as $entityId) {
         if (empty($parents[$entityId])) {
-            $roots++;
+            $roots[] = $entityId;
         }
     }
+
+    $foodIds = array_keys(array_filter(
+        $entitySlugs,
+        static fn(string $slug): bool => $slug === 'food'
+    ));
+    $foodId = count($foodIds) === 1 ? (int)$foodIds[0] : 0;
+    $missingPrimaryParents = [];
+    foreach (array_keys($entities) as $entityId) {
+        if (
+            $entityId !== $foodId
+            && count($primaryParents[$entityId] ?? []) !== 1
+        ) {
+            $missingPrimaryParents[] = $entityId;
+        }
+    }
+
+    $unreachable = [];
+    $ancestorOverflow = [];
+    $depthOverflow = [];
+    $pathOverflow = [];
+    $ancestorCounts = [];
+    $maximumDepths = [];
+    $rootPathCounts = [];
+    $traversalExpansions = 0;
+    $traversalExpansionLimit = max(
+        16384,
+        min(2000000, count($entities) * 256)
+    );
+    $traversalExpansionExceeded = false;
+    if (!$cycles && $foodId > 0) {
+        $memo = [];
+        foreach ($topological as $node) {
+            $traversalExpansions++;
+            if ($traversalExpansions > $traversalExpansionLimit) {
+                $traversalExpansionExceeded = true;
+                break;
+            }
+            if ($node === $foodId) {
+                $memo[$node] = [
+                    'ancestors' => [],
+                    'depth' => 0,
+                    'paths' => 1,
+                ];
+                continue;
+            }
+            $ancestors = [];
+            $maximumDepth = 0;
+            $pathsToFood = 0;
+            foreach (array_keys($parents[$node] ?? []) as $parentId) {
+                $parentId = (int)$parentId;
+                $traversalExpansions++;
+                if ($traversalExpansions > $traversalExpansionLimit) {
+                    $traversalExpansionExceeded = true;
+                    break 2;
+                }
+                $ancestors[$parentId] = true;
+                $parentStats = $memo[$parentId] ?? [
+                    'ancestors' => [],
+                    'depth' => 0,
+                    'paths' => 0,
+                ];
+                $maximumDepth = max(
+                    $maximumDepth,
+                    1 + (int)$parentStats['depth']
+                );
+                $pathsToFood = min(
+                    9,
+                    $pathsToFood + (int)$parentStats['paths']
+                );
+                foreach (
+                    array_keys($parentStats['ancestors']) as $ancestorId
+                ) {
+                    $traversalExpansions++;
+                    if (
+                        $traversalExpansions
+                        > $traversalExpansionLimit
+                    ) {
+                        $traversalExpansionExceeded = true;
+                        break 3;
+                    }
+                    $ancestors[(int)$ancestorId] = true;
+                    if (count($ancestors) > 64) {
+                        break;
+                    }
+                }
+                if (count($ancestors) > 64) {
+                    break;
+                }
+            }
+            $memo[$node] = [
+                'ancestors' => $ancestors,
+                'depth' => $maximumDepth,
+                'paths' => $pathsToFood,
+            ];
+        }
+        foreach (array_keys($entities) as $start) {
+            $stats = $memo[$start] ?? [
+                'ancestors' => [],
+                'depth' => 0,
+                'paths' => 0,
+            ];
+            $ancestorCounts[$start] = count($stats['ancestors']);
+            $maximumDepths[$start] = (int)$stats['depth'];
+            $rootPathCounts[$start] = (int)$stats['paths'];
+            if ($ancestorCounts[$start] > 64) {
+                $ancestorOverflow[$start] = true;
+            }
+            if ($maximumDepths[$start] > 32) {
+                $depthOverflow[$start] = true;
+            }
+            if ($rootPathCounts[$start] > 8) {
+                $pathOverflow[$start] = true;
+            }
+            if ($rootPathCounts[$start] === 0) {
+                $unreachable[] = $start;
+            }
+        }
+    } elseif ($foodId <= 0) {
+        $unreachable = array_keys($entities);
+    }
+
+    $pairRelations = [];
+    $reciprocal = [];
+    foreach ($acceptedRelations as $relation) {
+        $pair = $relation['from'] . ':' . $relation['to'];
+        $pairRelations[$pair][$relation['relation']][] =
+            (string)$relation['provenance'];
+        if (
+            in_array($relation['relation'], [
+                'is_a', 'variant_of', 'derived_from', 'component_of',
+            ], true)
+            && isset(
+                $pairRelations[
+                    $relation['to'] . ':' . $relation['from']
+                ][$relation['relation']]
+            )
+        ) {
+            $reciprocal[] = [
+                $relation['from'],
+                $relation['to'],
+                $relation['relation'],
+            ];
+        }
+    }
+    $pairConflicts = [];
+    foreach ($pairRelations as $pair => $types) {
+        $controllerOwned = false;
+        foreach ($types as $provenances) {
+            if (in_array(
+                'autonomous_controller',
+                $provenances,
+                true
+            )) {
+                $controllerOwned = true;
+                break;
+            }
+        }
+        if (count($types) > 1 && $controllerOwned) {
+            $pairConflicts[] = [
+                'pair' => $pair,
+                'relations' => array_keys($types),
+            ];
+        }
+    }
+
+    $valid = !$dangling
+        && !$multipleParents
+        && !$excessSecondaryParents
+        && !$cycles
+        && $crossVersion === 0
+        && count($entities) > 0
+        && $foodId > 0
+        && count($roots) === 1
+        && $roots[0] === $foodId
+        && !$missingPrimaryParents
+        && !$unreachable
+        && !$ancestorOverflow
+        && !$depthOverflow
+        && !$pathOverflow
+        && !$traversalExpansionExceeded
+        && !$pairConflicts
+        && !$reciprocal;
     return [
-        'valid' => !$dangling
-            && !$multipleParents
-            && !$cycles
-            && $crossVersion === 0
-            && count($entities) > 0,
+        'valid' => $valid,
         'entity_count' => count($entities),
-        'root_count' => $roots,
+        'root_count' => count($roots),
+        'food_entity_id' => $foodId > 0 ? $foodId : null,
         'dangling_relation_ids' => $dangling,
         'multiple_parent_entity_ids' => $multipleParents,
+        'missing_primary_parent_entity_ids' =>
+            array_slice($missingPrimaryParents, 0, 100),
+        'excess_secondary_parent_entity_ids' =>
+            array_slice($excessSecondaryParents, 0, 100),
+        'unreachable_from_food_entity_ids' =>
+            array_slice($unreachable, 0, 100),
+        'ancestor_overflow_entity_ids' =>
+            array_map('intval', array_keys($ancestorOverflow)),
+        'depth_overflow_entity_ids' =>
+            array_map('intval', array_keys($depthOverflow)),
+        'path_overflow_entity_ids' =>
+            array_map('intval', array_keys($pathOverflow)),
+        'maximum_ancestor_count' =>
+            $ancestorCounts ? max($ancestorCounts) : 0,
+        'maximum_depth' =>
+            $maximumDepths ? max($maximumDepths) : 0,
+        'maximum_root_path_count' =>
+            $rootPathCounts ? max($rootPathCounts) : 0,
+        'traversal_expansions' => $traversalExpansions,
+        'traversal_expansion_limit' => $traversalExpansionLimit,
+        'traversal_expansion_exceeded' =>
+            $traversalExpansionExceeded,
+        'relation_pair_conflicts' =>
+            array_slice($pairConflicts, 0, 100),
+        'reciprocal_relation_conflicts' =>
+            array_slice($reciprocal, 0, 100),
         'cycles' => array_slice($cycles, 0, 20),
         'cross_version_relations' => $crossVersion,
     ];

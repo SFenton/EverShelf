@@ -393,9 +393,12 @@ positive evidence for that exact product. `reject_current_match` binds negative
 evidence only when the exact displayed product is still current; staples/no-target
 rows remain availability-only. Every positive/negative identity decision writes a
 transactional proposal outbox row and candidate regression fixture in the same
-SQLite transaction. Positive evidence is immediately eligible; negative evidence
-remains provisional for 48 hours. A later decision deterministically supersedes
-the prior provisional outbox item.
+SQLite transaction. The autonomous controller also appends one immutable
+correction observation, advances the monotonic constraint epoch, and installs one
+immediate exact `must_equal`/`must_not_equal` constraint. A later decision
+supersedes the prior live constraint and every stale nonterminal artifact through
+epoch/lease CAS. The 48-hour delay applies only to the retained legacy proposal
+handoff; it does not delay the exact controller constraint.
 
 Proposal processing is asynchronous, staging-only, and never activates ontology
 content. The worker uses exactly
@@ -429,7 +432,63 @@ keys, unavailable models, and network failures remain durable
 blocked/retry rows. Raw model JSON never writes active entities, labels, relations,
 or mappings; the proposal CLI refuses the active database, and copied-database
 candidate builds, regression/gold gates, shadow
-scoring, human adjudication, and explicit activation/rollback remain mandatory.
+scoring, and explicit activation/rollback remain mandatory for the legacy
+proposal workflow.
+
+The default-off autonomous controller is a separate machine-adjudicated path. It
+deduplicates recipe ingredients through immutable recipe-independent subjects,
+forks an unreferenced building child, applies only closed repair kinds, validates
+all live exact constraints through the real matcher, seals and shadow-scores the
+child, and may atomically promote it only when every deterministic graph, gold,
+materialization, fingerprint, blast, relevant-stream-head, durable P7 critic,
+and rollback gate passes. Unrelated constraint epochs do not invalidate or roll
+back a generation; every active constraint is still rechecked before promotion.
+Unsafe or unsupported work abstains/quarantines without a human approval queue.
+`ONTOLOGY_AUTONOMOUS_ENABLED=false` also makes live product/recipe observation
+hooks no-ops. When enabled they are savepoint-isolated, so controller degradation
+cannot roll back the ordinary save. All model and promotion flags are false by
+default:
+
+```bash
+php scripts/ontology-controller.php status --db=/path/to/copy.sqlite
+php scripts/ontology-controller.php backfill \
+  --db=/path/to/copy.sqlite --json-out=subject-report.json
+php scripts/ontology-controller.php work \
+  --db=/path/to/evershelf.db --write --allow-active-db --loop \
+  --minimum-priority=50
+php scripts/ontology-controller.php benchmark-import \
+  --db=/path/to/copy.sqlite --file=measured-policy.json --write --activate
+```
+
+`backfill` is dry-run unless `--write` is supplied and refuses the active DB
+without `--allow-active-db`. It uses keyset batches and durable checkpoints
+rather than one corpus-sized transaction. Its subject jobs remain at priority
+`0`; production cron/work filters them out with a minimum priority of `50`.
+Live recipe observations enqueue at `50`, while live product observations use
+`100`, raise an existing queued historical job, and safely revive terminal work
+with fresh input and lease fences. Copied offline workers can explicitly select
+historical work with `--minimum-priority=0`. Google Interactions API support uses a separate key,
+strict JSON Schema, an exact model ID, `thinking_level`, and no silent fallback.
+Generalized repairs require an immutable measured benchmark policy and a
+persisted subtract-only P7 critic result; critic block/unavailability fails
+closed. Generation finalization, critic, and gold maturity/dual-run work are
+durable scheduler jobs.
+
+When a generalized attempt abstains or is quarantined, the subject remains in
+coverage. A building child receives an unresolved, explicitly non-satisfying
+portable provisional leaf under `Unclassified ingredient`; immutable retry
+evidence can later remap it without deleting fallback history. Prepared products
+are excluded from ingredient-subject expansion and resume observation only when
+toggled back to raw.
+
+The model provider can be `copilot_socket`, using the local bounded Unix-socket
+service in `scripts/ontology-copilot-provider.py`. It invokes the authenticated
+host Copilot CLI with no tools, custom instructions, MCP servers, remote export,
+or fallback. The sample user unit is
+`docs/evershelf-ontology-copilot.service`; it is documentation only and is not
+installed or started by EverShelf. It creates the socket below
+`$XDG_RUNTIME_DIR`; Compose mounts that directory at
+`/run/evershelf-ontology` for PHP.
 
 Cookidoo My Week write scaffolding is separate from metadata hydration and remains
 disabled by default. EverShelf requires `COOKIDOO_PLANNER_ENABLED=true`; the bridge
@@ -492,8 +551,10 @@ repository-policy review before hydration could be re-enabled.
 
 ### Ingredient ontology v3 shadow workflow
 
-Ontology v3 is additive, disabled by default, not deployed, and not activated in
-this release. It uses a strict primary `is_a` spine plus reviewed
+Ontology v3 is additive and active only when the active score revision references
+an ontology version; there is no independent active-ontology pointer. Autonomous
+controller/model/promotion paths remain disabled by default. The graph uses a
+strict primary `is_a` spine plus reviewed
 `equivalent_to`, `variant_of`, `substitutes_for`, `derived_from`, and
 `component_of` relations. Identity is the same base entity with compatible
 defining facets such as form, processing, cut, bone, skin, refinement, variety,
@@ -616,10 +677,12 @@ score, match, requirement, member, and recipe-state materializations. Validation
 recomputes canonical row/content/seal and materialized-value hashes, checks
 bidirectional recipe/ingredient/requirement ID equality, and compares portable
 terminal-disposition and legacy-owner outcome digests across eval/pilot copies.
-The retained 60-positive / 50-critical-negative adjudicated gold base is
-code-pinned, frozen-source and owner/product fingerprint-bound, structurally
-validated, and supersession-audited. Maintainer review metadata records its
-scope and confidence limits; code does not claim or infer model independence.
+The pinned matcher fixture currently contains 60 cases: 21 expected positives
+and 39 critical negatives. The pinned resolution workbook currently contains 84
+positives and 52 critical negatives. Both are frozen-source and
+owner/product-fingerprint bound, structurally validated, and
+supersession-audited. Their metadata records scope and confidence limits; code
+does not claim corpus-wide statistical precision or model independence.
 Generated accepted-row snapshots are conformance artifacts, not gold.
 
 The minute score rebuild detects an active v3 score revision and rebuilds only
@@ -657,7 +720,7 @@ critical false positives. Assertion attributes are closed to the selected
 ontology version's facet/value map. Reports include bounded error cases and 95%
 Wilson intervals.
 
-Gemini 3.5 Flash is the frozen proposal default. The benchmark found missing
+Gemini 3.5 Flash remains the frozen legacy proposal default. The benchmark found missing
 facets/inconsistent entities from Pro and one Gemini 3.6 Flash run that marked all
 hard attributes non-defining. Model JSON is therefore fenced, bounded, closed-set,
 staged only, and never auto-applied. Reduced coverage and cookability are expected
