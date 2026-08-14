@@ -156,7 +156,7 @@ class ProviderTests(unittest.TestCase):
         self.assertIn("--no-auto-update", argv)
         self.assertIn("--available-tools=", argv)
         self.assertIn("--excluded-tools=*", argv)
-        self.assertIn("--deny-tool=*", argv)
+        self.assertNotIn("--deny-tool=*", argv)
         self.assertFalse(captured["kwargs"]["shell"])
         self.assertNotIn("--effort", argv)
         self.assertNotIn(req["prompt"], argv)

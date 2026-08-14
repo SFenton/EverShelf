@@ -146,7 +146,6 @@ class CopilotInvoker:
             str(Path(self.work_dir) / "logs"),
             "--available-tools=",
             "--excluded-tools=*",
-            "--deny-tool=*",
             "--allow-all-tools",
             "--disallow-temp-dir",
             "-C",
