@@ -5684,6 +5684,29 @@ try {
         ORDER BY id LIMIT 1
     ")->fetchColumn();
     $db->prepare("
+        INSERT INTO ontology_provisional_queue (
+            subject_id, portable_slug, source_job_id,
+            status, reason, next_attempt_at
+        )
+        VALUES (?, ?, ?, 'plan_ready', 'shared subject fixture',
+                datetime('now', '+15 minutes'))
+    ")->execute([
+        $sharedBasilSubject,
+        'provisional-shared-basil-' . $sharedBasilSubject,
+        $sharedBasilJob,
+    ]);
+    $db->prepare("
+        INSERT INTO ontology_quarantine_retries (
+            source_job_id, subject_id, policy_hash,
+            next_attempt_at
+        )
+        VALUES (?, ?, ?, datetime('now', '+15 minutes'))
+    ")->execute([
+        $sharedBasilJob,
+        $sharedBasilSubject,
+        str_repeat('b', 64),
+    ]);
+    $db->prepare("
         UPDATE products SET prepared_food = 1 WHERE id = ?
     ")->execute([$sharedBasilOne]);
     ingredientOntologyControllerObserveProductSafely(
@@ -5708,7 +5731,15 @@ try {
             "SELECT COUNT(*) FROM ontology_subject_occurrences
              WHERE subject_id = ? AND active = 1",
             [$sharedBasilSubject]
-        ) === 1,
+        ) === 1
+        && $db->query("
+            SELECT status FROM ontology_provisional_queue
+            WHERE subject_id = {$sharedBasilSubject}
+        ")->fetchColumn() === 'plan_ready'
+        && $db->query("
+            SELECT status FROM ontology_quarantine_retries
+            WHERE subject_id = {$sharedBasilSubject}
+        ")->fetchColumn() === 'pending',
         'Preparing/deleting one shared Basil owner must preserve the shared job and other active occurrence'
     );
     $db->prepare("
@@ -5723,7 +5754,15 @@ try {
         $db->query("
             SELECT status FROM ontology_controller_jobs
             WHERE id = {$sharedBasilJob}
-        ")->fetchColumn() === 'superseded',
+        ")->fetchColumn() === 'superseded'
+        && $db->query("
+            SELECT status FROM ontology_provisional_queue
+            WHERE subject_id = {$sharedBasilSubject}
+        ")->fetchColumn() === 'resolved'
+        && $db->query("
+            SELECT status FROM ontology_quarantine_retries
+            WHERE subject_id = {$sharedBasilSubject}
+        ")->fetchColumn() === 'resolved',
         'Shared subject job may terminalize only after its final active occurrence is removed'
     );
 

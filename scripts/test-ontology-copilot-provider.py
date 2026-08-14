@@ -243,6 +243,44 @@ class ProviderTests(unittest.TestCase):
         self.assertFalse(response["ok"])
         self.assertEqual(response["error"], "copilot_malformed_jsonl")
 
+    def test_single_json_fence_is_accepted(self):
+        fenced = provider.stable_json(
+            {
+                "type": "assistant.message",
+                "data": {
+                    "content": '```json\n{"ok":true}\n```',
+                },
+            }
+        )
+        invoker = provider.CopilotInvoker(
+            runner=lambda *a, **k: FakeCompleted(fenced + "\n")
+        )
+        plan, _usage = invoker.invoke(request())
+        self.assertEqual(plan, {"ok": True})
+
+    def test_json_fence_with_commentary_is_rejected(self):
+        for content in (
+            'Result:\n```json\n{"ok":true}\n```',
+            '```json\n{"ok":true}\n```\nDone.',
+            '```json\n{"ok":true}\n```json',
+        ):
+            with self.subTest(content=content):
+                event = provider.stable_json(
+                    {
+                        "type": "assistant.message",
+                        "content": content,
+                    }
+                )
+                invoker = provider.CopilotInvoker(
+                    runner=lambda *a, **k: FakeCompleted(event + "\n")
+                )
+                with self.assertRaises(provider.ProviderError) as caught:
+                    invoker.invoke(request())
+                self.assertEqual(
+                    caught.exception.code,
+                    "copilot_plan_invalid_json",
+                )
+
     def test_timeout_has_no_fallback(self):
         calls = []
 

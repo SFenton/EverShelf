@@ -8,6 +8,7 @@ Type=simple
 UMask=0007
 RuntimeDirectory=evershelf-ontology
 RuntimeDirectoryMode=0750
+RuntimeDirectoryPreserve=restart
 StateDirectory=evershelf-ontology
 StateDirectoryMode=0700
 WorkingDirectory=%S/evershelf-ontology

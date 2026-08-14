@@ -13,6 +13,17 @@ RUN apt-get update && apt-get upgrade -y && apt-get install -y \
     && docker-php-ext-install pdo_sqlite curl mbstring gd \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
+# Apache rebuilds supplementary groups after dropping privileges, so record the
+# host socket group in /etc/group rather than relying only on Compose group_add.
+ARG ONTOLOGY_SOCKET_GID=1000
+RUN set -eux; \
+    ontology_group="$(getent group "${ONTOLOGY_SOCKET_GID}" | cut -d: -f1 || true)"; \
+    if [ -z "${ontology_group}" ]; then \
+        ontology_group=evershelf-ontology; \
+        groupadd --gid "${ONTOLOGY_SOCKET_GID}" "${ontology_group}"; \
+    fi; \
+    usermod --append --groups "${ontology_group}" www-data
+
 # Enable Apache mod_rewrite and mod_headers
 RUN a2enmod rewrite headers
 

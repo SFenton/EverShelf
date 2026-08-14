@@ -2672,6 +2672,8 @@ function ingredientOntologyControllerDeactivatePreparedProduct(
     ");
     $occurrences->execute([$productId]);
     $jobs = 0;
+    $provisionalIntents = 0;
+    $quarantineRetries = 0;
     if ($subjectIds) {
         $placeholders = implode(
             ',',
@@ -2699,6 +2701,52 @@ function ingredientOntologyControllerDeactivatePreparedProduct(
         ");
         $stmt->execute($subjectIds);
         $jobs = $stmt->rowCount();
+        if (ingredientOntologyControllerTableExists(
+            $db,
+            'ontology_provisional_queue'
+        )) {
+            $stmt = $db->prepare("
+                UPDATE ontology_provisional_queue
+                SET status = 'resolved',
+                    reason = 'Subject has no active occurrences.',
+                    next_attempt_at = NULL,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE subject_id IN ({$placeholders})
+                  AND status <> 'resolved'
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM ontology_subject_occurrences active_occurrence
+                      WHERE active_occurrence.subject_id =
+                            ontology_provisional_queue.subject_id
+                        AND active_occurrence.active = 1
+                  )
+            ");
+            $stmt->execute($subjectIds);
+            $provisionalIntents = $stmt->rowCount();
+        }
+        if (ingredientOntologyControllerTableExists(
+            $db,
+            'ontology_quarantine_retries'
+        )) {
+            $stmt = $db->prepare("
+                UPDATE ontology_quarantine_retries
+                SET status = 'resolved',
+                    circuit_open_until = NULL,
+                    resolved_at = CURRENT_TIMESTAMP,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE subject_id IN ({$placeholders})
+                  AND status <> 'resolved'
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM ontology_subject_occurrences active_occurrence
+                      WHERE active_occurrence.subject_id =
+                            ontology_quarantine_retries.subject_id
+                        AND active_occurrence.active = 1
+                  )
+            ");
+            $stmt->execute($subjectIds);
+            $quarantineRetries = $stmt->rowCount();
+        }
     }
     ingredientOntologyControllerMarkCoverageStale($db);
     return [
@@ -2707,6 +2755,8 @@ function ingredientOntologyControllerDeactivatePreparedProduct(
         'skipped' => true,
         'deactivated_occurrences' => $occurrences->rowCount(),
         'superseded_jobs' => $jobs,
+        'resolved_provisional_intents' => $provisionalIntents,
+        'resolved_quarantine_retries' => $quarantineRetries,
     ];
 }
 

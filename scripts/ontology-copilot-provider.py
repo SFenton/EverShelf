@@ -77,6 +77,27 @@ class ProviderError(RuntimeError):
         self.code = code
 
 
+def parse_plan_content(content: str) -> dict[str, Any]:
+    text = content.strip()
+    if text.startswith("```"):
+        lines = text.splitlines()
+        if (
+            len(lines) < 3
+            or lines[0].strip().lower() not in {"```", "```json"}
+            or lines[-1].strip() != "```"
+            or any("```" in line for line in lines[1:-1])
+        ):
+            raise ProviderError("copilot_plan_invalid_json")
+        text = "\n".join(lines[1:-1]).strip()
+    try:
+        candidate = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ProviderError("copilot_plan_invalid_json") from exc
+    if not isinstance(candidate, dict):
+        raise ProviderError("copilot_plan_not_object")
+    return candidate
+
+
 class RateLimiter:
     def __init__(self, maximum: int, window_seconds: int = 60) -> None:
         self.maximum = max(1, maximum)
@@ -237,13 +258,7 @@ class CopilotInvoker:
                 )
             if not isinstance(content, str):
                 raise ProviderError("copilot_message_missing")
-            try:
-                candidate = json.loads(content)
-            except json.JSONDecodeError as exc:
-                raise ProviderError("copilot_plan_invalid_json") from exc
-            if not isinstance(candidate, dict):
-                raise ProviderError("copilot_plan_not_object")
-            plan = candidate
+            plan = parse_plan_content(content)
         if plan is None:
             raise ProviderError("copilot_message_missing")
         usage_json = stable_json(usage)
