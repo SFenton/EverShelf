@@ -4129,12 +4129,27 @@ function ingredientOntologyV3AncestorProof(
 
 function ingredientOntologyV3Rollback(
     PDO $db,
-    ?int $targetRevisionId = null
+    ?int $targetRevisionId = null,
+    ?int $expectedActiveRevisionId = null
 ): array {
     $db->exec('BEGIN IMMEDIATE');
     try {
         $state = recipeScoreState($db);
         $activeId = (int)($state['active_score_revision_id'] ?? 0);
+        if (
+            $expectedActiveRevisionId !== null
+            && $activeId !== $expectedActiveRevisionId
+        ) {
+            $db->exec('ROLLBACK');
+            return [
+                'rolled_back' => false,
+                'superseded' => true,
+                'expected_active_revision_id' =>
+                    $expectedActiveRevisionId,
+                'active_revision_id' => $activeId,
+                'to_revision_id' => $targetRevisionId,
+            ];
+        }
         $active = recipeScoreRevision($db, $activeId);
         if ($active === null) {
             throw new RuntimeException('there is no active score revision');

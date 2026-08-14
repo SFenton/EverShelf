@@ -2769,6 +2769,39 @@ try {
         'Post-commit promotion reconciliation must be idempotent'
     );
     $db->prepare("
+        UPDATE recipe_score_state
+        SET active_score_revision_id = ?
+        WHERE id = 1
+    ")->execute([$baseScoreId]);
+    $supersededMonitor =
+        ingredientOntologyControllerMonitorGeneration(
+            $db,
+            $negativeGenerationId
+        );
+    $db->prepare("
+        UPDATE recipe_score_state
+        SET active_score_revision_id = ?
+        WHERE id = 1
+    ")->execute([$negativeScoreId]);
+    $db->prepare("
+        UPDATE ontology_generations
+        SET monitor_until = datetime('now', '+60 minutes'),
+            last_monitored_at = NULL
+        WHERE id = ?
+    ")->execute([$negativeGenerationId]);
+    controllerTestAssert(
+        !empty($supersededMonitor['healthy'])
+        && !empty($supersededMonitor['superseded'])
+        && empty($supersededMonitor['monitoring'])
+        && (int)$supersededMonitor['active_revision_id']
+            === $baseScoreId
+        && $db->query("
+            SELECT status FROM ontology_generations
+            WHERE id = {$negativeGenerationId}
+        ")->fetchColumn() === 'promoted',
+        'A monitor must retire without rollback when a different revision has already advanced the active pointer'
+    );
+    $db->prepare("
         UPDATE ontology_generations
         SET last_monitored_at = CURRENT_TIMESTAMP
         WHERE id = ?
@@ -2954,6 +2987,46 @@ try {
         )['valid'],
         'A same-stream reversal must invalidate the promoted generation head'
     );
+    $GLOBALS['ONTOLOGY_CONTROLLER_TEST_HOOK'] =
+        static function (
+            string $name
+        ) use ($db, $baseScoreId): void {
+            if ($name === 'controller_before_monitor_rollback') {
+                $db->prepare("
+                    UPDATE recipe_score_state
+                    SET active_score_revision_id = ?
+                    WHERE id = 1
+                ")->execute([$baseScoreId]);
+            }
+        };
+    $monitorRace = ingredientOntologyControllerMonitorGeneration(
+        $db,
+        $negativeGenerationId
+    );
+    unset($GLOBALS['ONTOLOGY_CONTROLLER_TEST_HOOK']);
+    controllerTestAssert(
+        !empty($monitorRace['healthy'])
+        && !empty($monitorRace['superseded'])
+        && empty($monitorRace['monitoring'])
+        && (int)recipeScoreState($db)['active_score_revision_id']
+            === $baseScoreId
+        && $db->query("
+            SELECT status FROM ontology_generations
+            WHERE id = {$negativeGenerationId}
+        ")->fetchColumn() === 'promoted',
+        'A monitor rollback must lose its CAS harmlessly when another revision advances the pointer during auditing'
+    );
+    $db->prepare("
+        UPDATE recipe_score_state
+        SET active_score_revision_id = ?
+        WHERE id = 1
+    ")->execute([$negativeScoreId]);
+    $db->prepare("
+        UPDATE ontology_generations
+        SET monitor_until = datetime('now', '+60 minutes'),
+            last_monitored_at = NULL
+        WHERE id = ?
+    ")->execute([$negativeGenerationId]);
     $monitor = ingredientOntologyControllerMonitorGeneration(
         $db,
         $negativeGenerationId

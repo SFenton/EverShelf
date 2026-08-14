@@ -11788,6 +11788,25 @@ function ingredientOntologyControllerProcessCriticJob(
                 );
             }
             $revisionId = (int)$generation['candidate_score_revision_id'];
+            $activeRevisionId = (int)(
+                recipeScoreState($db)['active_score_revision_id'] ?? 0
+            );
+            if ($activeRevisionId !== $revisionId) {
+                $db->prepare("
+                    UPDATE ontology_generations
+                    SET monitor_until = NULL,
+                        last_monitored_at = CURRENT_TIMESTAMP
+                    WHERE id = ? AND status = 'promoted'
+                ")->execute([$generationId]);
+                return [
+                    'generation_id' => $generationId,
+                    'healthy' => true,
+                    'monitoring' => false,
+                    'superseded' => true,
+                    'revision_id' => $revisionId,
+                    'active_revision_id' => $activeRevisionId,
+                ];
+            }
             $revision = recipeScoreRevision($db, $revisionId);
             $immutableRevision = $revision !== null
                 ? ingredientOntologyControllerImmutableRevisionAudit(
@@ -11852,12 +11871,6 @@ function ingredientOntologyControllerProcessCriticJob(
             }
             if (!$controllerIntegrity['valid']) {
                 $breaches[] = 'controller version seal breach';
-            }
-            if (
-                (int)(recipeScoreState($db)['active_score_revision_id'] ?? 0)
-                    !== $revisionId
-            ) {
-                $breaches[] = 'active pointer no longer references generation';
             }
             if (!$constraints['valid']) {
                 $breaches[] = 'controller exact constraint breach';
@@ -15654,10 +15667,37 @@ function ingredientOntologyControllerMonitorGenerationRollback(
     array $generation,
     array $breaches
 ): array {
+            ingredientOntologyControllerHook(
+                'controller_before_monitor_rollback',
+                [
+                    'generation_id' => $generationId,
+                    'candidate_score_revision_id' =>
+                        (int)($generation[
+                            'candidate_score_revision_id'
+                        ] ?? 0),
+                ]
+            );
             $rollback = ingredientOntologyV3Rollback(
                 $db,
-                (int)$generation['parent_score_revision_id']
+                (int)$generation['parent_score_revision_id'],
+                (int)$generation['candidate_score_revision_id']
             );
+            if (!empty($rollback['superseded'])) {
+                $db->prepare("
+                    UPDATE ontology_generations
+                    SET monitor_until = NULL,
+                        last_monitored_at = CURRENT_TIMESTAMP
+                    WHERE id = ? AND status = 'promoted'
+                ")->execute([$generationId]);
+                return [
+                    'generation_id' => $generationId,
+                    'healthy' => true,
+                    'monitoring' => false,
+                    'superseded' => true,
+                    'breaches_ignored' => $breaches,
+                    'rollback' => $rollback,
+                ];
+            }
             $db->prepare("
                 UPDATE ontology_generations
                 SET status = 'rolled_back',
