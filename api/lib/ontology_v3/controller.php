@@ -1878,6 +1878,28 @@ function ingredientOntologyControllerStableJson(mixed $value): string {
     );
 }
 
+function ingredientOntologyControllerScalarAssertionAttributes(
+    array $attributes
+): array {
+    $normalized = [];
+    foreach ($attributes as $facet => $value) {
+        if (is_array($value)) {
+            $value = $value['value'] ?? null;
+        }
+        if (
+            !is_string($facet)
+            || $facet === ''
+            || !is_scalar($value)
+            || (string)$value === ''
+        ) {
+            continue;
+        }
+        $normalized[$facet] = (string)$value;
+    }
+    ksort($normalized, SORT_STRING);
+    return $normalized;
+}
+
 function ingredientOntologyControllerDatabaseBusy(Throwable $error): bool {
     return $error instanceof PDOException
         && (
@@ -3080,65 +3102,514 @@ function ingredientOntologyControllerMaterializeMissingOwnerMappings(
             'missing owner mappings require a building version'
         );
     }
+    $prunedMappings = $db->prepare("
+        DELETE FROM ingredient_ontology_mappings
+        WHERE ontology_version_id = ?
+          AND (
+              (
+                  owner_type = 'product'
+                  AND NOT EXISTS (
+                      SELECT 1 FROM products owner
+                      WHERE owner.id =
+                            ingredient_ontology_mappings.owner_id
+                  )
+              )
+              OR (
+                  owner_type = 'recipe_ingredient'
+                  AND NOT EXISTS (
+                      SELECT 1 FROM recipe_ingredients owner
+                      WHERE owner.id =
+                            ingredient_ontology_mappings.owner_id
+                  )
+              )
+              OR (
+                  owner_type = 'recipe_source_ingredient'
+                  AND NOT EXISTS (
+                      SELECT 1 FROM recipe_source_ingredients owner
+                      WHERE owner.id =
+                            ingredient_ontology_mappings.owner_id
+                  )
+              )
+          )
+    ");
+    $prunedMappings->execute([$versionId]);
+    $prunedResolutions = $db->prepare("
+        DELETE FROM ingredient_ontology_subject_resolutions
+        WHERE ontology_version_id = ?
+          AND NOT EXISTS (
+              SELECT 1
+              FROM ontology_subject_occurrences occurrence
+              WHERE occurrence.subject_id =
+                    ingredient_ontology_subject_resolutions.subject_id
+                AND occurrence.active = 1
+          )
+    ");
+    $prunedResolutions->execute([$versionId]);
     $facetMap = ingredientOntologyV3FacetMap($db, $versionId);
     $entities = ingredientOntologyV3EntityMap(
         $db,
         $versionId
     )['by_slug'];
+    $cohortMap = function_exists('ingredientOntologyV3RecipeCohortMap')
+        ? ingredientOntologyV3RecipeCohortMap($db, $versionId)
+        : [];
     $inserted = [
         'product' => 0,
         'prepared_product_mapping' => 0,
         'recipe_ingredient' => 0,
         'recipe_source_ingredient' => 0,
     ];
+    $refreshed = [
+        'product' => 0,
+        'prepared_product_mapping' => 0,
+        'recipe_ingredient' => 0,
+        'recipe_source_ingredient' => 0,
+    ];
+    $refreshOwner = static function (
+        string $ownerType,
+        int $ownerId
+    ) use (
+        $db,
+        $versionId,
+        $facetMap,
+        $entities,
+        $cohortMap
+    ): ?string {
+        $fingerprintBefore =
+            ingredientOntologyV3CurrentOwnerFingerprint(
+                $db,
+                $ownerType,
+                $ownerId
+            );
+        if ($fingerprintBefore === null) {
+            return null;
+        }
+        if ($ownerType === 'recipe_ingredient') {
+            $source = $db->prepare("
+                SELECT COALESCE(
+                           NULLIF(ingredient.raw_text, ''),
+                           ingredient.normalized_name
+                       ) AS source_label,
+                       ingredient.recipe_id,
+                       catalog.language,
+                       0 AS prepared_food
+                FROM recipe_ingredients ingredient
+                JOIN recipe_catalog catalog
+                  ON catalog.id = ingredient.recipe_id
+                WHERE ingredient.id = ?
+            ");
+        } elseif ($ownerType === 'recipe_source_ingredient') {
+            $source = $db->prepare("
+                SELECT COALESCE(
+                           NULLIF(source.name, ''),
+                           source.normalized_name
+                       ) AS source_label,
+                       source.recipe_id,
+                       catalog.language,
+                       0 AS prepared_food
+                FROM recipe_source_ingredients source
+                JOIN recipe_catalog catalog
+                  ON catalog.id = source.recipe_id
+                WHERE source.id = ?
+            ");
+        } else {
+            $source = $db->prepare("
+                SELECT id, name AS source_label, brand, category,
+                       'en' AS language, 0 AS is_staple, prepared_food
+                FROM products WHERE id = ?
+            ");
+        }
+        $source->execute([$ownerId]);
+        $sourceRow = $source->fetch(PDO::FETCH_ASSOC) ?: null;
+        if ($sourceRow === null) {
+            return null;
+        }
+        $ownerFingerprint =
+            ingredientOntologyV3CurrentOwnerFingerprint(
+                $db,
+                $ownerType,
+                $ownerId
+            );
+        if (
+            $ownerFingerprint === null
+            || !hash_equals($fingerprintBefore, $ownerFingerprint)
+        ) {
+            throw new RuntimeException(
+                'owner changed during mapping refresh'
+            );
+        }
+        $prepared = $ownerType === 'product'
+            && !empty($sourceRow['prepared_food']);
+        if ($prepared) {
+            ingredientOntologyControllerDeactivatePreparedProduct(
+                $db,
+                $ownerId
+            );
+        }
+        $assertion = null;
+        if (!$prepared) {
+            $subject = ingredientOntologyControllerSubjectForOwner(
+                $db,
+                $ownerType,
+                $ownerId
+            );
+            if ($subject === null) {
+                if ($ownerType === 'product') {
+                    ingredientOntologyControllerObserveProduct(
+                        $db,
+                        $ownerId,
+                        null,
+                        'product_ingestion',
+                        100,
+                        false
+                    );
+                } else {
+                    ingredientOntologyControllerObserveRecipeOwner(
+                        $db,
+                        $ownerType,
+                        $ownerId,
+                        50,
+                        false
+                    );
+                }
+                $subject = ingredientOntologyControllerSubjectForOwner(
+                    $db,
+                    $ownerType,
+                    $ownerId
+                );
+            }
+            if ($subject !== null) {
+                $assertion =
+                    ingredientOntologyControllerSubjectAssertion(
+                        $db,
+                        $versionId,
+                        (int)$subject['id']
+                    );
+            }
+        }
+        if ($prepared) {
+            $resolution = [
+                'status' => 'unresolved',
+                'entity_id' => $entities['prepared-meal']['id']
+                    ?? $entities['prepared-food']['id']
+                    ?? null,
+                'confidence' => 0,
+                'mapping_source' =>
+                    'autonomous_prepared_placeholder',
+                'attributes' => [],
+                'curated_rationale' =>
+                    'Prepared product remains non-satisfying in the existing prepared bucket.',
+            ];
+        } elseif ($assertion !== null) {
+            $resolution = [
+                'status' => (string)$assertion['status'],
+                'entity_id' => $assertion['entity_id'],
+                'confidence' => (float)$assertion['confidence'],
+                'mapping_source' =>
+                    'controller_subject_resolution',
+                'attributes' =>
+                    ingredientOntologyControllerScalarAssertionAttributes(
+                        (array)$assertion['attributes']
+                    ),
+                'curated_rationale' =>
+                    'Current owner identity rebound from its existing subject resolution.',
+            ];
+        } else {
+            $resolution = [
+                'status' => 'unresolved',
+                'entity_id' => null,
+                'confidence' => 0,
+                'mapping_source' =>
+                    'autonomous_corpus_placeholder',
+                'attributes' => [],
+                'curated_rationale' =>
+                    'New owner awaits distinct subject resolution.',
+            ];
+        }
+        $originLocale = trim((string)(
+            $sourceRow['origin_locale'] ?? ''
+        ));
+        $effectiveLanguage = (string)(
+            $sourceRow['language'] ?? 'und'
+        );
+        $isStaple = false;
+        if (
+            $ownerType === 'recipe_ingredient'
+            || $ownerType === 'recipe_source_ingredient'
+        ) {
+            $cohort = $cohortMap[
+                (int)($sourceRow['recipe_id'] ?? 0)
+            ] ?? null;
+            if ($cohort !== null) {
+                $effectiveLanguage = (string)$cohort;
+            }
+            $isStaple = ingredientOntologyV3IsStapleLabel(
+                (string)($sourceRow['source_label'] ?? ''),
+                $effectiveLanguage
+            );
+        }
+        $existing = $db->prepare("
+            SELECT id, owner_fingerprint
+            FROM ingredient_ontology_mappings
+            WHERE ontology_version_id = ?
+              AND owner_type = ?
+              AND owner_id = ?
+        ");
+        $existing->execute([
+            $versionId,
+            $ownerType,
+            $ownerId,
+        ]);
+        $existingMapping =
+            $existing->fetch(PDO::FETCH_ASSOC) ?: null;
+        ingredientOntologyControllerHook(
+            'controller_before_owner_mapping_refresh_upsert',
+            [
+                'version_id' => $versionId,
+                'owner_type' => $ownerType,
+                'owner_id' => $ownerId,
+                'owner_fingerprint' => $ownerFingerprint,
+            ]
+        );
+        $mappingId = ingredientOntologyV3UpsertMapping(
+            $db,
+            $versionId,
+            $ownerType,
+            $ownerId,
+            (string)($sourceRow['source_label']
+                ?? $sourceRow['name']
+                ?? ''),
+            $originLocale !== ''
+                ? $originLocale
+                : $effectiveLanguage,
+            $resolution,
+            $ownerFingerprint,
+            $facetMap,
+            $entities,
+            $isStaple
+        );
+        ingredientOntologyControllerHook(
+            'controller_after_owner_mapping_refresh_upsert_before_cleanup',
+            [
+                'version_id' => $versionId,
+                'mapping_id' => $mappingId,
+                'owner_type' => $ownerType,
+                'owner_id' => $ownerId,
+                'owner_fingerprint' => $ownerFingerprint,
+            ]
+        );
+        if (
+            $existingMapping !== null
+            && !hash_equals(
+                (string)$existingMapping['owner_fingerprint'],
+                $ownerFingerprint
+            )
+        ) {
+            $db->prepare("
+                DELETE FROM ingredient_ontology_provider_observations
+                WHERE ontology_version_id = ?
+                  AND (
+                      mapping_id = ?
+                      OR (
+                          owner_type = ?
+                          AND owner_id = ?
+                      )
+                  )
+            ")->execute([
+                $versionId,
+                $mappingId,
+                $ownerType,
+                $ownerId,
+            ]);
+            $db->prepare("
+                DELETE FROM
+                    ingredient_ontology_curated_provider_conflict_reviews
+                WHERE ontology_version_id = ? AND mapping_id = ?
+            ")->execute([$versionId, $mappingId]);
+            $db->prepare("
+                UPDATE ingredient_ontology_mappings
+                SET provider_term_id = NULL,
+                    identity_basis = 'local_label',
+                    terminal_disposition_id = NULL,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ? AND ontology_version_id = ?
+            ")->execute([$mappingId, $versionId]);
+            if ($ownerType === 'product') {
+                $db->prepare("
+                    DELETE FROM
+                        ingredient_ontology_curated_product_assertions
+                    WHERE ontology_version_id = ?
+                      AND product_id = ?
+                      AND product_fingerprint <> ?
+                ")->execute([
+                    $versionId,
+                    $ownerId,
+                    $ownerFingerprint,
+                ]);
+            }
+        }
+        return $prepared
+            ? 'prepared_product_mapping'
+            : $ownerType;
+    };
+    $upsertOwner = static function (
+        string $ownerType,
+        int $ownerId
+    ) use ($db, $refreshOwner): ?string {
+        $savepoint = 'controller_owner_mapping_refresh';
+        $db->exec("SAVEPOINT {$savepoint}");
+        try {
+            $result = $refreshOwner($ownerType, $ownerId);
+            $db->exec("RELEASE SAVEPOINT {$savepoint}");
+            return $result;
+        } catch (Throwable $error) {
+            try {
+                $db->exec("ROLLBACK TO SAVEPOINT {$savepoint}");
+                $db->exec("RELEASE SAVEPOINT {$savepoint}");
+            } catch (Throwable $ignored) {
+            }
+            throw $error;
+        }
+    };
     $products = $db->prepare("
-        SELECT product.*
+        SELECT product.*, mapping.id AS mapping_id,
+               mapping.owner_fingerprint AS mapping_owner_fingerprint
         FROM products product
         LEFT JOIN ingredient_ontology_mappings mapping
           ON mapping.ontology_version_id = ?
          AND mapping.owner_type = 'product'
          AND mapping.owner_id = product.id
-        WHERE mapping.id IS NULL
         ORDER BY product.id
     ");
     $products->execute([$versionId]);
     foreach ($products->fetchAll(PDO::FETCH_ASSOC) as $product) {
-        $prepared = !empty($product['prepared_food']);
-        $preparedEntity = $entities['prepared-meal']['id']
-            ?? $entities['prepared-food']['id']
-            ?? null;
-        ingredientOntologyV3UpsertMapping(
-            $db,
-            $versionId,
+        $currentFingerprint =
+            ingredientOntologyV3CurrentOwnerFingerprint(
+                $db,
+                'product',
+                (int)$product['id']
+            );
+        $mappingId = (int)($product['mapping_id'] ?? 0);
+        if (
+            $mappingId > 0
+            && $currentFingerprint !== null
+            && hash_equals(
+                (string)($product['mapping_owner_fingerprint'] ?? ''),
+                $currentFingerprint
+            )
+        ) {
+            continue;
+        }
+        $kind = $upsertOwner(
             'product',
-            (int)$product['id'],
-            (string)($product['name'] ?? ''),
-            'en',
-            [
-                'status' => 'unresolved',
-                'entity_id' => $prepared
-                    ? $preparedEntity
-                    : null,
-                'confidence' => 0,
-                'mapping_source' =>
-                    $prepared
-                        ? 'autonomous_prepared_placeholder'
-                        : 'autonomous_corpus_placeholder',
-                'attributes' => [],
-                'curated_rationale' =>
-                    $prepared
-                        ? 'Prepared product remains non-satisfying in the existing prepared bucket.'
-                        : 'New owner awaits distinct subject resolution.',
-            ],
-            ingredientOntologyV3ProductOwnerFingerprint($product),
-            $facetMap,
-            $entities,
-            false
+            (int)$product['id']
         );
-        if ($prepared) {
-            $inserted['prepared_product_mapping']++;
+        if ($kind === null) {
+            continue;
+        }
+        if ($mappingId > 0) {
+            $refreshed[$kind]++;
         } else {
-            $inserted['product']++;
+            $inserted[$kind]++;
+        }
+    }
+    $staleRecipeQueries = [
+        'recipe_ingredient' => "
+            SELECT mapping.owner_fingerprint, owner.*,
+                   COALESCE(
+                       NULLIF(owner.raw_text, ''),
+                       owner.normalized_name
+                   ) AS source_label,
+                   catalog.language, catalog.primary_connector,
+                   COALESCE(scope_origin.external_id, '')
+                       AS origin_external_id,
+                   COALESCE(scope_origin.locale, '') AS origin_locale
+            FROM ingredient_ontology_mappings mapping
+            JOIN recipe_ingredients owner
+              ON owner.id = mapping.owner_id
+            JOIN recipe_catalog catalog
+              ON catalog.id = owner.recipe_id
+            LEFT JOIN recipe_origins scope_origin
+              ON scope_origin.id = (
+                  SELECT origin.id
+                  FROM recipe_origins origin
+                  WHERE origin.recipe_id = owner.recipe_id
+                    AND origin.connector =
+                        catalog.primary_connector
+                  ORDER BY origin.id
+                  LIMIT 1
+              )
+            WHERE mapping.ontology_version_id = ?
+              AND mapping.owner_type = 'recipe_ingredient'
+            ORDER BY mapping.owner_id
+        ",
+        'recipe_source_ingredient' => "
+            SELECT mapping.owner_fingerprint, owner.*,
+                   COALESCE(
+                       NULLIF(owner.name, ''),
+                       owner.normalized_name
+                   ) AS source_label,
+                   catalog.language,
+                   COALESCE(
+                       NULLIF(scope_origin.connector, ''),
+                       NULLIF(catalog.primary_connector, ''),
+                       'unknown_legacy_adapter'
+                   ) AS connector,
+                   COALESCE(scope_origin.metadata_version, '')
+                       AS metadata_version,
+                   COALESCE(
+                       scope_origin.metadata_schema_version,
+                       ''
+                   ) AS metadata_schema_version,
+                   COALESCE(scope_origin.external_id, '')
+                       AS origin_external_id,
+                   COALESCE(scope_origin.locale, '')
+                       AS origin_locale
+            FROM ingredient_ontology_mappings mapping
+            JOIN recipe_source_ingredients owner
+              ON owner.id = mapping.owner_id
+            JOIN recipe_catalog catalog
+              ON catalog.id = owner.recipe_id
+            LEFT JOIN recipe_origins scope_origin
+              ON scope_origin.id = (
+                  SELECT origin.id
+                  FROM recipe_origins origin
+                  WHERE origin.recipe_id = owner.recipe_id
+                    AND origin.connector =
+                        catalog.primary_connector
+                  ORDER BY origin.id
+                  LIMIT 1
+              )
+            WHERE mapping.ontology_version_id = ?
+              AND mapping.owner_type =
+                  'recipe_source_ingredient'
+            ORDER BY mapping.owner_id
+        ",
+    ];
+    foreach ($staleRecipeQueries as $ownerType => $sql) {
+        $staleRecipeMappings = $db->prepare($sql);
+        $staleRecipeMappings->execute([$versionId]);
+        while ($staleOwner = $staleRecipeMappings->fetch(
+            PDO::FETCH_ASSOC
+        )) {
+            $currentFingerprint =
+                ingredientOntologyV3RecipeOwnerFingerprint(
+                    $ownerType,
+                    $staleOwner
+                );
+            if (hash_equals(
+                (string)$staleOwner['owner_fingerprint'],
+                $currentFingerprint
+            )) {
+                continue;
+            }
+            $kind = $upsertOwner(
+                $ownerType,
+                (int)$staleOwner['id']
+            );
+            if ($kind !== null) {
+                $refreshed[$kind]++;
+            }
         }
     }
     $recipeIds = $db->prepare("
@@ -3184,48 +3655,159 @@ function ingredientOntologyControllerMaterializeMissingOwnerMappings(
             if ($mappingExists->fetchColumn() !== false) {
                 continue;
             }
-            $ownerFingerprint =
-                ingredientOntologyV3CurrentOwnerFingerprint(
-                    $db,
-                    $ownerType,
-                    $ownerId
-                );
-            if ($ownerFingerprint === null) {
-                continue;
-            }
-            $originLocale = trim((string)(
-                $row['origin_locale'] ?? ''
-            ));
-            ingredientOntologyV3UpsertMapping(
-                $db,
-                $versionId,
+            $kind = $upsertOwner(
                 $ownerType,
-                $ownerId,
-                (string)$row['source_label'],
-                $originLocale !== ''
-                    ? $originLocale
-                    : (string)($row['language'] ?? 'und'),
-                [
-                    'status' => 'unresolved',
-                    'entity_id' => null,
-                    'confidence' => 0,
-                    'mapping_source' =>
-                        'autonomous_corpus_placeholder',
-                    'attributes' => [],
-                    'curated_rationale' =>
-                        'New owner awaits distinct subject resolution.',
-                ],
-                $ownerFingerprint,
-                $facetMap,
-                $entities,
-                !empty($row['is_staple'])
+                $ownerId
             );
-            $inserted[$ownerType]++;
+            if ($kind !== null) {
+                $inserted[$kind]++;
+            }
         }
     }
     return [
         'inserted' => $inserted,
+        'refreshed' => $refreshed,
         'total' => array_sum($inserted),
+        'pruned' => [
+            'mappings' => $prunedMappings->rowCount(),
+            'subject_resolutions' => $prunedResolutions->rowCount(),
+        ],
+    ];
+}
+
+function ingredientOntologyControllerObserveRecipeOwner(
+    PDO $db,
+    string $ownerType,
+    int $ownerId,
+    int $jobPriority = 50,
+    bool $resetTerminal = true
+): ?array {
+    if (!in_array($ownerType, [
+        'recipe_ingredient',
+        'recipe_source_ingredient',
+    ], true) || $ownerId <= 0) {
+        throw new InvalidArgumentException(
+            'recipe owner observation is invalid'
+        );
+    }
+    $table = $ownerType === 'recipe_ingredient'
+        ? 'recipe_ingredients'
+        : 'recipe_source_ingredients';
+    $recipe = $db->prepare("
+        SELECT recipe_id FROM {$table} WHERE id = ?
+    ");
+    $recipe->execute([$ownerId]);
+    $recipeId = (int)($recipe->fetchColumn() ?: 0);
+    if ($recipeId <= 0) {
+        return null;
+    }
+    $row = null;
+    foreach (
+        ingredientOntologyControllerRecipeOwnerRows($db, $recipeId)
+        as $candidate
+    ) {
+        if (
+            (string)$candidate['controller_owner_type'] === $ownerType
+            && (int)$candidate['id'] === $ownerId
+        ) {
+            $row = $candidate;
+            break;
+        }
+    }
+    if ($row === null) {
+        return null;
+    }
+    $ownerFingerprint =
+        ingredientOntologyV3CurrentOwnerFingerprint(
+            $db,
+            $ownerType,
+            $ownerId
+        );
+    if ($ownerFingerprint === null) {
+        return null;
+    }
+    $db->prepare("
+        UPDATE ontology_subject_occurrences
+        SET active = 0,
+            last_seen_at = CURRENT_TIMESTAMP
+        WHERE owner_type = ?
+          AND owner_id = ?
+          AND owner_fingerprint <> ?
+          AND active = 1
+    ")->execute([
+        $ownerType,
+        $ownerId,
+        $ownerFingerprint,
+    ]);
+    $payload = ingredientOntologyControllerRecipePayload($row);
+    if ($payload['normalized_identity_text'] === '') {
+        return null;
+    }
+    $subject = ingredientOntologyControllerUpsertSubject(
+        $db,
+        'recipe_ingredient',
+        $payload
+    );
+    $occurrence = ingredientOntologyControllerUpsertOccurrence(
+        $db,
+        $subject['id'],
+        $ownerType,
+        $ownerId,
+        $ownerFingerprint,
+        ['recipe_id' => $recipeId]
+    );
+    $context =
+        ingredientOntologyControllerRecipeObservationContext(
+            $recipeId,
+            $row
+        );
+    $eventPayload = [
+        'recipe_id' => $recipeId,
+        'owner_type' => $ownerType,
+        'owner_id' => $ownerId,
+        'owner_fingerprint' => $ownerFingerprint,
+        'subject_fingerprint' =>
+            (string)$subject['subject_fingerprint'],
+        'context_hash' => ingredientOntologyV3Hash($context),
+        'context' => $context,
+    ];
+    $event = ingredientOntologyControllerInsertObservation(
+        $db,
+        ingredientOntologyControllerObservationKey(
+            'recipe-owner:' . $ownerType . ':' . $ownerId,
+            $eventPayload
+        ),
+        'recipe_ingestion',
+        $eventPayload,
+        $subject['id']
+    );
+    $job = null;
+    if (ingredientOntologyControllerSubjectNeedsResolution(
+        $db,
+        (int)$subject['id']
+    )) {
+        $job = ingredientOntologyControllerEnqueueJob(
+            $db,
+            'subject_resolution',
+            [
+                'subject_kind' => 'recipe_ingredient',
+                'subject_fingerprint' =>
+                    (string)$subject['subject_fingerprint'],
+                'observation_event_id' => (int)$event['id'],
+            ],
+            (int)$subject['id'],
+            (int)$event['id'],
+            null,
+            0,
+            max(0, min(1000000, $jobPriority)),
+            $resetTerminal
+        );
+    }
+    return [
+        'subject' => $subject,
+        'occurrence' => $occurrence,
+        'event' => $event,
+        'job' => $job,
     ];
 }
 
@@ -8131,6 +8713,96 @@ function ingredientOntologyControllerVersionIntegrityAudit(
     ];
 }
 
+function ingredientOntologyControllerImmutableRevisionAudit(
+    PDO $db,
+    array $revision,
+    int $expectedVersionId,
+    int $expectedParentScoreId
+): array {
+    $version = ingredientOntologyV3Version(
+        $db,
+        $expectedVersionId
+    );
+    $errors = [];
+    if (
+        (string)($revision['status'] ?? '') !== 'ready'
+        || (string)($revision['scoring_model'] ?? '')
+            !== 'faceted-ontology-v3'
+    ) {
+        $errors[] = 'promoted score revision is not ready';
+    }
+    if (
+        (int)($revision['ontology_version_id'] ?? 0)
+            !== $expectedVersionId
+        || (int)($revision['parent_score_revision_id'] ?? 0)
+            !== $expectedParentScoreId
+    ) {
+        $errors[] = 'promoted score revision lineage changed';
+    }
+    if ($version === null || (string)$version['status'] !== 'ready') {
+        $errors[] = 'promoted ontology version is not ready';
+        return [
+            'valid' => false,
+            'errors' => $errors,
+            'row_integrity' => ['valid' => false],
+        ];
+    }
+    $contentHash = ingredientOntologyV3ContentHash(
+        $db,
+        $expectedVersionId
+    );
+    $portableHash = ingredientOntologyV3PortableContentHash(
+        $db,
+        $expectedVersionId
+    );
+    foreach ([
+        'schema_hash' => 'ontology_schema_hash',
+        'prompt_hash' => 'ontology_prompt_hash',
+        'model_hash' => 'ontology_model_hash',
+        'corpus_hash' => 'ontology_corpus_hash',
+        'content_hash' => 'ontology_content_hash',
+        'portable_content_hash' =>
+            'ontology_portable_content_hash',
+        'review_manifest_hash' =>
+            'ontology_review_manifest_hash',
+        'resolution_gold_hash' =>
+            'ontology_resolution_gold_hash',
+        'seal_hash' => 'ontology_seal_hash',
+    ] as $versionColumn => $revisionColumn) {
+        if (!hash_equals(
+            (string)($version[$versionColumn] ?? ''),
+            (string)($revision[$revisionColumn] ?? '')
+        )) {
+            $errors[] =
+                "revision/version {$versionColumn} binding changed";
+        }
+    }
+    if (!hash_equals((string)$version['content_hash'], $contentHash)) {
+        $errors[] = 'ontology content hash changed';
+    }
+    if (!hash_equals(
+        (string)$version['portable_content_hash'],
+        $portableHash
+    )) {
+        $errors[] = 'ontology portable content hash changed';
+    }
+    $rowIntegrity = ingredientOntologyV3HashIntegrityAudit(
+        $db,
+        $expectedVersionId,
+        false
+    );
+    if (!$rowIntegrity['valid']) {
+        $errors[] = 'ontology immutable row integrity failed';
+    }
+    return [
+        'valid' => !$errors,
+        'errors' => $errors,
+        'content_hash' => $contentHash,
+        'portable_content_hash' => $portableHash,
+        'row_integrity' => $rowIntegrity,
+    ];
+}
+
         function ingredientOntologyControllerSealVersion(
             PDO $db,
             int $versionId,
@@ -9598,16 +10270,20 @@ function ingredientOntologyControllerSetPlanJobStatus(
                 ELSE finished_at
             END,
             updated_at = CURRENT_TIMESTAMP
-        WHERE id IN (
-            SELECT plan.job_id
+        WHERE EXISTS (
+            SELECT 1
             FROM ontology_generation_plans item
             JOIN ontology_mutation_plans plan
               ON plan.id = item.mutation_plan_id
             WHERE item.generation_id = ?
+              AND plan.job_id = ontology_controller_jobs.id
+              AND ontology_controller_jobs.mutation_plan_id = plan.id
         )
           AND status IN (
+              'queued', 'leased', 'model_running',
+              'responses_ready', 'staged', 'validating',
               'applied', 'generation_pending', 'shadowing',
-              'promotable', 'promoting'
+              'promotable', 'promoting', 'retry'
           )
     ");
     $stmt->execute([
@@ -9741,6 +10417,110 @@ function ingredientOntologyControllerProcessGenerationJob(
             'generation' => $result,
         ];
     } catch (Throwable $error) {
+        $reconciliation = dbWithRetry(
+            static function () use (
+                $db,
+                $lease,
+                $generationId,
+                $error
+            ): array {
+                $db->exec('BEGIN IMMEDIATE');
+                try {
+                    $generationStatus = $db->prepare("
+                        SELECT status, candidate_version_id,
+                               candidate_score_revision_id
+                        FROM ontology_generations
+                        WHERE id = ?
+                    ");
+                    $generationStatus->execute([
+                        $generationId ?? 0,
+                    ]);
+                    $terminalGeneration =
+                        $generationStatus->fetch(PDO::FETCH_ASSOC);
+                    $terminalStatus = (string)(
+                        $terminalGeneration['status'] ?? ''
+                    );
+                    if (!in_array($terminalStatus, [
+                        'promoted', 'quarantined',
+                        'rolled_back', 'failed',
+                    ], true)) {
+                        $db->exec('ROLLBACK');
+                        return ['terminal' => false];
+                    }
+                    $transitioned =
+                        ingredientOntologyControllerTransitionJob(
+                            $db,
+                            $lease,
+                            'model_running',
+                            $terminalStatus,
+                            [
+                                'candidate_version_id' =>
+                                    (int)($terminalGeneration[
+                                        'candidate_version_id'
+                                    ] ?? 0) ?: null,
+                                'candidate_score_revision_id' =>
+                                    (int)($terminalGeneration[
+                                        'candidate_score_revision_id'
+                                    ] ?? 0) ?: null,
+                                'last_error_kind' =>
+                                    'generation_already_'
+                                    . $terminalStatus,
+                                'last_error' => mb_substr(
+                                    $error->getMessage(),
+                                    0,
+                                    1000,
+                                    'UTF-8'
+                                ),
+                            ]
+                        );
+                    if (!$transitioned) {
+                        $db->exec('ROLLBACK');
+                        return [
+                            'terminal' => true,
+                            'transitioned' => false,
+                            'status' => $terminalStatus,
+                        ];
+                    }
+                    ingredientOntologyControllerSetPlanJobStatus(
+                        $db,
+                        $generationId ?? 0,
+                        $terminalStatus,
+                        (int)($terminalGeneration[
+                            'candidate_score_revision_id'
+                        ] ?? 0) ?: null
+                    );
+                    $db->exec('COMMIT');
+                    return [
+                        'terminal' => true,
+                        'transitioned' => true,
+                        'status' => $terminalStatus,
+                    ];
+                } catch (Throwable $reconciliationError) {
+                    try {
+                        $db->exec('ROLLBACK');
+                    } catch (Throwable $ignored) {
+                    }
+                    throw $reconciliationError;
+                }
+            }
+        );
+        if (!empty($reconciliation['terminal'])) {
+            if (empty($reconciliation['transitioned'])) {
+                return [
+                    'job_id' => (int)$lease['id'],
+                    'status' => 'superseded',
+                    'generation_id' => $generationId ?? 0,
+                    'reason' =>
+                        'generation_terminal_reconciliation_fence_lost',
+                ];
+            }
+            return [
+                'job_id' => (int)$lease['id'],
+                'status' => (string)$reconciliation['status'],
+                'generation_id' => $generationId ?? 0,
+                'reconciled' => true,
+            ];
+        }
         ingredientOntologyControllerTransitionJob(
             $db,
             $lease,
@@ -11009,12 +11789,17 @@ function ingredientOntologyControllerProcessCriticJob(
             }
             $revisionId = (int)$generation['candidate_score_revision_id'];
             $revision = recipeScoreRevision($db, $revisionId);
-            $integrity = $revision !== null
-                ? ingredientOntologyV3RevisionIntegrityAudit($db, $revision)
-                : ['valid' => false, 'errors' => ['score revision is missing']];
-            $materializedIds = $revision !== null
-                ? ingredientOntologyV3MaterializedIdSetAudit($db, $revision)
-                : ['valid' => false];
+            $immutableRevision = $revision !== null
+                ? ingredientOntologyControllerImmutableRevisionAudit(
+                    $db,
+                    $revision,
+                    (int)$generation['candidate_version_id'],
+                    (int)$generation['parent_score_revision_id']
+                )
+                : [
+                    'valid' => false,
+                    'errors' => ['score revision is missing'],
+                ];
             $materializedValues = $revision !== null
                 ? ingredientOntologyV3MaterializedValueAudit($db, $revision)
                 : ['valid' => false];
@@ -11046,9 +11831,12 @@ function ingredientOntologyControllerProcessCriticJob(
                     $db,
                     $generationId
                 );
-            $breaches = $integrity['errors'] ?? [];
-            if (empty($materializedIds['valid'])) {
-                $breaches[] = 'materialized ID-set breach';
+            $breaches = [];
+            if (!$immutableRevision['valid']) {
+                $breaches = array_merge(
+                    $breaches,
+                    $immutableRevision['errors']
+                );
             }
             if (empty($materializedValues['valid'])) {
                 $breaches[] = 'materialized value-hash breach';

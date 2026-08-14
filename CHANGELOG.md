@@ -51,8 +51,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   so every non-prepared subject enters the active ontology without changing
   recipe matches. Added realized provisional-edge blast accounting, inode-safe
   active-DB guards, SQLITE_BUSY/SQLITE_LOCKED generation replay, post-commit
-  job reconciliation, one-minute CAS-claimed monitoring, group-readable
-  user-runtime socket permissions, base-owned queue lease schemas, safe
+  job reconciliation, stale-owner pruning in child versions, one-minute
+  CAS-claimed monitoring that tolerates ordinary live source drift,
+  group-readable user-runtime socket permissions, base-owned queue lease
+  schemas, safe
   prepared/delete/merge deactivation, shared-subject job preservation,
   resumable keyset backfill under 128 MB, and fingerprint-aware cached
   coverage. Production intake uses an indexed minimum-priority fence: live

@@ -2336,11 +2336,137 @@ try {
         ),
         'A child fork must conservatively materialize newly ingested owners as canonical unresolved mappings before model resolution'
     );
+    controllerTestAssert(
+        ingredientOntologyControllerScalarAssertionAttributes([
+            'form' => ['value' => 'powder', 'is_defining' => true],
+            'processing' => 'dried',
+            'ignored' => ['is_defining' => false],
+        ]) === [
+            'form' => 'powder',
+            'processing' => 'dried',
+        ],
+        'Fallback mapping assertions must normalize structured matcher attributes before rematerialization'
+    );
+    $newOwnerObservation =
+        ingredientOntologyControllerObserveProduct(
+            $db,
+            $newOwnerProductId
+        );
+    $db->prepare("
+        UPDATE products SET prepared_food = 1 WHERE id = ?
+    ")->execute([$newOwnerProductId]);
+    $refreshCrashObserved = false;
+    $GLOBALS['ONTOLOGY_CONTROLLER_TEST_HOOK'] =
+        static function (
+            string $name,
+            array $context
+        ) use ($newOwnerProductId): void {
+            if (
+                $name
+                    === 'controller_after_owner_mapping_refresh_upsert_before_cleanup'
+                && (int)($context['owner_id'] ?? 0)
+                    === $newOwnerProductId
+            ) {
+                throw new RuntimeException(
+                    'controller_test_refresh_crash'
+                );
+            }
+        };
+    try {
+        ingredientOntologyControllerMaterializeMissingOwnerMappings(
+            $db,
+            $newOwnerVersionId
+        );
+    } catch (RuntimeException $error) {
+        $refreshCrashObserved =
+            $error->getMessage()
+                === 'controller_test_refresh_crash';
+    } finally {
+        unset($GLOBALS['ONTOLOGY_CONTROLLER_TEST_HOOK']);
+    }
+    $mappingAfterRefreshCrash = $db->query("
+        SELECT * FROM ingredient_ontology_mappings
+        WHERE ontology_version_id = {$newOwnerVersionId}
+          AND owner_type = 'product'
+          AND owner_id = {$newOwnerProductId}
+    ")->fetch(PDO::FETCH_ASSOC);
+    controllerTestAssert(
+        $refreshCrashObserved
+        && $mappingAfterRefreshCrash['mapping_source']
+            === 'autonomous_corpus_placeholder'
+        && hash_equals(
+            (string)$newOwnerMapping['owner_fingerprint'],
+            (string)$mappingAfterRefreshCrash['owner_fingerprint']
+        ),
+        'An interrupted owner refresh must roll back its fingerprint, semantics, and dependent cleanup atomically'
+    );
+    $preparedOwnerMaterialization =
+        ingredientOntologyControllerMaterializeMissingOwnerMappings(
+            $db,
+            $newOwnerVersionId
+        );
+    $preparedOwnerMapping = $db->query("
+        SELECT * FROM ingredient_ontology_mappings
+        WHERE ontology_version_id = {$newOwnerVersionId}
+          AND owner_type = 'product'
+          AND owner_id = {$newOwnerProductId}
+    ")->fetch(PDO::FETCH_ASSOC);
+    $preparedOwnerProduct = $db->query("
+        SELECT id, name, brand, category, prepared_food
+        FROM products WHERE id = {$newOwnerProductId}
+    ")->fetch(PDO::FETCH_ASSOC);
+    controllerTestAssert(
+        (
+            $preparedOwnerMaterialization['refreshed'][
+                'prepared_product_mapping'
+            ] ?? 0
+        ) === 1
+        && (int)$preparedOwnerMapping['id']
+            === (int)$newOwnerMapping['id']
+        && $preparedOwnerMapping['mapping_source']
+            === 'autonomous_prepared_placeholder'
+        && hash_equals(
+            ingredientOntologyV3ProductOwnerFingerprint(
+                $preparedOwnerProduct
+            ),
+            (string)$preparedOwnerMapping['owner_fingerprint']
+        )
+        && controllerTestCount(
+            $db,
+            "SELECT COUNT(*) FROM ontology_subject_occurrences
+             WHERE owner_type = 'product'
+               AND owner_id = ?
+               AND active = 1",
+            [$newOwnerProductId]
+        ) === 0
+        && $db->query("
+            SELECT status FROM ontology_controller_jobs
+            WHERE id = " . (int)$newOwnerObservation['job']['id']
+        )->fetchColumn() === 'superseded',
+        'A product that becomes prepared must refresh its existing child mapping without retaining the stale ingredient fingerprint'
+    );
+    $db->prepare("DELETE FROM products WHERE id = ?")
+        ->execute([$newOwnerProductId]);
+    $prunedOwnerMaterialization =
+        ingredientOntologyControllerMaterializeMissingOwnerMappings(
+            $db,
+            $newOwnerVersionId
+        );
+    controllerTestAssert(
+        ($prunedOwnerMaterialization['pruned']['mappings'] ?? 0) >= 1
+        && controllerTestCount(
+            $db,
+            "SELECT COUNT(*) FROM ingredient_ontology_mappings
+             WHERE ontology_version_id = ?
+               AND owner_type = 'product'
+               AND owner_id = ?",
+            [$newOwnerVersionId, $newOwnerProductId]
+        ) === 0,
+        'A building child must prune mappings whose source owner was deleted before sealing'
+    );
     $db->prepare("
         DELETE FROM ingredient_ontology_versions WHERE id = ?
     ")->execute([$newOwnerVersionId]);
-    $db->prepare("DELETE FROM products WHERE id = ?")
-        ->execute([$newOwnerProductId]);
 
     $prompt = ingredientOntologyV3BuildProposalPrompt(
         $db,
@@ -5436,6 +5562,79 @@ try {
             ]
         ) === 1,
         'Provisional leaf materialization must be idempotent per subject/version'
+    );
+    $mappingBeforeUnobservedDrift = $db->query("
+        SELECT * FROM ingredient_ontology_mappings
+        WHERE ontology_version_id = {$fallbackVersionId}
+          AND owner_type = 'recipe_ingredient'
+          AND owner_id = {$provisionalOwnerId}
+    ")->fetch(PDO::FETCH_ASSOC);
+    $db->prepare("
+        UPDATE recipe_ingredients
+        SET position = position + 1000
+        WHERE id = ?
+    ")->execute([$provisionalOwnerId]);
+    $unobservedDriftRefresh =
+        ingredientOntologyControllerMaterializeMissingOwnerMappings(
+            $db,
+            $fallbackVersionId
+        );
+    $mappingAfterUnobservedDrift = $db->query("
+        SELECT * FROM ingredient_ontology_mappings
+        WHERE ontology_version_id = {$fallbackVersionId}
+          AND owner_type = 'recipe_ingredient'
+          AND owner_id = {$provisionalOwnerId}
+    ")->fetch(PDO::FETCH_ASSOC);
+    $currentDriftFingerprint =
+        ingredientOntologyV3CurrentOwnerFingerprint(
+            $db,
+            'recipe_ingredient',
+            $provisionalOwnerId
+        );
+    $provisionalCohorts =
+        ingredientOntologyV3RecipeCohortMap(
+            $db,
+            $fallbackVersionId
+        );
+    $expectedDriftLanguage = (string)(
+        $provisionalCohorts[$provisionalRecipeId]
+            ?? $db->query("
+                SELECT language FROM recipe_catalog
+                WHERE id = {$provisionalRecipeId}
+            ")->fetchColumn()
+            ?: 'und'
+    );
+    controllerTestAssert(
+        (
+            $unobservedDriftRefresh['refreshed'][
+                'recipe_ingredient'
+            ] ?? 0
+        ) >= 1
+        && (int)$mappingAfterUnobservedDrift['id']
+            === (int)$mappingBeforeUnobservedDrift['id']
+        && (int)$mappingAfterUnobservedDrift['entity_id']
+            === (int)$mappingBeforeUnobservedDrift['entity_id']
+        && $mappingAfterUnobservedDrift['status'] === 'unresolved'
+        && hash_equals(
+            (string)$currentDriftFingerprint,
+            (string)$mappingAfterUnobservedDrift[
+                'owner_fingerprint'
+            ]
+        )
+        && $mappingAfterUnobservedDrift['language']
+            === ingredientOntologyV3NormalizeLanguage(
+                $expectedDriftLanguage
+            )
+        && (int)$mappingAfterUnobservedDrift['is_staple']
+            === (
+                ingredientOntologyV3IsStapleLabel(
+                    (string)$mappingAfterUnobservedDrift[
+                        'source_label'
+                    ],
+                    $expectedDriftLanguage
+                ) ? 1 : 0
+            ),
+        'Building-child repair must detect unobserved recipe drift directly, refresh the occurrence, and preserve the subject resolution'
     );
     ingredientOntologyControllerSealVersion(
         $db,
