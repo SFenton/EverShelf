@@ -12,6 +12,8 @@ services:
       # Set EVERSHELF_ONTOLOGY_SOCKET_DIR=$XDG_RUNTIME_DIR/evershelf-ontology
       # when enabling the host user service. The default remains inert.
       - ${EVERSHELF_ONTOLOGY_SOCKET_DIR:-/run/evershelf-ontology-disabled}:/run/evershelf-ontology:ro
+    env_file:
+      - ./.env
     restart: unless-stopped
     environment:
       - TZ=Europe/Rome

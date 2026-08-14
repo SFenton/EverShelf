@@ -13,7 +13,7 @@ function loadEnv(bool $forceReload = false): array {
     }
     $envFile = dirname(__DIR__, 2) . '/.env';
     $cache = [];
-    if (file_exists($envFile)) {
+    if (is_readable($envFile)) {
         $lines = file($envFile, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
         foreach ($lines as $line) {
             if (strpos($line, '#') === 0 || strpos($line, '=') === false) {
@@ -28,7 +28,11 @@ function loadEnv(bool $forceReload = false): array {
 
 function env(string $key, string $default = ''): string {
     $vars = loadEnv();
-    return $vars[$key] ?? $default;
+    if (array_key_exists($key, $vars)) {
+        return $vars[$key];
+    }
+    $processValue = getenv($key);
+    return $processValue === false ? $default : (string)$processValue;
 }
 
 function envCacheClear(): void {
