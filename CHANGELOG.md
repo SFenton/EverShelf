@@ -71,7 +71,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   work coalesces one child per parent, supports crash-resumable keyset forks,
   skips exact semantic no-ops, reuses safe shadow candidates, and exports a
   sealed portable activation bundle. Bundle preflight fails closed on source or
-  parent-pointer drift; no production importer is enabled.
+  parent-pointer drift; no production importer is enabled. Removing or marking
+  the final product occurrence prepared now supersedes its pending generation
+  intents so copied builds cannot apply deleted subjects.
 - **Atomic ingredient decision v2** — Added one revision-bound
   `assume_have|select_inventory_product|reject_current_match` command with
   product-level validation, immutable v2 source/target fingerprints, exact

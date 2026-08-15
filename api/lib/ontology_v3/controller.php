@@ -2881,6 +2881,7 @@ function ingredientOntologyControllerDeactivatePreparedProduct(
     ");
     $occurrences->execute([$productId]);
     $jobs = 0;
+    $generationIntents = 0;
     $provisionalIntents = 0;
     $quarantineRetries = 0;
     if ($subjectIds) {
@@ -2910,6 +2911,29 @@ function ingredientOntologyControllerDeactivatePreparedProduct(
         ");
         $stmt->execute($subjectIds);
         $jobs = $stmt->rowCount();
+        if (ingredientOntologyControllerTableExists(
+            $db,
+            'ontology_generation_intents'
+        )) {
+            $stmt = $db->prepare("
+                UPDATE ontology_generation_intents
+                SET status = 'superseded',
+                    last_error = 'Subject has no active occurrences.',
+                    finished_at = CURRENT_TIMESTAMP,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE subject_id IN ({$placeholders})
+                  AND status IN ('pending', 'queued')
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM ontology_subject_occurrences active_occurrence
+                      WHERE active_occurrence.subject_id =
+                            ontology_generation_intents.subject_id
+                        AND active_occurrence.active = 1
+                  )
+            ");
+            $stmt->execute($subjectIds);
+            $generationIntents = $stmt->rowCount();
+        }
         if (ingredientOntologyControllerTableExists(
             $db,
             'ontology_provisional_queue'
@@ -2964,6 +2988,7 @@ function ingredientOntologyControllerDeactivatePreparedProduct(
         'skipped' => true,
         'deactivated_occurrences' => $occurrences->rowCount(),
         'superseded_jobs' => $jobs,
+        'superseded_generation_intents' => $generationIntents,
         'resolved_provisional_intents' => $provisionalIntents,
         'resolved_quarantine_retries' => $quarantineRetries,
     ];

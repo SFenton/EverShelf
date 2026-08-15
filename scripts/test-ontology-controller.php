@@ -6475,6 +6475,15 @@ try {
         str_repeat('b', 64),
     ]);
     $db->prepare("
+        INSERT INTO ontology_generation_intents (
+            source_job_id, subject_id, intent_kind, status
+        )
+        VALUES (?, ?, 'provisional', 'pending')
+    ")->execute([
+        $sharedBasilJob,
+        $sharedBasilSubject,
+    ]);
+    $db->prepare("
         UPDATE products SET prepared_food = 1 WHERE id = ?
     ")->execute([$sharedBasilOne]);
     ingredientOntologyControllerObserveProductSafely(
@@ -6507,6 +6516,10 @@ try {
         && $db->query("
             SELECT status FROM ontology_quarantine_retries
             WHERE subject_id = {$sharedBasilSubject}
+        ")->fetchColumn() === 'pending'
+        && $db->query("
+            SELECT status FROM ontology_generation_intents
+            WHERE subject_id = {$sharedBasilSubject}
         ")->fetchColumn() === 'pending',
         'Preparing/deleting one shared Basil owner must preserve the shared job and other active occurrence'
     );
@@ -6530,7 +6543,11 @@ try {
         && $db->query("
             SELECT status FROM ontology_quarantine_retries
             WHERE subject_id = {$sharedBasilSubject}
-        ")->fetchColumn() === 'resolved',
+        ")->fetchColumn() === 'resolved'
+        && $db->query("
+            SELECT status FROM ontology_generation_intents
+            WHERE subject_id = {$sharedBasilSubject}
+        ")->fetchColumn() === 'superseded',
         'Shared subject job may terminalize only after its final active occurrence is removed'
     );
 
