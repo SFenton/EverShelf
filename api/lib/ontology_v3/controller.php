@@ -14073,6 +14073,41 @@ function ingredientOntologyControllerResumeDurableJob(
                         'ontology generation intent kind is invalid'
                     );
                 }
+                $subjectId = $job['subject_id'] !== null
+                    ? (int)$job['subject_id']
+                    : null;
+                if (
+                    $subjectId !== null
+                    && in_array(
+                        $intentKind,
+                        ['validated_plan', 'provisional'],
+                        true
+                    )
+                ) {
+                    $supersededKinds = $intentKind === 'validated_plan'
+                        ? ['validated_plan', 'provisional']
+                        : ['provisional'];
+                    $placeholders = implode(
+                        ',',
+                        array_fill(0, count($supersededKinds), '?')
+                    );
+                    $db->prepare("
+                        UPDATE ontology_generation_intents
+                        SET status = 'superseded',
+                            last_error =
+                                'Superseded by newer subject intent.',
+                            finished_at = CURRENT_TIMESTAMP,
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE subject_id = ?
+                          AND source_job_id <> ?
+                          AND intent_kind IN ({$placeholders})
+                          AND status IN ('pending', 'queued')
+                    ")->execute([
+                        $subjectId,
+                        (int)$job['id'],
+                        ...$supersededKinds,
+                    ]);
+                }
                 $db->prepare("
                     INSERT INTO ontology_generation_intents (
                         source_job_id, subject_id, intent_kind,
@@ -14091,9 +14126,7 @@ function ingredientOntologyControllerResumeDurableJob(
                         updated_at = CURRENT_TIMESTAMP
                 ")->execute([
                     (int)$job['id'],
-                    $job['subject_id'] !== null
-                        ? (int)$job['subject_id']
-                        : null,
+                    $subjectId,
                     $intentKind,
                     $responseArtifactId,
                 ]);

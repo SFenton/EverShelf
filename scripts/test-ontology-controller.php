@@ -6185,6 +6185,37 @@ try {
           AND status = 'queued'
         ORDER BY id DESC LIMIT 1
     ")->fetch(PDO::FETCH_ASSOC);
+    $db->prepare("
+        INSERT INTO ontology_controller_jobs (
+            job_key, job_type, subject_id, trigger_event_id,
+            required_epoch, controller_generation,
+            base_ontology_version_id, base_content_hash,
+            controller_policy_hash, status, priority,
+            input_hash, input_json, finished_at
+        )
+        VALUES (
+            ?, 'subject_resolution', ?, ?, 0, ?, ?, ?, ?,
+            'quarantined', 0, ?, '{}', CURRENT_TIMESTAMP
+        )
+    ")->execute([
+        hash('sha256', 'older_provisional_intent_job'),
+        (int)$liveIntakeJob['subject_id'],
+        (int)$liveIntakeJob['trigger_event_id'],
+        (int)$liveIntakeJob['controller_generation'],
+        (int)$liveIntakeJob['base_ontology_version_id'],
+        (string)$liveIntakeJob['base_content_hash'],
+        (string)$liveIntakeJob['controller_policy_hash'],
+        hash('sha256', 'older_provisional_intent_input'),
+    ]);
+    $olderLiveIntentJob = $db->query("
+        SELECT * FROM ontology_controller_jobs
+        WHERE id = last_insert_rowid()
+    ")->fetch(PDO::FETCH_ASSOC);
+    ingredientOntologyControllerStoreGenerationIntent(
+        $db,
+        $olderLiveIntentJob,
+        'provisional'
+    );
     $liveVersionCount = controllerTestCount(
         $db,
         'SELECT COUNT(*) FROM ingredient_ontology_versions'
@@ -6276,6 +6307,16 @@ try {
             $db,
             'SELECT COUNT(*) FROM ontology_generations'
         ) === $liveGenerationCount
+        && $db->query("
+            SELECT status FROM ontology_generation_intents
+            WHERE source_job_id = "
+                . (int)$olderLiveIntentJob['id']
+        )->fetchColumn() === 'superseded'
+        && $db->query("
+            SELECT intent_kind || ':' || status
+            FROM ontology_generation_intents
+            WHERE source_job_id = " . (int)$liveIntakeJob['id']
+        )->fetchColumn() === 'validated_plan:pending'
         && controllerTestCount(
             $db,
             "SELECT COUNT(*) FROM ontology_mutation_plans
