@@ -10,6 +10,7 @@ import os
 import shutil
 import socket
 import subprocess
+import sys
 import threading
 import time
 import unittest
@@ -221,6 +222,39 @@ class ProviderTests(unittest.TestCase):
             str(image),
         )
         self.assertFalse(image.exists())
+
+    def test_sdk_bridge_stays_warm_across_requests(self):
+        bridge = self.root / "fake-sdk-bridge.py"
+        starts = self.root / "fake-sdk-bridge-starts.txt"
+        bridge.write_text(
+            "\n".join([
+                "import json, sys",
+                f"open({str(starts)!r}, 'a').write('start\\n')",
+                "for line in sys.stdin:",
+                "    request = json.loads(line)",
+                "    print(json.dumps({",
+                "        'id': request['id'],",
+                "        'ok': True,",
+                "        'plan': {'ok': True},",
+                "        'usage': {'warm': True},",
+                "    }), flush=True)",
+            ]),
+            encoding="utf-8",
+        )
+        invoker = provider.CopilotInvoker(
+            bridge_command=[sys.executable, str(bridge)],
+            work_dir=str(self.root / "sdk-bridge-work"),
+        )
+        try:
+            first, first_usage = invoker.invoke(request())
+            second, second_usage = invoker.invoke(request())
+        finally:
+            invoker.close()
+        self.assertEqual(first, {"ok": True})
+        self.assertEqual(second, {"ok": True})
+        self.assertEqual(first_usage, {"warm": True})
+        self.assertEqual(second_usage, {"warm": True})
+        self.assertEqual(starts.read_text(encoding="utf-8"), "start\n")
 
     def test_attachment_hash_mismatch_fails_closed(self):
         attachments = self.root / "attachments-mismatch"

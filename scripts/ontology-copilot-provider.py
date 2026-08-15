@@ -9,6 +9,8 @@ import errno
 import hashlib
 import json
 import os
+import select
+import shutil
 import socket
 import socketserver
 import subprocess
@@ -130,13 +132,19 @@ class CopilotInvoker:
         ),
         timeout_seconds: int = 90,
         attachments_dir: str = DEFAULT_ATTACHMENTS_DIR,
+        bridge_command: list[str] | None = None,
         runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
     ) -> None:
         self.copilot_path = copilot_path
         self.work_dir = work_dir
         self.timeout_seconds = max(5, min(180, timeout_seconds))
         self.attachments_dir = Path(attachments_dir)
-        self.runner = runner or subprocess.run
+        self.runner = runner
+        self.bridge_command = bridge_command
+        self.bridge_process: subprocess.Popen[str] | None = None
+        self.bridge_lock = threading.Lock()
+        self.bridge_stderr = None
+        self.bridge_sequence = 0
 
     def argv(
         self,
@@ -224,6 +232,19 @@ class CopilotInvoker:
                 raise ProviderError("attachment_hash_mismatch")
         work_dir = Path(self.work_dir)
         work_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        if self.runner is None:
+            try:
+                return self.invoke_sdk_bridge(
+                    request,
+                    request_prompt,
+                    attachment_path,
+                )
+            finally:
+                if attachment_path is not None:
+                    try:
+                        attachment_path.unlink(missing_ok=True)
+                    except OSError:
+                        pass
         try:
             completed = self.runner(
                 self.argv(
@@ -300,6 +321,160 @@ class CopilotInvoker:
         if len(usage_json.encode("utf-8")) > MAX_USAGE_BYTES:
             usage = {"truncated": True}
         return plan, usage
+
+    def default_bridge_command(self) -> list[str]:
+        node = shutil.which("node") or "/home/sfenton/.local/bin/node"
+        bridge = Path(__file__).with_name("copilot-sdk-bridge.mjs")
+        return [node, str(bridge)]
+
+    def stop_bridge(self) -> None:
+        process = self.bridge_process
+        self.bridge_process = None
+        if process is not None:
+            try:
+                if process.stdin is not None:
+                    process.stdin.close()
+            except OSError:
+                pass
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.terminate()
+                try:
+                    process.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=2)
+            if process.stdout is not None:
+                process.stdout.close()
+        if self.bridge_stderr is not None:
+            self.bridge_stderr.close()
+            self.bridge_stderr = None
+
+    def ensure_bridge(self) -> subprocess.Popen[str]:
+        if (
+            self.bridge_process is not None
+            and self.bridge_process.poll() is None
+        ):
+            return self.bridge_process
+        self.stop_bridge()
+        work_dir = Path(self.work_dir)
+        logs_dir = work_dir / "logs"
+        logs_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        self.bridge_stderr = open(
+            logs_dir / "copilot-sdk-bridge.stderr.log",
+            "a",
+            encoding="utf-8",
+        )
+        command = self.bridge_command or self.default_bridge_command()
+        self.bridge_process = subprocess.Popen(
+            command,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=self.bridge_stderr,
+            text=True,
+            bufsize=1,
+            cwd=self.work_dir,
+            shell=False,
+            env={
+                "HOME": os.environ.get("HOME", "/home/sfenton"),
+                "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+                "NO_COLOR": "1",
+                "COPILOT_ALLOW_ALL": "1",
+                "COPILOT_PATH": self.copilot_path,
+                "COPILOT_HOME": os.environ.get(
+                    "COPILOT_HOME",
+                    str(Path.home() / ".copilot"),
+                ),
+                "EVERSHELF_COPILOT_WORK_DIR": self.work_dir,
+            },
+        )
+        return self.bridge_process
+
+    def invoke_sdk_bridge(
+        self,
+        request: dict[str, Any],
+        request_prompt: str,
+        attachment_path: Path | None,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        with self.bridge_lock:
+            self.bridge_sequence += 1
+            bridge_id = (
+                f"{request['request_id']}:{self.bridge_sequence}"
+            )
+            payload = {
+                "id": bridge_id,
+                "model": request["model"],
+                "effort": request.get("effort"),
+                "prompt": request_prompt,
+                "timeout_ms": self.timeout_seconds * 1000,
+                "attachment_path": (
+                    str(attachment_path)
+                    if attachment_path is not None
+                    else None
+                ),
+                "attachment_name": (
+                    request.get("attachment", {}).get("name")
+                    if attachment_path is not None
+                    else None
+                ),
+            }
+            process = self.ensure_bridge()
+            if process.stdin is None or process.stdout is None:
+                self.stop_bridge()
+                raise ProviderError("copilot_sdk_bridge_unavailable")
+            try:
+                process.stdin.write(stable_json(payload) + "\n")
+                process.stdin.flush()
+            except (BrokenPipeError, OSError) as exc:
+                self.stop_bridge()
+                raise ProviderError(
+                    "copilot_sdk_bridge_unavailable"
+                ) from exc
+            ready, _, _ = select.select(
+                [process.stdout],
+                [],
+                [],
+                self.timeout_seconds + 5,
+            )
+            if not ready:
+                self.stop_bridge()
+                raise ProviderError("copilot_timeout")
+            line = process.stdout.readline()
+            if line == "":
+                self.stop_bridge()
+                raise ProviderError("copilot_sdk_bridge_unavailable")
+            try:
+                response = json.loads(line)
+            except json.JSONDecodeError as exc:
+                self.stop_bridge()
+                raise ProviderError(
+                    "copilot_sdk_bridge_malformed"
+                ) from exc
+            if (
+                not isinstance(response, dict)
+                or response.get("id") != bridge_id
+            ):
+                self.stop_bridge()
+                raise ProviderError(
+                    "copilot_sdk_bridge_mismatched_response"
+                )
+            if not response.get("ok"):
+                message = str(
+                    response.get("error", "copilot_sdk_failed")
+                )
+                if "timeout" in message.lower():
+                    raise ProviderError("copilot_timeout")
+                raise ProviderError("copilot_failed", message)
+            plan = response.get("plan")
+            if not isinstance(plan, dict):
+                raise ProviderError("copilot_plan_not_object")
+            usage = response.get("usage")
+            return plan, usage if isinstance(usage, dict) else {}
+
+    def close(self) -> None:
+        with self.bridge_lock:
+            self.stop_bridge()
 
 
 def validate_request(request: Any) -> dict[str, Any]:
@@ -503,6 +678,7 @@ def serve(args: argparse.Namespace) -> None:
         server.serve_forever(poll_interval=0.2)
     finally:
         server.server_close()
+        invoker.close()
         if socket_path.exists() and socket_path.is_socket():
             socket_path.unlink()
 

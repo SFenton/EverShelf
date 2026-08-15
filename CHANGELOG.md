@@ -5,6 +5,15 @@ All notable changes to EverShelf will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.8.8] - 2026-08-15
+
+### Performance
+- The local Copilot socket provider now keeps one Copilot SDK runtime alive
+  instead of launching a new CLI process for every request. Gemini-first expiry
+  vision dropped from roughly 9–12 seconds to 3–5 seconds after warm-up while
+  preserving isolated sessions, strict JSON schemas, disabled tools, and
+  hash-bound attachments.
+
 ## [1.8.7] - 2026-08-14
 
 ### Changed
