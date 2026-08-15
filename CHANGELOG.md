@@ -5,6 +5,16 @@ All notable changes to EverShelf will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.8.6] - 2026-08-14
+
+### Fixed
+- Expiry scans now fall back to a bounded local Copilot Gemini 3.6 vision
+  attachment when Tesseract extracts no text. Gemini 3.7 remains the ontology
+  proposer but is not used for images because its Copilot endpoint rejects
+  image parts.
+- Vision attachments are hash-bound, size-limited, stored only in a
+  group-writable runtime directory, and deleted by both provider and caller.
+
 ## [Unreleased] — Ideas & Roadmap
 
 > Ideas collected during development. No priority or date implied.

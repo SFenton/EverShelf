@@ -5128,6 +5128,7 @@ try {
     controllerTestAssert(
         array_keys($copilotWhitelist) === [
             'gemini-3.7-flash',
+            'gemini-3.6-flash',
             'claude-sonnet-5',
             'gpt-5.6-terra',
             'claude-opus-5',

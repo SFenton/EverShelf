@@ -181,6 +181,73 @@ class ProviderTests(unittest.TestCase):
         )
         self.assertTrue(response["ok"])
 
+    def test_bounded_image_attachment(self):
+        attachments = self.root / "attachments"
+        attachments.mkdir(mode=0o770)
+        image = attachments / "expiry-test.png"
+        image.write_bytes(b"\x89PNG\r\n\x1a\nbounded-image")
+        captured = {}
+
+        def runner(argv, **kwargs):
+            del kwargs
+            attachment_index = argv.index("--attachment")
+            captured["attachment"] = argv[attachment_index + 1]
+            self.assertTrue(Path(captured["attachment"]).is_file())
+            return success_runner()
+
+        req = request(model="gemini-3.6-flash")
+        req["attachment"] = {
+            "name": image.name,
+            "mime_type": "image/png",
+            "sha256": provider.hashlib.sha256(
+                image.read_bytes()
+            ).hexdigest(),
+        }
+        app = provider.ProviderApplication(
+            provider.CopilotInvoker(
+                runner=runner,
+                work_dir=str(self.root / "attachment-work"),
+                attachments_dir=str(attachments),
+            )
+        )
+        path = self.start_server(app, "attachment")
+        response = self.exchange(
+            path,
+            provider.stable_json(req).encode(),
+        )
+        self.assertTrue(response["ok"])
+        self.assertEqual(
+            captured["attachment"],
+            str(image),
+        )
+        self.assertFalse(image.exists())
+
+    def test_attachment_hash_mismatch_fails_closed(self):
+        attachments = self.root / "attachments-mismatch"
+        attachments.mkdir(mode=0o770)
+        image = attachments / "expiry-test.jpg"
+        image.write_bytes(b"not-the-declared-image")
+        req = request(model="gemini-3.6-flash")
+        req["attachment"] = {
+            "name": image.name,
+            "mime_type": "image/jpeg",
+            "sha256": "0" * 64,
+        }
+        app = provider.ProviderApplication(
+            provider.CopilotInvoker(
+                runner=success_runner,
+                work_dir=str(self.root / "attachment-mismatch-work"),
+                attachments_dir=str(attachments),
+            )
+        )
+        path = self.start_server(app, "attachment-mismatch")
+        response = self.exchange(
+            path,
+            provider.stable_json(req).encode(),
+        )
+        self.assertFalse(response["ok"])
+        self.assertEqual(response["error"], "attachment_hash_mismatch")
+
     def test_php_python_request_hash_fixture(self):
         schema = {"additionalProperties": False, "type": "object"}
         raw_prompt = "alpha\u2028beta\u2029gamma"

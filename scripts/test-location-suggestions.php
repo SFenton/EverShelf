@@ -327,6 +327,18 @@ assertScanTrue(
 );
 
 $imageBase64 = scanTestImageBase64();
+$expiryAttachmentDirectory = dirname(__DIR__)
+    . '/data/.expiry-copilot-attachments-' . getmypid();
+if (
+    !mkdir($expiryAttachmentDirectory, 0770, true)
+    && !is_dir($expiryAttachmentDirectory)
+) {
+    throw new RuntimeException(
+        'Unable to create expiry attachment test directory'
+    );
+}
+$GLOBALS['EXPIRY_COPILOT_ATTACHMENT_DIR'] =
+    $expiryAttachmentDirectory;
 $processOrder = [];
 $copilotExpiryCalls = 0;
 $capturedProcessRemaining = null;
@@ -455,18 +467,40 @@ $GLOBALS['EXPIRY_OCR_PROCESS_TRANSPORT'] =
         ];
     };
 $GLOBALS['EXPIRY_COPILOT_TRANSPORT'] =
-    static function () use (&$processOrder): array {
-        $processOrder[] = 'copilot';
-        throw new RuntimeException('copilot_must_not_run_without_text');
+    static function (
+        array $request
+    ) use (
+        &$processOrder,
+        $expiryAttachmentDirectory
+    ): array {
+        $processOrder[] = 'vision';
+        $attachment = $request['attachment'] ?? [];
+        $path = $expiryAttachmentDirectory . '/'
+            . (string)($attachment['name'] ?? '');
+        assertScanTrue(
+            ($request['model'] ?? '') === 'gemini-3.6-flash'
+            && ($attachment['mime_type'] ?? '') === 'image/png'
+            && is_file($path)
+            && hash_file('sha256', $path)
+                === ($attachment['sha256'] ?? ''),
+            'Vision fallback must use one bounded, hash-bound attachment'
+        );
+        return [
+            'source' => 'copilot_socket',
+            'envelope' => [
+                'found' => true,
+                'date' => '2027-11-05',
+            ],
+        ];
     };
 $localTimeout = readExpiryFromImage($imageBase64);
 assertScanTrue(
-    $localTimeout['found'] === false
-    && $localTimeout['nonfatal'] === true
-    && $localTimeout['can_continue'] === true
-    && $localTimeout['reason'] === 'tesseract_timeout'
-    && $processOrder === ['process'],
-    'Tesseract timeout must remain nonfatal and must not send an image to Copilot'
+    $localTimeout['found'] === true
+    && $localTimeout['expiry_date'] === '2027-11-05'
+    && $localTimeout['source'] === 'copilot_vision'
+    && $processOrder === ['process', 'vision']
+    && glob($expiryAttachmentDirectory . '/*') === [],
+    'Tesseract failure must use bounded Copilot Gemini vision and clean its attachment'
 );
 
 $processOrder = [];
@@ -584,7 +618,9 @@ assertScanTrue(
     && !str_contains($expirySource, 'sys_get_temp_dir')
     && EXPIRY_OCR_PROCESS_TIMEOUT_SECONDS <= 4.0
     && EXPIRY_COPILOT_TIMEOUT_SECONDS <= 10.0
-    && EXPIRY_INTERACTIVE_TIMEOUT_SECONDS <= 14.0
+    && EXPIRY_COPILOT_VISION_TIMEOUT_SECONDS <= 15.0
+    && EXPIRY_COPILOT_VISION_MODEL === 'gemini-3.6-flash'
+    && EXPIRY_INTERACTIVE_TIMEOUT_SECONDS <= 19.0
     && $expiryUiSource !== ''
     && !str_contains($expiryUiSource, '_requireGemini')
     && !str_contains($expiryUiSource, "result.error === 'no_api_key'")
@@ -673,10 +709,14 @@ unset(
     $GLOBALS['EXPIRY_TESSERACT_BINARY'],
     $GLOBALS['EXPIRY_OCR_PROCESS_TRANSPORT'],
     $GLOBALS['EXPIRY_COPILOT_TRANSPORT'],
+    $GLOBALS['EXPIRY_COPILOT_ATTACHMENT_DIR'],
     $GLOBALS['BARCODE_HTTP_TRANSPORT'],
     $GLOBALS['BARCODE_AI_API_KEY'],
     $GLOBALS['BARCODE_AI_TRANSPORT'],
     $GLOBALS['BARCODE_AI_FALLBACK']
 );
+if (is_dir($expiryAttachmentDirectory)) {
+    rmdir($expiryAttachmentDirectory);
+}
 
 echo "Scan AI tests passed: {$scanAiAssertions} assertions.\n";

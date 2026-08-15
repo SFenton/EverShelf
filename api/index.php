@@ -15,8 +15,11 @@ const RECIPE_PANTRY_MIN_MATCH_SCORE = 80;
 const RECENTLY_EXHAUSTED_DAYS = 30;
 const EXPIRY_OCR_PROCESS_TIMEOUT_SECONDS = 4.0;
 const EXPIRY_COPILOT_TIMEOUT_SECONDS = 10.0;
-const EXPIRY_INTERACTIVE_TIMEOUT_SECONDS = 14.0;
+const EXPIRY_COPILOT_VISION_TIMEOUT_SECONDS = 15.0;
+const EXPIRY_COPILOT_VISION_MODEL = 'gemini-3.6-flash';
+const EXPIRY_INTERACTIVE_TIMEOUT_SECONDS = 19.0;
 const EXPIRY_OCR_MAX_TEXT_CHARS = 1200;
+const EXPIRY_COPILOT_MAX_ATTACHMENT_BYTES = 4 * 1024 * 1024;
 /** How long to suppress auto-re-add after user bought an item (ms, synced with client blocklist). */
 const BRING_PURCHASED_BLOCK_MS = 72 * 60 * 60 * 1000;
 
@@ -8755,6 +8758,123 @@ PROMPT;
     );
 }
 
+function expiryCopilotAttachmentDirectory(): string {
+    if (
+        defined('RECIPE_BACKEND_TEST_MODE')
+        && RECIPE_BACKEND_TEST_MODE
+        && is_string(
+            $GLOBALS['EXPIRY_COPILOT_ATTACHMENT_DIR'] ?? null
+        )
+    ) {
+        return trim(
+            (string)$GLOBALS['EXPIRY_COPILOT_ATTACHMENT_DIR']
+        );
+    }
+    return trim(env(
+        'EVERSHELF_COPILOT_ATTACHMENT_DIR',
+        '/run/evershelf-ontology-attachments'
+    ));
+}
+
+function expiryCopilotPrepareAttachment(
+    string $imageBase64
+): ?array {
+    $bytes = base64_decode($imageBase64, true);
+    if (
+        $bytes === false
+        || strlen($bytes) < 100
+        || strlen($bytes) > EXPIRY_COPILOT_MAX_ATTACHMENT_BYTES
+    ) {
+        return null;
+    }
+    $image = @getimagesizefromstring($bytes);
+    $mime = is_array($image)
+        ? strtolower((string)($image['mime'] ?? ''))
+        : '';
+    $extensions = [
+        'image/jpeg' => 'jpg',
+        'image/png' => 'png',
+        'image/webp' => 'webp',
+    ];
+    if (!isset($extensions[$mime])) {
+        return null;
+    }
+    $directory = expiryCopilotAttachmentDirectory();
+    if (
+        $directory === ''
+        || !is_dir($directory)
+        || !is_writable($directory)
+    ) {
+        return null;
+    }
+    $name = bin2hex(random_bytes(16)) . '.' . $extensions[$mime];
+    $path = $directory . '/' . $name;
+    $temporaryPath = $path . '.tmp.' . getmypid();
+    try {
+        if (
+            file_put_contents(
+                $temporaryPath,
+                $bytes,
+                LOCK_EX
+            ) !== strlen($bytes)
+            || !chmod($temporaryPath, 0640)
+            || !rename($temporaryPath, $path)
+        ) {
+            return null;
+        }
+    } finally {
+        if (is_file($temporaryPath)) {
+            @unlink($temporaryPath);
+        }
+    }
+    return [
+        'path' => $path,
+        'request' => [
+            'name' => $name,
+            'mime_type' => $mime,
+            'sha256' => hash('sha256', $bytes),
+        ],
+    ];
+}
+
+function expiryCopilotVisionRequest(
+    array $attachment,
+    DateTimeImmutable $today
+): array {
+    $prompt = <<<PROMPT
+Read the attached grocery label image and identify an explicit expiration,
+best-by, use-by, or freeze-by date. Never infer from lot, packed, manufacture,
+or Julian codes. Numeric dates use US month/day ordering unless the first value
+is greater than 12. For month/year values use the first day of that month.
+Return found=false when uncertain and return only the strict JSON object.
+PROMPT;
+    $schema = [
+        'type' => 'object',
+        'additionalProperties' => false,
+        'required' => ['found', 'date'],
+        'properties' => [
+            'found' => ['type' => 'boolean'],
+            'date' => [
+                'type' => 'string',
+                'maxLength' => 10,
+            ],
+        ],
+    ];
+    $request = evershelfCopilotStrictRequest(
+        'expiry_vision',
+        $prompt,
+        $schema,
+        [
+            'version' => 'expiry-vision-v1',
+            'today' => $today->format('Y-m-d'),
+            'attachment_sha256' => $attachment['sha256'] ?? '',
+        ],
+        EXPIRY_COPILOT_VISION_MODEL
+    );
+    $request['attachment'] = $attachment;
+    return $request;
+}
+
 function parseExpiryCopilotEnvelope(array $envelope): ?array {
     if (
         array_diff(array_keys($envelope), ['found', 'date']) !== []
@@ -8809,6 +8929,95 @@ function expiryNotFoundResult(
     ];
 }
 
+function readExpiryWithCopilotVision(
+    string $imageBase64,
+    float $startedAt,
+    float $totalDeadline,
+    string $fallbackReason
+): array {
+    $attachment = expiryCopilotPrepareAttachment($imageBase64);
+    if ($attachment === null) {
+        return expiryNotFoundResult(
+            $fallbackReason,
+            '',
+            $startedAt
+        );
+    }
+    $path = (string)$attachment['path'];
+    $deadline = min(
+        $totalDeadline,
+        microtime(true) + EXPIRY_COPILOT_VISION_TIMEOUT_SECONDS
+    );
+    try {
+        if ($deadline <= microtime(true)) {
+            return expiryNotFoundResult(
+                'expiry_deadline_exceeded',
+                '',
+                $startedAt
+            );
+        }
+        $request = expiryCopilotVisionRequest(
+            $attachment['request'],
+            new DateTimeImmutable('today')
+        );
+        EverLog::aiCall(
+            EXPIRY_COPILOT_VISION_MODEL,
+            mb_strlen((string)$request['prompt'], 'UTF-8')
+        );
+        $response = expiryCopilotTransport($request, $deadline);
+        $envelope = $response['envelope'] ?? null;
+        $parsed = is_array($envelope)
+            ? parseExpiryCopilotEnvelope($envelope)
+            : null;
+        if ($parsed === null) {
+            throw new RuntimeException(
+                'expiry_vision_invalid_response'
+            );
+        }
+        if (!$parsed['found']) {
+            return expiryNotFoundResult(
+                'expiry_not_found',
+                '',
+                $startedAt
+            );
+        }
+        return [
+            'success' => true,
+            'found' => true,
+            'expiry_date' => $parsed['date'],
+            'raw_text' => '',
+            'source' => 'copilot_vision',
+            'model' => EXPIRY_COPILOT_VISION_MODEL,
+            'nonfatal' => false,
+            'elapsed_ms' => (int)round(
+                (microtime(true) - $startedAt) * 1000
+            ),
+        ];
+    } catch (Throwable $error) {
+        $reason = evershelfCopilotFailureReason($error);
+        EverLog::warn(
+            'Expiry Copilot vision fallback unavailable',
+            [
+                'model' => EXPIRY_COPILOT_VISION_MODEL,
+                'reason' => mb_substr($reason, 0, 100),
+                'elapsed_ms' => (int)round(
+                    (microtime(true) - $startedAt) * 1000
+                ),
+            ],
+            'expiry_ocr'
+        );
+        return expiryNotFoundResult($reason, '', $startedAt);
+    } finally {
+        if (is_file($path) && !@unlink($path)) {
+            EverLog::warn(
+                'Unable to remove expiry Copilot attachment',
+                ['path' => basename($path)],
+                'expiry_ocr'
+            );
+        }
+    }
+}
+
 function readExpiryFromImage(string $imageBase64): array {
     $startedAt = microtime(true);
     $totalDeadline = $startedAt
@@ -8840,11 +9049,24 @@ function readExpiryFromImage(string $imageBase64): array {
         'UTF-8'
     );
     if ($rawText === '') {
-        return expiryNotFoundResult(
-            (string)($ocrResult['reason'] ?? 'expiry_not_found'),
-            '',
-            $startedAt
+        $result = readExpiryWithCopilotVision(
+            $imageBase64,
+            $startedAt,
+            $totalDeadline,
+            (string)($ocrResult['reason'] ?? 'expiry_not_found')
         );
+        if (empty($result['found'])) {
+            EverLog::warn(
+                'Expiry OCR did not find a date',
+                [
+                    'reason' => $result['reason'] ?? 'unknown',
+                    'source' => $result['source'] ?? 'none',
+                    'elapsed_ms' => $result['elapsed_ms'] ?? 0,
+                ],
+                'expiry_ocr'
+            );
+        }
+        return $result;
     }
     $copilotDeadline = min(
         $totalDeadline,

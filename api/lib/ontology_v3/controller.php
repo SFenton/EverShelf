@@ -6831,6 +6831,10 @@ function ingredientOntologyControllerStreamEpoch(
                 'role' => 'proposer',
                 'effort' => null,
             ],
+            'gemini-3.6-flash' => [
+                'role' => 'proposer',
+                'effort' => null,
+            ],
             'claude-sonnet-5' => [
                 'role' => 'critic_or_alternate',
                 'effort' => 'high',

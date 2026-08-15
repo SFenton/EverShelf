@@ -18,8 +18,9 @@ from pathlib import Path
 from typing import Any, Callable
 
 PROTOCOL_VERSION = "evershelf-ontology-copilot-v1"
-WHITELIST_VERSION = "ontology-copilot-models-v1"
+WHITELIST_VERSION = "ontology-copilot-models-v2"
 DEFAULT_SOCKET = "/run/evershelf-ontology/copilot.sock"
+DEFAULT_ATTACHMENTS_DIR = "/run/evershelf-ontology/attachments"
 DEFAULT_COPILOT = "/home/sfenton/.local/bin/copilot"
 MAX_REQUEST_BYTES = 524_288
 MAX_RESPONSE_BYTES = 524_288
@@ -27,6 +28,7 @@ MAX_PROMPT_BYTES = 160_000
 MAX_SCHEMA_BYTES = 262_144
 MAX_COPILOT_ARGUMENT_BYTES = 100_000
 MAX_USAGE_BYTES = 16_384
+MAX_ATTACHMENT_BYTES = 4 * 1024 * 1024
 SOCKET_IDLE_TIMEOUT = 15.0
 DISABLED_MCP_SERVERS = (
     "github-mcp-server",
@@ -36,6 +38,7 @@ DISABLED_MCP_SERVERS = (
 )
 MODEL_WHITELIST = {
     "gemini-3.7-flash": {"roles": {"proposer"}, "effort": None},
+    "gemini-3.6-flash": {"roles": {"proposer"}, "effort": None},
     "claude-sonnet-5": {
         "roles": {"proposer", "critic", "alternate"},
         "effort": "high",
@@ -126,11 +129,13 @@ class CopilotInvoker:
             Path.home() / ".local/share/evershelf-ontology/empty"
         ),
         timeout_seconds: int = 90,
+        attachments_dir: str = DEFAULT_ATTACHMENTS_DIR,
         runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
     ) -> None:
         self.copilot_path = copilot_path
         self.work_dir = work_dir
         self.timeout_seconds = max(5, min(180, timeout_seconds))
+        self.attachments_dir = Path(attachments_dir)
         self.runner = runner or subprocess.run
 
     def argv(
@@ -138,6 +143,7 @@ class CopilotInvoker:
         model: str,
         effort: str | None,
         request_prompt: str,
+        attachment_path: Path | None = None,
     ) -> list[str]:
         argv = [
             self.copilot_path,
@@ -169,6 +175,8 @@ class CopilotInvoker:
         ]
         if effort is not None:
             argv[5:5] = ["--effort", effort]
+        if attachment_path is not None:
+            argv.extend(["--attachment", str(attachment_path)])
         for server in DISABLED_MCP_SERVERS:
             argv.extend(["--disable-mcp-server", server])
         return argv
@@ -198,11 +206,32 @@ class CopilotInvoker:
         )
         if len(request_prompt.encode("utf-8")) > MAX_COPILOT_ARGUMENT_BYTES:
             raise ProviderError("copilot_argument_oversized")
+        attachment_path: Path | None = None
+        attachment = request.get("attachment")
+        if isinstance(attachment, dict):
+            name = str(attachment["name"])
+            attachment_path = self.attachments_dir / name
+            try:
+                stat = attachment_path.lstat()
+            except FileNotFoundError as exc:
+                raise ProviderError("attachment_missing") from exc
+            if attachment_path.is_symlink() or not attachment_path.is_file():
+                raise ProviderError("attachment_invalid")
+            if stat.st_size <= 0 or stat.st_size > MAX_ATTACHMENT_BYTES:
+                raise ProviderError("attachment_size_invalid")
+            digest = hashlib.sha256(attachment_path.read_bytes()).hexdigest()
+            if digest != attachment["sha256"]:
+                raise ProviderError("attachment_hash_mismatch")
         work_dir = Path(self.work_dir)
         work_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
         try:
             completed = self.runner(
-                self.argv(model, effort, request_prompt),
+                self.argv(
+                    model,
+                    effort,
+                    request_prompt,
+                    attachment_path,
+                ),
                 input="",
                 text=True,
                 capture_output=True,
@@ -222,6 +251,12 @@ class CopilotInvoker:
             if exc.errno == errno.E2BIG:
                 raise ProviderError("copilot_argv_too_large") from exc
             raise ProviderError("copilot_unavailable", str(exc)) from exc
+        finally:
+            if attachment_path is not None:
+                try:
+                    attachment_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
         if completed.returncode != 0:
             raise ProviderError(
                 "copilot_failed",
@@ -281,6 +316,7 @@ def validate_request(request: Any) -> dict[str, Any]:
         "schema",
         "schema_hash",
         "input_hash",
+        "attachment",
     }
     if set(request) - allowed:
         raise ProviderError("request_unknown_fields")
@@ -312,6 +348,32 @@ def validate_request(request: Any) -> dict[str, Any]:
         raise ProviderError("schema_oversized")
     if sha256_text(schema_json) != request["schema_hash"]:
         raise ProviderError("schema_hash_mismatch")
+    attachment = request.get("attachment")
+    if attachment is not None:
+        if not isinstance(attachment, dict):
+            raise ProviderError("attachment_invalid")
+        if set(attachment) != {"name", "mime_type", "sha256"}:
+            raise ProviderError("attachment_invalid")
+        name = attachment.get("name")
+        mime_type = attachment.get("mime_type")
+        digest = attachment.get("sha256")
+        if (
+            not isinstance(name, str)
+            or not name
+            or "/" in name
+            or "\\" in name
+            or "\0" in name
+            or len(name) > 100
+        ):
+            raise ProviderError("attachment_name_invalid")
+        if mime_type not in {"image/jpeg", "image/png", "image/webp"}:
+            raise ProviderError("attachment_mime_invalid")
+        if (
+            not isinstance(digest, str)
+            or len(digest) != 64
+            or any(char not in "0123456789abcdef" for char in digest)
+        ):
+            raise ProviderError("attachment_hash_invalid")
     return request
 
 
@@ -419,10 +481,15 @@ def serve(args: argparse.Namespace) -> None:
     work_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
     os.chmod(work_dir, 0o700)
     (work_dir / "logs").mkdir(mode=0o700, exist_ok=True)
+    attachments_dir = Path(args.attachments_dir)
+    attachments_dir.mkdir(mode=0o2770, parents=True, exist_ok=True)
+    os.chmod(attachments_dir, 0o2770)
+    os.chown(attachments_dir, -1, args.socket_gid)
     invoker = CopilotInvoker(
         copilot_path=DEFAULT_COPILOT,
         work_dir=str(work_dir),
         timeout_seconds=args.timeout,
+        attachments_dir=str(attachments_dir),
     )
     application = ProviderApplication(
         invoker,
@@ -443,6 +510,10 @@ def serve(args: argparse.Namespace) -> None:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--socket", default=DEFAULT_SOCKET)
+    parser.add_argument(
+        "--attachments-dir",
+        default=DEFAULT_ATTACHMENTS_DIR,
+    )
     parser.add_argument(
         "--work-dir",
         default=str(Path.home() / ".local/share/evershelf-ontology/empty"),
