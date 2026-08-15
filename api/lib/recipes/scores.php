@@ -966,229 +966,295 @@ function recipeScorePruneRevisions(PDO $db): array {
             'recipe score pruning cannot run inside a transaction'
         );
     }
-    $transactionStarted = false;
-    try {
-        $db->exec('BEGIN IMMEDIATE');
-        $transactionStarted = true;
-        $keep = array_map('intval', $db->query("
-            SELECT id
-            FROM recipe_score_revisions
-            WHERE status = 'ready'
-              AND COALESCE(scoring_model, 'legacy-v2') = 'legacy-v2'
-            ORDER BY completed_at DESC, id DESC
-            LIMIT " . RECIPE_SCORE_LEGACY_READY_RETENTION . "
-        ")->fetchAll(PDO::FETCH_COLUMN));
+    $keep = array_map('intval', $db->query("
+        SELECT id
+        FROM recipe_score_revisions
+        WHERE status = 'ready'
+          AND COALESCE(scoring_model, 'legacy-v2') = 'legacy-v2'
+        ORDER BY completed_at DESC, id DESC
+        LIMIT " . RECIPE_SCORE_LEGACY_READY_RETENTION . "
+    ")->fetchAll(PDO::FETCH_COLUMN));
 
-        $activeRevisionId = recipeScoreState($db)['active_score_revision_id'];
-        $active = $activeRevisionId !== null
-            ? recipeScoreRevision($db, $activeRevisionId)
-            : null;
-        if ($active !== null) {
-            $keep[] = $activeRevisionId;
-            $cursor = $active;
-            $seen = [$activeRevisionId => true];
-            for (
-                $depth = 0;
-                $depth < RECIPE_SCORE_V3_ROLLBACK_ANCESTOR_LIMIT;
-                $depth++
-            ) {
-                $parentId = (int)($cursor['parent_score_revision_id'] ?? 0);
-                if ($parentId <= 0 || isset($seen[$parentId])) {
-                    break;
-                }
-                $parent = recipeScoreRevision($db, $parentId);
-                if ($parent === null) {
-                    break;
-                }
-                $keep[] = $parentId;
-                $seen[$parentId] = true;
-                $cursor = $parent;
-            }
-
-            $sameParent = $db->prepare("
-                SELECT id
-                FROM recipe_score_revisions
-                WHERE scoring_model = 'faceted-ontology-v3'
-                  AND parent_score_revision_id = ?
-                  AND status IN ('ready', 'failed')
-                  AND id <> ?
-                ORDER BY id DESC
-                LIMIT 1
-            ");
-            $sameParent->execute([$activeRevisionId, $activeRevisionId]);
-            $candidateId = (int)($sameParent->fetchColumn() ?: 0);
-            if ($candidateId > 0) {
-                $keep[] = $candidateId;
-            }
-        }
-
-        $keep = array_merge($keep, array_map('intval', $db->query("
-            SELECT id
-            FROM recipe_score_revisions
-            WHERE status = 'ready'
-              AND COALESCE(scoring_model, 'legacy-v2') = 'faceted-ontology-v3'
-            ORDER BY completed_at DESC, id DESC
-            LIMIT " . RECIPE_SCORE_V3_READY_HISTORY_LIMIT . "
-        ")->fetchAll(PDO::FETCH_COLUMN)));
-        $keep = array_merge($keep, array_map('intval', $db->query("
-            SELECT id
-            FROM recipe_score_revisions
-            WHERE status = 'ready'
-              AND COALESCE(scoring_model, 'legacy-v2')
-                    = 'faceted-ontology-v3-requirements'
-            ORDER BY completed_at DESC, id DESC
-            LIMIT " . RECIPE_SCORE_REQUIREMENT_SHADOW_RETENTION . "
-        ")->fetchAll(PDO::FETCH_COLUMN)));
-        if ($keep) {
-            $placeholders = implode(
-                ',',
-                array_fill(0, count($keep), '?')
-            );
-            $baselines = $db->prepare("
-                SELECT DISTINCT parity_baseline_score_revision_id
-                FROM recipe_score_revisions
-                WHERE id IN ({$placeholders})
-                  AND parity_baseline_score_revision_id IS NOT NULL
-            ");
-            $baselines->execute($keep);
-            $keep = array_merge(
-                $keep,
-                array_map(
-                    'intval',
-                    $baselines->fetchAll(PDO::FETCH_COLUMN)
-                )
-            );
-        }
-        $keep = array_values(array_unique($keep));
-        sort($keep, SORT_NUMERIC);
-        $maximumKeepCount = RECIPE_SCORE_LEGACY_READY_RETENTION
-            + 1
-            + RECIPE_SCORE_V3_ROLLBACK_ANCESTOR_LIMIT
-            + 1
-            + RECIPE_SCORE_V3_READY_HISTORY_LIMIT
-            + RECIPE_SCORE_REQUIREMENT_SHADOW_RETENTION
-            + RECIPE_SCORE_REQUIREMENT_SHADOW_RETENTION;
-        if (count($keep) > $maximumKeepCount) {
-            throw new RuntimeException(
-                'recipe score pruning keep set exceeded its bounded limit'
-            );
-        }
-        if (
-            defined('RECIPE_BACKEND_TEST_MODE')
-            && RECIPE_BACKEND_TEST_MODE
-            && is_callable(
-                $GLOBALS[
-                    'RECIPE_SCORE_AFTER_PRUNE_KEEP_COMPUTATION'
-                ] ?? null
-            )
+    $activeRevisionId = recipeScoreState($db)['active_score_revision_id'];
+    $active = $activeRevisionId !== null
+        ? recipeScoreRevision($db, $activeRevisionId)
+        : null;
+    if ($active !== null) {
+        $keep[] = $activeRevisionId;
+        $cursor = $active;
+        $seen = [$activeRevisionId => true];
+        for (
+            $depth = 0;
+            $depth < RECIPE_SCORE_V3_ROLLBACK_ANCESTOR_LIMIT;
+            $depth++
         ) {
-            ($GLOBALS['RECIPE_SCORE_AFTER_PRUNE_KEEP_COMPUTATION'])(
-                $db,
-                $keep,
-                $activeRevisionId
-            );
-        }
-        if ($keep) {
-            $placeholders = implode(',', array_fill(0, count($keep), '?'));
-            $delete = $db->prepare("
-                DELETE FROM recipe_score_revisions
-                WHERE status <> 'building' AND id NOT IN ({$placeholders})
-            ");
-            $guardAvailable = function_exists(
-                'ingredientOntologyV3SetRequirementPruneGuard'
-            );
-            $guardWasEnabled = $guardAvailable
-                && function_exists(
-                    'ingredientOntologyV3RequirementPruneGuardEnabled'
-                )
-                    ? ingredientOntologyV3RequirementPruneGuardEnabled($db)
-                    : false;
-            try {
-                if ($guardAvailable) {
-                    ingredientOntologyV3SetRequirementPruneGuard($db, true);
-                }
-                $truncate = $db->prepare("
-                    UPDATE recipe_score_revisions
-                    SET parent_score_revision_id = NULL
-                    WHERE id IN ({$placeholders})
-                      AND parent_score_revision_id IS NOT NULL
-                      AND parent_score_revision_id NOT IN ({$placeholders})
-                ");
-                $truncate->execute(array_merge($keep, $keep));
-                $delete->execute($keep);
-            } finally {
-                if ($guardAvailable) {
-                    ingredientOntologyV3SetRequirementPruneGuard(
-                        $db,
-                        $guardWasEnabled
-                    );
-                }
+            $parentId = (int)($cursor['parent_score_revision_id'] ?? 0);
+            if ($parentId <= 0 || isset($seen[$parentId])) {
+                break;
             }
-            $retained = $db->prepare("
-                SELECT COUNT(*)
-                FROM recipe_score_revisions
-                WHERE id IN ({$placeholders})
-            ");
-            $retained->execute($keep);
-            if ((int)$retained->fetchColumn() !== count($keep)) {
+            $parent = recipeScoreRevision($db, $parentId);
+            if ($parent === null) {
+                break;
+            }
+            $keep[] = $parentId;
+            $seen[$parentId] = true;
+            $cursor = $parent;
+        }
+
+        $sameParent = $db->prepare("
+            SELECT id
+            FROM recipe_score_revisions
+            WHERE scoring_model = 'faceted-ontology-v3'
+              AND parent_score_revision_id = ?
+              AND status IN ('ready', 'failed')
+              AND id <> ?
+            ORDER BY id DESC
+            LIMIT 1
+        ");
+        $sameParent->execute([$activeRevisionId, $activeRevisionId]);
+        $candidateId = (int)($sameParent->fetchColumn() ?: 0);
+        if ($candidateId > 0) {
+            $keep[] = $candidateId;
+        }
+    }
+
+    $keep = array_merge($keep, array_map('intval', $db->query("
+        SELECT id
+        FROM recipe_score_revisions
+        WHERE status = 'ready'
+          AND COALESCE(scoring_model, 'legacy-v2') = 'faceted-ontology-v3'
+        ORDER BY completed_at DESC, id DESC
+        LIMIT " . RECIPE_SCORE_V3_READY_HISTORY_LIMIT . "
+    ")->fetchAll(PDO::FETCH_COLUMN)));
+    $keep = array_merge($keep, array_map('intval', $db->query("
+        SELECT id
+        FROM recipe_score_revisions
+        WHERE status = 'ready'
+          AND COALESCE(scoring_model, 'legacy-v2')
+                = 'faceted-ontology-v3-requirements'
+        ORDER BY completed_at DESC, id DESC
+        LIMIT " . RECIPE_SCORE_REQUIREMENT_SHADOW_RETENTION . "
+    ")->fetchAll(PDO::FETCH_COLUMN)));
+    if ($keep) {
+        $placeholders = implode(',', array_fill(0, count($keep), '?'));
+        $baselines = $db->prepare("
+            SELECT DISTINCT parity_baseline_score_revision_id
+            FROM recipe_score_revisions
+            WHERE id IN ({$placeholders})
+              AND parity_baseline_score_revision_id IS NOT NULL
+        ");
+        $baselines->execute($keep);
+        $keep = array_merge(
+            $keep,
+            array_map('intval', $baselines->fetchAll(PDO::FETCH_COLUMN))
+        );
+    }
+    $keep = array_values(array_unique($keep));
+    sort($keep, SORT_NUMERIC);
+    $maximumKeepCount = RECIPE_SCORE_LEGACY_READY_RETENTION
+        + 1
+        + RECIPE_SCORE_V3_ROLLBACK_ANCESTOR_LIMIT
+        + 1
+        + RECIPE_SCORE_V3_READY_HISTORY_LIMIT
+        + RECIPE_SCORE_REQUIREMENT_SHADOW_RETENTION
+        + RECIPE_SCORE_REQUIREMENT_SHADOW_RETENTION;
+    if (count($keep) > $maximumKeepCount) {
+        throw new RuntimeException(
+            'recipe score pruning keep set exceeded its bounded limit'
+        );
+    }
+    if (
+        defined('RECIPE_BACKEND_TEST_MODE')
+        && RECIPE_BACKEND_TEST_MODE
+        && is_callable(
+            $GLOBALS['RECIPE_SCORE_AFTER_PRUNE_KEEP_COMPUTATION'] ?? null
+        )
+    ) {
+        ($GLOBALS['RECIPE_SCORE_AFTER_PRUNE_KEEP_COMPUTATION'])(
+            $db,
+            $keep,
+            $activeRevisionId
+        );
+    }
+
+    $params = [];
+    $where = "status <> 'building'";
+    if ($keep) {
+        $placeholders = implode(',', array_fill(0, count($keep), '?'));
+        $where .= " AND id NOT IN ({$placeholders})";
+        $params = $keep;
+    }
+    $targets = $db->prepare("
+        SELECT id FROM recipe_score_revisions
+        WHERE {$where}
+        ORDER BY id
+    ");
+    $targets->execute($params);
+    $targetIds = array_map('intval', $targets->fetchAll(PDO::FETCH_COLUMN));
+    $chunkRows = max(
+        25,
+        min(
+            5000,
+            (int)(function_exists('env')
+                ? env('RECIPE_SCORE_PRUNE_CHUNK_ROWS', '1000')
+                : (getenv('RECIPE_SCORE_PRUNE_CHUNK_ROWS') ?: 1000))
+        )
+    );
+    $maximumChunks = max(
+        1,
+        min(
+            500,
+            (int)(function_exists('env')
+                ? env('RECIPE_SCORE_PRUNE_MAX_CHUNKS', '50')
+                : (getenv('RECIPE_SCORE_PRUNE_MAX_CHUNKS') ?: 50))
+        )
+    );
+    $guardAvailable = function_exists(
+        'ingredientOntologyV3SetRequirementPruneGuard'
+    );
+    $guardWasEnabled = $guardAvailable
+        && function_exists('ingredientOntologyV3RequirementPruneGuardEnabled')
+            ? ingredientOntologyV3RequirementPruneGuardEnabled($db)
+            : false;
+    $runReservation = static function (
+        callable $callback
+    ) use (
+        $db,
+        $activeRevisionId,
+        $guardAvailable,
+        $guardWasEnabled
+    ): mixed {
+        $db->exec('BEGIN IMMEDIATE');
+        try {
+            if (
+                recipeScoreState($db)['active_score_revision_id']
+                    !== $activeRevisionId
+            ) {
                 throw new RuntimeException(
-                    'recipe score pruning removed a retained revision'
+                    'active score pointer changed during pruning'
                 );
             }
-        } else {
-            $guardAvailable = function_exists(
-                'ingredientOntologyV3SetRequirementPruneGuard'
-            );
-            $guardWasEnabled = $guardAvailable
-                && function_exists(
-                    'ingredientOntologyV3RequirementPruneGuardEnabled'
-                )
-                    ? ingredientOntologyV3RequirementPruneGuardEnabled($db)
-                    : false;
-            try {
-                if ($guardAvailable) {
-                    ingredientOntologyV3SetRequirementPruneGuard($db, true);
-                }
-                $db->exec("
-                DELETE FROM recipe_score_revisions
-                WHERE status <> 'building'
-                ");
-            } finally {
-                if ($guardAvailable) {
-                    ingredientOntologyV3SetRequirementPruneGuard(
-                        $db,
-                        $guardWasEnabled
-                    );
-                }
+            if ($guardAvailable) {
+                ingredientOntologyV3SetRequirementPruneGuard($db, true);
             }
-        }
-        $finalActiveRevisionId =
-            recipeScoreState($db)['active_score_revision_id'];
-        if ($finalActiveRevisionId !== $activeRevisionId) {
-            throw new RuntimeException(
-                'active score pointer changed during pruning'
-            );
-        }
-        if ($activeRevisionId !== null) {
-            $finalActive = recipeScoreRevision($db, $activeRevisionId);
-            if ($finalActive === null || $finalActive['status'] !== 'ready') {
-                throw new RuntimeException(
-                    'active score pointer does not resolve to a ready revision'
-                );
-            }
-        }
-        $db->exec('COMMIT');
-        $transactionStarted = false;
-        return $keep;
-    } catch (Throwable $e) {
-        if ($transactionStarted || $db->inTransaction()) {
+            $result = $callback();
+            $db->exec('COMMIT');
+            return $result;
+        } catch (Throwable $error) {
             try {
                 $db->exec('ROLLBACK');
             } catch (Throwable $ignored) {
             }
+            throw $error;
+        } finally {
+            if ($guardAvailable) {
+                ingredientOntologyV3SetRequirementPruneGuard(
+                    $db,
+                    $guardWasEnabled
+                );
+            }
         }
-        throw $e;
+    };
+
+    if ($keep) {
+        $placeholders = implode(',', array_fill(0, count($keep), '?'));
+        $runReservation(static function () use (
+            $db,
+            $keep,
+            $placeholders
+        ): void {
+            $truncate = $db->prepare("
+                UPDATE recipe_score_revisions
+                SET parent_score_revision_id = NULL
+                WHERE id IN ({$placeholders})
+                  AND parent_score_revision_id IS NOT NULL
+                  AND parent_score_revision_id NOT IN ({$placeholders})
+            ");
+            $truncate->execute(array_merge($keep, $keep));
+        });
     }
+
+    $childTables = [
+        'ingredient_ontology_shadow_requirement_matches',
+        'ingredient_ontology_shadow_matches',
+        'recipe_inventory_scores',
+    ];
+    $chunks = 0;
+    foreach ($targetIds as $targetId) {
+        foreach ($childTables as $table) {
+            while ($chunks < $maximumChunks) {
+                $deleted = (int)$runReservation(
+                    static function () use (
+                        $db,
+                        $table,
+                        $targetId,
+                        $chunkRows
+                    ): int {
+                        $delete = $db->prepare("
+                            DELETE FROM {$table}
+                            WHERE rowid IN (
+                                SELECT rowid FROM {$table}
+                                WHERE score_revision_id = ?
+                                LIMIT {$chunkRows}
+                            )
+                        ");
+                        $delete->execute([$targetId]);
+                        return $delete->rowCount();
+                    }
+                );
+                if ($deleted === 0) {
+                    break;
+                }
+                $chunks++;
+            }
+            if ($chunks >= $maximumChunks) {
+                return $keep;
+            }
+        }
+        $runReservation(static function () use (
+            $db,
+            $targetId
+        ): void {
+            $delete = $db->prepare("
+                DELETE FROM recipe_score_revisions
+                WHERE id = ?
+                  AND status <> 'building'
+                  AND NOT EXISTS (
+                      SELECT 1 FROM recipe_score_state
+                      WHERE id = 1
+                        AND active_score_revision_id =
+                            recipe_score_revisions.id
+                  )
+            ");
+            $delete->execute([$targetId]);
+            if ($delete->rowCount() !== 1) {
+                throw new RuntimeException(
+                    'recipe score pruning revision fence was lost'
+                );
+            }
+        });
+        $chunks++;
+        if ($chunks >= $maximumChunks) {
+            return $keep;
+        }
+    }
+
+    $finalActiveRevisionId =
+        recipeScoreState($db)['active_score_revision_id'];
+    if ($finalActiveRevisionId !== $activeRevisionId) {
+        throw new RuntimeException(
+            'active score pointer changed during pruning'
+        );
+    }
+    if ($activeRevisionId !== null) {
+        $finalActive = recipeScoreRevision($db, $activeRevisionId);
+        if ($finalActive === null || $finalActive['status'] !== 'ready') {
+            throw new RuntimeException(
+                'active score pointer does not resolve to a ready revision'
+            );
+        }
+    }
+    return $keep;
 }
 
 function recipeScorePostCommitCleanup(PDO $db): ?string {

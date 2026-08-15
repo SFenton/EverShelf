@@ -1173,12 +1173,9 @@ function ingredientOntologyV3BuildShadow(
     bool $lockAlreadyHeld = false,
     ?array $expectedParent = null
 ): array {
-    if (
-        function_exists(
-            'ingredientOntologyControllerAssertCopiedGenerationDatabase'
-        )
-        && $expectedParent === null
-    ) {
+    if (function_exists(
+        'ingredientOntologyControllerAssertCopiedGenerationDatabase'
+    )) {
         ingredientOntologyControllerAssertCopiedGenerationDatabase($db);
     }
     ingredientOntologyV3SchemaMigrate($db);

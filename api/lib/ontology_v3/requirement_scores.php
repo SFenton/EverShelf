@@ -737,6 +737,11 @@ function ingredientOntologyV3BuildRequirementShadow(
     int $batchSize = 250,
     ?callable $progress = null
 ): array {
+    if (function_exists(
+        'ingredientOntologyControllerAssertCopiedGenerationDatabase'
+    )) {
+        ingredientOntologyControllerAssertCopiedGenerationDatabase($db);
+    }
     ingredientOntologyV3SchemaMigrate($db);
     $requirements = ingredientOntologyV3RequirementRevision(
         $db,

@@ -6582,12 +6582,17 @@ try {
     ");
     $failedPruneWarning = ingredientOntologyV3PostActivationCleanup($db);
     $db->exec("DROP TRIGGER ontology_test_atomic_prune_failure");
+    $afterFailedPrune = $pruneSnapshot($db);
     ontologyV3TestAssert(
         is_string($failedPruneWarning)
         && str_contains($failedPruneWarning, 'forced atomic-prune failure')
         && strlen($failedPruneWarning) <= 500
-        && $pruneSnapshot($db) === $beforeFailedPrune,
-        'Failed post-activation pruning must roll back every row and pointer'
+        && $afterFailedPrune['state'] === $beforeFailedPrune['state']
+        && array_column($afterFailedPrune['revisions'], 'id')
+            === array_column($beforeFailedPrune['revisions'], 'id')
+        && $afterFailedPrune['scores'] <= $beforeFailedPrune['scores']
+        && $afterFailedPrune['matches'] <= $beforeFailedPrune['matches'],
+        'Failed chunked pruning must retain every revision and active pointer'
     );
 
     $pruneWriter = new PDO('sqlite:' . $dbPath);
@@ -6598,6 +6603,7 @@ try {
     $pruneWriter->exec('PRAGMA busy_timeout = 1');
     $pruneWriterBusy = false;
     $pruneWriterCommitted = false;
+    $pruneFenceLost = false;
     $GLOBALS['RECIPE_SCORE_AFTER_PRUNE_KEEP_COMPUTATION'] =
         static function (
             PDO $heldDb,
@@ -6632,7 +6638,14 @@ try {
             }
         };
     try {
-        recipeScorePruneRevisions($db);
+        try {
+            recipeScorePruneRevisions($db);
+        } catch (RuntimeException $error) {
+            $pruneFenceLost = str_contains(
+                $error->getMessage(),
+                'active score pointer changed during pruning'
+            );
+        }
     } finally {
         unset($GLOBALS['RECIPE_SCORE_AFTER_PRUNE_KEEP_COMPUTATION']);
         if ($pruneWriter->inTransaction()) {
@@ -6641,16 +6654,33 @@ try {
         $pruneWriter = null;
     }
     $postPruneActive = recipeScoreActiveRevision($db);
-    ontologyV3TestAssert(
-        $pruneWriterBusy
+    $postPruneActiveId = (int)($postPruneActive['id'] ?? 0);
+    $blockedWriterSafe = $pruneWriterBusy
         && !$pruneWriterCommitted
+        && !$pruneFenceLost
         && recipeScoreState($db)['active_score_revision_id']
             === $retentionActiveId
+        && $postPruneActiveId === $retentionActiveId;
+    $winningWriterSafe = !$pruneWriterBusy
+        && $pruneWriterCommitted
+        && $pruneFenceLost
+        && recipeScoreState($db)['active_score_revision_id']
+            === $retentionImmediateParentId
+        && $postPruneActiveId === $retentionImmediateParentId;
+    ontologyV3TestAssert(
+        ($blockedWriterSafe || $winningWriterSafe)
         && $postPruneActive !== null
-        && (int)$postPruneActive['id'] === $retentionActiveId
         && $postPruneActive['status'] === 'ready',
-        'Pruning reservation must block concurrent pointer commits'
+        'Chunked pruning must preserve whichever pointer commit wins'
     );
+    if ($winningWriterSafe) {
+        $db->prepare("
+            UPDATE recipe_score_state
+            SET active_score_revision_id = ?
+            WHERE id = 1 AND active_score_revision_id = ?
+        ")->execute([$retentionActiveId, $retentionImmediateParentId]);
+    }
+    recipeScorePruneRevisions($db);
     $maximumRetainedV3 = 1
         + RECIPE_SCORE_V3_ROLLBACK_ANCESTOR_LIMIT
         + RECIPE_SCORE_V3_READY_HISTORY_LIMIT
