@@ -5022,6 +5022,55 @@ try {
         )['valid'],
         'Instruction-like scoped aliases must fail even when quoted by untrusted evidence'
     );
+    $mapAliasPrompt = ingredientOntologyControllerBuildPrompt(
+        $db,
+        'P1',
+        $baseVersionId,
+        'controller_map_alias_normalization',
+        [],
+        ['text' => 'Beefsteak Tomato'],
+        [[
+            'evidence_id' => 'ev_map_alias',
+            'trust' => 'untrusted_source_text',
+            'text' => 'Beefsteak Tomato',
+            'source_hash' => hash(
+                'sha256',
+                'Beefsteak Tomato'
+            ),
+        ]]
+    );
+    $mapAliasPlan = [
+        'schema_version' => 'ontology-controller-plan-v1',
+        'request_id' => 'controller_map_alias_normalization',
+        'input_hash' => $mapAliasPrompt['input_hash'],
+        'decision' => 'apply',
+        'repair_kind' => 'map_source_to_target_entity',
+        'entity_candidate_id' =>
+            $mapAliasPrompt['manifest']['candidate_ids'][0],
+        'new_entity' => null,
+        'attributes' => [],
+        'relations' => [],
+        'evidence' => [[
+            'evidence_id' => 'ev_map_alias',
+            'quote' => 'Beefsteak Tomato',
+        ]],
+        'optional_deltas' => [],
+        'alias' => 'Beefsteak Tomato',
+        'confidence' => 0.95,
+    ];
+    $mapAliasValidation =
+        ingredientOntologyControllerValidatePlan(
+            $mapAliasPlan,
+            $mapAliasPrompt['manifest']
+        );
+    controllerTestAssert(
+        $mapAliasValidation['valid']
+        && !array_key_exists('alias', $mapAliasPlan)
+        && $mapAliasValidation['normalizations'] === [
+            'dropped_non_applicable_exact_evidence_alias',
+        ],
+        'A direct map may discard an exact source-label alias without granting global alias authority'
+    );
     foreach (['P1', 'P2', 'P3', 'P4', 'P5', 'P6', 'P7'] as $promptType) {
         $contract = ingredientOntologyControllerBuildPrompt(
             $db,

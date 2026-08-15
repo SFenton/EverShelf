@@ -8,7 +8,7 @@ const INGREDIENT_ONTOLOGY_CONTROLLER_POLICY_VERSION =
 const INGREDIENT_ONTOLOGY_CONTROLLER_FINGERPRINT_VERSION =
     'ontology-subject-fingerprint-v1';
 const INGREDIENT_ONTOLOGY_CONTROLLER_PROMPT_VERSION =
-    'ontology-controller-prompts-v1';
+    'ontology-controller-prompts-v2';
 const INGREDIENT_ONTOLOGY_CONTROLLER_GOLD_VERSION =
     'ontology-gold-release-v1';
 
@@ -6425,6 +6425,7 @@ function ingredientOntologyControllerStreamEpoch(
             'Ancestry and typed relations never prove ingredient identity.',
             'equivalent_to and variant_of cannot repair a positive identity pair.',
             'If evidence is insufficient or conflicting, abstain.',
+            'Set alias only for add_scoped_alias or quarantine_or_split_alias; otherwise omit it.',
             'A negative correction always retains its exact deny pair; broader changes are optional.',
             'A critic may subtract or veto optional deltas but never add mutations or alter exact constraints.',
         ]);
@@ -6480,10 +6481,11 @@ function ingredientOntologyControllerStreamEpoch(
     }
 
     function ingredientOntologyControllerValidatePlan(
-        array $plan,
+        array &$plan,
         array $manifest
     ): array {
         $errors = [];
+        $normalizations = [];
         if (strlen(
             ingredientOntologyControllerStableJson($plan)
         ) > 131072) {
@@ -6555,6 +6557,40 @@ function ingredientOntologyControllerStreamEpoch(
                 true
             )) {
                 $errors[] = 'repair kind is invalid';
+            }
+            if (
+                array_key_exists('alias', $plan)
+                && !in_array($repair, [
+                    'add_scoped_alias',
+                    'quarantine_or_split_alias',
+                ], true)
+            ) {
+                $alias = ingredientOntologyControllerBoundedText(
+                    $plan['alias'] ?? '',
+                    200
+                );
+                $normalizedAlias =
+                    ingredientOntologyV3NormalizeLabel($alias);
+                $exactEvidenceAlias = $normalizedAlias === '';
+                foreach (($plan['evidence'] ?? []) as $item) {
+                    if (
+                        is_array($item)
+                        && hash_equals(
+                            $normalizedAlias,
+                            ingredientOntologyV3NormalizeLabel(
+                                (string)($item['quote'] ?? '')
+                            )
+                        )
+                    ) {
+                        $exactEvidenceAlias = true;
+                        break;
+                    }
+                }
+                if ($exactEvidenceAlias) {
+                    unset($plan['alias']);
+                    $normalizations[] =
+                        'dropped_non_applicable_exact_evidence_alias';
+                }
             }
             $candidateId = (string)(
                 $plan['entity_candidate_id'] ?? 'none'
@@ -6669,6 +6705,7 @@ function ingredientOntologyControllerStreamEpoch(
             'valid' => !$errors,
             'errors' => $errors,
             'plan' => $plan,
+            'normalizations' => $normalizations,
         ];
     }
 
