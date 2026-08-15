@@ -16,8 +16,8 @@ function recipeCookidooMetadataBackfillUsage(): string {
         'Usage: php scripts/backfill-cookidoo-metadata-v2.php [mode] [options]',
         'Modes (choose one; default is --status):',
         '  --status             Show version coverage, checkpoint, and job counts',
-        '  --dry-run            Report policy-disabled planning without writing',
-        '  --enqueue            Refused while provider detail policy is disabled',
+        '  --dry-run            Plan bounded metadata batches without writing',
+        '  --enqueue            Enqueue bounded direct-ID metadata batches',
         'Options:',
         '  --locale=LOCALE      One exact regional/script Cookidoo locale (default: discovery locale)',
         '  --batch-size=N       IDs per bridge job, 1-20 (default: configured value)',
@@ -25,9 +25,7 @@ function recipeCookidooMetadataBackfillUsage(): string {
         '  --json               Emit machine-readable JSON',
         '  --help               Show this help',
         '',
-        'Provider detail hydration is disabled by repository policy.',
-        'Status/dry-run report provider_detail_policy_disabled and zero batches.',
-        'COOKIDOO_METADATA_BACKFILL_ENABLED cannot override this gate.',
+        'Requires detail hydration and the separate metadata-backfill gate.',
         'Existing cached catalog rows are unchanged and remain readable.',
     ]) . PHP_EOL;
 }

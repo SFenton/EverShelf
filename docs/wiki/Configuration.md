@@ -37,11 +37,12 @@ RECIPE_QUEUE_MAX_ATTEMPTS=3
 RECIPE_QUEUE_LEASE_MINUTES=15
 
 # ─────────────────────────────────────────────
-# Experimental Cookidoo metadata connector
-# ─────────────────────────────────────────────
+# Cookidoo metadata connector
+# ───────────────────────────
 
 # Cookidoo email/password belong ONLY in cookidoo-bridge/.env.
 COOKIDOO_CONNECTOR_ENABLED=false
+COOKIDOO_DETAIL_HYDRATION_ENABLED=false
 COOKIDOO_BRIDGE_URL=http://cookidoo-bridge:8081
 COOKIDOO_BRIDGE_TOKEN=
 COOKIDOO_BRIDGE_TIMEOUT_SECONDS=50
@@ -54,6 +55,8 @@ COOKIDOO_METADATA_BACKFILL_JITTER_SECONDS=20
 COOKIDOO_QUEUE_CADENCE_MINUTES=1
 # Language-only discovery values are allowed; stored recipes use the selected effective locale.
 COOKIDOO_DISCOVERY_LOCALE=en-US
+COOKIDOO_PERIODIC_REFRESH_ENABLED=false
+COOKIDOO_LEGACY_REFRESH_ENABLED=false
 COOKIDOO_REFRESH_ENQUEUE_LIMIT=2
 
 # ─────────────────────────────────────────────
@@ -333,10 +336,11 @@ connector failure or circuit accounting.
 
 ### Direct-ID metadata-v2 backfill
 
-`COOKIDOO_METADATA_BACKFILL_ENABLED=false` is mandatory and cannot override the
-policy gate. Status reports `provider_detail_policy_disabled`; enqueue refuses.
-There is no authorized full backfill. A future provider endpoint that does not
-co-transport official steps would require a new repository-policy review.
+`COOKIDOO_CONNECTOR_ENABLED` and
+`COOKIDOO_DETAIL_HYDRATION_ENABLED` must both be true for scan-triggered
+discovery. Full direct-ID backfill remains separately controlled by
+`COOKIDOO_METADATA_BACKFILL_ENABLED`; it is not required for newly discovered
+recipes.
 
 ---
 

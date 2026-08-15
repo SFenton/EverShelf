@@ -12,6 +12,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Recipe scraps tips** — During cooking steps, detect "waste" generated (peels, cores, bones, eggshells, coffee grounds, citrus zest, etc.) and surface AI-powered tips on how to reuse them (compost, natural cleaner, broth, candied peel, etc.). Could be shown as an optional collapsible hint card below the step that generates the scrap.
 
 ### Added
+- **Operator-gated Cookidoo scan discovery** — Restored the authenticated,
+  bounded private-account search/detail bridge behind matching default-off
+  EverShelf and bridge gates. Inventory adds can now query direct ingredient
+  terms and taxonomy ancestors, persist allowlisted English metadata locally,
+  and reuse fresh discovery jobs without enabling full catalog backfill.
 - **Autonomous ingredient ontology controller (default off)** — Added immutable
   recipe-independent product/ingredient subjects, occurrence conservation,
   immediate latest-intent exact allow/deny constraints, fenced durable jobs,

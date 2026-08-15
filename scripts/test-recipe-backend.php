@@ -13,9 +13,12 @@ $GLOBALS['RECIPE_COOKIDOO_CONFIG'] = [
     'COOKIDOO_BRIDGE_TIMEOUT_SECONDS' => '5',
     'COOKIDOO_RESULT_LIMIT' => '20',
     'COOKIDOO_METADATA_REFRESH_DAYS' => '14',
+    'COOKIDOO_DETAIL_HYDRATION_ENABLED' => 'false',
     'COOKIDOO_METADATA_BACKFILL_ENABLED' => 'false',
     'COOKIDOO_METADATA_BACKFILL_BATCH_SIZE' => '20',
     'COOKIDOO_QUEUE_CADENCE_MINUTES' => '5',
+    'COOKIDOO_PERIODIC_REFRESH_ENABLED' => 'true',
+    'COOKIDOO_LEGACY_REFRESH_ENABLED' => 'true',
     'COOKIDOO_INGEST_LANGUAGE_POLICY' => 'observe',
 ];
 $GLOBALS['RECIPE_COOKIDOO_POLICY_TEST_OVERRIDE'] = true;
@@ -1294,17 +1297,16 @@ try {
     );
     $cookidooRegistry = recipeConnectorRegistry()['cookidoo'];
     recipeTestAssert(
-        $cookidooRegistry['detail_hydration'] === false
-        && $cookidooRegistry['detail_hydration_reason']
-            === RECIPE_COOKIDOO_DETAIL_POLICY_REASON
+        $cookidooRegistry['detail_hydration'] === true
+        && $cookidooRegistry['detail_hydration_reason'] === null
         && $cookidooRegistry['policy_version']
             === RECIPE_COOKIDOO_DETAIL_POLICY_VERSION
-        && !in_array(
+        && in_array(
             'direct_metadata_refresh',
             $cookidooRegistry['capabilities'],
             true
         ),
-        'Cookidoo connector capabilities must expose policy-disabled hydration'
+        'Cookidoo connector capabilities must expose enabled hydration'
     );
     $policyJobCountBefore = recipeTestCount(
         $db,
@@ -1651,14 +1653,21 @@ try {
         WHERE id = ?
     ")->execute([$firstAutoJob]);
     $periodicRefresh = recipeCookidooEnqueuePeriodicRefreshes($db, 1);
+    $periodicRefreshJobId = (int)($periodicRefresh['jobs'][0] ?? 0);
     recipeTestAssert(
         $periodicRefresh['queued'] === 1
-        && recipeJobGet($db, $firstAutoJob)['status'] === 'pending',
-        'Periodic refresh must requeue completed stale taxonomy searches'
+        && $periodicRefresh['crawl_refresh_strategy']
+            === 'page_zero_only'
+        && recipeJobGet($db, $firstAutoJob)['status'] === 'done'
+        && recipeJobGet($db, $periodicRefreshJobId)['status']
+            === 'pending',
+        'Periodic refresh must enqueue bounded page-zero work without reopening the historical crawl'
     );
     foreach ($autoInventoryDiscovery['result']['remote_discovery']['jobs'] ?? [] as $job) {
         $db->prepare("DELETE FROM recipe_jobs WHERE id = ?")->execute([(int)$job['id']]);
     }
+    $db->prepare("DELETE FROM recipe_jobs WHERE id = ?")
+        ->execute([$periodicRefreshJobId]);
     $backgroundJob = recipeJobEnqueueOnce(
         $db,
         'catalog_rebuild_search',
@@ -1808,23 +1817,23 @@ try {
             && $leaseExhaustedLocal['finished_at'] !== null
             && $leaseExhaustedCookidoo['status'] === 'skipped'
             && $leaseExhaustedCookidoo['last_error']
-                === 'provider_detail_policy_disabled'
+                === 'detail_hydration_disabled'
             && $leaseExhaustedCookidoo['finished_at'] !== null
             && $leaseExhaustedCookidoo['started_at'] === null
             && $leaseExhaustedCookidoo['next_retry_at'] === null
             && $leaseExhaustedCookidoo['result']['reason']
-                === 'provider_detail_policy_disabled'
+                === 'detail_hydration_disabled'
             && $leaseRetryCookidoo['status'] === 'skipped'
             && $leaseRetryCookidoo['last_error']
-                === 'provider_detail_policy_disabled'
+                === 'detail_hydration_disabled'
             && $leaseRetryCookidoo['finished_at'] !== null
             && $policyPendingCookidoo['status'] === 'skipped'
             && $policyPendingCookidoo['last_error']
-                === 'provider_detail_policy_disabled'
+                === 'detail_hydration_disabled'
             && $policyPendingCookidoo['finished_at'] !== null
             && $policyRetryCookidoo['status'] === 'skipped'
             && $policyRetryCookidoo['last_error']
-                === 'provider_detail_policy_disabled'
+                === 'detail_hydration_disabled'
             && $policyRetryCookidoo['next_retry_at'] === null
             && $policyRetryCookidoo['finished_at'] !== null
             && $unrelatedLocalPending['status'] === 'pending'
@@ -1867,7 +1876,7 @@ try {
     recipeTestAssert(
         $policyTrueWorkerCookidoo['status'] === 'skipped'
             && $policyTrueWorkerCookidoo['last_error']
-                === 'provider_detail_policy_disabled'
+                === 'detail_hydration_disabled'
             && $policyTrueWorkerCookidoo['finished_at'] !== null
             && $policyTrueWorkerCookidoo['started_at'] === null,
         'Global provider policy must terminalize Cookidoo work even when cadence allows it'
@@ -3013,9 +3022,57 @@ try {
         && $fullCrawlRequest['max_pages'] === 1
         && $fullCrawlRequest['exclude_cached'] === true
         && recipeCookidooDiscoveryIdempotencyKey($fullCrawlRequest)
-            !== recipeCookidooDiscoveryIdempotencyKey($fullCrawlNextPage),
+            !== recipeCookidooDiscoveryIdempotencyKey($fullCrawlNextPage)
+        && recipeCookidooSearchId($fullCrawlRequest)
+            === recipeCookidooSearchId($fullCrawlNextPage),
         'Full-crawl requests must normalize to one stable 20-hit job per page'
     );
+    $legacyScopeRequest = recipeCookidooNormalizeDiscoveryInput([
+        'query' => 'legacy scope migration',
+        'locale' => 'en-GB',
+        'page' => 1,
+        'crawl_all' => true,
+    ]);
+    $legacyScopeKey =
+        recipeCookidooDiscoveryIdempotencyKey($legacyScopeRequest);
+    $legacyScopeJob = recipeJobEnqueue(
+        $db,
+        'connector_discovery',
+        [
+            'scope' => 'cookidoo:' . substr(
+                recipeCookidooDiscoveryHash($legacyScopeRequest),
+                0,
+                24
+            ),
+            'connector' => 'cookidoo',
+            'query' => $legacyScopeRequest['query'],
+        ],
+        $legacyScopeRequest,
+        $legacyScopeKey
+    );
+    $db->prepare("
+        UPDATE recipe_jobs SET status = 'done'
+        WHERE id = ?
+    ")->execute([(int)$legacyScopeJob['id']]);
+    $migratedScope = recipeCookidooEnqueueDiscoveryJob(
+        $db,
+        $legacyScopeRequest,
+        false
+    );
+    recipeTestAssert(
+        !empty($migratedScope['migrated'])
+        && (int)$migratedScope['job']['id']
+            === (int)$legacyScopeJob['id']
+        && $migratedScope['job']['status'] === 'pending'
+        && $migratedScope['job']['scope']
+            === recipeCookidooSearchId($legacyScopeRequest)
+        && $migratedScope['job']['payload'][
+            RECIPE_COOKIDOO_POLICY_FIELD
+        ] === RECIPE_COOKIDOO_DETAIL_POLICY_VERSION,
+        'Legacy page-scoped discovery jobs must migrate and requeue under the current crawl-wide scope'
+    );
+    $db->prepare("DELETE FROM recipe_jobs WHERE id = ?")
+        ->execute([(int)$legacyScopeJob['id']]);
     $invalidCrawlFlagRejected = false;
     try {
         recipeCookidooNormalizeDiscoveryInput([
@@ -7621,7 +7678,11 @@ try {
         && $cookidooConnector['metadata_only'] === true
         && $cookidooConnector['state']['enabled'] === true
         && $cookidooConnector['health']['configured'] === true
-        && $cookidooConnector['health']['status'] === 'policy_disabled'
+        && in_array(
+            $cookidooConnector['health']['status'],
+            ['configured', 'healthy'],
+            true
+        )
         && $cookidooConnector['state']['policy_version'] === 'metadata-v2'
         && $cookidooConnector['policy_version']
             === RECIPE_COOKIDOO_DETAIL_POLICY_VERSION
@@ -7635,7 +7696,7 @@ try {
             $cookidooConnector['capabilities'],
             true
         )
-        && !in_array(
+        && in_array(
             'direct_metadata_refresh',
             $cookidooConnector['capabilities'],
             true
@@ -7700,6 +7761,48 @@ try {
             ], JSON_UNESCAPED_SLASHES),
         ];
     };
+    $legacyDispatchRequest = recipeCookidooNormalizeDiscoveryInput([
+        'query' => 'legacy dispatch migration',
+        'locale' => 'en-GB',
+        'page' => 50,
+        'crawl_all' => true,
+    ]);
+    $legacyDispatchJob = recipeJobEnqueue(
+        $db,
+        'connector_discovery',
+        [
+            'scope' => 'cookidoo:' . substr(
+                recipeCookidooDiscoveryHash($legacyDispatchRequest),
+                0,
+                24
+            ),
+            'connector' => 'cookidoo',
+            'query' => $legacyDispatchRequest['query'],
+        ],
+        $legacyDispatchRequest,
+        recipeCookidooDiscoveryIdempotencyKey(
+            $legacyDispatchRequest
+        )
+    );
+    recipeCookidooDispatchDiscovery(
+        $db,
+        $legacyDispatchJob,
+        $legacyDispatchRequest
+    );
+    $legacyDispatchMigrated = recipeJobGet(
+        $db,
+        (int)$legacyDispatchJob['id']
+    );
+    recipeTestAssert(
+        $legacyDispatchMigrated['scope']
+            === recipeCookidooSearchId($legacyDispatchRequest)
+        && $legacyDispatchMigrated['payload'][
+            RECIPE_COOKIDOO_POLICY_FIELD
+        ] === RECIPE_COOKIDOO_DETAIL_POLICY_VERSION,
+        'A queued legacy discovery job must migrate its scope and policy before dispatch'
+    );
+    $db->prepare("DELETE FROM recipe_jobs WHERE id = ?")
+        ->execute([(int)$legacyDispatchJob['id']]);
     $crawlInput = [
         'query' => 'cached-only crawl',
         'ingredients' => ['Tomato Test'],
@@ -7724,12 +7827,49 @@ try {
     recipeTestAssert(
         $pageOneJob !== null
         && $pageOneJob['payload']['page'] === 1
+        && $pageOneJob['scope'] === $crawlRoot['scope']
         && recipeTestCount(
             $db,
             "SELECT COUNT(*) FROM recipe_jobs WHERE idempotency_key = ?",
             [$pageOneKey]
         ) === 1,
         'Crawl chaining must create one stable idempotent job per page'
+    );
+    $legacyPagePayload = $pageOneJob['payload'];
+    unset($legacyPagePayload[RECIPE_COOKIDOO_POLICY_FIELD]);
+    $db->prepare("
+        UPDATE recipe_jobs
+        SET scope = ?,
+            payload_json = ?,
+            status = 'skipped'
+        WHERE id = ?
+    ")->execute([
+        'cookidoo:' . substr(
+            recipeCookidooDiscoveryHash($pageOneRequest),
+            0,
+            24
+        ),
+        recipeCatalogJsonEncode($legacyPagePayload),
+        (int)$pageOneJob['id'],
+    ]);
+    $legacyContinuation = recipeCookidooEnqueueNextCrawlPage(
+        $db,
+        $crawlInput,
+        [
+            'last_page_had_raw_hits' => true,
+            'next_page' => 1,
+        ],
+        false
+    );
+    $pageOneJob = recipeJobGet($db, (int)$pageOneJob['id']);
+    recipeTestAssert(
+        !empty($legacyContinuation['next_page_migrated'])
+        && $pageOneJob['status'] === 'pending'
+        && $pageOneJob['scope'] === $crawlRoot['scope']
+        && $pageOneJob['payload'][
+            RECIPE_COOKIDOO_POLICY_FIELD
+        ] === RECIPE_COOKIDOO_DETAIL_POLICY_VERSION,
+        'A skipped legacy crawl continuation must migrate and requeue under the root search scope'
     );
     $repeatCrawl = recipeCookidooDiscover($db, $crawlInput);
     recipeTestAssert(
@@ -7753,6 +7893,79 @@ try {
         'An empty raw Cookidoo page must stop the persistent crawl'
     );
 
+    $legacyPeriodicRequest = recipeCookidooNormalizeDiscoveryInput([
+        'query' => 'legacy periodic root',
+        'locale' => 'en-GB',
+        'crawl_all' => true,
+    ]);
+    $legacyPeriodicJob = recipeJobEnqueue(
+        $db,
+        'connector_discovery',
+        [
+            'scope' => 'cookidoo:' . substr(
+                recipeCookidooDiscoveryHash($legacyPeriodicRequest),
+                0,
+                24
+            ),
+            'connector' => 'cookidoo',
+            'query' => $legacyPeriodicRequest['query'],
+        ],
+        $legacyPeriodicRequest,
+        recipeCookidooDiscoveryIdempotencyKey(
+            $legacyPeriodicRequest
+        )
+    );
+    $db->prepare("
+        UPDATE recipe_jobs
+        SET status = 'skipped',
+            updated_at = datetime('now', '-30 days')
+        WHERE id = ?
+    ")->execute([(int)$legacyPeriodicJob['id']]);
+    $db->prepare("
+        UPDATE recipe_jobs
+        SET payload_json = json_set(
+                payload_json,
+                '$." . RECIPE_COOKIDOO_POLICY_FIELD . "',
+                ?
+            ),
+            updated_at = CURRENT_TIMESTAMP
+        WHERE connector = 'cookidoo' AND id <> ?
+    ")->execute([
+        RECIPE_COOKIDOO_DETAIL_POLICY_VERSION,
+        (int)$legacyPeriodicJob['id'],
+    ]);
+    $legacyPeriodicRefresh =
+        recipeCookidooEnqueuePeriodicRefreshes($db, 1);
+    $legacyPeriodicSource = recipeJobGet(
+        $db,
+        (int)$legacyPeriodicJob['id']
+    );
+    recipeTestAssert(
+        $legacyPeriodicRefresh['queued'] === 1
+        && $legacyPeriodicRefresh['legacy_migrated'] === 1
+        && $legacyPeriodicSource['payload'][
+            RECIPE_COOKIDOO_POLICY_FIELD
+        ] === RECIPE_COOKIDOO_DETAIL_POLICY_VERSION,
+        'Periodic refresh must migrate one eligible legacy root before bounded page-zero refresh: '
+            . json_encode([
+                'refresh' => $legacyPeriodicRefresh,
+                'source' => $legacyPeriodicSource,
+            ])
+    );
+    $legacyPeriodicRefreshId =
+        (int)$legacyPeriodicRefresh['jobs'][0];
+    recipeJobProcessQueueBatch($db, 1, 3);
+    recipeTestAssert(
+        recipeJobGet($db, $legacyPeriodicRefreshId)['status']
+            === 'done',
+        'Migrated legacy refresh work must execute as one bounded page'
+    );
+    $db->prepare("DELETE FROM recipe_jobs WHERE id IN (?, ?)")
+        ->execute([
+            (int)$legacyPeriodicJob['id'],
+            $legacyPeriodicRefreshId,
+        ]);
+
     $db->prepare("
         UPDATE recipe_jobs SET updated_at = datetime('now', '-30 days')
         WHERE id = ?
@@ -7769,30 +7982,22 @@ try {
     $rootRefresh = recipeCookidooEnqueuePeriodicRefreshes($db, 1);
     recipeTestAssert(
         $rootRefresh['queued'] === 1
-        && $rootRefresh['crawl_refresh_strategy'] === 'page_zero_chain_root',
-        'Periodic refresh must designate page zero as the bounded crawl refresh root'
+        && $rootRefresh['crawl_refresh_strategy'] === 'page_zero_only',
+        'Periodic refresh must enqueue one bounded page-zero refresh'
     );
+    $refreshJobId = (int)$rootRefresh['jobs'][0];
     recipeJobProcessQueueBatch($db, 1, 3);
-    $pageOneJob = recipeJobGet($db, (int)$pageOneJob['id']);
+    $refreshJob = recipeJobGet($db, $refreshJobId);
     recipeTestAssert(
-        $pageOneJob['status'] === 'pending'
-        && recipeTestCount(
-            $db,
-            "SELECT COUNT(*) FROM recipe_jobs WHERE idempotency_key = ?",
-            [$pageOneKey]
-        ) === 1,
-        'A root refresh must requeue, not duplicate, the existing next page'
+        $refreshJob['status'] === 'done'
+        && recipeJobGet($db, (int)$pageOneJob['id'])['status']
+            === 'done',
+        'A periodic refresh must not restart the historical crawl chain'
     );
     recipeTestAssert(
         $crawlRefreshWithoutExclusion,
         'Refresh crawl pages must rehydrate cached metadata instead of excluding it'
     );
-    recipeJobProcessQueueBatch($db, 1, 3);
-    recipeTestAssert(
-        recipeJobGet($db, (int)$pageOneJob['id'])['status'] === 'done',
-        'A refreshed crawl chain must stop again on its empty page'
-    );
-
     $pageFiftyOutcome = recipeCookidooDispatchDiscovery($db, [
         'connector' => 'cookidoo',
     ], $crawlInput + ['page' => 50]);
@@ -7804,8 +8009,8 @@ try {
         'A full crawl must stop after Cookidoo page 50 even when it has raw hits'
     );
     recipeTestAssert(
-        $crawlBridgeCalls === 5,
-        'Crawl tests must execute only their five bounded mocked bridge pages'
+        $crawlBridgeCalls === 6,
+        'Crawl tests must execute only their six bounded mocked bridge pages'
     );
     $db->prepare("DELETE FROM recipe_jobs WHERE id IN (?, ?)")
        ->execute([(int)$crawlRoot['id'], (int)$pageOneJob['id']]);

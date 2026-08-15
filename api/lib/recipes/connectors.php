@@ -1,6 +1,17 @@
 <?php
 
 function recipeConnectorRegistry(): array {
+    $cookidooDetailEnabled =
+        recipeCookidooDetailHydrationPolicyAllows();
+    $cookidooCapabilities = [
+        'cached_catalog_read',
+        'canonical_link',
+        'external_instructions_link',
+    ];
+    if ($cookidooDetailEnabled) {
+        $cookidooCapabilities[] = 'ingredient_aware_discovery';
+        $cookidooCapabilities[] = 'direct_metadata_refresh';
+    }
     return [
         'local' => [
             'label' => 'EverShelf local catalog',
@@ -28,16 +39,14 @@ function recipeConnectorRegistry(): array {
             'network' => true,
             'experimental' => true,
             'metadata_only' => true,
-            'detail_hydration' => false,
+            'detail_hydration' => $cookidooDetailEnabled,
             'detail_hydration_reason' =>
-                RECIPE_COOKIDOO_DETAIL_POLICY_REASON,
+                $cookidooDetailEnabled
+                    ? null
+                    : RECIPE_COOKIDOO_DETAIL_POLICY_REASON,
             'policy_version' =>
                 RECIPE_COOKIDOO_DETAIL_POLICY_VERSION,
-            'capabilities' => [
-                'cached_catalog_read',
-                'canonical_link',
-                'external_instructions_link',
-            ],
+            'capabilities' => $cookidooCapabilities,
             'storage_policy' => 'metadata_only',
             'rights_basis' => 'cookidoo_metadata_operator_approved',
         ],

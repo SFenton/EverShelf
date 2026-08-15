@@ -21,11 +21,12 @@ from types import SimpleNamespace
 from typing import Any
 import unicodedata
 from urllib.parse import urlparse
+import zlib
 
 import aiohttp
 from aiohttp import web
 from cookidoo_api import Cookidoo
-from cookidoo_api.const import RECIPE_PATH
+from cookidoo_api.const import COMMUNITY_PROFILE_PATH, RECIPE_PATH
 from cookidoo_api.exceptions import (
     CookidooAuthException,
     CookidooConfigException,
@@ -34,7 +35,10 @@ from cookidoo_api.exceptions import (
     CookidooRequestException,
     CookidooResponseException,
 )
-from cookidoo_api.helpers import get_localization_options
+from cookidoo_api.helpers import (
+    cookidoo_search_result_from_json,
+    get_localization_options,
+)
 from cookidoo_api.types import CookidooConfig, CookidooLocalizationConfig
 from yarl import URL
 
@@ -43,6 +47,7 @@ logging.getLogger("cookidoo_api").setLevel(logging.WARNING)
 
 MAX_BODY_BYTES = 2 * 1024 * 1024
 MAX_RESPONSE_BYTES = 1_000_000
+MAX_UPSTREAM_RESPONSE_BYTES = 2_000_000
 MAX_RESPONSE_RECIPES = 20
 MAX_INGREDIENT_FILTERS = 25
 MAX_RECIPE_INGREDIENTS = 200
@@ -61,9 +66,71 @@ MAX_RECIPE_SECONDS = 366 * 24 * 60 * 60
 MAX_SOURCE_NUMBER = 1_000_000_000
 MAX_EXCLUDED_RECIPE_IDS = 100000
 METADATA_SCHEMA_VERSION = "ingredient-topology-v1"
-DETAIL_HYDRATION_POLICY_VERSION = "metadata-v2-detail-disabled"
-DETAIL_HYDRATION_POLICY_REASON = "provider_detail_policy_disabled"
+DETAIL_HYDRATION_POLICY_VERSION = "metadata-v3-operator-enabled"
+DETAIL_HYDRATION_POLICY_REASON = "detail_hydration_disabled"
 ALLOWED_TMV = frozenset({"TM31", "TM5", "TM6", "TM7"})
+SAFE_SOURCE_UNIT_ALIASES = {
+    "mg": "mg",
+    "milligram": "mg",
+    "milligrams": "mg",
+    "g": "g",
+    "gram": "g",
+    "grams": "g",
+    "kg": "kg",
+    "kilogram": "kg",
+    "kilograms": "kg",
+    "ml": "ml",
+    "milliliter": "ml",
+    "milliliters": "ml",
+    "millilitre": "ml",
+    "millilitres": "ml",
+    "cl": "cl",
+    "dl": "dl",
+    "l": "l",
+    "liter": "l",
+    "liters": "l",
+    "litre": "l",
+    "litres": "l",
+    "tsp": "tsp",
+    "teaspoon": "tsp",
+    "teaspoons": "tsp",
+    "tbsp": "tbsp",
+    "tablespoon": "tbsp",
+    "tablespoons": "tbsp",
+    "cup": "cup",
+    "cups": "cup",
+    "oz": "oz",
+    "ounce": "oz",
+    "ounces": "oz",
+    "lb": "lb",
+    "lbs": "lb",
+    "pound": "lb",
+    "pounds": "lb",
+    "piece": "piece",
+    "pieces": "piece",
+    "clove": "clove",
+    "cloves": "clove",
+    "bunch": "bunch",
+    "bunches": "bunch",
+    "pinch": "pinch",
+    "pinches": "pinch",
+    "sprig": "sprig",
+    "sprigs": "sprig",
+    "handful": "handful",
+    "handfuls": "handful",
+    "can": "can",
+    "cans": "can",
+    "jar": "jar",
+    "jars": "jar",
+    "bottle": "bottle",
+    "bottles": "bottle",
+    "package": "package",
+    "packages": "package",
+    "pack": "package",
+    "packs": "package",
+    "packet": "package",
+    "packets": "package",
+}
 TIME_FACT_ALIASES = {
     "prep": "prep",
     "preptime": "prep",
@@ -197,13 +264,13 @@ class GatewayConfigurationError(BridgeError):
 
 
 class GatewayPolicyDisabledError(BridgeError):
-    """Repository policy disables detail-bearing provider requests."""
+    """Runtime configuration disables detail-bearing provider requests."""
 
     def __init__(self) -> None:
         super().__init__(
             503,
             "metadata_hydration_disabled_policy",
-            "Cookidoo metadata hydration is disabled by repository policy",
+            "Cookidoo metadata hydration is disabled",
         )
 
 
@@ -290,6 +357,8 @@ class BridgeConfig:
     max_concurrency: int
     detail_concurrency: int
     max_results: int
+    detail_hydration_enabled: bool = False
+    password_login_enabled: bool = False
     planner_write_enabled: bool = False
     planner_put_semantics: str = "unknown"
 
@@ -317,6 +386,12 @@ class BridgeConfig:
                 "COOKIDOO_DETAIL_CONCURRENCY", 1, 1, 4
             ),
             max_results=_env_int("COOKIDOO_MAX_RESULTS", 20, 1, 20),
+            detail_hydration_enabled=_env_bool(
+                "COOKIDOO_DETAIL_HYDRATION_ENABLED", False
+            ),
+            password_login_enabled=_env_bool(
+                "COOKIDOO_PASSWORD_LOGIN_ENABLED", False
+            ),
             planner_write_enabled=_env_bool(
                 "COOKIDOO_PLANNER_WRITE_ENABLED", False
             ),
@@ -1201,6 +1276,43 @@ def _public_amount_text(value: object) -> str | None:
     return text
 
 
+def _safe_structured_amount(
+    quantity: float | None,
+    quantity_max: float | None,
+    unit: str | None,
+) -> tuple[
+    float | None,
+    float | None,
+    str | None,
+    str | None,
+]:
+    if quantity is None:
+        return (None, None, None, None)
+    if quantity <= 0 or (
+        quantity_max is not None
+        and quantity_max <= 0
+    ):
+        return (None, None, None, None)
+    canonical_unit = None
+    if unit is not None:
+        folded = " ".join(
+            unit.strip().lower().replace(".", "").split()
+        )
+        canonical_unit = SAFE_SOURCE_UNIT_ALIASES.get(folded)
+        if canonical_unit is None:
+            return (None, None, None, None)
+    return (
+        quantity,
+        quantity_max,
+        canonical_unit,
+        _source_amount_text(
+            quantity,
+            quantity_max,
+            canonical_unit,
+        ),
+    )
+
+
 def _raw_quantity(value: object) -> tuple[float | None, float | None]:
     if value is None:
         return (None, None)
@@ -1295,6 +1407,16 @@ def _safe_recipe_from_raw(
                 "source_unit",
                 MAX_SOURCE_UNIT_TEXT,
             )
+            (
+                quantity,
+                quantity_max,
+                unit,
+                amount_text,
+            ) = _safe_structured_amount(
+                quantity,
+                quantity_max,
+                unit,
+            )
             ingredient_ref, ingredient_ref_present = (
                 _optional_provider_reference(ingredient, "ingredient_ref")
             )
@@ -1349,9 +1471,7 @@ def _safe_recipe_from_raw(
                     source_quantity=quantity,
                     source_quantity_max=quantity_max,
                     source_unit=unit,
-                    source_amount_text=_source_amount_text(
-                        quantity, quantity_max, unit
-                    ),
+                    source_amount_text=amount_text,
                     source_group_index=output_group_index,
                     source_group_position=group_position,
                     source_group_title=group_title,
@@ -1562,7 +1682,7 @@ def _safe_recipe_from_public(details: object) -> SafeRecipeMetadata:
 
 
 async def _load_safe_recipe_metadata(client: Any, recipe_id: str) -> SafeRecipeMetadata:
-    """Synthetic adapter-test helper; production routes must never call this."""
+    """Load one recipe and retain only bounded factual metadata."""
     if not re.fullmatch(r"[A-Za-z0-9._:-]+", recipe_id):
         raise GatewayResponseError()
     raw_request = getattr(client, "_request_json", None)
@@ -1811,10 +1931,12 @@ class CookidooGateway:
         config: BridgeConfig,
         localizations: Sequence[CookidooLocalizationConfig],
         client_factory: ClientFactory = Cookidoo,
+        bounded_session: aiohttp.ClientSession | None = None,
     ) -> None:
         if not localizations:
             raise GatewayConfigurationError("No Cookidoo localizations are available")
         self._session = session
+        self._bounded_session = bounded_session or session
         self._config = config
         self._localizations = tuple(localizations)
         self._client_factory = client_factory
@@ -1837,21 +1959,41 @@ class CookidooGateway:
         )
         trace_config = aiohttp.TraceConfig()
         trace_config.on_request_redirect.append(_validate_redirect)
+        bounded_trace_config = aiohttp.TraceConfig()
+        bounded_trace_config.on_request_redirect.append(
+            _validate_redirect
+        )
+        cookie_jar = aiohttp.CookieJar(unsafe=True)
         session = aiohttp.ClientSession(
-            cookie_jar=aiohttp.CookieJar(unsafe=True),
+            cookie_jar=cookie_jar,
             timeout=timeout,
             trust_env=False,
             trace_configs=[trace_config],
         )
+        bounded_session = aiohttp.ClientSession(
+            auto_decompress=False,
+            cookie_jar=cookie_jar,
+            timeout=timeout,
+            trust_env=False,
+            trace_configs=[bounded_trace_config],
+        )
         try:
             localizations = await get_localization_options()
-            return cls(session, config, localizations)
+            return cls(
+                session,
+                config,
+                localizations,
+                bounded_session=bounded_session,
+            )
         except BaseException:
             await session.close()
+            await bounded_session.close()
             raise
 
     async def close(self) -> None:
         await self._session.close()
+        if self._bounded_session is not self._session:
+            await self._bounded_session.close()
 
     def _select_localization(
         self, locale: str, *, exact: bool = False
@@ -1928,6 +2070,10 @@ class CookidooGateway:
         async with self._login_lock:
             if not force and key in self._authenticated:
                 return
+            if not self._config.password_login_enabled:
+                raise GatewayConfigurationError(
+                    "Cookidoo password login is disabled; refresh the persisted cookie"
+                )
             if not os.getenv("COOKIDOO_EMAIL", "").strip() or not os.getenv(
                 "COOKIDOO_PASSWORD", ""
             ).strip():
@@ -1946,9 +2092,48 @@ class CookidooGateway:
     ) -> Any:
         await self._load_cookies_once(client)
         logged_in_now = False
-        if not self._cookie_available and key not in self._authenticated:
-            await self._login(client, key, force=False)
-            logged_in_now = True
+        if key not in self._authenticated:
+            if self._cookie_available:
+                try:
+                    if self._config.detail_hydration_enabled:
+                        api_endpoint = getattr(
+                            client,
+                            "api_endpoint",
+                            None,
+                        )
+                        localization = getattr(
+                            client,
+                            "localization",
+                            None,
+                        )
+                        if (
+                            not isinstance(api_endpoint, URL)
+                            or localization is None
+                        ):
+                            raise GatewayConfigurationError(
+                                "Cookidoo account verification is unavailable"
+                            )
+                        profile_url = (
+                            api_endpoint
+                            / COMMUNITY_PROFILE_PATH.format(
+                                **localization.__dict__
+                            )
+                        )
+                        await self._bounded_request_json(
+                            client,
+                            "get",
+                            profile_url,
+                            "loading user info",
+                        )
+                    else:
+                        await client.get_user_info()
+                except CookidooAuthException:
+                    self._cookie_available = False
+                else:
+                    self._authenticated.add(key)
+            if key not in self._authenticated:
+                await self._login(client, key, force=False)
+                logged_in_now = True
         try:
             return await operation()
         except CookidooAuthException:
@@ -1957,11 +2142,327 @@ class CookidooGateway:
             await self._login(client, key, force=True)
             return await operation()
 
+    async def _bounded_request_json(
+        self,
+        client: Any,
+        method: str,
+        url: URL,
+        operation: str,
+        *,
+        params: Mapping[str, str] | None = None,
+    ) -> Mapping[str, object]:
+        decoded, _response_url = await self._bounded_request_json_with_url(
+            client,
+            method,
+            url,
+            operation,
+            params=params,
+        )
+        return decoded
+
+    async def _bounded_request_json_with_url(
+        self,
+        client: Any,
+        method: str,
+        url: URL,
+        operation: str,
+        *,
+        params: Mapping[str, str] | None = None,
+    ) -> tuple[Mapping[str, object], URL]:
+        _validate_upstream_url(url)
+        headers = getattr(client, "_api_headers", None)
+        if not isinstance(headers, Mapping):
+            raise GatewayConfigurationError(
+                "Cookidoo client headers are unavailable"
+            )
+        request_headers = dict(headers)
+        request_headers["Accept-Encoding"] = "gzip, deflate"
+        try:
+            async with self._bounded_session.request(
+                method,
+                url,
+                headers=request_headers,
+                params=dict(params or {}),
+            ) as response:
+                if response.status == 401:
+                    raise_auth = getattr(
+                        client,
+                        "_raise_auth_exception",
+                        None,
+                    )
+                    if callable(raise_auth):
+                        raise_auth(operation)
+                    raise CookidooAuthException(
+                        f"{operation} authentication failed"
+                    )
+                response.raise_for_status()
+                encoding = response.headers.get(
+                    "Content-Encoding",
+                    "",
+                ).strip().lower()
+                if encoding in {"", "identity"}:
+                    decompressor = None
+                elif encoding == "gzip":
+                    decompressor = zlib.decompressobj(
+                        16 + zlib.MAX_WBITS
+                    )
+                elif encoding == "deflate":
+                    decompressor = zlib.decompressobj()
+                else:
+                    raise GatewayResponseError()
+                body = bytearray()
+                compressed_bytes = 0
+                async for chunk in response.content.iter_chunked(65536):
+                    compressed_bytes += len(chunk)
+                    if compressed_bytes > MAX_UPSTREAM_RESPONSE_BYTES:
+                        raise GatewayResponseError()
+                    if decompressor is None:
+                        body.extend(chunk)
+                    else:
+                        remaining = (
+                            MAX_UPSTREAM_RESPONSE_BYTES - len(body)
+                        )
+                        try:
+                            decoded_chunk = decompressor.decompress(
+                                chunk,
+                                remaining + 1,
+                            )
+                        except zlib.error as exc:
+                            raise GatewayResponseError() from exc
+                        body.extend(decoded_chunk)
+                        if decompressor.unconsumed_tail:
+                            raise GatewayResponseError()
+                    if len(body) > MAX_UPSTREAM_RESPONSE_BYTES:
+                        raise GatewayResponseError()
+                if decompressor is not None:
+                    remaining = MAX_UPSTREAM_RESPONSE_BYTES - len(body)
+                    try:
+                        body.extend(decompressor.flush(remaining + 1))
+                    except zlib.error as exc:
+                        raise GatewayResponseError() from exc
+                    if (
+                        len(body) > MAX_UPSTREAM_RESPONSE_BYTES
+                        or decompressor.unused_data
+                    ):
+                        raise GatewayResponseError()
+                response_url = URL(str(response.url))
+                _validate_upstream_url(response_url)
+        except (
+            CookidooAuthException,
+            GatewayResponseError,
+        ):
+            raise
+        except (aiohttp.ClientError, TimeoutError) as exc:
+            raise CookidooRequestException(
+                f"{operation} failed"
+            ) from exc
+        try:
+            decoded = json.loads(body.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise CookidooParseException(
+                f"{operation} returned invalid JSON"
+            ) from exc
+        if not isinstance(decoded, Mapping):
+            raise GatewayResponseError()
+        return decoded, response_url
+
+    async def _load_safe_recipe_metadata(
+        self,
+        client: Any,
+        recipe_id: str,
+    ) -> SafeRecipeMetadata:
+        if not re.fullmatch(r"[A-Za-z0-9._:-]+", recipe_id):
+            raise GatewayResponseError()
+        api_endpoint = getattr(client, "api_endpoint", None)
+        localization = getattr(client, "localization", None)
+        if not isinstance(api_endpoint, URL) or localization is None:
+            raise GatewayConfigurationError(
+                "Cookidoo raw metadata adapter is unavailable"
+            )
+        url = api_endpoint / RECIPE_PATH.format(
+            language=localization.language,
+            id=recipe_id,
+        )
+        raw, response_url = await self._bounded_request_json_with_url(
+            client,
+            "get",
+            url,
+            "loading recipe metadata",
+        )
+        return _safe_recipe_from_raw(raw, str(response_url))
+
     async def search(self, request: SearchRequest) -> GatewaySearchResult:
-        raise GatewayPolicyDisabledError()
+        if not self._config.detail_hydration_enabled:
+            raise GatewayPolicyDisabledError()
+        localization = self._select_localization(request.locale)
+        client = self._client_for(localization)
+        key = f"{localization.language}|{localization.url}"
+        excluded = set(request.exclude_ids)
+        recipes: list[dict[str, object]] = []
+        pages_scanned = 0
+        last_page = request.page
+        last_page_had_raw_hits = False
+
+        for page in range(
+            request.page,
+            min(51, request.page + request.max_pages),
+        ):
+            params = {
+                "query": request.query,
+                "languages": ",".join(request.languages),
+                "page": str(page),
+                "pageSize": str(request.limit),
+                "tmv": request.tmv,
+            }
+            if request.ingredients:
+                params["ingredients"] = ",".join(request.ingredients)
+            if request.exclude_ingredients:
+                params["excludeIngredients"] = ",".join(
+                    request.exclude_ingredients
+                )
+            search_url = (
+                getattr(client, "api_endpoint", URL(""))
+                / "search"
+                / localization.language.split("-", 1)[0]
+            )
+            operation = lambda: self._bounded_request_json(
+                client,
+                "get",
+                search_url,
+                "search recipes",
+                params=params,
+            )
+            raw_result = await self._with_lazy_login(
+                client,
+                key,
+                operation,
+            )
+            try:
+                result = cookidoo_search_result_from_json(
+                    raw_result,
+                    localization,
+                )
+            except (KeyError, TypeError, ValueError) as exc:
+                raise CookidooParseException(
+                    "Search recipes failed during parsing"
+                ) from exc
+            raw_hits = getattr(result, "recipes", None)
+            if (
+                isinstance(raw_hits, str)
+                or not isinstance(raw_hits, Sequence)
+                or len(raw_hits) > 200
+            ):
+                raise GatewayResponseError()
+            pages_scanned += 1
+            last_page = page
+            last_page_had_raw_hits = len(raw_hits) > 0
+            if not raw_hits:
+                break
+
+            for hit in raw_hits:
+                external_id = _upstream_text(
+                    getattr(hit, "id", ""),
+                    "external_id",
+                    160,
+                    True,
+                )
+                if external_id in excluded:
+                    continue
+                try:
+                    async with self._detail_semaphore:
+                        details = await self._with_lazy_login(
+                            client,
+                            key,
+                            lambda external_id=external_id:
+                                self._load_safe_recipe_metadata(
+                                    client, external_id
+                                ),
+                        )
+                    recipe = _allowlisted_recipe(
+                        hit,
+                        details,
+                        localization.language,
+                    )
+                    _require_canonical_recipe_locale(
+                        details.url,
+                        localization.language,
+                    )
+                except BaseException as exc:
+                    if _metadata_failure_kind(exc) is not None:
+                        continue
+                    raise
+                recipes.append(recipe)
+                excluded.add(external_id)
+                if len(recipes) >= request.limit:
+                    break
+            if len(recipes) >= request.limit:
+                break
+
+        return GatewaySearchResult(
+            recipes=recipes,
+            pages_scanned=pages_scanned,
+            last_page=last_page,
+            next_page=last_page + 1,
+            last_page_had_raw_hits=last_page_had_raw_hits,
+        )
 
     async def metadata(self, request: MetadataRequest) -> GatewayMetadataResult:
-        raise GatewayPolicyDisabledError()
+        if not self._config.detail_hydration_enabled:
+            raise GatewayPolicyDisabledError()
+        localization = self._select_localization(
+            request.locale,
+            exact=True,
+        )
+        client = self._client_for(localization)
+        key = f"{localization.language}|{localization.url}"
+        outcomes: list[dict[str, object]] = []
+        for external_id in request.external_ids:
+            try:
+                async with self._detail_semaphore:
+                    details = await self._with_lazy_login(
+                        client,
+                        key,
+                        lambda external_id=external_id:
+                            self._load_safe_recipe_metadata(
+                                client, external_id
+                            ),
+                    )
+                _require_canonical_recipe_locale(
+                    details.url,
+                    localization.language,
+                )
+                recipe = _allowlisted_recipe(
+                    SimpleNamespace(
+                        id=external_id,
+                        name="",
+                        image="",
+                        url="",
+                    ),
+                    details,
+                    localization.language,
+                )
+                outcomes.append(
+                    {
+                        "external_id": external_id,
+                        "status": "succeeded",
+                        "recipe": recipe,
+                    }
+                )
+            except BaseException as exc:
+                failure_kind = _metadata_failure_kind(exc)
+                if failure_kind is None:
+                    raise
+                outcomes.append(
+                    {
+                        "external_id": external_id,
+                        "status": "failed",
+                        "error_kind": failure_kind,
+                    }
+                )
+        return GatewayMetadataResult(
+            outcomes=outcomes,
+            locale=localization.language,
+        )
 
     async def _planner_read(
         self,
@@ -2241,14 +2742,15 @@ async def error_middleware(
 
 
 def _policy_capabilities(config: BridgeConfig) -> dict[str, object]:
+    detail_enabled = config.detail_hydration_enabled
     planner_available = (
         config.planner_write_enabled
         and config.planner_put_semantics in {"append", "replace"}
     )
     return {
-        "detail_hydration": False,
-        "metadata_hydration": False,
-        "ingredient_aware_discovery": False,
+        "detail_hydration": detail_enabled,
+        "metadata_hydration": detail_enabled,
+        "ingredient_aware_discovery": detail_enabled,
         "planner_write": planner_available,
         "put_semantics": (
             config.planner_put_semantics
@@ -2256,7 +2758,9 @@ def _policy_capabilities(config: BridgeConfig) -> dict[str, object]:
             else "unknown"
         ),
         "account_scope": "configured_account",
-        "reason": DETAIL_HYDRATION_POLICY_REASON,
+        "reason": (
+            None if detail_enabled else DETAIL_HYDRATION_POLICY_REASON
+        ),
         "policy_version": DETAIL_HYDRATION_POLICY_VERSION,
     }
 
@@ -2298,8 +2802,30 @@ async def search_handler(request: web.Request) -> web.Response:
         payload = await request.json(loads=json.loads)
     except (json.JSONDecodeError, UnicodeDecodeError):
         raise BridgeError(400, "invalid_json", "Request body is not valid JSON") from None
-    SearchRequest.from_payload(payload, config)
-    raise GatewayPolicyDisabledError()
+    search_request = SearchRequest.from_payload(payload, config)
+    if not config.detail_hydration_enabled:
+        raise GatewayPolicyDisabledError()
+    gateway = request.app.get(GATEWAY_KEY)
+    if gateway is None:
+        raise GatewayConfigurationError(
+            "Cookidoo discovery gateway is unavailable"
+        )
+    async with request.app[REQUEST_SEMAPHORE_KEY]:
+        result = await asyncio.wait_for(
+            gateway.search(search_request),
+            timeout=config.request_timeout_seconds,
+        )
+    return _bounded_json_response(
+        {
+            "recipes": result.recipes,
+            "count": len(result.recipes),
+            "pages_scanned": result.pages_scanned,
+            "last_page": result.last_page,
+            "next_page": result.next_page,
+            "last_page_had_raw_hits":
+                result.last_page_had_raw_hits,
+        }
+    )
 
 
 async def metadata_handler(request: web.Request) -> web.Response:
@@ -2320,8 +2846,33 @@ async def metadata_handler(request: web.Request) -> web.Response:
         raise BridgeError(
             400, "invalid_json", "Request body is not valid JSON"
         ) from None
-    MetadataRequest.from_payload(payload, config)
-    raise GatewayPolicyDisabledError()
+    metadata_request = MetadataRequest.from_payload(payload, config)
+    if not config.detail_hydration_enabled:
+        raise GatewayPolicyDisabledError()
+    gateway = request.app.get(GATEWAY_KEY)
+    if gateway is None:
+        raise GatewayConfigurationError(
+            "Cookidoo metadata gateway is unavailable"
+        )
+    async with request.app[REQUEST_SEMAPHORE_KEY]:
+        result = await asyncio.wait_for(
+            gateway.metadata(metadata_request),
+            timeout=config.request_timeout_seconds,
+        )
+    succeeded = sum(
+        1 for item in result.outcomes
+        if item["status"] == "succeeded"
+    )
+    return _bounded_json_response(
+        {
+            "outcomes": result.outcomes,
+            "count": len(result.outcomes),
+            "succeeded_count": succeeded,
+            "failed_count": len(result.outcomes) - succeeded,
+            "locale": result.locale,
+            "metadata_schema_version": METADATA_SCHEMA_VERSION,
+        }
+    )
 
 
 async def planner_capabilities_handler(request: web.Request) -> web.Response:
@@ -2409,6 +2960,26 @@ async def _gateway_context(app: web.Application):
         await gateway.close()
 
 
+def _bounded_json_response(
+    payload: Mapping[str, object],
+) -> web.Response:
+    body = json.dumps(
+        payload,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    if len(body) > MAX_RESPONSE_BYTES:
+        raise BridgeError(
+            502,
+            "response_too_large",
+            "Bridge response exceeds the configured limit",
+        )
+    return web.Response(
+        body=body,
+        content_type="application/json",
+    )
+
+
 def create_app(
     config: BridgeConfig | None = None, gateway: CookidooGateway | None = None
 ) -> web.Application:
@@ -2420,7 +2991,7 @@ def create_app(
 
     if gateway is not None:
         app[GATEWAY_KEY] = gateway
-    elif (
+    elif config.detail_hydration_enabled or (
         config.planner_write_enabled
         and config.planner_put_semantics in {"append", "replace"}
     ):

@@ -462,27 +462,26 @@ HTTP 409. Idempotency records have a 30-day retention window from the original
 command; older records may be pruned by later grocery commands.
 
 ### `recipe_catalog_discover` — POST
-Cookidoo discovery hydration is policy-disabled. The action returns local catalog
-results, no remote job, `detail_hydration: false`, and
-`unrefreshable_reason: "provider_detail_policy_disabled"`.
-The disabled request contract forces the separate upstream `languages=en`
-filter. Provider `language`, when present, is bounded undocumented evidence,
-not a guarantee; it remains separate from locale and deterministic local
-content detection. Explicit non-English evidence is rejected/quarantined for
-new ingestion without deleting existing rows.
+When both Cookidoo connector/detail gates are enabled, the action returns local
+catalog results immediately and queues bounded authenticated discovery. The
+upstream request always applies a separate `languages=en` filter. Provider
+`language`, when present, remains bounded undocumented evidence rather than a
+guarantee; deterministic local content detection still rejects/quarantines
+explicit non-English ingestion.
 
 ### `recipe_jobs_status` — GET
 Read one background job by `id`/`idempotency_key`, list recent jobs, or pass
 `search_id` to receive aggregate hydration status, queue position, polling delay,
-exhaustion state, and compact imported/updated cards. Legacy Cookidoo discovery and
-metadata jobs terminate as `skipped` with
-`provider_detail_policy_disabled`; they do not retry or affect connector
-failure/circuit state. No new hydration jobs are enqueued.
+exhaustion state, and compact imported/updated cards. When the detail gate is
+disabled, Cookidoo network jobs terminate locally as
+`skipped` with `detail_hydration_disabled`; they do not retry or affect
+connector failure/circuit state.
 
 ### `recipe_connectors` — GET
 List connector capabilities, enabled/configured state, and circuit-breaker health.
-Cookidoo reports `detail_hydration: false`, policy reason/version, cached-catalog
-read, canonical-link, and external-instructions-link capabilities.
+Cookidoo reports its live detail/discovery gate, policy version,
+cached-catalog read, canonical-link, and external-instructions-link
+capabilities.
 
 `ha_info` advertises `recipe_detail_v1`, `recipe_grocery_v1`,
 `recipe_ingredient_feedback_v1`, and `recipe_ingredient_feedback_v2` alongside

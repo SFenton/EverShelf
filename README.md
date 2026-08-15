@@ -533,21 +533,15 @@ suppressed regardless of confidence. `capabilities.grocery_add` means the comple
 nonempty list is supported, while the sibling `grocery` object reports missing,
 uncertain, in-stock, staple, eligible, and blocking state.
 
-Do not configure Cookidoo credentials or start the provider-facing bridge profile
-for metadata hydration while detail hydration is policy-disabled. Local recipe
-search and existing cached Cookidoo catalog reads remain available. Planner use is
-a separate explicit dual-gate operation and does not amend the instruction
-prohibition.
+Cookidoo search/detail access is default-off and requires matching
+`COOKIDOO_CONNECTOR_ENABLED` and `COOKIDOO_DETAIL_HYDRATION_ENABLED` gates in
+EverShelf plus the bridge detail gate. Scan-triggered discovery remains bounded,
+authenticated, English-filtered, metadata-only, and locally cached. Planner use
+is a separate explicit dual-gate operation.
 
-Full-corpus crawls, taxonomy-triggered discovery, periodic refresh, and direct
-metadata hydration are policy-disabled. Existing queued jobs terminate as local
-`skipped` outcomes; do not run the crawl/backfill commands retained in the source
-tree.
-
-`COOKIDOO_METADATA_BACKFILL_ENABLED` remains false and cannot override this policy
-gate. Status reports `provider_detail_policy_disabled`; enqueue refuses. No full
-backfill is authorized. A future step-free provider endpoint would require a new
-repository-policy review before hydration could be re-enabled.
+Full direct-ID catalog backfill remains separately controlled by
+`COOKIDOO_METADATA_BACKFILL_ENABLED`; scan-triggered taxonomy discovery does not
+require or imply full backfill.
 
 ### Ingredient ontology v3 shadow workflow
 

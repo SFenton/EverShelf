@@ -18,13 +18,12 @@ function recipeCookidooBackfillUsage(): string {
         'Usage: php scripts/backfill-cookidoo-crawls.php [options]',
         '  --locale=LOCALE  Cookidoo locale (default: COOKIDOO_DISCOVERY_LOCALE)',
         '  --tmv=TMV        TM31, TM5, TM6, or TM7 (default: TM6)',
-        '  --dry-run        Report policy-disabled status without DB/job writes',
-        '  --force          Unavailable while detail hydration is policy-disabled',
+        '  --dry-run        Report planned crawl jobs without DB/job writes',
+        '  --force          Requeue stale or terminal discovery jobs',
         '  --json           Emit machine-readable JSON',
         '  --help           Show this help',
         '',
-        'Provider detail hydration is disabled by repository policy.',
-        'Non-dry-run execution exits nonzero with provider_detail_policy_disabled.',
+        'Requires both Cookidoo connector and detail-hydration gates.',
     ]) . PHP_EOL;
 }
 

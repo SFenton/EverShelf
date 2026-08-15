@@ -2,11 +2,12 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import date
+import gzip
 import os
 from pathlib import Path
 from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import aiohttp
 from aiohttp.test_utils import TestClient, TestServer
@@ -18,6 +19,7 @@ from app import (
     DETAIL_HYDRATION_POLICY_REASON,
     DETAIL_HYDRATION_POLICY_VERSION,
     GatewayMetadataResult,
+    GatewayConfigurationError,
     GatewayPlannerDisabledError,
     GatewayPlannerDriftError,
     GatewayPlannerResult,
@@ -27,6 +29,7 @@ from app import (
     MAX_RECIPE_DESCRIPTIVE_ASSETS,
     MAX_RECIPE_SECONDS,
     MAX_RESPONSE_BYTES,
+    MAX_UPSTREAM_RESPONSE_BYTES,
     METADATA_SCHEMA_VERSION,
     MetadataRequest,
     PlannerRequest,
@@ -38,6 +41,7 @@ from app import (
     _safe_https_url,
     _safe_recipe_from_public,
     _safe_recipe_from_raw,
+    _safe_structured_amount,
     _upstream_seconds,
     _validate_upstream_url,
     create_app,
@@ -233,13 +237,23 @@ class FakeCookidoo:
         recipe_locale: str = "en-GB",
     ) -> None:
         self.login_calls = 0
+        self.profile_calls = 0
+        self.profile_auth_failure = False
         self.search_calls = 0
         self.detail_calls = 0
         self.search_hits = search_hits
         self.recipe_locale = recipe_locale
+        self._api_headers: dict[str, str] = {}
 
     async def login(self) -> None:
         self.login_calls += 1
+
+    async def get_user_info(self) -> object:
+        self.profile_calls += 1
+        if self.profile_auth_failure:
+            self.profile_auth_failure = False
+            raise CookidooAuthException("stale cookie")
+        return SimpleNamespace(id="fake-user")
 
     def save_cookies(self, path: Path) -> None:
         path.write_text('[{"key":"session","value":"fake"}]', encoding="utf-8")
@@ -729,6 +743,28 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             },
         )
 
+    async def test_enabled_health_and_capabilities_report_discovery(
+        self,
+    ) -> None:
+        config = replace(
+            self.config,
+            detail_hydration_enabled=True,
+        )
+        async with TestClient(
+            TestServer(create_app(config, FakeGateway()))
+        ) as client:
+            capabilities = await (
+                await client.get("/v1/capabilities")
+            ).json()
+        self.assertTrue(capabilities["detail_hydration"])
+        self.assertTrue(capabilities["metadata_hydration"])
+        self.assertTrue(capabilities["ingredient_aware_discovery"])
+        self.assertIsNone(capabilities["reason"])
+        self.assertEqual(
+            capabilities["policy_version"],
+            DETAIL_HYDRATION_POLICY_VERSION,
+        )
+
     async def test_search_requires_bearer_and_rejects_unknown_fields(self) -> None:
         gateway = FakeGateway()
         async with TestClient(TestServer(create_app(self.config, gateway))) as client:
@@ -769,19 +805,143 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(gateway.requests, [])
 
     async def test_search_response_size_is_bounded(self) -> None:
+        config = replace(
+            self.config,
+            detail_hydration_enabled=True,
+        )
         async with TestClient(
-            TestServer(create_app(self.config, HugeGateway()))
+            TestServer(create_app(config, HugeGateway()))
         ) as client:
             response = await client.post(
                 "/v1/search",
                 headers={"Authorization": "Bearer test-token"},
                 json={"query": "tomato", "limit": 1},
             )
-            self.assertEqual(response.status, 503)
+            self.assertEqual(response.status, 502)
             self.assertEqual(
                 (await response.json())["error"],
-                "metadata_hydration_disabled_policy",
+                "response_too_large",
             )
+
+    async def test_upstream_decompressed_response_size_is_bounded(
+        self,
+    ) -> None:
+        compressed = gzip.compress(
+            b'{"value":"'
+            + (b"x" * (MAX_UPSTREAM_RESPONSE_BYTES * 10))
+            + b'"}'
+        )
+
+        class FakeContent:
+            async def iter_chunked(self, _size: int):
+                yield compressed
+
+        class FakeResponse:
+            status = 200
+            content = FakeContent()
+            headers = {"Content-Encoding": "gzip"}
+            url = URL("https://cookidoo.co.uk/search/en")
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args: object) -> None:
+                return None
+
+            def raise_for_status(self) -> None:
+                return None
+
+        class FakeSession:
+            def request(self, *_args: object, **_kwargs: object):
+                return FakeResponse()
+
+        config = replace(
+            self.config,
+            detail_hydration_enabled=True,
+        )
+        gateway = CookidooGateway(
+            FakeSession(),
+            config,
+            [
+                CookidooLocalizationConfig(
+                    country_code="gb",
+                    language="en-GB",
+                    url="https://cookidoo.co.uk/foundation/en-GB",
+                )
+            ],
+        )
+        client = SimpleNamespace(_api_headers={})
+        with patch("app._validate_upstream_url"):
+            with self.assertRaises(GatewayResponseError):
+                await gateway._bounded_request_json(
+                    client,
+                    "get",
+                    URL("https://cookidoo.co.uk/search/en"),
+                    "oversized response",
+                )
+
+    async def test_login_and_bounded_sessions_share_cookie_jar(
+        self,
+    ) -> None:
+        cookie_jar = aiohttp.CookieJar(unsafe=True)
+        async with aiohttp.ClientSession(
+            cookie_jar=cookie_jar
+        ) as session, aiohttp.ClientSession(
+            auto_decompress=False,
+            cookie_jar=cookie_jar,
+        ) as bounded_session:
+            gateway = CookidooGateway(
+                session,
+                replace(
+                    self.config,
+                    detail_hydration_enabled=True,
+                ),
+                [
+                    CookidooLocalizationConfig(
+                        country_code="gb",
+                        language="en-GB",
+                        url=(
+                            "https://cookidoo.co.uk/"
+                            "foundation/en-GB"
+                        ),
+                    )
+                ],
+                bounded_session=bounded_session,
+            )
+            self.assertIs(
+                gateway._session.cookie_jar,
+                gateway._bounded_session.cookie_jar,
+            )
+
+    async def test_enabled_search_returns_allowlisted_payload(self) -> None:
+        gateway = FakeGateway()
+        config = replace(
+            self.config,
+            detail_hydration_enabled=True,
+        )
+        async with TestClient(
+            TestServer(create_app(config, gateway))
+        ) as client:
+            response = await client.post(
+                "/v1/search",
+                headers={"Authorization": "Bearer test-token"},
+                json={
+                    "query": "tomato",
+                    "ingredients": ["Basil"],
+                    "locale": "en-GB",
+                    "limit": 2,
+                },
+            )
+            body = await response.json()
+        self.assertEqual(response.status, 200)
+        self.assertEqual(body["count"], 1)
+        self.assertEqual(body["pages_scanned"], 1)
+        self.assertEqual(body["last_page"], 0)
+        self.assertEqual(body["next_page"], 1)
+        self.assertTrue(body["last_page_had_raw_hits"])
+        self.assertEqual(body["recipes"][0]["title"], "Tomato Soup")
+        self.assertEqual(len(gateway.requests), 1)
+        self.assertEqual(gateway.requests[0].languages, ("en",))
 
     async def test_search_uses_default_locale_and_accepts_script_subtags(self) -> None:
         gateway = FakeGateway()
@@ -901,8 +1061,12 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(gateway.metadata_requests, [])
 
     async def test_metadata_response_size_is_bounded(self) -> None:
+        config = replace(
+            self.config,
+            detail_hydration_enabled=True,
+        )
         async with TestClient(
-            TestServer(create_app(self.config, HugeMetadataGateway()))
+            TestServer(create_app(config, HugeMetadataGateway()))
         ) as client:
             response = await client.post(
                 "/v1/metadata",
@@ -910,8 +1074,36 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                 json={"locale": "en-GB", "external_ids": ["r1"]},
             )
             body = await response.json()
-        self.assertEqual(response.status, 503)
-        self.assertEqual(body["error"], "metadata_hydration_disabled_policy")
+        self.assertEqual(response.status, 502)
+        self.assertEqual(body["error"], "response_too_large")
+
+    async def test_enabled_metadata_returns_ordered_outcomes(self) -> None:
+        gateway = FakeGateway()
+        config = replace(
+            self.config,
+            detail_hydration_enabled=True,
+        )
+        async with TestClient(
+            TestServer(create_app(config, gateway))
+        ) as client:
+            response = await client.post(
+                "/v1/metadata",
+                headers={"Authorization": "Bearer test-token"},
+                json={
+                    "locale": "en-GB",
+                    "external_ids": ["r1", "r2"],
+                },
+            )
+            body = await response.json()
+        self.assertEqual(response.status, 200)
+        self.assertEqual(body["count"], 2)
+        self.assertEqual(body["succeeded_count"], 2)
+        self.assertEqual(body["failed_count"], 0)
+        self.assertEqual(
+            [item["external_id"] for item in body["outcomes"]],
+            ["r1", "r2"],
+        )
+        self.assertEqual(len(gateway.metadata_requests), 1)
 
     def _planner_gateway(
         self,
@@ -922,6 +1114,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             self.config,
             planner_write_enabled=True,
             planner_put_semantics=semantics,
+            password_login_enabled=True,
         )
         localization = CookidooLocalizationConfig(
             country_code="gb",
@@ -936,6 +1129,9 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         )
         gateway._cookies_loaded = True
         gateway._cookie_available = True
+        gateway._authenticated.add(
+            "en-GB|https://cookidoo.co.uk/foundation/en-GB"
+        )
         return gateway
 
     def _planner_request(self, external_id: str = "r-target") -> PlannerRequest:
@@ -1159,6 +1355,9 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         )
         gateway._cookies_loaded = True
         gateway._cookie_available = True
+        gateway._authenticated.add(
+            "en-GB|https://cookidoo.co.uk/foundation/en-GB"
+        )
 
         with self.assertRaises(GatewayPolicyDisabledError):
             await gateway.metadata(
@@ -1352,6 +1551,26 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(prose=prose):
                 self.assertIsNone(_public_amount_text(prose))
 
+    def test_structured_amounts_drop_zero_and_unsupported_units(
+        self,
+    ) -> None:
+        self.assertEqual(
+            _safe_structured_amount(0, None, "g"),
+            (None, None, None, None),
+        )
+        self.assertEqual(
+            _safe_structured_amount(2.5, None, "cm"),
+            (None, None, None, None),
+        )
+        self.assertEqual(
+            _safe_structured_amount(3, None, "stalks"),
+            (None, None, None, None),
+        )
+        self.assertEqual(
+            _safe_structured_amount(2, 3, "pieces"),
+            (2, 3, "piece", "2 - 3 piece"),
+        )
+
     async def test_redirect_validation_blocks_cross_host_targets(self) -> None:
         params = SimpleNamespace(
             response=SimpleNamespace(headers={"Location": "https://example.invalid/internal"}),
@@ -1405,6 +1624,268 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(safe.devices, ())
         self.assertEqual(safe.optional_devices, ())
         self.assertEqual(safe.equipment, ("sieve",))
+
+    async def test_enabled_gateway_search_loads_allowlisted_details(
+        self,
+    ) -> None:
+        fake_client = FakeRawCookidoo()
+        detail_raw = await fake_client._request_json()
+        fake_client.raw_detail_calls = 0
+        config = replace(
+            self.config,
+            detail_hydration_enabled=True,
+        )
+        gateway = CookidooGateway(
+            SimpleNamespace(),
+            config,
+            [
+                CookidooLocalizationConfig(
+                    country_code="gb",
+                    language="en-GB",
+                    url="https://cookidoo.co.uk/foundation/en-GB",
+                )
+            ],
+            client_factory=lambda _session, _cfg: fake_client,
+        )
+        gateway._bounded_request_json = AsyncMock(
+            side_effect=[
+                {"id": "fake-user"},
+                {
+                    "data": [
+                        {
+                            "id": "r200",
+                            "title": "Unsafe raw title",
+                        }
+                    ],
+                    "total": 1,
+                },
+            ]
+        )
+        gateway._bounded_request_json_with_url = AsyncMock(
+            return_value=(
+                detail_raw,
+                URL(
+                    "https://cookidoo.co.uk/recipes/recipe/"
+                    "en-GB/r200"
+                ),
+            )
+        )
+        gateway._cookies_loaded = True
+        gateway._cookie_available = True
+        result = await gateway.search(
+            SearchRequest(
+                "tomato",
+                ("Tomato",),
+                (),
+                "en-GB",
+                "TM6",
+                1,
+                0,
+                (),
+                1,
+            )
+        )
+        self.assertEqual(fake_client.search_calls, 0)
+        self.assertEqual(fake_client.raw_detail_calls, 0)
+        self.assertEqual(fake_client.profile_calls, 0)
+        self.assertEqual(
+            gateway._bounded_request_json.await_count,
+            2,
+        )
+        self.assertEqual(
+            gateway._bounded_request_json_with_url.await_count,
+            1,
+        )
+        self.assertEqual(result.pages_scanned, 1)
+        self.assertEqual(result.last_page, 0)
+        self.assertEqual(result.next_page, 1)
+        self.assertTrue(result.last_page_had_raw_hits)
+        self.assertEqual(result.recipes[0]["external_id"], "r200")
+        self.assertEqual(result.recipes[0]["title"], "Metadata Title")
+        self.assertEqual(result.recipes[0]["locale"], "en-GB")
+
+    async def test_enabled_search_skips_cross_locale_detail_hits(
+        self,
+    ) -> None:
+        fake_client = FakeRawCookidoo()
+        detail_raw = await fake_client._request_json()
+        config = replace(
+            self.config,
+            detail_hydration_enabled=True,
+        )
+        gateway = CookidooGateway(
+            SimpleNamespace(),
+            config,
+            [fake_client.localization],
+            client_factory=lambda _session, _cfg: fake_client,
+        )
+        gateway._bounded_request_json = AsyncMock(
+            return_value={
+                "data": [{"id": "r200", "title": "Recipe"}],
+                "total": 1,
+            }
+        )
+        gateway._bounded_request_json_with_url = AsyncMock(
+            return_value=(
+                detail_raw,
+                URL(
+                    "https://cookidoo.thermomix.com/recipes/recipe/"
+                    "en-US/r200"
+                ),
+            )
+        )
+        gateway._cookies_loaded = True
+        gateway._cookie_available = True
+        gateway._authenticated.add(
+            "en-GB|https://cookidoo.co.uk/foundation/en-GB"
+        )
+        result = await gateway.search(
+            SearchRequest(
+                "tomato",
+                (),
+                (),
+                "en-GB",
+                "TM6",
+                1,
+                0,
+                (),
+                1,
+            )
+        )
+        self.assertEqual(result.recipes, [])
+        self.assertTrue(result.last_page_had_raw_hits)
+
+    async def test_enabled_gateway_metadata_keeps_permanent_failures_bounded(
+        self,
+    ) -> None:
+        fake_client = OutcomeCookidoo()
+        config = replace(
+            self.config,
+            detail_hydration_enabled=True,
+        )
+        gateway = CookidooGateway(
+            SimpleNamespace(),
+            config,
+            [fake_client.localization],
+            client_factory=lambda _session, _cfg: fake_client,
+        )
+        async def bounded_request(
+            _client: object,
+            method: str,
+            url: URL,
+            *_args: object,
+            **_kwargs: object,
+        ) -> tuple[object, URL]:
+            return await fake_client._request_json(method, url), url
+        gateway._bounded_request_json_with_url = AsyncMock(
+            side_effect=bounded_request
+        )
+        gateway._cookies_loaded = True
+        gateway._cookie_available = True
+        gateway._authenticated.add(
+            "en-GB|https://cookidoo.co.uk/foundation/en-GB"
+        )
+        result = await gateway.metadata(
+            MetadataRequest(
+                locale="en-GB",
+                external_ids=("ok-1", "missing", "parse"),
+            )
+        )
+        self.assertEqual(
+            [item["status"] for item in result.outcomes],
+            ["succeeded", "failed", "failed"],
+        )
+        self.assertEqual(
+            result.outcomes[1]["error_kind"],
+            "not_found",
+        )
+        self.assertEqual(
+            result.outcomes[2]["error_kind"],
+            "invalid_metadata",
+        )
+        self.assertEqual(
+            fake_client.requested_ids,
+            ["ok-1", "missing", "parse"],
+        )
+
+    async def test_enabled_metadata_rejects_redirected_cross_locale_url(
+        self,
+    ) -> None:
+        fake_client = FakeRawCookidoo()
+        detail_raw = await fake_client._request_json()
+        config = replace(
+            self.config,
+            detail_hydration_enabled=True,
+        )
+        gateway = CookidooGateway(
+            SimpleNamespace(),
+            config,
+            [fake_client.localization],
+            client_factory=lambda _session, _cfg: fake_client,
+        )
+        gateway._bounded_request_json_with_url = AsyncMock(
+            return_value=(
+                detail_raw,
+                URL(
+                    "https://cookidoo.thermomix.com/recipes/recipe/"
+                    "en-US/r200"
+                ),
+            )
+        )
+        gateway._cookies_loaded = True
+        gateway._cookie_available = True
+        gateway._authenticated.add(
+            "en-GB|https://cookidoo.co.uk/foundation/en-GB"
+        )
+        result = await gateway.metadata(
+            MetadataRequest(
+                locale="en-GB",
+                external_ids=("r200",),
+            )
+        )
+        self.assertEqual(
+            result.outcomes,
+            [{
+                "external_id": "r200",
+                "status": "failed",
+                "error_kind": "locale_mismatch",
+            }],
+        )
+
+    async def test_stale_cookie_fails_without_unbounded_password_login(
+        self,
+    ) -> None:
+        fake_client = FakeRawCookidoo()
+        config = replace(
+            self.config,
+            detail_hydration_enabled=True,
+        )
+        gateway = CookidooGateway(
+            SimpleNamespace(),
+            config,
+            [fake_client.localization],
+            client_factory=lambda _session, _cfg: fake_client,
+        )
+        gateway._bounded_request_json = AsyncMock(
+            side_effect=CookidooAuthException("stale cookie")
+        )
+        gateway._cookies_loaded = True
+        gateway._cookie_available = True
+        with self.assertRaises(GatewayConfigurationError):
+            await gateway.search(
+                SearchRequest(
+                    "tomato",
+                    (),
+                    (),
+                    "en-GB",
+                    "TM6",
+                    1,
+                    0,
+                    (),
+                    1,
+                )
+            )
+        self.assertEqual(fake_client.login_calls, 0)
 
     async def test_language_only_search_returns_effective_localization_locale(
         self,
@@ -1620,8 +2101,8 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                 "name": "Tomato",
                 "source_quantity": 2.0,
                 "source_quantity_max": 3.0,
-                "source_unit": "pieces",
-                "source_amount_text": "2 - 3 pieces",
+                "source_unit": "piece",
+                "source_amount_text": "2 - 3 piece",
                 "source_group_index": 0,
                 "source_group_position": 1,
                 "source_group_title": "Sauce",

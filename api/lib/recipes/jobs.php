@@ -1016,7 +1016,7 @@ function recipeJobProcessQueueBatch(
     $policySkippedRows = [];
     $cookidooPolicyAllowed = recipeCookidooDetailHydrationPolicyAllows();
     if (!$cookidooPolicyAllowed) {
-        $policyReason = 'provider_detail_policy_disabled';
+        $policyReason = RECIPE_COOKIDOO_DETAIL_POLICY_REASON;
         $disableCookidoo = $db->prepare("
             UPDATE recipe_jobs SET
                 status = 'skipped',
@@ -1135,7 +1135,7 @@ function recipeJobProcessQueueBatch(
                 'job_type' => (string)$row['job_type'],
                 'status' => 'skipped',
                 'result' => [
-                    'reason' => 'provider_detail_policy_disabled',
+                    'reason' => RECIPE_COOKIDOO_DETAIL_POLICY_REASON,
                 ],
             ],
             $policySkippedRows
