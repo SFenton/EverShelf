@@ -254,23 +254,43 @@ paths:
               type: object
               required: [product_id, quantity, location]
               properties:
+                idempotency_key:
+                  type: string
+                  minLength: 1
+                  maxLength: 128
+                  pattern: "^[A-Za-z0-9._:-]+$"
+                  description: >-
+                    Reusing this key with the same normalized payload replays the
+                    original success without adding inventory twice. Reusing it
+                    with a different payload returns HTTP 409.
                 product_id:
                   type: integer
                 quantity:
                   type: number
                 location:
                   type: string
-                  enum: [dispensa, frigo, freezer, altro]
+                  enum: [dispensa, frigo, freezer, spice_rack, cabinet, altro]
                 expiry_date:
                   type: string
                   format: date
-                conf_size:
+                expiry_user_set:
+                  type: boolean
+                package_size:
                   type: number
-                vacuum:
+                package_unit:
+                  type: string
+                vacuum_sealed:
                   type: boolean
       responses:
         "200":
-          description: Item added to inventory
+          description: Item added or an earlier idempotent success replayed
+        "409":
+          description: Idempotency key was reused with a different payload
+        "503":
+          description: SQLite writer is briefly busy
+          headers:
+            Retry-After:
+              schema: { type: integer, const: 1 }
 
   /index.php?action=inventory_use:
     post:

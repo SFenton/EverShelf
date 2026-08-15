@@ -141,9 +141,10 @@ dispensa/
   immediate; model work may generalize them only inside a forked building child.
 - Controller jobs use lease token, lease generation, required epoch, and
   controller generation as one completion fence. Prompts precede calls, responses
-  precede staging, and every phase is content-hashed/idempotent. Generation waits
-  for 30 seconds of quiet with a five-minute maximum debounce and initial
-  six/hour, twenty-four/day ceilings.
+  precede staging, and every phase is content-hashed/idempotent. Intake-only
+  responses become durable generation intents and are rebound by portable slug
+  without another model call. Generation waits for five minutes of quiet with a
+  thirty-minute maximum latency and initial six/hour, twenty-four/day ceilings.
 - Recipe occurrence retirement uses an indexed recipe-ID JSON expression and
   active-row predicate. Late-phase failures transition from their actual fenced
   state immediately, and a partial database unique index prevents duplicate
@@ -166,6 +167,11 @@ dispensa/
   the same portable content hash. The deterministic applier supports only
   table-driven closed repairs and materializes exact constraints before all-edge
   graph, corpus, gold, shadow, blast, and activation gates.
+- Copied-database autonomous children may use persistent, lease-fenced keyset
+  fork progress and bounded write reservations. The active database cannot
+  fork, shadow, or promote. One collecting or shadowing child is permitted per
+  copied parent. Exact semantic no-ops skip shadow scoring, while safe shadow
+  retries reuse the completed child.
 - One primary navigation `is_a` plus at most two secondary parents is supported
   only when all accepted `is_a` edges form a food-rooted DAG with depth, ancestor,
   and path caps. Secondary ancestry and all typed relations remain non-satisfying.

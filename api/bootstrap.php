@@ -22,4 +22,7 @@ require_once __DIR__ . '/lib/canonical_ingredients.php';
 require_once __DIR__ . '/lib/taxonomy_review.php';
 require_once __DIR__ . '/lib/recipes/bootstrap.php';
 require_once __DIR__ . '/logger.php';
+require_once __DIR__ . '/lib/shopping_classification.php';
+require_once __DIR__ . '/lib/api_idempotency.php';
+require_once __DIR__ . '/lib/database_maintenance.php';
 require_once __DIR__ . '/database.php';

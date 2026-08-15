@@ -1054,8 +1054,11 @@ try {
     initializeDB($db);
     migrateDB($db);
     $db->exec("
+        DROP TABLE ontology_generation_intents;
         DROP TABLE ontology_quarantine_retries;
         DROP TABLE ontology_provisional_queue;
+        DROP TABLE ontology_version_fork_id_map;
+        DROP TABLE ontology_version_fork_progress;
         DROP TABLE ontology_generation_constraint_heads;
         DROP TABLE ontology_artifact_supersessions;
         DROP TABLE ontology_gold_cases;
@@ -10534,8 +10537,11 @@ try {
     migrateDB($disabledDb);
     $disabledDb->exec('PRAGMA foreign_keys=OFF');
     $disabledDb->exec("
+        DROP TABLE IF EXISTS ontology_generation_intents;
         DROP TABLE IF EXISTS ontology_quarantine_retries;
         DROP TABLE IF EXISTS ontology_provisional_queue;
+        DROP TABLE IF EXISTS ontology_version_fork_id_map;
+        DROP TABLE IF EXISTS ontology_version_fork_progress;
         DROP TABLE IF EXISTS ontology_generation_constraint_heads;
         DROP TABLE IF EXISTS ontology_generation_plans;
         DROP TABLE IF EXISTS ontology_gold_cases;

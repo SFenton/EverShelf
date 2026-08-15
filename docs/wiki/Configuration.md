@@ -174,6 +174,8 @@ INGREDIENT_ONTOLOGY_CONTROLLER_LEASE_SECONDS=600
 INGREDIENT_ONTOLOGY_CONTROLLER_CRON_LIMIT=10
 INGREDIENT_ONTOLOGY_CONTROLLER_MINIMUM_PRIORITY=50
 INGREDIENT_ONTOLOGY_CONTROLLER_CANDIDATE_LIMIT=64
+INGREDIENT_ONTOLOGY_CONTROLLER_GENERATION_QUIET_SECONDS=300
+INGREDIENT_ONTOLOGY_CONTROLLER_GENERATION_MAXIMUM_LATENCY_SECONDS=1800
 INGREDIENT_ONTOLOGY_CONTROLLER_GOOGLE_API_KEY=
 INGREDIENT_ONTOLOGY_CONTROLLER_GOOGLE_MODEL=gemini-3.7-flash
 INGREDIENT_ONTOLOGY_CONTROLLER_GOOGLE_THINKING_LEVEL=medium
@@ -214,20 +216,24 @@ ordinary product or recipe save still commits. The older
 `INGREDIENT_ONTOLOGY_CONTROLLER_ENABLED` name remains a compatibility fallback
 when the new gate is absent.
 
-Production remains intake-only unless the dedicated worker supplies every
-active-generation guard. Autonomous production generation requires
-`INGREDIENT_ONTOLOGY_CONTROLLER_PROMOTION_ENABLED=true` together with
-`--allow-active-db --copy-generation --run-generation --promote
---allow-active-generation`. Omitting any guard fails closed before a fork.
-The same generation path remains usable against a copied database without the
-active-generation switch.
+Production is always intake/model-evidence-only. The active database rejects
+`--copy-generation`, generation finalization, shadowing, and promotion even if
+`--allow-active-db` or the promotion feature gate is enabled. Candidate work
+must run against a copied database.
 
-Active generations are immutable children of the current ontology. Plans are
-debounced for 30 quiet seconds (maximum five minutes), shadow-scored, checked
+Copied-database generations are immutable children of the copied active
+ontology. Plans are
+collected for five quiet minutes with a bounded thirty-minute maximum latency,
+then shadow-scored and checked
 against exact constraints, blast limits, immutable gold, integrity, and
-materialized-value parity, then promoted with a compare-and-swap pointer
-update. A failed, abstained, or quarantined subject receives a unique
+materialized-value parity, then the copied pointer may be promoted with a
+compare-and-swap update for validation. A failed, abstained, or quarantined
+subject receives a unique
 non-satisfying provisional leaf and durable retry rather than being dropped.
+Copied-database controller forks may use persistent keyset progress and
+conservative row chunks. Intake-only production responses are stored as durable
+generation intents and later rebound inside the copy by portable entity slug
+without another proposer call.
 Live product observations enqueue subject resolution at priority `100`, and
 live recipe ingestion uses priority `50`; both refresh queued/retry work and
 safely revive terminal jobs with fresh immutable input and lease fences.
@@ -238,16 +244,29 @@ historical work is retained but not drained:
 ```bash
 php scripts/ontology-controller.php work \
   --db=/path/to/evershelf.db --write --allow-active-db --loop \
-  --minimum-priority=50 --allow-network \
-  --copy-generation --run-generation --promote \
-  --allow-active-generation
+  --minimum-priority=50 --allow-network
 ```
 
-The repository Compose file exposes the supervised worker under the
-`ontology` profile. Start it with `docker compose --profile ontology up -d`
-after enabling all three controller gates. The worker runs as its own
-container rather than through a host `docker exec` service, so stop/restart
-signals cannot orphan a second controller process.
+Copy the database safely, then consume and coalesce the stored intents, build
+one candidate and complete shadow, and export a sealed portable manifest:
+
+```bash
+php scripts/ontology-controller.php bundle-build \
+  --db=/path/to/evershelf-copy.sqlite --write \
+  --out=/path/to/activation-bundle.json
+```
+
+`bundle-validate` rechecks the parent pointer, ontology hashes, source
+revision/hash, catalog fingerprint, and source inventory fingerprint. No
+production bundle importer is currently provided; validation never moves a
+pointer.
+
+The repository Compose worker must be configured as intake-only before it is
+started against `evershelf.db`. Any command retaining `--copy-generation`,
+`--run-generation`, `--promote`, or `--allow-active-generation` now fails
+closed. The worker runs as its own container rather than through a host
+`docker exec` service, so stop/restart signals cannot orphan a second
+controller process.
 
 An offline copied-database historical batch may opt in later with
 `--minimum-priority=0`.

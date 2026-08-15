@@ -49,12 +49,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   coverage status, SQL-bounded candidate retrieval, attachment-based 160 KB
   prompt/schema delivery, Gemini effort omission, and user-unit runtime/socket
   alignment.
-  Production cron remains intake-only. A separate default-off Compose worker
-  can now run guarded active-database fork/generation/shadow/promotion when all
-  CLI and environment gates are explicit. Unsafe or exhausted plans promote a
-  deterministic unresolved, confidence-zero, non-satisfying provisional leaf
-  so every non-prepared subject enters the active ontology without changing
-  recipe matches. Added realized provisional-edge blast accounting, inode-safe
+  Production cron and workers remain intake-only. Candidate fork, generation,
+  shadow, and promotion work is rejected on the active database and must run
+  against a copy. Unsafe or exhausted plans retain a deterministic unresolved,
+  confidence-zero, non-satisfying provisional intent for copied-candidate
+  materialization without changing active recipe matches. Added realized
+  provisional-edge blast accounting, inode-safe
   active-DB guards, SQLITE_BUSY/SQLITE_LOCKED generation replay, post-commit
   job reconciliation, stale-owner pruning in child versions, one-minute
   CAS-claimed monitoring that tolerates ordinary live source drift,
@@ -66,6 +66,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   products run at 100, live recipe ingredients at 50, terminal jobs revive with
   fresh fences, and priority-0 historical backfill remains queued for explicit
   offline processing.
+  Intake-only model artifacts now enter a durable generation-intent lane and
+  are rebound without another proposer call inside a copied database. Copied
+  work coalesces one child per parent, supports crash-resumable keyset forks,
+  skips exact semantic no-ops, reuses safe shadow candidates, and exports a
+  sealed portable activation bundle. Bundle preflight fails closed on source or
+  parent-pointer drift; no production importer is enabled.
 - **Atomic ingredient decision v2** — Added one revision-bound
   `assume_have|select_inventory_product|reject_current_match` command with
   product-level validation, immutable v2 source/target fingerprints, exact

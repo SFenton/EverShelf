@@ -1898,6 +1898,247 @@ try {
         ingredientOntologyV3CorpusHash($db),
     ]);
 
+    $chunkedGenerationKey = ingredientOntologyV3Hash([
+        'test' => 'chunked-copied-fork-resume',
+    ]);
+    $writerDb = new PDO('sqlite:' . $dbPath);
+    $writerDb->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+    $writerDb->setAttribute(PDO::ATTR_DEFAULT_FETCH_MODE, PDO::FETCH_ASSOC);
+    $writerDb->exec('PRAGMA foreign_keys=ON');
+    $writerDb->exec('PRAGMA busy_timeout=10000');
+    $chunkHookCount = 0;
+    $chunkWriterMaximumMs = 0.0;
+    $chunkCrashInjected = false;
+    $GLOBALS['ONTOLOGY_CONTROLLER_TEST_HOOK'] =
+        static function (
+            string $name,
+            array $context
+        ) use (
+            $writerDb,
+            &$chunkHookCount,
+            &$chunkWriterMaximumMs,
+            &$chunkCrashInjected
+        ): void {
+            if ($name !== 'controller_chunked_fork_after_chunk') {
+                return;
+            }
+            $started = hrtime(true);
+            $writerDb->exec("
+                UPDATE ontology_controller_state
+                SET updated_at = CURRENT_TIMESTAMP
+                WHERE id = 1
+            ");
+            $chunkWriterMaximumMs = max(
+                $chunkWriterMaximumMs,
+                (hrtime(true) - $started) / 1000000
+            );
+            $chunkHookCount++;
+            if (!$chunkCrashInjected && $chunkHookCount === 3) {
+                $chunkCrashInjected = true;
+                throw new RuntimeException(
+                    'controller_test_crash:chunked_fork'
+                );
+            }
+        };
+    $chunkCrashObserved = false;
+    try {
+        ingredientOntologyControllerChunkedFork(
+            $db,
+            $baseVersionId,
+            [
+                'generation_key' => $chunkedGenerationKey,
+                'constraint_epoch' => 0,
+                'constraint_hash' =>
+                    ingredientOntologyControllerConstraintHash($db, 0),
+                'controller_policy_hash' =>
+                    ingredientOntologyControllerPolicyHash(),
+                'activation_policy' => 'autonomous',
+            ]
+        );
+    } catch (RuntimeException $error) {
+        $chunkCrashObserved =
+            $error->getMessage()
+                === 'controller_test_crash:chunked_fork';
+    }
+    $partialChunkVersionId = (int)$db->query("
+        SELECT id
+        FROM ingredient_ontology_versions
+        WHERE controller_generation_key = "
+            . $db->quote($chunkedGenerationKey)
+    )->fetchColumn();
+    $chunkResume = ingredientOntologyControllerChunkedFork(
+        $db,
+        $baseVersionId,
+        [
+            'generation_key' => $chunkedGenerationKey,
+            'constraint_epoch' => 0,
+            'constraint_hash' =>
+                ingredientOntologyControllerConstraintHash($db, 0),
+            'controller_policy_hash' =>
+                ingredientOntologyControllerPolicyHash(),
+            'activation_policy' => 'autonomous',
+        ]
+    );
+    unset($GLOBALS['ONTOLOGY_CONTROLLER_TEST_HOOK']);
+    $chunkProgress = $db->query("
+        SELECT * FROM ontology_version_fork_progress
+        WHERE candidate_version_id = {$partialChunkVersionId}
+    ")->fetch(PDO::FETCH_ASSOC);
+    controllerTestAssert(
+        $chunkCrashObserved
+        && $partialChunkVersionId > 0
+        && (int)$chunkResume['version_id'] === $partialChunkVersionId
+        && $chunkProgress['status'] === 'complete'
+        && $chunkHookCount > 3
+        && $chunkWriterMaximumMs < 250
+        && (float)$chunkProgress['maximum_reservation_ms'] <= 250
+        && controllerTestCount(
+            $db,
+            "SELECT COUNT(*)
+             FROM ontology_version_fork_id_map
+             WHERE candidate_version_id = ?",
+            [$partialChunkVersionId]
+        ) === 0
+        && hash_equals(
+            ingredientOntologyV3PortableContentHash(
+                $db,
+                $baseVersionId
+            ),
+            ingredientOntologyV3PortableContentHash(
+                $db,
+                $partialChunkVersionId
+            )
+        ),
+        'Chunked fork must resume one child after a crash and permit a concurrent writer between bounded reservations: '
+            . ingredientOntologyControllerStableJson([
+                'progress' => $chunkProgress,
+                'writer_maximum_ms' => $chunkWriterMaximumMs,
+                'hook_count' => $chunkHookCount,
+            ])
+    );
+
+    $noOpJob = ingredientOntologyControllerEnqueueJob(
+        $db,
+        'subject_resolution',
+        ['test' => 'exact-no-op-generation'],
+        (int)$db->query("
+            SELECT id FROM ontology_subjects ORDER BY id LIMIT 1
+        ")->fetchColumn(),
+        null,
+        null,
+        0,
+        100
+    );
+    $noOpPlan = [
+        'schema_version' => 'ontology-controller-plan-v1',
+        'decision' => 'apply',
+        'repair_kind' => 'confirm_existing_mapping',
+        'entity_candidate_id' => 'none',
+        'new_entity' => null,
+        'attributes' => [],
+        'relations' => [],
+        'evidence' => [],
+        'optional_deltas' => [],
+        'confidence' => 1.0,
+    ];
+    $noOpPlanJson =
+        ingredientOntologyControllerStableJson($noOpPlan);
+    $db->prepare("
+        INSERT INTO ingredient_ontology_change_sets (
+            ontology_version_id, change_set_key, input_hash,
+            prompt_hash, model_hash, schema_hash, model_name,
+            raw_model_json, validator_result_json,
+            review_state, approved_by, reviewed_at, applied_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, 'controller-test', ?, ?,
+                'applied', 'controller-test',
+                CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+    ")->execute([
+        $partialChunkVersionId,
+        'controller-no-op-test',
+        hash('sha256', 'controller-no-op-input'),
+        hash('sha256', 'controller-no-op-prompt'),
+        hash('sha256', 'controller-no-op-model'),
+        hash('sha256', 'controller-no-op-schema'),
+        $noOpPlanJson,
+        ingredientOntologyControllerStableJson(['valid' => true]),
+    ]);
+    $noOpChangeSetId = (int)$db->lastInsertId();
+    $db->prepare("
+        INSERT INTO ontology_mutation_plans (
+            job_id, change_set_id, repair_kind, risk_tier,
+            base_ontology_version_id, base_content_hash,
+            constraint_epoch, constraint_hash,
+            controller_policy_hash, plan_json, plan_hash,
+            optional_delta_json, status, candidate_version_id,
+            applied_at
+        )
+        VALUES (?, ?, 'confirm_existing_mapping', 'R0',
+                ?, ?, 0, ?, ?, ?, ?, '[]', 'applied', ?,
+                CURRENT_TIMESTAMP)
+    ")->execute([
+        (int)$noOpJob['id'],
+        $noOpChangeSetId,
+        $baseVersionId,
+        ingredientOntologyV3ContentHash($db, $baseVersionId),
+        ingredientOntologyControllerConstraintHash($db, 0),
+        ingredientOntologyControllerPolicyHash(),
+        $noOpPlanJson,
+        hash('sha256', $noOpPlanJson),
+        $partialChunkVersionId,
+    ]);
+    $noOpPlanId = (int)$db->lastInsertId();
+    $db->prepare("
+        UPDATE ontology_controller_jobs
+        SET status = 'applied',
+            change_set_id = ?,
+            mutation_plan_id = ?,
+            candidate_version_id = ?
+        WHERE id = ?
+    ")->execute([
+        $noOpChangeSetId,
+        $noOpPlanId,
+        $partialChunkVersionId,
+        (int)$noOpJob['id'],
+    ]);
+    $noOpGeneration = ingredientOntologyControllerCreateGeneration(
+        $db,
+        $partialChunkVersionId,
+        [$noOpPlanId]
+    );
+    $noOpResult = ingredientOntologyControllerFinalizeGeneration(
+        $db,
+        (int)$noOpGeneration['id'],
+        [
+            'bypass_debounce' => true,
+            'bypass_cadence' => true,
+            'allow_test_fixture' => true,
+        ]
+    );
+    controllerTestAssert(
+        !empty($noOpResult['no_op'])
+        && $noOpResult['status'] === 'promoted'
+        && (int)recipeScoreState($db)['active_score_revision_id']
+            === $baseScoreId
+        && controllerTestCount(
+            $db,
+            "SELECT COUNT(*) FROM recipe_score_revisions
+             WHERE ontology_version_id = ?",
+            [$partialChunkVersionId]
+        ) === 0,
+        'An exact semantic no-op must skip shadowing and leave the active pointer unchanged: '
+            . ingredientOntologyControllerStableJson([
+                'result' => $noOpResult,
+                'audit' => ingredientOntologyControllerNoOpAudit(
+                    $db,
+                    $baseVersionId,
+                    $partialChunkVersionId
+                ),
+                'active_score_revision_id' =>
+                    recipeScoreState($db)['active_score_revision_id'],
+            ])
+    );
+
     $cookidooSourceOwnerId = (int)$db->query("
         SELECT id FROM recipe_source_ingredients
         WHERE recipe_id = {$cookidooRecipeId}
@@ -2875,7 +3116,7 @@ try {
         && $compensation['job_id'] !== null,
         'Reselect after promoted negative must enqueue compensation'
     );
-    ingredientOntologyControllerProcessQueue(
+    $generationProcess = ingredientOntologyControllerProcessQueue(
         $db,
         1,
         ['provider' => 'fake', 'model' => 'deterministic-r0']
@@ -3290,7 +3531,7 @@ try {
             }
         };
     $phaseFailureResult =
-        ingredientOntologyControllerProcessQueue(
+        $generationProcess = ingredientOntologyControllerProcessQueue(
             $db,
             1,
             ['provider' => 'fake', 'model' => 'deterministic-r0']
@@ -3384,10 +3625,6 @@ try {
             'release' => [
                 'hook' => 'controller_before_release_job_update',
                 'run_generation' => false,
-            ],
-            'finalize' => [
-                'hook' => 'controller_before_finalize_job_update',
-                'run_generation' => true,
             ],
         ] as $abaKind => $abaConfig
     ) {
@@ -3731,6 +3968,11 @@ try {
             "Crash boundary {$crashPhase} must resume to one durable logical mutation"
         );
     }
+    $db->exec("
+        UPDATE ontology_generations
+        SET status = 'failed'
+        WHERE status IN ('shadowing', 'promotable', 'promoting')
+    ");
     $generationCrashEvent = 7000;
     $createGenerationCrashFixture =
         static function (string $suffix) use (
@@ -3761,7 +4003,7 @@ try {
                             $targetFingerprint,
                     ]
                 );
-            ingredientOntologyControllerProcessQueue(
+            $generationProcess = ingredientOntologyControllerProcessQueue(
                 $db,
                 1,
                 [
@@ -3779,6 +4021,15 @@ try {
                 WHERE item.mutation_plan_id = "
                 . (int)$job['mutation_plan_id']
             )->fetchColumn();
+            controllerTestAssert(
+                $generationId > 0,
+                'Generation crash fixture must create a generation: '
+                    . ingredientOntologyControllerStableJson([
+                        'suffix' => $suffix,
+                        'process' => $generationProcess,
+                        'job' => $job,
+                    ])
+            );
             return [
                 'job' => $job,
                 'generation_id' => $generationId,
@@ -3874,6 +4125,12 @@ try {
         );
         if ($generationPhase === 'after_shadow') {
             $promotionCrashFixture = $fixture;
+        } else {
+            $db->prepare("
+                UPDATE ontology_generations
+                SET status = 'failed'
+                WHERE id = ?
+            ")->execute([(int)$fixture['generation_id']]);
         }
     }
     $GLOBALS['ONTOLOGY_CONTROLLER_TEST_HOOK'] =
@@ -5434,6 +5691,13 @@ try {
         SET status = 'failed', finished_at = CURRENT_TIMESTAMP
         WHERE status IN ('queued', 'retry')
     ");
+    $db->exec("
+        UPDATE ontology_generations
+        SET status = 'failed'
+        WHERE status IN (
+            'building', 'shadowing', 'promotable', 'promoting'
+        )
+    ");
     $provisionalRecipe = recipeCatalogSaveVariant(
         $db,
         [
@@ -5905,6 +6169,7 @@ try {
             1000
         );
     $GLOBALS['ONTOLOGY_PROMOTION_ENABLED_OVERRIDE'] = true;
+    $GLOBALS['ONTOLOGY_CONTROLLER_ACTIVE_DB_PATH_OVERRIDE'] = $dbPath;
     $GLOBALS['ONTOLOGY_CONTROLLER_TEST_HOOK'] =
         static function (string $name): void {
             if (in_array($name, [
@@ -5933,9 +6198,22 @@ try {
             'promote' => false,
         ]
     );
+    $activeGenerationRejected = false;
+    try {
+        ingredientOntologyControllerProcessQueue(
+            $db,
+            1,
+            ['run_generation' => true]
+        );
+    } catch (RuntimeException $error) {
+        $activeGenerationRejected =
+            $error->getMessage()
+                === 'ontology_generation_requires_copied_database';
+    }
     unset(
         $GLOBALS['ONTOLOGY_PROMOTION_ENABLED_OVERRIDE'],
-        $GLOBALS['ONTOLOGY_CONTROLLER_TEST_HOOK']
+        $GLOBALS['ONTOLOGY_CONTROLLER_TEST_HOOK'],
+        $GLOBALS['ONTOLOGY_CONTROLLER_ACTIVE_DB_PATH_OVERRIDE']
     );
     controllerTestAssert(
         $liveIntake['results'][0]['intake_only'] === true
@@ -5967,9 +6245,145 @@ try {
         && $db->query("
             SELECT status FROM ontology_controller_jobs
             WHERE id = " . (int)$injectedGoldJob['id']
-        )->fetchColumn() === 'queued',
-        'Live intake must persist plan artifacts without forking, generating, shadowing, or promoting even when promotion is enabled'
+        )->fetchColumn() === 'queued'
+        && $activeGenerationRejected,
+        'The active database must remain intake-only and reject every generation path while preserving model evidence'
     );
+    $livePromptCount = controllerTestCount(
+        $db,
+        "SELECT COUNT(*) FROM ontology_controller_prompts
+         WHERE job_id = ?",
+        [(int)$liveIntakeJob['id']]
+    );
+    $liveResponseCount = controllerTestCount(
+        $db,
+        "SELECT COUNT(*)
+         FROM ontology_controller_responses response
+         JOIN ontology_controller_prompts prompt
+           ON prompt.id = response.prompt_artifact_id
+         WHERE prompt.job_id = ?",
+        [(int)$liveIntakeJob['id']]
+    );
+    $db->prepare("
+        UPDATE ontology_controller_jobs
+        SET status = 'failed',
+            finished_at = CURRENT_TIMESTAMP
+        WHERE id <> ?
+          AND status IN ('queued', 'retry')
+    ")->execute([(int)$liveIntakeJob['id']]);
+    $db->exec("
+        UPDATE ontology_generations
+        SET status = 'failed'
+        WHERE status IN (
+            'building', 'shadowing', 'promotable', 'promoting'
+        )
+    ");
+    $copiedBundleBuild =
+        ingredientOntologyControllerBuildActivationBundle(
+            $db,
+            [
+                'limit' => 1,
+                'maximum_cycles' => 2,
+                'critic' => [
+                    'verdict' => 'pass',
+                    'reason' => 'copied bundle test critic',
+                ],
+                'bypass_cadence' => true,
+                'allow_test_fixture' => true,
+                'batch_size' => 40,
+            ]
+        );
+    $liveIntentRow = $db->query("
+        SELECT * FROM ontology_generation_intents
+        WHERE source_job_id = " . (int)$liveIntakeJob['id']
+    )->fetch(PDO::FETCH_ASSOC);
+    $copiedBundle = $copiedBundleBuild['bundle'];
+    $bundlePreflight =
+        ingredientOntologyControllerActivationBundlePreflight(
+            $db,
+            $copiedBundle
+        );
+    $bundleState = recipeScoreState($db);
+    $bundleCandidateScoreId =
+        (int)$copiedBundle['candidate']['score_revision_id'];
+    $db->prepare("
+        UPDATE recipe_score_state
+        SET active_score_revision_id = ?
+        WHERE id = 1
+    ")->execute([$bundleCandidateScoreId]);
+    $bundlePointerDrift =
+        ingredientOntologyControllerActivationBundlePreflight(
+            $db,
+            $copiedBundle
+        );
+    $db->prepare("
+        UPDATE recipe_score_state
+        SET active_score_revision_id = ?,
+            ontology_source_revision = ?,
+            ontology_source_hash = ?
+        WHERE id = 1
+    ")->execute([
+        $bundleState['active_score_revision_id'],
+        $bundleState['ontology_source_revision'] + 1,
+        '',
+    ]);
+    $bundleSourceDrift =
+        ingredientOntologyControllerActivationBundlePreflight(
+            $db,
+            $copiedBundle
+        );
+    $db->prepare("
+        UPDATE recipe_score_state
+        SET ontology_source_revision = ?,
+            ontology_source_hash = ?
+        WHERE id = 1
+    ")->execute([
+        $bundleState['ontology_source_revision'],
+        $bundleState['ontology_source_hash'],
+    ]);
+    controllerTestAssert(
+        $copiedBundle['schema_version']
+            === 'ontology-controller-activation-bundle-v1'
+        && $copiedBundleBuild['claimed_intents'] === 1
+        && $liveIntentRow['status'] === 'applied'
+        && $bundlePreflight['valid']
+        && !$bundlePreflight['activation_permitted']
+        && !$bundlePointerDrift['valid']
+        && in_array(
+            'activation bundle parent pointer changed',
+            $bundlePointerDrift['errors'],
+            true
+        )
+        && !$bundleSourceDrift['valid']
+        && in_array(
+            'activation bundle ontology source changed',
+            $bundleSourceDrift['errors'],
+            true
+        )
+        && controllerTestCount(
+            $db,
+            "SELECT COUNT(*) FROM ontology_controller_prompts
+             WHERE job_id = ?",
+            [(int)$liveIntakeJob['id']]
+        ) === $livePromptCount
+        && controllerTestCount(
+            $db,
+            "SELECT COUNT(*)
+             FROM ontology_controller_responses response
+             JOIN ontology_controller_prompts prompt
+               ON prompt.id = response.prompt_artifact_id
+             WHERE prompt.job_id = ?",
+            [(int)$liveIntakeJob['id']]
+        ) === $liveResponseCount,
+        'Copied generation must consume the durable plan once, seal a portable bundle, and fail closed on pointer or source drift'
+    );
+    $db->prepare("
+        UPDATE ontology_generations
+        SET status = 'failed'
+        WHERE generation_key = ?
+    ")->execute([
+        (string)$copiedBundle['generation']['generation_key'],
+    ]);
 
     $exactBeforeAbstention =
         ingredientOntologyControllerRecordCorrection(
@@ -6356,6 +6770,81 @@ try {
         $powderProductId
     );
     unset($GLOBALS['ONTOLOGY_AUTONOMOUS_ENABLED_OVERRIDE']);
+    $staleParentOriginalScore = (int)(
+        recipeScoreState($db)['active_score_revision_id'] ?? 0
+    );
+    $staleParentAlternateScore = (int)$db->query("
+        SELECT id
+        FROM recipe_score_revisions
+        WHERE status = 'ready'
+          AND ontology_version_id IS NOT NULL
+          AND id <> {$staleParentOriginalScore}
+        ORDER BY id DESC
+        LIMIT 1
+    ")->fetchColumn();
+    if ($staleParentAlternateScore > 0) {
+        $db->exec("
+            UPDATE ontology_controller_jobs
+            SET status = 'failed',
+                finished_at = CURRENT_TIMESTAMP
+            WHERE status IN ('queued', 'retry')
+        ");
+        $staleParentJob = ingredientOntologyControllerEnqueueJob(
+            $db,
+            'correction',
+            ['test' => 'stale-parent-before-fork'],
+            (int)$powderSubject['id'],
+            null,
+            null,
+            0,
+            1000,
+            true
+        );
+        $staleParentLease = ingredientOntologyControllerClaimJobs(
+            $db,
+            1,
+            600,
+            ['correction']
+        )[0];
+        $versionsBeforeStaleParent = controllerTestCount(
+            $db,
+            'SELECT COUNT(*) FROM ingredient_ontology_versions'
+        );
+        $db->prepare("
+            UPDATE recipe_score_state
+            SET active_score_revision_id = ?
+            WHERE id = 1
+        ")->execute([$staleParentAlternateScore]);
+        $staleParentResult = ingredientOntologyControllerProcessJob(
+            $db,
+            $staleParentLease,
+            ['provider' => 'missing_provider']
+        );
+        $db->prepare("
+            UPDATE recipe_score_state
+            SET active_score_revision_id = ?
+            WHERE id = 1
+        ")->execute([$staleParentOriginalScore]);
+        controllerTestAssert(
+            $staleParentResult['status'] === 'retry'
+            && $staleParentResult['reason']
+                === 'stale_parent_rebased'
+            && controllerTestCount(
+                $db,
+                'SELECT COUNT(*) FROM ingredient_ontology_versions'
+            ) === $versionsBeforeStaleParent
+            && (int)$db->query("
+                SELECT base_ontology_version_id
+                FROM ontology_controller_jobs
+                WHERE id = " . (int)$staleParentJob['id']
+            )->fetchColumn()
+                === (int)recipeScoreRevision(
+                    $db,
+                    $staleParentAlternateScore
+                )['ontology_version_id'],
+            'A stale parent must rebase before creating or copying a child'
+        );
+    }
     ingredientOntologyControllerRefreshCoverageState($db);
     $runtimeStatus = ingredientOntologyControllerRuntimeStatus($db);
     $coverageCacheStarted = hrtime(true);
@@ -6399,8 +6888,20 @@ try {
         && str_contains(
             $controllerCliSource,
             "'minimum_priority' => \$minimumPriority"
+        )
+        && !str_contains(
+            $controllerCliSource,
+            '--allow-active-generation'
+        )
+        && str_contains(
+            $controllerCliSource,
+            'the active database is intake-only'
+        )
+        && str_contains(
+            $controllerCliSource,
+            "case 'bundle-build':"
         ),
-        'Production cron and live worker CLI must remain priority-fenced intake-only paths'
+        'Production cron and live worker CLI must remain priority-fenced and reject active-database generation'
     );
 
     $epochBeforeAvailabilityOnly = (int)$db->query("
@@ -6655,6 +7156,15 @@ try {
             $db,
             'SELECT COUNT(*) FROM ontology_constraint_ledger'
         )
+        . '; chunked_fork_rows='
+        . (int)$chunkProgress['rows_copied']
+        . '; chunked_fork_max_ms='
+        . number_format(
+            (float)$chunkProgress['maximum_reservation_ms'],
+            3
+        )
+        . '; concurrent_writer_max_ms='
+        . number_format($chunkWriterMaximumMs, 3)
         . '; peak_php_mb='
         . number_format(memory_get_peak_usage(true) / 1048576, 2)
         . PHP_EOL;

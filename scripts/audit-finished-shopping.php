@@ -81,7 +81,7 @@ $suppressed = [];
 
 foreach ($rows as $r) {
     $pid = (int)$r['id'];
-    $generic = trim($r['shopping_name'] ?? '') ?: computeShoppingName($r['name'], '', $r['brand'] ?? '');
+    $generic = resolveProductShoppingName($r);
     $bringKey = mb_strtolower(italianToBring($generic));
     $shopKey = mb_strtolower($generic);
 

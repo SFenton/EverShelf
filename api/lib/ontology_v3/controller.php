@@ -159,6 +159,93 @@ function ingredientOntologyControllerMinimumPriority(): int {
         : 50;
 }
 
+function ingredientOntologyControllerForkChunkRows(): int {
+    return function_exists('env')
+        ? max(25, min(5000, (int)env(
+            'INGREDIENT_ONTOLOGY_CONTROLLER_FORK_CHUNK_ROWS',
+            '250'
+        )))
+        : 250;
+}
+
+function ingredientOntologyControllerGenerationQuietSeconds(): int {
+    return function_exists('env')
+        ? max(30, min(3600, (int)env(
+            'INGREDIENT_ONTOLOGY_CONTROLLER_GENERATION_QUIET_SECONDS',
+            '300'
+        )))
+        : 300;
+}
+
+function ingredientOntologyControllerGenerationMaximumLatencySeconds(): int {
+    $quiet = ingredientOntologyControllerGenerationQuietSeconds();
+    return function_exists('env')
+        ? max($quiet, min(21600, (int)env(
+            'INGREDIENT_ONTOLOGY_CONTROLLER_GENERATION_MAXIMUM_LATENCY_SECONDS',
+            '1800'
+        )))
+        : 1800;
+}
+
+function ingredientOntologyControllerDatabasePath(PDO $db): string {
+    $rows = $db->query("PRAGMA database_list")
+        ->fetchAll(PDO::FETCH_ASSOC);
+    foreach ($rows as $row) {
+        if ((string)($row['name'] ?? '') === 'main') {
+            return (string)($row['file'] ?? '');
+        }
+    }
+    return '';
+}
+
+function ingredientOntologyControllerDatabaseIsActive(PDO $db): bool {
+    $active = (
+        defined('RECIPE_BACKEND_TEST_MODE')
+        && RECIPE_BACKEND_TEST_MODE
+        && is_string(
+            $GLOBALS[
+                'ONTOLOGY_CONTROLLER_ACTIVE_DB_PATH_OVERRIDE'
+            ] ?? null
+        )
+    )
+        ? (string)$GLOBALS[
+            'ONTOLOGY_CONTROLLER_ACTIVE_DB_PATH_OVERRIDE'
+        ]
+        : (defined('DB_PATH') ? (string)DB_PATH : '');
+    if ($active === '') {
+        return false;
+    }
+    $selected = ingredientOntologyControllerDatabasePath($db);
+    if ($selected === '') {
+        return false;
+    }
+    $selectedReal = realpath($selected);
+    $activeReal = realpath($active);
+    if (
+        $selectedReal !== false
+        && $activeReal !== false
+        && $selectedReal === $activeReal
+    ) {
+        return true;
+    }
+    $selectedStat = @stat($selected);
+    $activeStat = @stat($active);
+    return is_array($selectedStat)
+        && is_array($activeStat)
+        && (int)$selectedStat['dev'] === (int)$activeStat['dev']
+        && (int)$selectedStat['ino'] === (int)$activeStat['ino'];
+}
+
+function ingredientOntologyControllerAssertCopiedGenerationDatabase(
+    PDO $db
+): void {
+    if (ingredientOntologyControllerDatabaseIsActive($db)) {
+        throw new RuntimeException(
+            'ontology_generation_requires_copied_database'
+        );
+    }
+}
+
 function ingredientOntologyControllerPolicyHash(): string {
     return ingredientOntologyV3Hash([
         'schema' => INGREDIENT_ONTOLOGY_CONTROLLER_SCHEMA_VERSION,
@@ -167,8 +254,10 @@ function ingredientOntologyControllerPolicyHash(): string {
         'repair_risks' => INGREDIENT_ONTOLOGY_CONTROLLER_REPAIR_RISKS,
         'candidate_target' => 64,
         'candidate_rungs' => [64, 96, 128, 277, 500],
-        'quiet_seconds' => 30,
-        'maximum_debounce_seconds' => 300,
+        'quiet_seconds' =>
+            ingredientOntologyControllerGenerationQuietSeconds(),
+        'maximum_debounce_seconds' =>
+            ingredientOntologyControllerGenerationMaximumLatencySeconds(),
         'maximum_generations_per_hour' => 6,
         'maximum_generations_per_day' => 24,
         'secondary_parent_limit' => 2,
@@ -415,7 +504,7 @@ function ingredientOntologyControllerEnsurePendingGenerationKeyUniqueness(
     foreach ($duplicates->fetchAll(PDO::FETCH_ASSOC) as $duplicate) {
         $losers = $db->prepare("
             SELECT id FROM ingredient_ontology_versions
-            WHERE parent_version_id = ?
+            WHERE version.parent_version_id = ?
               AND controller_generation_key = ?
               AND status = 'building'
               AND id <> ?
@@ -1088,6 +1177,81 @@ function ingredientOntologyControllerSchemaMigrate(PDO $db): void {
             ON ontology_provisional_queue(
                 status, next_attempt_at, id
             );
+
+        CREATE TABLE IF NOT EXISTS ontology_generation_intents (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source_job_id INTEGER NOT NULL UNIQUE,
+            subject_id INTEGER DEFAULT NULL,
+            intent_kind TEXT NOT NULL
+                CHECK(intent_kind IN (
+                    'validated_plan', 'exact_constraint', 'provisional'
+                )),
+            response_artifact_id INTEGER DEFAULT NULL,
+            status TEXT NOT NULL DEFAULT 'pending'
+                CHECK(status IN (
+                    'pending', 'queued', 'applied',
+                    'superseded', 'failed'
+                )),
+            attempts INTEGER NOT NULL DEFAULT 0,
+            last_error TEXT NOT NULL DEFAULT ''
+                CHECK(length(last_error) <= 1000),
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            finished_at DATETIME DEFAULT NULL,
+            FOREIGN KEY(source_job_id)
+                REFERENCES ontology_controller_jobs(id) ON DELETE CASCADE,
+            FOREIGN KEY(subject_id)
+                REFERENCES ontology_subjects(id) ON DELETE SET NULL,
+            FOREIGN KEY(response_artifact_id)
+                REFERENCES ontology_controller_responses(id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_ontology_generation_intents_ready
+            ON ontology_generation_intents(status, created_at, id);
+
+        CREATE TABLE IF NOT EXISTS ontology_version_fork_progress (
+            candidate_version_id INTEGER PRIMARY KEY,
+            parent_version_id INTEGER NOT NULL,
+            phase INTEGER NOT NULL DEFAULT 0,
+            source_cursor INTEGER NOT NULL DEFAULT 0,
+            cleanup_phase INTEGER NOT NULL DEFAULT 0,
+            chunk_rows INTEGER NOT NULL DEFAULT 250,
+            rows_copied INTEGER NOT NULL DEFAULT 0,
+            status TEXT NOT NULL DEFAULT 'copying'
+                CHECK(status IN (
+                    'copying', 'verifying', 'cleanup',
+                    'complete', 'failed', 'purging'
+                )),
+            lease_token TEXT DEFAULT NULL
+                CHECK(lease_token IS NULL OR length(lease_token) = 64),
+            lease_generation INTEGER NOT NULL DEFAULT 0,
+            leased_until DATETIME DEFAULT NULL,
+            last_reservation_ms REAL NOT NULL DEFAULT 0,
+            maximum_reservation_ms REAL NOT NULL DEFAULT 0,
+            last_error TEXT NOT NULL DEFAULT ''
+                CHECK(length(last_error) <= 1000),
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            completed_at DATETIME DEFAULT NULL,
+            FOREIGN KEY(candidate_version_id)
+                REFERENCES ingredient_ontology_versions(id) ON DELETE CASCADE,
+            FOREIGN KEY(parent_version_id)
+                REFERENCES ingredient_ontology_versions(id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_ontology_version_fork_progress_status
+            ON ontology_version_fork_progress(
+                status, leased_until, updated_at, candidate_version_id
+            );
+
+        CREATE TABLE IF NOT EXISTS ontology_version_fork_id_map (
+            candidate_version_id INTEGER NOT NULL,
+            map_kind TEXT NOT NULL CHECK(length(map_kind) <= 40),
+            old_id INTEGER NOT NULL,
+            new_id INTEGER NOT NULL,
+            PRIMARY KEY(candidate_version_id, map_kind, old_id),
+            UNIQUE(candidate_version_id, map_kind, new_id),
+            FOREIGN KEY(candidate_version_id)
+                REFERENCES ingredient_ontology_versions(id) ON DELETE CASCADE
+        ) WITHOUT ROWID;
 
         CREATE TABLE IF NOT EXISTS ontology_controller_prompts (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -5335,6 +5499,7 @@ function ingredientOntologyV3ForkVersion(
     int $parentVersionId,
     array $metadata = []
 ): array {
+    ingredientOntologyControllerAssertCopiedGenerationDatabase($db);
     if (!$db->inTransaction()) {
         try {
             ingredientOntologyV3SchemaMigrate($db);
@@ -5426,7 +5591,8 @@ function ingredientOntologyControllerStreamEpoch(
         int $limit = 10,
         int $leaseSeconds = 600,
         array $jobTypes = [],
-        int $minimumPriority = 0
+        int $minimumPriority = 0,
+        bool $generationIntentsOnly = false
     ): array {
         $limit = max(1, min(100, $limit));
         $leaseSeconds = max(30, min(3600, $leaseSeconds));
@@ -5444,6 +5610,15 @@ function ingredientOntologyControllerStreamEpoch(
                 . implode("','", $jobTypes)
                 . "')"
             : '';
+        $intentWhere = $generationIntentsOnly
+            ? "AND EXISTS (
+                    SELECT 1
+                    FROM ontology_generation_intents intent
+                    WHERE intent.source_job_id =
+                        ontology_controller_jobs.id
+                      AND intent.status = 'queued'
+                )"
+            : '';
         $token = hash('sha256', random_bytes(32) . ':' . hrtime(true));
         $db->exec('BEGIN IMMEDIATE');
         try {
@@ -5460,6 +5635,7 @@ function ingredientOntologyControllerStreamEpoch(
                       OR next_attempt_at <= CURRENT_TIMESTAMP
                   )
                   {$jobTypeWhere}
+                  {$intentWhere}
                 ORDER BY priority DESC, created_at ASC, id ASC
                 LIMIT {$limit}
             ");
@@ -6725,23 +6901,6 @@ function ingredientOntologyControllerStreamEpoch(
                 'controller_copilot_socket_disabled'
             );
         }
-        $socketPath = ingredientOntologyControllerCopilotSocket();
-        if (
-            $socketPath === ''
-            || strlen($socketPath) > 200
-            || str_contains($socketPath, "\0")
-        ) {
-            throw new RuntimeException(
-                'controller_copilot_socket_invalid'
-            );
-        }
-        $requestJson =
-            ingredientOntologyControllerStableJson($request);
-        if (strlen($requestJson) > 524288) {
-            throw new RuntimeException(
-                'controller_copilot_request_oversized'
-            );
-        }
         $timeout = function_exists('env')
             ? max(5, min(180, (int)env(
                 'INGREDIENT_ONTOLOGY_CONTROLLER_COPILOT_TIMEOUT_SECONDS',
@@ -6760,53 +6919,147 @@ function ingredientOntologyControllerStreamEpoch(
                 (string)$timeout
             )))
             : $timeout;
+        return ingredientOntologyControllerCopilotSocketExchange(
+            $request,
+            ingredientOntologyControllerCopilotSocket(),
+            microtime(true) + $timeout,
+            $connectTimeout,
+            $readTimeout
+        );
+    }
+
+    function ingredientOntologyControllerCopilotSocketTimeout(
+        $stream,
+        float $deadline,
+        float $maximumSeconds
+    ): void {
+        $remaining = min(
+            $maximumSeconds,
+            $deadline - microtime(true)
+        );
+        if ($remaining <= 0) {
+            throw new RuntimeException(
+                'controller_copilot_socket_timeout'
+            );
+        }
+        $seconds = (int)floor($remaining);
+        $microseconds = (int)max(
+            1,
+            min(
+                999999,
+                round(($remaining - $seconds) * 1000000)
+            )
+        );
+        if (!stream_set_timeout($stream, $seconds, $microseconds)) {
+            throw new RuntimeException(
+                'controller_copilot_socket_timeout_config_failed'
+            );
+        }
+    }
+
+    function ingredientOntologyControllerCopilotSocketExchange(
+        array $request,
+        string $socketPath,
+        float $deadline,
+        float $connectTimeout = 5.0,
+        float $readTimeout = 90.0
+    ): array {
+        if (
+            $socketPath === ''
+            || strlen($socketPath) > 200
+            || str_contains($socketPath, "\0")
+        ) {
+            throw new RuntimeException(
+                'controller_copilot_socket_invalid'
+            );
+        }
+        $requestJson =
+            ingredientOntologyControllerStableJson($request);
+        if (strlen($requestJson) > 524288) {
+            throw new RuntimeException(
+                'controller_copilot_request_oversized'
+            );
+        }
+        $remaining = $deadline - microtime(true);
+        if ($remaining <= 0) {
+            throw new RuntimeException(
+                'controller_copilot_socket_timeout'
+            );
+        }
         $errno = 0;
         $error = '';
         $stream = @stream_socket_client(
             'unix://' . $socketPath,
             $errno,
             $error,
-            $connectTimeout,
+            min(max(0.01, $connectTimeout), $remaining),
             STREAM_CLIENT_CONNECT
         );
         if (!is_resource($stream)) {
+            if (microtime(true) >= $deadline) {
+                throw new RuntimeException(
+                    'controller_copilot_socket_timeout'
+                );
+            }
             throw new RuntimeException(
                 'controller_copilot_socket_unavailable'
             );
         }
-        stream_set_timeout($stream, $readTimeout);
-        $wire = $requestJson . "\n";
-        $written = 0;
-        while ($written < strlen($wire)) {
-            $chunk = fwrite($stream, substr($wire, $written));
-            if ($chunk === false || $chunk === 0) {
-                fclose($stream);
+        try {
+            $wire = $requestJson . "\n";
+            $written = 0;
+            while ($written < strlen($wire)) {
+                ingredientOntologyControllerCopilotSocketTimeout(
+                    $stream,
+                    $deadline,
+                    $readTimeout
+                );
+                $chunk = fwrite($stream, substr($wire, $written));
+                if ($chunk === false || $chunk === 0) {
+                    $meta = stream_get_meta_data($stream);
+                    if (
+                        !empty($meta['timed_out'])
+                        || microtime(true) >= $deadline
+                    ) {
+                        throw new RuntimeException(
+                            'controller_copilot_socket_timeout'
+                        );
+                    }
+                    throw new RuntimeException(
+                        'controller_copilot_socket_write_failed'
+                    );
+                }
+                $written += $chunk;
+            }
+            $response = '';
+            while (!feof($stream) && !str_contains($response, "\n")) {
+                ingredientOntologyControllerCopilotSocketTimeout(
+                    $stream,
+                    $deadline,
+                    $readTimeout
+                );
+                $chunk = fgets($stream, 65537);
+                if ($chunk === false) {
+                    break;
+                }
+                $response .= $chunk;
+                if (strlen($response) > 524289) {
+                    throw new RuntimeException(
+                        'controller_copilot_response_oversized'
+                    );
+                }
+            }
+            $meta = stream_get_meta_data($stream);
+            if (
+                !empty($meta['timed_out'])
+                || microtime(true) >= $deadline
+            ) {
                 throw new RuntimeException(
-                    'controller_copilot_socket_write_failed'
+                    'controller_copilot_socket_timeout'
                 );
             }
-            $written += $chunk;
-        }
-        $response = '';
-        while (!feof($stream) && !str_contains($response, "\n")) {
-            $chunk = fgets($stream, 65537);
-            if ($chunk === false) {
-                break;
-            }
-            $response .= $chunk;
-            if (strlen($response) > 524289) {
-                fclose($stream);
-                throw new RuntimeException(
-                    'controller_copilot_response_oversized'
-                );
-            }
-        }
-        $meta = stream_get_meta_data($stream);
-        fclose($stream);
-        if (!empty($meta['timed_out'])) {
-            throw new RuntimeException(
-                'controller_copilot_socket_timeout'
-            );
+        } finally {
+            fclose($stream);
         }
         $responsePayload = str_ends_with($response, "\n")
             ? substr($response, 0, -1)
@@ -8505,6 +8758,133 @@ function ingredientOntologyControllerVersionConstraintHash(
     );
 }
 
+function ingredientOntologyControllerNoOpAudit(
+    PDO $db,
+    int $parentVersionId,
+    int $candidateVersionId
+): array {
+    $crossCopy = function_exists(
+        'ingredientOntologyV3CrossCopyHashAudit'
+    ) ? ingredientOntologyV3CrossCopyHashAudit(
+        $db,
+        $parentVersionId,
+        $db,
+        $candidateVersionId
+    ) : ['valid' => false];
+    $controllerEqual = hash_equals(
+        ingredientOntologyControllerVersionContentHash(
+            $db,
+            $parentVersionId
+        ),
+        ingredientOntologyControllerVersionContentHash(
+            $db,
+            $candidateVersionId
+        )
+    );
+    $constraintSnapshot =
+        ingredientOntologyControllerConstraintSnapshotAudit(
+            $db,
+            $parentVersionId
+        );
+    $ownerFingerprints = ingredientOntologyV3OwnerFingerprintAudit(
+        $db,
+        $parentVersionId
+    );
+    $corpus = ingredientOntologyV3CorpusCompleteness(
+        $db,
+        $parentVersionId
+    );
+    return [
+        'valid' => !empty($crossCopy['valid'])
+            && $controllerEqual
+            && !empty($constraintSnapshot['valid'])
+            && !empty($ownerFingerprints['valid'])
+            && !empty($corpus['complete']),
+        'cross_copy' => $crossCopy,
+        'controller_content_equal' => $controllerEqual,
+        'constraint_snapshot' => $constraintSnapshot,
+        'owner_fingerprints' => $ownerFingerprints,
+        'corpus' => $corpus,
+    ];
+}
+
+function ingredientOntologyControllerCompleteNoOpGeneration(
+    PDO $db,
+    array $generation,
+    array $audit
+): array {
+    $generationId = (int)$generation['id'];
+    $candidateVersionId = (int)$generation['candidate_version_id'];
+    $parentVersionId =
+        (int)$generation['parent_ontology_version_id'];
+    $parentScoreId =
+        (int)($generation['parent_score_revision_id'] ?? 0);
+    $report = ingredientOntologyControllerStableJson([
+        'no_op' => true,
+        'reason' =>
+            'candidate semantic and controller content equal parent',
+        'parent_version_id' => $parentVersionId,
+        'parent_score_revision_id' => $parentScoreId,
+        'retired_candidate_version_id' => $candidateVersionId,
+        'audit' => $audit,
+    ]);
+    $db->exec('BEGIN IMMEDIATE');
+    try {
+        $state = recipeScoreState($db);
+        if (
+            (int)($state['active_score_revision_id'] ?? 0)
+                !== $parentScoreId
+        ) {
+            throw new RuntimeException(
+                'controller generation parent pointer changed'
+            );
+        }
+        $db->prepare("
+            UPDATE ingredient_ontology_versions
+            SET status = 'retired',
+                retired_at = CURRENT_TIMESTAMP,
+                validation_report_json = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ? AND status = 'building'
+        ")->execute([$report, $candidateVersionId]);
+        $db->prepare("
+            UPDATE ontology_generations
+            SET status = 'promoted',
+                candidate_version_id = ?,
+                candidate_score_revision_id = ?,
+                gate_report_json = ?,
+                promoted_at = CURRENT_TIMESTAMP,
+                monitor_until = NULL
+            WHERE id = ? AND status IN ('building', 'shadowing')
+        ")->execute([
+            $parentVersionId,
+            $parentScoreId,
+            $report,
+            $generationId,
+        ]);
+        $db->exec('COMMIT');
+    } catch (Throwable $error) {
+        try {
+            $db->exec('ROLLBACK');
+        } catch (Throwable $ignored) {
+        }
+        throw $error;
+    }
+    ingredientOntologyControllerSetPlanJobStatus(
+        $db,
+        $generationId,
+        'promoted',
+        $parentScoreId
+    );
+    return [
+        'generation_id' => $generationId,
+        'status' => 'promoted',
+        'no_op' => true,
+        'revision_id' => $parentScoreId,
+        'ontology_version_id' => $parentVersionId,
+    ];
+}
+
 function ingredientOntologyControllerUsesDynamicPins(
     array $version
 ): bool {
@@ -9395,14 +9775,18 @@ function ingredientOntologyControllerPendingGenerationChild(
                       AND generation.controller_policy_hash = ?
                       AND generation.status = 'building'
                       AND version.status = 'building'
-                      AND generation.created_at >= datetime('now', '-5 minutes')
                     ORDER BY generation.id DESC
                     LIMIT 1
                 ");
                 $stmt->execute([$parentVersionId, $policyHash]);
                 $row = $stmt->fetch(PDO::FETCH_ASSOC);
-                if (!$row || (int)$row['plan_count'] >= 50) {
+                if (!$row) {
                     return null;
+                }
+                if ((int)$row['plan_count'] >= 50) {
+                    throw new RuntimeException(
+                        'controller_generation_batch_full_retryable'
+                    );
                 }
                 $constraintHash = ingredientOntologyControllerConstraintHash(
                     $db,
@@ -9447,6 +9831,7 @@ function ingredientOntologyControllerAcquireBuildingChild(
     string $activationPolicy = 'autonomous',
     ?int $timeBucket = null
 ): array {
+    ingredientOntologyControllerAssertCopiedGenerationDatabase($db);
     if ($parentVersionId <= 0) {
         throw new InvalidArgumentException(
             'controller generation parent is unavailable'
@@ -9470,15 +9855,33 @@ function ingredientOntologyControllerAcquireBuildingChild(
         );
         return $pending;
     }
-    $existing = $db->prepare("
-        SELECT id
-        FROM ingredient_ontology_versions
-        WHERE parent_version_id = ?
-          AND status = 'building'
+    $inFlight = $db->prepare("
+        SELECT id, status
+        FROM ontology_generations
+        WHERE parent_ontology_version_id = ?
           AND controller_policy_hash = ?
-          AND controller_activation_policy = ?
-          AND created_at >= datetime('now', '-5 minutes')
+          AND status IN ('shadowing', 'promotable', 'promoting')
         ORDER BY id DESC
+        LIMIT 1
+    ");
+    $inFlight->execute([$parentVersionId, $policyHash]);
+    $inFlightRow = $inFlight->fetch(PDO::FETCH_ASSOC);
+    if ($inFlightRow) {
+        throw new RuntimeException(
+            'controller_generation_in_flight_retryable'
+        );
+    }
+    $existing = $db->prepare("
+        SELECT version.id, version.controller_generation_key,
+               progress.status AS fork_status
+        FROM ingredient_ontology_versions version
+        LEFT JOIN ontology_version_fork_progress progress
+          ON progress.candidate_version_id = version.id
+        WHERE version.parent_version_id = ?
+          AND version.status = 'building'
+          AND version.controller_policy_hash = ?
+          AND version.controller_activation_policy = ?
+        ORDER BY version.id DESC
         LIMIT 1
     ");
     $existing->execute([
@@ -9486,12 +9889,22 @@ function ingredientOntologyControllerAcquireBuildingChild(
         $policyHash,
         $activationPolicy,
     ]);
-    $existingId = (int)($existing->fetchColumn() ?: 0);
+    $existingRow = $existing->fetch(PDO::FETCH_ASSOC);
+    $existingId = (int)($existingRow['id'] ?? 0);
     $constraintHash = ingredientOntologyControllerConstraintHash(
         $db,
         $requiredEpoch
     );
     if ($existingId > 0) {
+        if (
+            isset($existingRow['fork_status'])
+            && (string)$existingRow['fork_status'] !== 'complete'
+        ) {
+            ingredientOntologyControllerRunChunkedFork(
+                $db,
+                $existingId
+            );
+        }
         $db->prepare("
             UPDATE ingredient_ontology_versions
             SET controller_constraint_epoch = ?,
@@ -9514,12 +9927,12 @@ function ingredientOntologyControllerAcquireBuildingChild(
             'reused_pending_child' => true,
         ];
     }
-    $timeBucket ??= (int)floor(time() / 300);
+    $timeBucket ??= 0;
     $controllerGeneration = (int)$db->query("
         SELECT controller_generation
         FROM ontology_controller_state WHERE id = 1
     ")->fetchColumn();
-    $fork = ingredientOntologyV3ForkVersion(
+    $fork = ingredientOntologyControllerChunkedFork(
         $db,
         $parentVersionId,
         [
@@ -9568,12 +9981,23 @@ function ingredientOntologyControllerAcquireBuildingChild(
                 $last = $last === false ? $first : $last;
                 $quietSeconds = max(0, $now - $last);
                 $ageSeconds = max(0, $now - $first);
+                $quietRequired =
+                    ingredientOntologyControllerGenerationQuietSeconds();
+                $maximumLatency =
+                    ingredientOntologyControllerGenerationMaximumLatencySeconds();
+                $planCount = max(
+                    0,
+                    (int)($generation['plan_count'] ?? 0)
+                );
                 return [
-                    'due' => $quietSeconds >= 30 || $ageSeconds >= 300,
+                    'due' => $planCount >= 50
+                        || $quietSeconds >= $quietRequired
+                        || $ageSeconds >= $maximumLatency,
                     'quiet_seconds' => $quietSeconds,
                     'age_seconds' => $ageSeconds,
-                    'required_quiet_seconds' => 30,
-                    'maximum_debounce_seconds' => 300,
+                    'plan_count' => $planCount,
+                    'required_quiet_seconds' => $quietRequired,
+                    'maximum_debounce_seconds' => $maximumLatency,
                 ];
             }
 function ingredientOntologyControllerCreateGenerationContinue(
@@ -11056,8 +11480,16 @@ function ingredientOntologyControllerProcessCriticJob(
             int $generationId,
             array $options = []
         ): array {
+            ingredientOntologyControllerAssertCopiedGenerationDatabase($db);
             $stmt = $db->prepare("
-                SELECT * FROM ontology_generations WHERE id = ?
+                SELECT generation.*,
+                       (
+                           SELECT COUNT(*)
+                           FROM ontology_generation_plans item
+                           WHERE item.generation_id = generation.id
+                       ) AS plan_count
+                FROM ontology_generations generation
+                WHERE generation.id = ?
             ");
             $stmt->execute([$generationId]);
             $generation = $stmt->fetch(PDO::FETCH_ASSOC);
@@ -11104,6 +11536,18 @@ function ingredientOntologyControllerProcessCriticJob(
                     'debounce' => $debounce,
                 ];
             }
+            if (
+                (int)(
+                    recipeScoreState($db)['active_score_revision_id']
+                        ?? 0
+                ) !== (int)(
+                    $generation['parent_score_revision_id'] ?? 0
+                )
+            ) {
+                throw new RuntimeException(
+                    'controller_stale_parent_before_shadow'
+                );
+            }
             $cadence = ingredientOntologyControllerGenerationCadenceAudit($db);
             if (
                 empty($options['bypass_cadence'])
@@ -11142,6 +11586,27 @@ function ingredientOntologyControllerProcessCriticJob(
                 $db,
                 $candidateVersionId
             );
+            $parentVersionId =
+                (int)$generation['parent_ontology_version_id'];
+            if (
+                $candidateVersion !== null
+                && (string)$candidateVersion['status'] === 'building'
+                && $parentVersionId > 0
+                && (int)($generation['parent_score_revision_id'] ?? 0) > 0
+            ) {
+                $earlyNoOp = ingredientOntologyControllerNoOpAudit(
+                    $db,
+                    $parentVersionId,
+                    $candidateVersionId
+                );
+                if (!empty($earlyNoOp['valid'])) {
+                    return ingredientOntologyControllerCompleteNoOpGeneration(
+                        $db,
+                        $generation,
+                        $earlyNoOp
+                    );
+                }
+            }
             if (
                 $candidateVersion !== null
                 && (string)$candidateVersion['status'] === 'building'
@@ -11244,6 +11709,28 @@ function ingredientOntologyControllerProcessCriticJob(
                     'status' => 'quarantined',
                     'blast' => $preBlast,
                 ];
+            }
+            $parentVersionId =
+                (int)$generation['parent_ontology_version_id'];
+            $parentScoreId =
+                (int)($generation['parent_score_revision_id'] ?? 0);
+            $noOp = $parentVersionId > 0
+                ? ingredientOntologyControllerNoOpAudit(
+                    $db,
+                    $parentVersionId,
+                    $candidateVersionId
+                )
+                : ['valid' => false];
+            if (
+                $parentVersionId > 0
+                && $parentScoreId > 0
+                && !empty($noOp['valid'])
+            ) {
+                return ingredientOntologyControllerCompleteNoOpGeneration(
+                    $db,
+                    $generation,
+                    $noOp
+                );
             }
             $riskRows = $preBlast['risk_counts'];
             $generalized = array_sum(array_intersect_key(
@@ -11568,6 +12055,7 @@ function ingredientOntologyControllerProcessCriticJob(
             int $generationId,
             array $options = []
         ): array {
+            ingredientOntologyControllerAssertCopiedGenerationDatabase($db);
             if (
                 !ingredientOntologyControllerPromotionEnabled()
                 && !(
@@ -12044,6 +12532,97 @@ function ingredientOntologyControllerPromptArtifactFromRow(
     ];
 }
 
+function ingredientOntologyControllerRebindPlanToVersion(
+    PDO $db,
+    array $promptRow,
+    array $plan,
+    int $versionId
+): array {
+    $manifest = json_decode(
+        (string)$promptRow['manifest_json'],
+        true,
+        64,
+        JSON_THROW_ON_ERROR
+    );
+    if (!is_array($manifest)) {
+        throw new RuntimeException(
+            'controller persisted prompt manifest is invalid'
+        );
+    }
+    $candidateMap = is_array($manifest['candidate_map'] ?? null)
+        ? $manifest['candidate_map']
+        : [];
+    $bySlug = [];
+    $stmt = $db->prepare("
+        SELECT id, slug
+        FROM ingredient_ontology_entities
+        WHERE ontology_version_id = ? AND active = 1
+    ");
+    $stmt->execute([$versionId]);
+    while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
+        $bySlug[(string)$row['slug']] = (int)$row['id'];
+    }
+    $rebind = static function (mixed $candidate) use (
+        $candidateMap,
+        $bySlug
+    ): mixed {
+        if (
+            $candidate === null
+            || $candidate === ''
+            || $candidate === 'none'
+            || (
+                is_string($candidate)
+                && str_starts_with($candidate, 'tmp:')
+            )
+        ) {
+            return $candidate;
+        }
+        $candidateKey = (string)$candidate;
+        $source = $candidateMap[$candidateKey] ?? null;
+        $slug = is_array($source)
+            ? trim((string)($source['slug'] ?? ''))
+            : '';
+        if ($slug === '' || !isset($bySlug[$slug])) {
+            throw new RuntimeException(
+                'controller_rebind_candidate_missing'
+            );
+        }
+        return 'e' . $bySlug[$slug];
+    };
+    $walk = static function (mixed $value) use (&$walk, $rebind): mixed {
+        if (!is_array($value)) {
+            return $value;
+        }
+        foreach ($value as $key => $item) {
+            if (in_array((string)$key, [
+                'entity_candidate_id',
+                'parent_candidate_id',
+                'to_candidate_id',
+                'from_candidate_id',
+            ], true)) {
+                $value[$key] = $rebind($item);
+                continue;
+            }
+            $value[$key] = $walk($item);
+        }
+        return $value;
+    };
+    $rebound = $walk($plan);
+    if (!is_array($rebound)) {
+        throw new RuntimeException(
+            'controller rebound plan is invalid'
+        );
+    }
+    $rebound['controller_rebind'] = [
+        'source_prompt_artifact_id' => (int)$promptRow['id'],
+        'source_ontology_version_id' =>
+            (int)($manifest['ontology_version_id'] ?? 0),
+        'target_ontology_version_id' => $versionId,
+        'source_manifest_hash' => (string)$promptRow['manifest_hash'],
+    ];
+    return $rebound;
+}
+
 function ingredientOntologyControllerExistingGenerationForPlan(
     PDO $db,
     int $planId
@@ -12195,28 +12774,6 @@ function ingredientOntologyControllerFinishPersistedPlan(
             'controller_post_apply_fence_lost'
         );
     }
-    if (
-        $jobStatus === 'generation_pending'
-        && (
-            !empty($options['run_generation'])
-            || ingredientOntologyControllerPromotionEnabled()
-        )
-    ) {
-        $final = dbWithRetry(
-            static fn(): array =>
-                ingredientOntologyControllerFinalizeGeneration(
-                    $db,
-                    (int)$generation['id'],
-                    $options
-                )
-        );
-        return [
-            'job_id' => (int)$lease['id'],
-            'status' => (string)$final['status'],
-            'generation' => $final,
-            'resumed' => true,
-        ];
-    }
     return [
         'job_id' => (int)$lease['id'],
         'status' => $jobStatus,
@@ -12312,6 +12869,83 @@ function ingredientOntologyControllerResumeDurableJob(
                 return null;
             }
         }
+        $prompt = $db->prepare("
+            SELECT * FROM ontology_controller_prompts WHERE id = ?
+        ");
+        $prompt->execute([(int)$lease['prompt_artifact_id']]);
+        $promptRow = $prompt->fetch(PDO::FETCH_ASSOC);
+        if (!$promptRow || !$responseRow) {
+            throw new RuntimeException(
+                'controller durable response artifact is incomplete'
+            );
+        }
+        $childVersionId = (int)(
+            $lease['candidate_version_id'] ?? 0
+        );
+        if ($childVersionId <= 0) {
+            $baseVersionId = (int)(
+                $lease['base_ontology_version_id'] ?? 0
+            );
+            $activeVersionId =
+                ingredientOntologyControllerActiveVersionId($db);
+            if (
+                $baseVersionId <= 0
+                || $activeVersionId === null
+                || $activeVersionId !== $baseVersionId
+            ) {
+                throw new RuntimeException(
+                    'controller_stale_parent_before_fork'
+                );
+            }
+            $fork = ingredientOntologyControllerAcquireBuildingChild(
+                $db,
+                $baseVersionId,
+                (int)$lease['required_epoch'],
+                (string)$lease['controller_policy_hash'],
+                'autonomous'
+            );
+            $childVersionId = (int)$fork['version_id'];
+            ingredientOntologyControllerMaterializeConstraints(
+                $db,
+                $childVersionId,
+                (int)$lease['required_epoch']
+            );
+            $link = $db->prepare("
+                UPDATE ontology_controller_jobs
+                SET candidate_version_id = ?,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                  AND status = 'leased'
+                  AND lease_token = ?
+                  AND lease_generation = ?
+                  AND required_epoch = ?
+                  AND controller_generation = ?
+            ");
+            $link->execute([
+                $childVersionId,
+                (int)$lease['id'],
+                (string)$lease['lease_token'],
+                (int)$lease['lease_generation'],
+                (int)$lease['required_epoch'],
+                (int)$lease['controller_generation'],
+            ]);
+            if ($link->rowCount() !== 1) {
+                throw new RuntimeException(
+                    'controller_intent_child_fence_lost'
+                );
+            }
+        }
+        $persistedPlan = ingredientOntologyControllerRebindPlanToVersion(
+            $db,
+            $promptRow,
+            json_decode(
+                (string)$responseRow['parsed_plan_json'],
+                true,
+                64,
+                JSON_THROW_ON_ERROR
+            ),
+            $childVersionId
+        );
         if (!ingredientOntologyControllerTransitionJob(
             $db,
             $lease,
@@ -12336,33 +12970,18 @@ function ingredientOntologyControllerResumeDurableJob(
                 'reason' => 'resume_stage_fence_lost',
             ];
         }
-        $prompt = $db->prepare("
-            SELECT * FROM ontology_controller_prompts WHERE id = ?
-        ");
-        $prompt->execute([(int)$lease['prompt_artifact_id']]);
-        $promptRow = $prompt->fetch(PDO::FETCH_ASSOC);
-        if (!$promptRow || !$responseRow) {
-            throw new RuntimeException(
-                'controller durable response artifact is incomplete'
-            );
-        }
         return ingredientOntologyControllerFinishPersistedPlan(
             $db,
             $lease,
             ingredientOntologyControllerPromptArtifactFromRow($promptRow),
-            json_decode(
-                (string)$responseRow['parsed_plan_json'],
-                true,
-                64,
-                JSON_THROW_ON_ERROR
-            ),
+            $persistedPlan,
             json_decode(
                 (string)$responseRow['validation_json'],
                 true,
                 64,
                 JSON_THROW_ON_ERROR
             ),
-            (int)$lease['candidate_version_id'],
+            $childVersionId,
             $options
         );
     }
@@ -12374,6 +12993,83 @@ function ingredientOntologyControllerResumeDurableJob(
                 array $lease,
                 array $options = []
             ): array {
+                $activeVersionId =
+                    ingredientOntologyControllerActiveVersionId($db);
+                $baseVersionId = (int)(
+                    $lease['base_ontology_version_id'] ?? 0
+                );
+                if (
+                    $activeVersionId !== null
+                    && $baseVersionId > 0
+                    && $activeVersionId !== $baseVersionId
+                ) {
+                    if ($lease['mutation_plan_id'] !== null) {
+                        ingredientOntologyControllerTransitionJob(
+                            $db,
+                            $lease,
+                            'leased',
+                            'superseded',
+                            [
+                                'last_error_kind' =>
+                                    'stale_parent_after_staging',
+                                'last_error' =>
+                                    'The active ontology parent advanced.',
+                            ]
+                        );
+                        return [
+                            'job_id' => (int)$lease['id'],
+                            'status' => 'superseded',
+                            'reason' => 'stale_parent_after_staging',
+                        ];
+                    }
+                    $activeVersion = ingredientOntologyV3Version(
+                        $db,
+                        $activeVersionId
+                    );
+                    $controllerGeneration = (int)$db->query("
+                        SELECT controller_generation
+                        FROM ontology_controller_state WHERE id = 1
+                    ")->fetchColumn();
+                    $rebase = $db->prepare("
+                        UPDATE ontology_controller_jobs
+                        SET status = 'retry',
+                            base_ontology_version_id = ?,
+                            base_content_hash = ?,
+                            controller_generation = ?,
+                            controller_policy_hash = ?,
+                            lease_token = NULL,
+                            leased_until = NULL,
+                            next_attempt_at = CURRENT_TIMESTAMP,
+                            last_error_kind = 'stale_parent_rebased',
+                            last_error =
+                                'The active ontology parent advanced; durable artifacts will be rebound.',
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE id = ?
+                          AND status = 'leased'
+                          AND lease_token = ?
+                          AND lease_generation = ?
+                          AND required_epoch = ?
+                          AND controller_generation = ?
+                    ");
+                    $rebase->execute([
+                        $activeVersionId,
+                        (string)($activeVersion['content_hash'] ?? ''),
+                        $controllerGeneration,
+                        ingredientOntologyControllerPolicyHash(),
+                        (int)$lease['id'],
+                        (string)$lease['lease_token'],
+                        (int)$lease['lease_generation'],
+                        (int)$lease['required_epoch'],
+                        (int)$lease['controller_generation'],
+                    ]);
+                    return [
+                        'job_id' => (int)$lease['id'],
+                        'status' => $rebase->rowCount() === 1
+                            ? 'retry'
+                            : 'superseded',
+                        'reason' => 'stale_parent_rebased',
+                    ];
+                }
                 if (
                     $lease['mutation_plan_id'] !== null
                     || $lease['response_artifact_id'] !== null
@@ -13089,71 +13785,6 @@ function ingredientOntologyControllerResumeDurableJob(
                             'reason' => 'lease_or_epoch_lost_before_generation',
                         ];
                     }
-                    if (
-                        !empty($options['run_generation'])
-                        || ingredientOntologyControllerPromotionEnabled()
-                    ) {
-                        $final = dbWithRetry(
-                            static fn(): array =>
-                                ingredientOntologyControllerFinalizeGeneration(
-                                    $db,
-                                    (int)$generation['id'],
-                                    $options
-                                )
-                        );
-                        $jobStatus = (string)($final['status'] ?? 'promotable');
-                        $targetJobStatus = in_array($jobStatus, [
-                            'promoted', 'quarantined', 'rolled_back',
-                        ], true)
-                            ? $jobStatus
-                            : 'promotable';
-                        ingredientOntologyControllerHook(
-                            'controller_before_finalize_job_update',
-                            ['job_id' => (int)$lease['id']]
-                        );
-                        $finalizeJob = $db->prepare("
-                            UPDATE ontology_controller_jobs
-                            SET status = ?,
-                                lease_token = NULL,
-                                leased_until = NULL,
-                                candidate_score_revision_id = ?,
-                                finished_at = CASE
-                                    WHEN ? IN (
-                                        'promoted', 'quarantined',
-                                        'rolled_back', 'failed'
-                                    )
-                                    THEN CURRENT_TIMESTAMP
-                                    ELSE finished_at
-                                END,
-                                updated_at = CURRENT_TIMESTAMP
-                            WHERE id = ?
-                              AND status = 'generation_pending'
-                              AND lease_token = ?
-                              AND lease_generation = ?
-                              AND required_epoch = ?
-                              AND controller_generation = ?
-                        ");
-                        $finalizeJob->execute([
-                            $targetJobStatus,
-                            $final['candidate_score_revision_id'] ?? null,
-                            $jobStatus,
-                            (int)$lease['id'],
-                            (string)$lease['lease_token'],
-                            (int)$lease['lease_generation'],
-                            (int)$lease['required_epoch'],
-                            (int)$lease['controller_generation'],
-                        ]);
-                        if ($finalizeJob->rowCount() !== 1) {
-                            throw new RuntimeException(
-                                'controller_finalize_job_fence_lost'
-                            );
-                        }
-                        return [
-                            'job_id' => (int)$lease['id'],
-                            'status' => $jobStatus,
-                            'generation' => $final,
-                        ];
-                    }
                     ingredientOntologyControllerHook(
                         'controller_before_release_job_update',
                         ['job_id' => (int)$lease['id']]
@@ -13363,6 +13994,323 @@ function ingredientOntologyControllerResumeDurableJob(
                 ];
             }
 
+            function ingredientOntologyControllerStoreGenerationIntent(
+                PDO $db,
+                array $job,
+                string $intentKind,
+                ?int $responseArtifactId = null
+            ): array {
+                if (!in_array($intentKind, [
+                    'validated_plan', 'exact_constraint', 'provisional',
+                ], true)) {
+                    throw new InvalidArgumentException(
+                        'ontology generation intent kind is invalid'
+                    );
+                }
+                $db->prepare("
+                    INSERT INTO ontology_generation_intents (
+                        source_job_id, subject_id, intent_kind,
+                        response_artifact_id
+                    )
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(source_job_id) DO UPDATE SET
+                        subject_id = excluded.subject_id,
+                        intent_kind = excluded.intent_kind,
+                        response_artifact_id =
+                            excluded.response_artifact_id,
+                        status = 'pending',
+                        attempts = 0,
+                        last_error = '',
+                        finished_at = NULL,
+                        updated_at = CURRENT_TIMESTAMP
+                ")->execute([
+                    (int)$job['id'],
+                    $job['subject_id'] !== null
+                        ? (int)$job['subject_id']
+                        : null,
+                    $intentKind,
+                    $responseArtifactId,
+                ]);
+                $read = $db->prepare("
+                    SELECT * FROM ontology_generation_intents
+                    WHERE source_job_id = ?
+                ");
+                $read->execute([(int)$job['id']]);
+                $row = $read->fetch(PDO::FETCH_ASSOC);
+                if (!$row) {
+                    throw new RuntimeException(
+                        'ontology generation intent was not stored'
+                    );
+                }
+                return $row;
+            }
+
+            function ingredientOntologyControllerBackfillGenerationIntents(
+                PDO $db
+            ): int {
+                $stmt = $db->prepare("
+                    INSERT OR IGNORE INTO ontology_generation_intents (
+                        source_job_id, subject_id, intent_kind,
+                        response_artifact_id
+                    )
+                    SELECT queue.source_job_id, queue.subject_id,
+                           CASE
+                               WHEN queue.status = 'plan_ready'
+                               THEN 'validated_plan'
+                               ELSE 'provisional'
+                           END,
+                           queue.response_artifact_id
+                    FROM ontology_provisional_queue queue
+                    JOIN ontology_controller_jobs job
+                      ON job.id = queue.source_job_id
+                    WHERE queue.status IN (
+                        'plan_ready', 'retry', 'quarantined'
+                    )
+                ");
+                $stmt->execute();
+                return $stmt->rowCount();
+            }
+
+            function ingredientOntologyControllerQueueGenerationIntents(
+                PDO $db,
+                int $limit = 10
+            ): array {
+                ingredientOntologyControllerAssertCopiedGenerationDatabase(
+                    $db
+                );
+                $limit = max(1, min(100, $limit));
+                ingredientOntologyControllerBackfillGenerationIntents($db);
+                $activeVersionId =
+                    ingredientOntologyControllerActiveVersionId($db);
+                $activeVersion = $activeVersionId !== null
+                    ? ingredientOntologyV3Version($db, $activeVersionId)
+                    : null;
+                if ($activeVersion === null) {
+                    return [
+                        'queued' => 0,
+                        'provisional_pending' => 0,
+                        'reason' => 'active_version_unavailable',
+                    ];
+                }
+                $controllerGeneration = (int)$db->query("
+                    SELECT controller_generation
+                    FROM ontology_controller_state WHERE id = 1
+                ")->fetchColumn();
+                $db->exec('BEGIN IMMEDIATE');
+                try {
+                    $rows = $db->query("
+                        SELECT intent.*, job.prompt_artifact_id,
+                               job.response_artifact_id AS job_response_id,
+                               job.status AS job_status
+                        FROM ontology_generation_intents intent
+                        JOIN ontology_controller_jobs job
+                          ON job.id = intent.source_job_id
+                        WHERE intent.status = 'pending'
+                          AND intent.intent_kind IN (
+                              'validated_plan', 'exact_constraint'
+                          )
+                        ORDER BY intent.created_at, intent.id
+                        LIMIT {$limit}
+                    ")->fetchAll(PDO::FETCH_ASSOC);
+                    $queued = 0;
+                    foreach ($rows as $row) {
+                        if (
+                            (string)$row['intent_kind'] === 'validated_plan'
+                            && (
+                                $row['prompt_artifact_id'] === null
+                                || (
+                                    $row['response_artifact_id'] === null
+                                    && $row['job_response_id'] === null
+                                )
+                            )
+                        ) {
+                            $db->prepare("
+                                UPDATE ontology_generation_intents
+                                SET status = 'failed',
+                                    last_error =
+                                        'durable response artifacts are missing',
+                                    finished_at = CURRENT_TIMESTAMP,
+                                    updated_at = CURRENT_TIMESTAMP
+                                WHERE id = ? AND status = 'pending'
+                            ")->execute([(int)$row['id']]);
+                            continue;
+                        }
+                        $job = $db->prepare("
+                            UPDATE ontology_controller_jobs
+                            SET status = 'retry',
+                                attempts = 0,
+                                lease_token = NULL,
+                                leased_until = NULL,
+                                lease_generation = lease_generation + 1,
+                                next_attempt_at = CURRENT_TIMESTAMP,
+                                base_ontology_version_id = ?,
+                                base_content_hash = ?,
+                                controller_generation = ?,
+                                controller_policy_hash = ?,
+                                response_artifact_id =
+                                    COALESCE(?, response_artifact_id),
+                                change_set_id = NULL,
+                                mutation_plan_id = NULL,
+                                candidate_version_id = NULL,
+                                candidate_score_revision_id = NULL,
+                                last_error_kind = 'generation_intent_ready',
+                                last_error =
+                                    'Durable intake artifact queued for generation.',
+                                finished_at = NULL,
+                                updated_at = CURRENT_TIMESTAMP
+                            WHERE id = ?
+                              AND status IN (
+                                  'promoted', 'quarantined',
+                                  'failed', 'abstained',
+                                  'superseded', 'retry', 'queued'
+                              )
+                        ");
+                        $job->execute([
+                            $activeVersionId,
+                            (string)$activeVersion['content_hash'],
+                            $controllerGeneration,
+                            ingredientOntologyControllerPolicyHash(),
+                            $row['response_artifact_id'],
+                            (int)$row['source_job_id'],
+                        ]);
+                        if ($job->rowCount() !== 1) {
+                            continue;
+                        }
+                        $db->prepare("
+                            UPDATE ontology_generation_intents
+                            SET status = 'queued',
+                                attempts = attempts + 1,
+                                updated_at = CURRENT_TIMESTAMP
+                            WHERE id = ? AND status = 'pending'
+                        ")->execute([(int)$row['id']]);
+                        $queued++;
+                    }
+                    $db->exec('COMMIT');
+                } catch (Throwable $error) {
+                    try {
+                        $db->exec('ROLLBACK');
+                    } catch (Throwable $ignored) {
+                    }
+                    throw $error;
+                }
+                $provisionalPending = (int)$db->query("
+                    SELECT COUNT(*)
+                    FROM ontology_generation_intents
+                    WHERE status = 'pending'
+                      AND intent_kind = 'provisional'
+                ")->fetchColumn();
+                return [
+                    'queued' => $queued,
+                    'provisional_pending' => $provisionalPending,
+                ];
+            }
+
+            function ingredientOntologyControllerUpdateGenerationIntent(
+                PDO $db,
+                int $sourceJobId,
+                string $status,
+                string $error = ''
+            ): void {
+                if (!in_array($status, [
+                    'pending', 'queued', 'applied',
+                    'superseded', 'failed',
+                ], true)) {
+                    throw new InvalidArgumentException(
+                        'ontology generation intent status is invalid'
+                    );
+                }
+                $terminal = in_array(
+                    $status,
+                    ['applied', 'superseded', 'failed'],
+                    true
+                );
+                $db->prepare("
+                    UPDATE ontology_generation_intents
+                    SET status = ?,
+                        last_error = ?,
+                        finished_at = CASE
+                            WHEN ? THEN CURRENT_TIMESTAMP
+                            ELSE NULL
+                        END,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE source_job_id = ?
+                      AND status NOT IN ('applied', 'superseded')
+                ")->execute([
+                    $status,
+                    mb_substr($error, 0, 1000, 'UTF-8'),
+                    $terminal ? 1 : 0,
+                    $sourceJobId,
+                ]);
+            }
+
+            function ingredientOntologyControllerProcessProvisionalIntents(
+                PDO $db,
+                int $limit = 10
+            ): array {
+                $limit = max(1, min(50, $limit));
+                $rows = $db->query("
+                    SELECT intent.id AS intent_id,
+                           intent.source_job_id,
+                           intent.attempts AS intent_attempts,
+                           job.*
+                    FROM ontology_generation_intents intent
+                    JOIN ontology_controller_jobs job
+                      ON job.id = intent.source_job_id
+                    WHERE intent.status = 'pending'
+                      AND intent.intent_kind = 'provisional'
+                    ORDER BY intent.created_at, intent.id
+                    LIMIT {$limit}
+                ")->fetchAll(PDO::FETCH_ASSOC);
+                $results = [];
+                foreach ($rows as $row) {
+                    try {
+                        $result =
+                            ingredientOntologyControllerEnsureTerminalCoverage(
+                                $db,
+                                $row,
+                                [
+                                    'status' => 'quarantined',
+                                    'reason' =>
+                                        (string)($row['last_error']
+                                            ?: 'provisional intake fallback'),
+                                ]
+                            );
+                        if (!empty($result['ensured'])) {
+                            ingredientOntologyControllerUpdateGenerationIntent(
+                                $db,
+                                (int)$row['source_job_id'],
+                                'applied'
+                            );
+                        }
+                        $results[] = [
+                            'source_job_id' => (int)$row['source_job_id'],
+                            'result' => $result,
+                        ];
+                    } catch (Throwable $error) {
+                        $db->prepare("
+                            UPDATE ontology_generation_intents
+                            SET attempts = attempts + 1,
+                                last_error = ?,
+                                updated_at = CURRENT_TIMESTAMP
+                            WHERE id = ? AND status = 'pending'
+                        ")->execute([
+                            mb_substr(
+                                $error->getMessage(),
+                                0,
+                                1000,
+                                'UTF-8'
+                            ),
+                            (int)$row['intent_id'],
+                        ]);
+                        $results[] = [
+                            'source_job_id' => (int)$row['source_job_id'],
+                            'error' => $error->getMessage(),
+                        ];
+                    }
+                }
+                return $results;
+            }
+
             function ingredientOntologyControllerProcessIntakeJob(
                 PDO $db,
                 array $lease,
@@ -13373,6 +14321,12 @@ function ingredientOntologyControllerResumeDurableJob(
                     ['correction', 'compensation'],
                     true
                 )) {
+                    $intent =
+                        ingredientOntologyControllerStoreGenerationIntent(
+                            $db,
+                            $lease,
+                            'exact_constraint'
+                        );
                     if (!ingredientOntologyControllerTransitionJob(
                         $db,
                         $lease,
@@ -13394,6 +14348,7 @@ function ingredientOntologyControllerResumeDurableJob(
                         'status' => 'promoted',
                         'intake_only' => true,
                         'exact_r0' => true,
+                        'generation_intent_id' => (int)$intent['id'],
                     ];
                 }
                 if (!ingredientOntologyControllerTransitionJob(
@@ -13533,6 +14488,15 @@ function ingredientOntologyControllerResumeDurableJob(
                                 : implode('; ', $validation['errors']),
                             (int)$response['id']
                         );
+                    $intent =
+                        ingredientOntologyControllerStoreGenerationIntent(
+                            $db,
+                            $lease,
+                            !empty($validation['valid'])
+                                ? 'validated_plan'
+                                : 'provisional',
+                            (int)$response['id']
+                        );
                     $terminal = !empty($validation['valid'])
                         ? 'promoted'
                         : 'quarantined';
@@ -13562,6 +14526,7 @@ function ingredientOntologyControllerResumeDurableJob(
                         'intake_only' => true,
                         'response_artifact_id' => (int)$response['id'],
                         'provisional_queue' => $queue,
+                        'generation_intent_id' => (int)$intent['id'],
                     ];
                 } catch (Throwable $error) {
                     $queue =
@@ -13570,6 +14535,12 @@ function ingredientOntologyControllerResumeDurableJob(
                             $lease,
                             'retry',
                             $error->getMessage()
+                        );
+                    $intent =
+                        ingredientOntologyControllerStoreGenerationIntent(
+                            $db,
+                            $lease,
+                            'provisional'
                         );
                     ingredientOntologyControllerTransitionJob(
                         $db,
@@ -13592,6 +14563,7 @@ function ingredientOntologyControllerResumeDurableJob(
                         'status' => 'failed',
                         'intake_only' => true,
                         'provisional_queue' => $queue,
+                        'generation_intent_id' => (int)$intent['id'],
                     ];
                 }
             }
@@ -13727,6 +14699,14 @@ function ingredientOntologyControllerResumeDurableJob(
                 array $options = []
             ): array {
                 if (
+                    empty($options['intake_only'])
+                    && ingredientOntologyControllerDatabaseIsActive($db)
+                ) {
+                    throw new RuntimeException(
+                        'ontology_generation_requires_copied_database'
+                    );
+                }
+                if (
                     !ingredientOntologyControllerEnabled()
                     && !(
                         defined('RECIPE_BACKEND_TEST_MODE')
@@ -13750,8 +14730,30 @@ function ingredientOntologyControllerResumeDurableJob(
                     : ingredientOntologyControllerPruneAbandonedBuildingVersions(
                         $db
                     );
+                $forkCleanup = !empty($options['intake_only'])
+                    ? []
+                    : ingredientOntologyControllerDriveForkCleanup(
+                        $db,
+                        min($limit, 20)
+                    );
                 $scheduledRetries =
                     ingredientOntologyControllerDriveQuarantineRetries(
+                        $db,
+                        min($limit, 10)
+                    );
+                $generationIntents = !empty($options['intake_only'])
+                    ? [
+                        'queued' => 0,
+                        'provisional_pending' => 0,
+                        'skipped' => 'intake_only',
+                    ]
+                    : ingredientOntologyControllerQueueGenerationIntents(
+                        $db,
+                        min($limit, 50)
+                    );
+                $provisionalIntents = !empty($options['intake_only'])
+                    ? []
+                    : ingredientOntologyControllerProcessProvisionalIntents(
                         $db,
                         min($limit, 10)
                     );
@@ -13808,7 +14810,8 @@ function ingredientOntologyControllerResumeDurableJob(
                                         : ['correction', 'compensation']
                                 )
                         ),
-                    $minimumPriority
+                    $minimumPriority,
+                    !empty($options['generation_intents_only'])
                 );
                 $results = [];
                 foreach ($rows as $row) {
@@ -13894,12 +14897,41 @@ function ingredientOntologyControllerResumeDurableJob(
                                   )
                             ")->execute([(int)$row['subject_id']]);
                         }
+                        if (empty($options['intake_only'])) {
+                            $processedStatus =
+                                (string)($processed['status'] ?? '');
+                            if (in_array($processedStatus, [
+                                'generation_pending', 'shadowing',
+                                'promotable', 'promoted',
+                            ], true)) {
+                                ingredientOntologyControllerUpdateGenerationIntent(
+                                    $db,
+                                    (int)$row['id'],
+                                    'applied'
+                                );
+                            } elseif ($processedStatus === 'superseded') {
+                                ingredientOntologyControllerUpdateGenerationIntent(
+                                    $db,
+                                    (int)$row['id'],
+                                    'superseded',
+                                    (string)($processed['reason'] ?? '')
+                                );
+                            } elseif ($processedStatus === 'failed') {
+                                ingredientOntologyControllerUpdateGenerationIntent(
+                                    $db,
+                                    (int)$row['id'],
+                                    'failed',
+                                    (string)($processed['error'] ?? '')
+                                );
+                            }
+                        }
                     }
                     $results[] = $processed;
                 }
                 $generations = [];
                 if (
                     empty($options['intake_only'])
+                    && empty($options['suppress_due_generations'])
                     && (
                         !empty($options['run_generation'])
                         || ingredientOntologyControllerPromotionEnabled()
@@ -13924,10 +14956,13 @@ function ingredientOntologyControllerResumeDurableJob(
                     'generations' => $generations,
                     'monitors' => $monitors,
                     'scheduled_retries' => $scheduledRetries,
+                    'generation_intents' => $generationIntents,
+                    'provisional_intents' => $provisionalIntents,
                     'coverage' => !empty($options['include_coverage'])
                         ? ingredientOntologyControllerCoverageSnapshot($db)
                         : null,
                     'pruned_building_versions' => $prunedBuildingVersions,
+                    'fork_cleanup' => $forkCleanup,
                 ];
             }
 
@@ -13980,6 +15015,7 @@ function ingredientOntologyControllerResumeDurableJob(
                 ");
                 $deleted = 0;
                 $failedPreserved = 0;
+                $cleanupPending = 0;
                 $errors = [];
                 foreach ($ids as $versionId) {
                     try {
@@ -14049,6 +15085,33 @@ function ingredientOntologyControllerResumeDurableJob(
                             $failedPreserved++;
                             continue;
                         }
+                        $chunked = $db->prepare("
+                            SELECT COUNT(*)
+                            FROM ontology_version_fork_progress
+                            WHERE candidate_version_id = ?
+                        ");
+                        $chunked->execute([$versionId]);
+                        if ((int)$chunked->fetchColumn() > 0) {
+                            $db->prepare("
+                                UPDATE ingredient_ontology_versions
+                                SET status = 'failed',
+                                    failed_at = CURRENT_TIMESTAMP,
+                                    updated_at = CURRENT_TIMESTAMP
+                                WHERE id = ? AND status = 'building'
+                            ")->execute([$versionId]);
+                            $purge =
+                                ingredientOntologyControllerPurgeForkChunk(
+                                    $db,
+                                    $versionId,
+                                    ingredientOntologyControllerForkChunkRows()
+                                );
+                            if (!empty($purge['complete'])) {
+                                $deleted++;
+                            } else {
+                                $cleanupPending++;
+                            }
+                            continue;
+                        }
                         $delete->execute([$versionId]);
                         $deleted += $delete->rowCount();
                     } catch (Throwable $error) {
@@ -14091,6 +15154,7 @@ function ingredientOntologyControllerResumeDurableJob(
                 return [
                     'deleted' => $deleted,
                     'failed_preserved' => $failedPreserved,
+                    'cleanup_pending' => $cleanupPending,
                     'errors' => $errors,
                 ];
             }
@@ -14099,12 +15163,21 @@ function ingredientOntologyControllerResumeDurableJob(
                 PDO $db,
                 array $options = []
             ): array {
+                ingredientOntologyControllerAssertCopiedGenerationDatabase(
+                    $db
+                );
                 $rows = $db->query("
-                    SELECT * FROM ontology_generations
-                    WHERE status IN (
+                    SELECT generation.*,
+                           (
+                               SELECT COUNT(*)
+                               FROM ontology_generation_plans item
+                               WHERE item.generation_id = generation.id
+                           ) AS plan_count
+                    FROM ontology_generations generation
+                    WHERE generation.status IN (
                         'building', 'shadowing', 'promotable'
                     )
-                    ORDER BY created_at, id
+                    ORDER BY generation.created_at, generation.id
                     LIMIT 20
                 ")->fetchAll(PDO::FETCH_ASSOC);
                 $results = [];
@@ -14125,7 +15198,14 @@ function ingredientOntologyControllerResumeDurableJob(
                             (string)$generation['status'] === 'promotable'
                             && (
                                 !empty($options['promote'])
-                                || ingredientOntologyControllerPromotionEnabled()
+                                || (
+                                    empty(
+                                        $options[
+                                            'disable_automatic_promotion'
+                                        ]
+                                    )
+                                    && ingredientOntologyControllerPromotionEnabled()
+                                )
                             )
                         ) {
                             $results[] = dbWithRetry(
@@ -14161,6 +15241,67 @@ function ingredientOntologyControllerResumeDurableJob(
                                     1000,
                                     'UTF-8'
                                 ),
+                            ];
+                            continue;
+                        }
+                        $candidateVersionId = (int)(
+                            $generation['candidate_version_id'] ?? 0
+                        );
+                        $candidateVersion = $candidateVersionId > 0
+                            ? ingredientOntologyV3Version(
+                                $db,
+                                $candidateVersionId
+                            )
+                            : null;
+                        $shadowRetryable =
+                            (string)$generation['status'] === 'shadowing'
+                            || str_contains(
+                                strtolower($error->getMessage()),
+                                'shadow'
+                            );
+                        $candidateReusable = $candidateVersion !== null
+                            && (string)$candidateVersion['status'] === 'ready'
+                            && hash_equals(
+                                (string)$candidateVersion['corpus_hash'],
+                                ingredientOntologyV3CorpusHash($db)
+                            )
+                            && ingredientOntologyV3OwnerFingerprintAudit(
+                                $db,
+                                $candidateVersionId
+                            )['valid']
+                            && ingredientOntologyControllerVersionIntegrityAudit(
+                                $db,
+                                $candidateVersionId
+                            )['valid'];
+                        if ($shadowRetryable && $candidateReusable) {
+                            $db->prepare("
+                                UPDATE ontology_generations
+                                SET status = 'shadowing',
+                                    candidate_score_revision_id = NULL,
+                                    gate_report_json = ?
+                                WHERE id = ?
+                                  AND status IN ('building', 'shadowing')
+                            ")->execute([
+                                ingredientOntologyControllerStableJson([
+                                    'reason' =>
+                                        'shadow_retry_reusing_candidate',
+                                    'error' => mb_substr(
+                                        $error->getMessage(),
+                                        0,
+                                        1000,
+                                        'UTF-8'
+                                    ),
+                                ]),
+                                (int)$generation['id'],
+                            ]);
+                            $results[] = [
+                                'generation_id' =>
+                                    (int)$generation['id'],
+                                'status' => 'retry',
+                                'reason' =>
+                                    'shadow_retry_reusing_candidate',
+                                'candidate_version_id' =>
+                                    $candidateVersionId,
                             ];
                             continue;
                         }
@@ -17278,4 +18419,2104 @@ function ingredientOntologyV3ForkVersionContinue(
         }
         throw $e;
     }
+}
+
+function ingredientOntologyControllerForkPhaseDefinitions(
+    int $parentVersionId,
+    int $childVersionId
+): array {
+    $map = static function (string $kind, string $column) use (
+        $childVersionId
+    ): string {
+        return "JOIN ontology_version_fork_id_map {$kind}_map
+          ON {$kind}_map.candidate_version_id = {$childVersionId}
+         AND {$kind}_map.map_kind = '{$kind}'
+         AND {$kind}_map.old_id = {$column}";
+    };
+    return [
+        [
+            'table' => 'ingredient_ontology_entities',
+            'cursor' => 'id',
+            'insert' => "
+                INSERT INTO ingredient_ontology_entities (
+                    ontology_version_id, local_key, slug, canonical_name,
+                    entity_kind, active, provenance,
+                    legacy_taxonomy_node_id,
+                    legacy_canonical_ingredient_id, identity_role
+                )
+                SELECT {$childVersionId}, local_key, slug, canonical_name,
+                       entity_kind, active, provenance,
+                       legacy_taxonomy_node_id,
+                       legacy_canonical_ingredient_id, identity_role
+                FROM ingredient_ontology_entities source
+                WHERE source.ontology_version_id = {$parentVersionId}
+                  AND source.id > {{LOWER}} AND source.id <= {{UPPER}}
+                ORDER BY source.id
+            ",
+            'map_kind' => 'entity',
+            'map' => "
+                INSERT INTO ontology_version_fork_id_map (
+                    candidate_version_id, map_kind, old_id, new_id
+                )
+                SELECT {$childVersionId}, 'entity', old.id, new.id
+                FROM ingredient_ontology_entities old
+                JOIN ingredient_ontology_entities new
+                  ON new.ontology_version_id = {$childVersionId}
+                 AND new.slug = old.slug
+                WHERE old.ontology_version_id = {$parentVersionId}
+                  AND old.id > {{LOWER}} AND old.id <= {{UPPER}}
+            ",
+        ],
+        [
+            'table' => 'ingredient_ontology_facets',
+            'cursor' => 'id',
+            'insert' => "
+                INSERT INTO ingredient_ontology_facets (
+                    ontology_version_id, facet_key, display_name,
+                    hard_default, active
+                )
+                SELECT {$childVersionId}, facet_key, display_name,
+                       hard_default, active
+                FROM ingredient_ontology_facets source
+                WHERE source.ontology_version_id = {$parentVersionId}
+                  AND source.id > {{LOWER}} AND source.id <= {{UPPER}}
+                ORDER BY source.id
+            ",
+            'map_kind' => 'facet',
+            'map' => "
+                INSERT INTO ontology_version_fork_id_map (
+                    candidate_version_id, map_kind, old_id, new_id
+                )
+                SELECT {$childVersionId}, 'facet', old.id, new.id
+                FROM ingredient_ontology_facets old
+                JOIN ingredient_ontology_facets new
+                  ON new.ontology_version_id = {$childVersionId}
+                 AND new.facet_key = old.facet_key
+                WHERE old.ontology_version_id = {$parentVersionId}
+                  AND old.id > {{LOWER}} AND old.id <= {{UPPER}}
+            ",
+        ],
+        [
+            'table' => 'ingredient_ontology_facet_values',
+            'cursor' => 'id',
+            'insert' => "
+                INSERT INTO ingredient_ontology_facet_values (
+                    ontology_version_id, facet_id, value_key,
+                    display_name, active
+                )
+                SELECT {$childVersionId}, facet_map.new_id,
+                       source.value_key, source.display_name, source.active
+                FROM ingredient_ontology_facet_values source
+                {$map('facet', 'source.facet_id')}
+                WHERE source.ontology_version_id = {$parentVersionId}
+                  AND source.id > {{LOWER}} AND source.id <= {{UPPER}}
+                ORDER BY source.id
+            ",
+            'map_kind' => 'facet_value',
+            'map' => "
+                INSERT INTO ontology_version_fork_id_map (
+                    candidate_version_id, map_kind, old_id, new_id
+                )
+                SELECT {$childVersionId}, 'facet_value', old.id, new.id
+                FROM ingredient_ontology_facet_values old
+                JOIN ingredient_ontology_facets old_facet
+                  ON old_facet.id = old.facet_id
+                JOIN ingredient_ontology_facets new_facet
+                  ON new_facet.ontology_version_id = {$childVersionId}
+                 AND new_facet.facet_key = old_facet.facet_key
+                JOIN ingredient_ontology_facet_values new
+                  ON new.facet_id = new_facet.id
+                 AND new.value_key = old.value_key
+                WHERE old.ontology_version_id = {$parentVersionId}
+                  AND old.id > {{LOWER}} AND old.id <= {{UPPER}}
+            ",
+        ],
+        [
+            'table' => 'ingredient_ontology_resolution_manifests',
+            'cursor' => 'id',
+            'insert' => "
+                INSERT INTO ingredient_ontology_resolution_manifests (
+                    ontology_version_id, manifest_key, manifest_version,
+                    manifest_hash, content_hash, source_corpus_hash,
+                    reviewer, review_batch, metadata_json
+                )
+                SELECT {$childVersionId}, manifest_key, manifest_version,
+                       manifest_hash, content_hash, source_corpus_hash,
+                       reviewer, review_batch, metadata_json
+                FROM ingredient_ontology_resolution_manifests source
+                WHERE source.ontology_version_id = {$parentVersionId}
+                  AND source.id > {{LOWER}} AND source.id <= {{UPPER}}
+                ORDER BY source.id
+            ",
+            'map_kind' => 'manifest',
+            'map' => "
+                INSERT INTO ontology_version_fork_id_map (
+                    candidate_version_id, map_kind, old_id, new_id
+                )
+                SELECT {$childVersionId}, 'manifest', old.id, new.id
+                FROM ingredient_ontology_resolution_manifests old
+                JOIN ingredient_ontology_resolution_manifests new
+                  ON new.ontology_version_id = {$childVersionId}
+                 AND new.manifest_key = old.manifest_key
+                WHERE old.ontology_version_id = {$parentVersionId}
+                  AND old.id > {{LOWER}} AND old.id <= {{UPPER}}
+            ",
+        ],
+        [
+            'table' => 'ingredient_ontology_labels',
+            'cursor' => 'id',
+            'insert' => "
+                INSERT INTO ingredient_ontology_labels (
+                    ontology_version_id, entity_id, language, label,
+                    normalized_label, kind, review_state, provenance,
+                    source_ref
+                )
+                SELECT {$childVersionId}, entity_map.new_id,
+                       source.language, source.label,
+                       source.normalized_label, source.kind,
+                       source.review_state, source.provenance,
+                       source.source_ref
+                FROM ingredient_ontology_labels source
+                {$map('entity', 'source.entity_id')}
+                WHERE source.ontology_version_id = {$parentVersionId}
+                  AND source.id > {{LOWER}} AND source.id <= {{UPPER}}
+                ORDER BY source.id
+            ",
+            'map_kind' => 'label',
+            'map' => "
+                INSERT INTO ontology_version_fork_id_map (
+                    candidate_version_id, map_kind, old_id, new_id
+                )
+                SELECT {$childVersionId}, 'label', old.id, new.id
+                FROM ingredient_ontology_labels old
+                {$map('entity', 'old.entity_id')}
+                JOIN ingredient_ontology_labels new
+                  ON new.ontology_version_id = {$childVersionId}
+                 AND new.entity_id = entity_map.new_id
+                 AND new.language = old.language
+                 AND new.normalized_label = old.normalized_label
+                 AND new.kind = old.kind
+                WHERE old.ontology_version_id = {$parentVersionId}
+                  AND old.id > {{LOWER}} AND old.id <= {{UPPER}}
+            ",
+        ],
+        [
+            'table' => 'ingredient_ontology_evidence_sources',
+            'cursor' => 'id',
+            'insert' => "
+                INSERT INTO ingredient_ontology_evidence_sources (
+                    ontology_version_id, manifest_id, evidence_kind,
+                    evidence_key, evidence_scope, owner_fingerprint,
+                    connector, metadata_schema_version, provider_ref,
+                    title_hash, observation_hash, scope_hash, payload_hash,
+                    payload_json, algorithm_hash, reviewer, review_batch
+                )
+                SELECT {$childVersionId}, manifest_map.new_id,
+                       source.evidence_kind, source.evidence_key,
+                       source.evidence_scope, source.owner_fingerprint,
+                       source.connector, source.metadata_schema_version,
+                       source.provider_ref, source.title_hash,
+                       source.observation_hash, source.scope_hash,
+                       source.payload_hash, source.payload_json,
+                       source.algorithm_hash, source.reviewer,
+                       source.review_batch
+                FROM ingredient_ontology_evidence_sources source
+                LEFT JOIN ontology_version_fork_id_map manifest_map
+                  ON manifest_map.candidate_version_id = {$childVersionId}
+                 AND manifest_map.map_kind = 'manifest'
+                 AND manifest_map.old_id = source.manifest_id
+                WHERE source.ontology_version_id = {$parentVersionId}
+                  AND source.id > {{LOWER}} AND source.id <= {{UPPER}}
+                ORDER BY source.id
+            ",
+            'map_kind' => 'evidence',
+            'map' => "
+                INSERT INTO ontology_version_fork_id_map (
+                    candidate_version_id, map_kind, old_id, new_id
+                )
+                SELECT {$childVersionId}, 'evidence', old.id, new.id
+                FROM ingredient_ontology_evidence_sources old
+                JOIN ingredient_ontology_evidence_sources new
+                  ON new.ontology_version_id = {$childVersionId}
+                 AND new.evidence_kind = old.evidence_kind
+                 AND new.evidence_key = old.evidence_key
+                WHERE old.ontology_version_id = {$parentVersionId}
+                  AND old.id > {{LOWER}} AND old.id <= {{UPPER}}
+            ",
+        ],
+        [
+            'table' => 'ingredient_ontology_disposition_scopes',
+            'cursor' => 'id',
+            'insert' => "
+                INSERT INTO ingredient_ontology_disposition_scopes (
+                    ontology_version_id, scope_type, scope_key,
+                    scope_fingerprint, portable_scope_hash,
+                    normalized_label, language, context_json, content_hash
+                )
+                SELECT {$childVersionId}, scope_type, scope_key,
+                       scope_fingerprint, portable_scope_hash,
+                       normalized_label, language, context_json, content_hash
+                FROM ingredient_ontology_disposition_scopes source
+                WHERE source.ontology_version_id = {$parentVersionId}
+                  AND source.id > {{LOWER}} AND source.id <= {{UPPER}}
+                ORDER BY source.id
+            ",
+            'map_kind' => 'scope',
+            'map' => "
+                INSERT INTO ontology_version_fork_id_map (
+                    candidate_version_id, map_kind, old_id, new_id
+                )
+                SELECT {$childVersionId}, 'scope', old.id, new.id
+                FROM ingredient_ontology_disposition_scopes old
+                JOIN ingredient_ontology_disposition_scopes new
+                  ON new.ontology_version_id = {$childVersionId}
+                 AND new.scope_fingerprint = old.scope_fingerprint
+                WHERE old.ontology_version_id = {$parentVersionId}
+                  AND old.id > {{LOWER}} AND old.id <= {{UPPER}}
+            ",
+        ],
+        [
+            'table' => 'ingredient_ontology_terminal_dispositions',
+            'cursor' => 'id',
+            'insert' => "
+                INSERT INTO ingredient_ontology_terminal_dispositions (
+                    ontology_version_id, scope_id, disposition_code,
+                    disposition_name, entity_id, attributes_json, mechanism,
+                    evidence_json, evidence_hash, reviewer, review_batch,
+                    batch_hash, portable_disposition_hash, content_hash
+                )
+                SELECT {$childVersionId}, scope_map.new_id,
+                       source.disposition_code, source.disposition_name,
+                       entity_map.new_id, source.attributes_json,
+                       source.mechanism, source.evidence_json,
+                       source.evidence_hash, source.reviewer,
+                       source.review_batch, source.batch_hash,
+                       source.portable_disposition_hash, source.content_hash
+                FROM ingredient_ontology_terminal_dispositions source
+                {$map('scope', 'source.scope_id')}
+                LEFT JOIN ontology_version_fork_id_map entity_map
+                  ON entity_map.candidate_version_id = {$childVersionId}
+                 AND entity_map.map_kind = 'entity'
+                 AND entity_map.old_id = source.entity_id
+                WHERE source.ontology_version_id = {$parentVersionId}
+                  AND source.id > {{LOWER}} AND source.id <= {{UPPER}}
+                ORDER BY source.id
+            ",
+            'map_kind' => 'disposition',
+            'map' => "
+                INSERT INTO ontology_version_fork_id_map (
+                    candidate_version_id, map_kind, old_id, new_id
+                )
+                SELECT {$childVersionId}, 'disposition', old.id, new.id
+                FROM ingredient_ontology_terminal_dispositions old
+                {$map('scope', 'old.scope_id')}
+                JOIN ingredient_ontology_terminal_dispositions new
+                  ON new.ontology_version_id = {$childVersionId}
+                 AND new.scope_id = scope_map.new_id
+                WHERE old.ontology_version_id = {$parentVersionId}
+                  AND old.id > {{LOWER}} AND old.id <= {{UPPER}}
+            ",
+        ],
+        [
+            'table' => 'ingredient_ontology_provider_terms',
+            'cursor' => 'id',
+            'insert' => "
+                INSERT INTO ingredient_ontology_provider_terms (
+                    ontology_version_id, connector, metadata_schema_version,
+                    namespace, provider_ref, default_title,
+                    normalized_default_title, title_hash,
+                    observed_row_count, distinct_title_count,
+                    first_seen_at, last_seen_at, consistency_state,
+                    is_generic, mapping_status, review_state, entity_id,
+                    attributes_json, evidence_json, provenance,
+                    terminal_disposition_id
+                )
+                SELECT {$childVersionId}, source.connector,
+                       source.metadata_schema_version, source.namespace,
+                       source.provider_ref, source.default_title,
+                       source.normalized_default_title, source.title_hash,
+                       source.observed_row_count, source.distinct_title_count,
+                       source.first_seen_at, source.last_seen_at,
+                       source.consistency_state, source.is_generic,
+                       source.mapping_status, source.review_state,
+                       entity_map.new_id, source.attributes_json,
+                       source.evidence_json, source.provenance,
+                       disposition_map.new_id
+                FROM ingredient_ontology_provider_terms source
+                LEFT JOIN ontology_version_fork_id_map entity_map
+                  ON entity_map.candidate_version_id = {$childVersionId}
+                 AND entity_map.map_kind = 'entity'
+                 AND entity_map.old_id = source.entity_id
+                LEFT JOIN ontology_version_fork_id_map disposition_map
+                  ON disposition_map.candidate_version_id = {$childVersionId}
+                 AND disposition_map.map_kind = 'disposition'
+                 AND disposition_map.old_id =
+                     source.terminal_disposition_id
+                WHERE source.ontology_version_id = {$parentVersionId}
+                  AND source.id > {{LOWER}} AND source.id <= {{UPPER}}
+                ORDER BY source.id
+            ",
+            'map_kind' => 'provider_term',
+            'map' => "
+                INSERT INTO ontology_version_fork_id_map (
+                    candidate_version_id, map_kind, old_id, new_id
+                )
+                SELECT {$childVersionId}, 'provider_term', old.id, new.id
+                FROM ingredient_ontology_provider_terms old
+                JOIN ingredient_ontology_provider_terms new
+                  ON new.ontology_version_id = {$childVersionId}
+                 AND new.connector = old.connector
+                 AND new.metadata_schema_version =
+                     old.metadata_schema_version
+                 AND new.namespace = old.namespace
+                 AND new.provider_ref = old.provider_ref
+                WHERE old.ontology_version_id = {$parentVersionId}
+                  AND old.id > {{LOWER}} AND old.id <= {{UPPER}}
+            ",
+        ],
+        [
+            'table' => 'ingredient_ontology_mappings',
+            'cursor' => 'id',
+            'insert' => "
+                INSERT INTO ingredient_ontology_mappings (
+                    ontology_version_id, owner_type, owner_id,
+                    owner_fingerprint, source_label, normalized_label,
+                    language, entity_id, status, confidence,
+                    mapping_source, evidence_json, attributes_json,
+                    is_staple, provider_term_id, identity_basis,
+                    terminal_disposition_id
+                )
+                SELECT {$childVersionId}, source.owner_type,
+                       source.owner_id, source.owner_fingerprint,
+                       source.source_label, source.normalized_label,
+                       source.language, entity_map.new_id, source.status,
+                       source.confidence, source.mapping_source,
+                       source.evidence_json, source.attributes_json,
+                       source.is_staple, provider_map.new_id,
+                       source.identity_basis, disposition_map.new_id
+                FROM ingredient_ontology_mappings source
+                LEFT JOIN ontology_version_fork_id_map entity_map
+                  ON entity_map.candidate_version_id = {$childVersionId}
+                 AND entity_map.map_kind = 'entity'
+                 AND entity_map.old_id = source.entity_id
+                LEFT JOIN ontology_version_fork_id_map provider_map
+                  ON provider_map.candidate_version_id = {$childVersionId}
+                 AND provider_map.map_kind = 'provider_term'
+                 AND provider_map.old_id = source.provider_term_id
+                LEFT JOIN ontology_version_fork_id_map disposition_map
+                  ON disposition_map.candidate_version_id = {$childVersionId}
+                 AND disposition_map.map_kind = 'disposition'
+                 AND disposition_map.old_id =
+                     source.terminal_disposition_id
+                WHERE source.ontology_version_id = {$parentVersionId}
+                  AND source.id > {{LOWER}} AND source.id <= {{UPPER}}
+                ORDER BY source.id
+            ",
+            'map_kind' => 'mapping',
+            'map' => "
+                INSERT INTO ontology_version_fork_id_map (
+                    candidate_version_id, map_kind, old_id, new_id
+                )
+                SELECT {$childVersionId}, 'mapping', old.id, new.id
+                FROM ingredient_ontology_mappings old
+                JOIN ingredient_ontology_mappings new
+                  ON new.ontology_version_id = {$childVersionId}
+                 AND new.owner_type = old.owner_type
+                 AND new.owner_id = old.owner_id
+                WHERE old.ontology_version_id = {$parentVersionId}
+                  AND old.id > {{LOWER}} AND old.id <= {{UPPER}}
+            ",
+        ],
+        [
+            'table' => 'ingredient_ontology_relations',
+            'cursor' => 'id',
+            'insert' => "
+                INSERT INTO ingredient_ontology_relations (
+                    ontology_version_id, from_entity_id, to_entity_id,
+                    relation, direction, is_primary, satisfies_required,
+                    confidence, provenance, review_state, semantics_json
+                )
+                SELECT {$childVersionId}, from_map.new_id, to_map.new_id,
+                       source.relation, source.direction, source.is_primary,
+                       source.satisfies_required, source.confidence,
+                       source.provenance, source.review_state,
+                       source.semantics_json
+                FROM ingredient_ontology_relations source
+                JOIN ontology_version_fork_id_map from_map
+                  ON from_map.candidate_version_id = {$childVersionId}
+                 AND from_map.map_kind = 'entity'
+                 AND from_map.old_id = source.from_entity_id
+                JOIN ontology_version_fork_id_map to_map
+                  ON to_map.candidate_version_id = {$childVersionId}
+                 AND to_map.map_kind = 'entity'
+                 AND to_map.old_id = source.to_entity_id
+                WHERE source.ontology_version_id = {$parentVersionId}
+                  AND source.id > {{LOWER}} AND source.id <= {{UPPER}}
+                ORDER BY source.id
+            ",
+        ],
+        [
+            'table' => 'ingredient_ontology_entity_defaults',
+            'cursor' => 'id',
+            'insert' => "
+                INSERT INTO ingredient_ontology_entity_defaults (
+                    ontology_version_id, entity_id, facet_id,
+                    facet_value_id, is_defining, provenance
+                )
+                SELECT {$childVersionId}, entity_map.new_id,
+                       facet_map.new_id, facet_value_map.new_id,
+                       source.is_defining, source.provenance
+                FROM ingredient_ontology_entity_defaults source
+                {$map('entity', 'source.entity_id')}
+                {$map('facet', 'source.facet_id')}
+                {$map('facet_value', 'source.facet_value_id')}
+                WHERE source.ontology_version_id = {$parentVersionId}
+                  AND source.id > {{LOWER}} AND source.id <= {{UPPER}}
+                ORDER BY source.id
+            ",
+        ],
+        [
+            'table' => 'ingredient_ontology_label_attributes',
+            'cursor' => 'id',
+            'insert' => "
+                INSERT INTO ingredient_ontology_label_attributes (
+                    ontology_version_id, label_id, facet_id,
+                    facet_value_id, is_defining
+                )
+                SELECT {$childVersionId}, label_map.new_id,
+                       facet_map.new_id, facet_value_map.new_id,
+                       source.is_defining
+                FROM ingredient_ontology_label_attributes source
+                {$map('label', 'source.label_id')}
+                {$map('facet', 'source.facet_id')}
+                {$map('facet_value', 'source.facet_value_id')}
+                WHERE source.ontology_version_id = {$parentVersionId}
+                  AND source.id > {{LOWER}} AND source.id <= {{UPPER}}
+                ORDER BY source.id
+            ",
+        ],
+        [
+            'table' => 'ingredient_ontology_mapping_attributes',
+            'cursor' => 'id',
+            'insert' => "
+                INSERT INTO ingredient_ontology_mapping_attributes (
+                    ontology_version_id, mapping_id, facet_id,
+                    facet_value_id, is_defining, provenance
+                )
+                SELECT {$childVersionId}, mapping_map.new_id,
+                       facet_map.new_id, facet_value_map.new_id,
+                       source.is_defining, source.provenance
+                FROM ingredient_ontology_mapping_attributes source
+                {$map('mapping', 'source.mapping_id')}
+                {$map('facet', 'source.facet_id')}
+                {$map('facet_value', 'source.facet_value_id')}
+                WHERE source.ontology_version_id = {$parentVersionId}
+                  AND source.id > {{LOWER}} AND source.id <= {{UPPER}}
+                ORDER BY source.id
+            ",
+        ],
+        [
+            'table' => 'ingredient_ontology_mapping_relations',
+            'cursor' => 'id',
+            'insert' => "
+                INSERT INTO ingredient_ontology_mapping_relations (
+                    ontology_version_id, mapping_id, to_entity_id,
+                    relation, direction, confidence, provenance,
+                    review_state
+                )
+                SELECT {$childVersionId}, mapping_map.new_id,
+                       entity_map.new_id, source.relation,
+                       source.direction, source.confidence,
+                       source.provenance, source.review_state
+                FROM ingredient_ontology_mapping_relations source
+                {$map('mapping', 'source.mapping_id')}
+                {$map('entity', 'source.to_entity_id')}
+                WHERE source.ontology_version_id = {$parentVersionId}
+                  AND source.id > {{LOWER}} AND source.id <= {{UPPER}}
+                ORDER BY source.id
+            ",
+        ],
+        [
+            'table' => 'ingredient_ontology_entity_facet_policies',
+            'cursor' => 'id',
+            'insert' => "
+                INSERT INTO ingredient_ontology_entity_facet_policies (
+                    ontology_version_id, entity_id, facet_id, allowed,
+                    defining, evidence_source_id, policy_hash, provenance
+                )
+                SELECT {$childVersionId}, entity_map.new_id,
+                       facet_map.new_id, source.allowed, source.defining,
+                       evidence_map.new_id, source.policy_hash,
+                       source.provenance
+                FROM ingredient_ontology_entity_facet_policies source
+                {$map('entity', 'source.entity_id')}
+                {$map('facet', 'source.facet_id')}
+                LEFT JOIN ontology_version_fork_id_map evidence_map
+                  ON evidence_map.candidate_version_id = {$childVersionId}
+                 AND evidence_map.map_kind = 'evidence'
+                 AND evidence_map.old_id = source.evidence_source_id
+                WHERE source.ontology_version_id = {$parentVersionId}
+                  AND source.id > {{LOWER}} AND source.id <= {{UPPER}}
+                ORDER BY source.id
+            ",
+        ],
+        [
+            'table' => 'ingredient_ontology_label_context_policies',
+            'cursor' => 'id',
+            'insert' => "
+                INSERT INTO ingredient_ontology_label_context_policies (
+                    ontology_version_id, label_id, required_cohort,
+                    required_evidence_kind, required_evidence_key,
+                    policy_hash, provenance
+                )
+                SELECT {$childVersionId}, label_map.new_id,
+                       source.required_cohort,
+                       source.required_evidence_kind,
+                       source.required_evidence_key,
+                       source.policy_hash, source.provenance
+                FROM ingredient_ontology_label_context_policies source
+                {$map('label', 'source.label_id')}
+                WHERE source.ontology_version_id = {$parentVersionId}
+                  AND source.id > {{LOWER}} AND source.id <= {{UPPER}}
+                ORDER BY source.id
+            ",
+        ],
+        [
+            'table' => 'ingredient_ontology_recipe_cohorts',
+            'cursor' => 'id',
+            'insert' => "
+                INSERT INTO ingredient_ontology_recipe_cohorts (
+                    ontology_version_id, recipe_id, cohort, winner_votes,
+                    runner_up_votes, margin, conflict_count, votes_json,
+                    recipe_fingerprint, algorithm_hash, evidence_source_id
+                )
+                SELECT {$childVersionId}, source.recipe_id, source.cohort,
+                       source.winner_votes, source.runner_up_votes,
+                       source.margin, source.conflict_count,
+                       source.votes_json, source.recipe_fingerprint,
+                       source.algorithm_hash, evidence_map.new_id
+                FROM ingredient_ontology_recipe_cohorts source
+                LEFT JOIN ontology_version_fork_id_map evidence_map
+                  ON evidence_map.candidate_version_id = {$childVersionId}
+                 AND evidence_map.map_kind = 'evidence'
+                 AND evidence_map.old_id = source.evidence_source_id
+                WHERE source.ontology_version_id = {$parentVersionId}
+                  AND source.id > {{LOWER}} AND source.id <= {{UPPER}}
+                ORDER BY source.id
+            ",
+        ],
+        [
+            'table' => 'ingredient_ontology_primary_edge_reviews',
+            'cursor' => 'id',
+            'insert' => "
+                INSERT INTO ingredient_ontology_primary_edge_reviews (
+                    ontology_version_id, child_entity_id,
+                    previous_parent_entity_id, new_parent_entity_id,
+                    change_kind, disposition, rationale, manifest_id,
+                    content_hash, reviewer, review_batch
+                )
+                SELECT {$childVersionId}, child_map.new_id,
+                       previous_map.new_id, next_map.new_id,
+                       source.change_kind, source.disposition,
+                       source.rationale, manifest_map.new_id,
+                       source.content_hash, source.reviewer,
+                       source.review_batch
+                FROM ingredient_ontology_primary_edge_reviews source
+                JOIN ontology_version_fork_id_map child_map
+                  ON child_map.candidate_version_id = {$childVersionId}
+                 AND child_map.map_kind = 'entity'
+                 AND child_map.old_id = source.child_entity_id
+                LEFT JOIN ontology_version_fork_id_map previous_map
+                  ON previous_map.candidate_version_id = {$childVersionId}
+                 AND previous_map.map_kind = 'entity'
+                 AND previous_map.old_id =
+                     source.previous_parent_entity_id
+                LEFT JOIN ontology_version_fork_id_map next_map
+                  ON next_map.candidate_version_id = {$childVersionId}
+                 AND next_map.map_kind = 'entity'
+                 AND next_map.old_id = source.new_parent_entity_id
+                LEFT JOIN ontology_version_fork_id_map manifest_map
+                  ON manifest_map.candidate_version_id = {$childVersionId}
+                 AND manifest_map.map_kind = 'manifest'
+                 AND manifest_map.old_id = source.manifest_id
+                WHERE source.ontology_version_id = {$parentVersionId}
+                  AND source.id > {{LOWER}} AND source.id <= {{UPPER}}
+                ORDER BY source.id
+            ",
+        ],
+        [
+            'table' => 'ingredient_ontology_curated_product_assertions',
+            'cursor' => 'id',
+            'insert' => "
+                INSERT INTO ingredient_ontology_curated_product_assertions (
+                    ontology_version_id, product_id, product_fingerprint,
+                    product_name, normalized_product_name, entity_id,
+                    status, confidence, attributes_json, rationale,
+                    provenance, review_state, terminal_disposition_id
+                )
+                SELECT {$childVersionId}, source.product_id,
+                       source.product_fingerprint, source.product_name,
+                       source.normalized_product_name, entity_map.new_id,
+                       source.status, source.confidence,
+                       source.attributes_json, source.rationale,
+                       source.provenance, source.review_state,
+                       disposition_map.new_id
+                FROM ingredient_ontology_curated_product_assertions source
+                LEFT JOIN ontology_version_fork_id_map entity_map
+                  ON entity_map.candidate_version_id = {$childVersionId}
+                 AND entity_map.map_kind = 'entity'
+                 AND entity_map.old_id = source.entity_id
+                LEFT JOIN ontology_version_fork_id_map disposition_map
+                  ON disposition_map.candidate_version_id = {$childVersionId}
+                 AND disposition_map.map_kind = 'disposition'
+                 AND disposition_map.old_id =
+                     source.terminal_disposition_id
+                WHERE source.ontology_version_id = {$parentVersionId}
+                  AND source.id > {{LOWER}} AND source.id <= {{UPPER}}
+                ORDER BY source.id
+            ",
+        ],
+        [
+            'table' => 'ingredient_ontology_provider_observations',
+            'cursor' => 'id',
+            'insert' => "
+                INSERT INTO ingredient_ontology_provider_observations (
+                    ontology_version_id, provider_term_id, mapping_id,
+                    owner_type, owner_id, owner_fingerprint, recipe_id,
+                    connector, metadata_schema_version, namespace,
+                    provider_ref, default_title, normalized_default_title,
+                    title_hash, local_label, normalized_local_label,
+                    local_label_hash, consistency_state, ref_provenance,
+                    group_index, group_position, source_position,
+                    observed_first_at, observed_last_at, evidence_json
+                )
+                SELECT {$childVersionId}, provider_map.new_id,
+                       mapping_map.new_id, source.owner_type,
+                       source.owner_id, source.owner_fingerprint,
+                       source.recipe_id, source.connector,
+                       source.metadata_schema_version, source.namespace,
+                       source.provider_ref, source.default_title,
+                       source.normalized_default_title, source.title_hash,
+                       source.local_label, source.normalized_local_label,
+                       source.local_label_hash, source.consistency_state,
+                       source.ref_provenance, source.group_index,
+                       source.group_position, source.source_position,
+                       source.observed_first_at, source.observed_last_at,
+                       source.evidence_json
+                FROM ingredient_ontology_provider_observations source
+                LEFT JOIN ontology_version_fork_id_map provider_map
+                  ON provider_map.candidate_version_id = {$childVersionId}
+                 AND provider_map.map_kind = 'provider_term'
+                 AND provider_map.old_id = source.provider_term_id
+                LEFT JOIN ontology_version_fork_id_map mapping_map
+                  ON mapping_map.candidate_version_id = {$childVersionId}
+                 AND mapping_map.map_kind = 'mapping'
+                 AND mapping_map.old_id = source.mapping_id
+                WHERE source.ontology_version_id = {$parentVersionId}
+                  AND source.id > {{LOWER}} AND source.id <= {{UPPER}}
+                ORDER BY source.id
+            ",
+        ],
+        [
+            'table' => 'ingredient_ontology_mapping_assertion_history',
+            'cursor' => 'id',
+            'insert' => "
+                INSERT INTO ingredient_ontology_mapping_assertion_history (
+                    ontology_version_id, mapping_id, owner_type,
+                    owner_fingerprint, phase, prior_status,
+                    proposed_entity_slug, proposed_confidence,
+                    proposed_attributes_json, proposed_relations_json,
+                    mapping_source, legacy_target_json,
+                    denied_provenance_json, evidence_hash, content_hash
+                )
+                SELECT {$childVersionId}, mapping_map.new_id,
+                       source.owner_type, source.owner_fingerprint,
+                       source.phase, source.prior_status,
+                       source.proposed_entity_slug,
+                       source.proposed_confidence,
+                       source.proposed_attributes_json,
+                       source.proposed_relations_json,
+                       source.mapping_source, source.legacy_target_json,
+                       source.denied_provenance_json,
+                       source.evidence_hash, source.content_hash
+                FROM ingredient_ontology_mapping_assertion_history source
+                LEFT JOIN ontology_version_fork_id_map mapping_map
+                  ON mapping_map.candidate_version_id = {$childVersionId}
+                 AND mapping_map.map_kind = 'mapping'
+                 AND mapping_map.old_id = source.mapping_id
+                WHERE source.ontology_version_id = {$parentVersionId}
+                  AND source.id > {{LOWER}} AND source.id <= {{UPPER}}
+                ORDER BY source.id
+            ",
+        ],
+        [
+            'table' => 'ingredient_ontology_curated_provider_reviews',
+            'cursor' => 'id',
+            'insert' => "
+                INSERT INTO ingredient_ontology_curated_provider_reviews (
+                    ontology_version_id, connector,
+                    metadata_schema_version, namespace, provider_ref,
+                    disposition, rationale, provenance
+                )
+                SELECT {$childVersionId}, source.connector,
+                       source.metadata_schema_version, source.namespace,
+                       source.provider_ref, source.disposition,
+                       source.rationale, source.provenance
+                FROM ingredient_ontology_curated_provider_reviews source
+                WHERE source.ontology_version_id = {$parentVersionId}
+                  AND source.id > {{LOWER}} AND source.id <= {{UPPER}}
+                ORDER BY source.id
+            ",
+        ],
+        [
+            'table' =>
+                'ingredient_ontology_curated_provider_conflict_reviews',
+            'cursor' => 'id',
+            'insert' => "
+                INSERT INTO
+                    ingredient_ontology_curated_provider_conflict_reviews (
+                        ontology_version_id, mapping_id, provider_term_id,
+                        disposition, rationale, provenance
+                    )
+                SELECT {$childVersionId}, mapping_map.new_id,
+                       provider_map.new_id, source.disposition,
+                       source.rationale, source.provenance
+                FROM
+                    ingredient_ontology_curated_provider_conflict_reviews
+                        source
+                LEFT JOIN ontology_version_fork_id_map mapping_map
+                  ON mapping_map.candidate_version_id = {$childVersionId}
+                 AND mapping_map.map_kind = 'mapping'
+                 AND mapping_map.old_id = source.mapping_id
+                LEFT JOIN ontology_version_fork_id_map provider_map
+                  ON provider_map.candidate_version_id = {$childVersionId}
+                 AND provider_map.map_kind = 'provider_term'
+                 AND provider_map.old_id = source.provider_term_id
+                WHERE source.ontology_version_id = {$parentVersionId}
+                  AND source.id > {{LOWER}} AND source.id <= {{UPPER}}
+                ORDER BY source.id
+            ",
+        ],
+        [
+            'table' => 'ingredient_ontology_subject_resolutions',
+            'cursor' => 'subject_id',
+            'insert' => "
+                INSERT INTO ingredient_ontology_subject_resolutions (
+                    ontology_version_id, subject_id, entity_id, status,
+                    confidence, attributes_json, evidence_hash, plan_hash
+                )
+                SELECT {$childVersionId}, source.subject_id,
+                       entity_map.new_id, source.status,
+                       source.confidence, source.attributes_json,
+                       source.evidence_hash, source.plan_hash
+                FROM ingredient_ontology_subject_resolutions source
+                LEFT JOIN ontology_version_fork_id_map entity_map
+                  ON entity_map.candidate_version_id = {$childVersionId}
+                 AND entity_map.map_kind = 'entity'
+                 AND entity_map.old_id = source.entity_id
+                WHERE source.ontology_version_id = {$parentVersionId}
+                  AND source.subject_id > {{LOWER}}
+                  AND source.subject_id <= {{UPPER}}
+                ORDER BY source.subject_id
+            ",
+        ],
+        [
+            'table' => 'ingredient_ontology_pair_constraints',
+            'cursor' => 'constraint_ledger_id',
+            'insert' => "
+                INSERT INTO ingredient_ontology_pair_constraints (
+                    ontology_version_id, constraint_ledger_id, stream_key,
+                    subject_id, target_owner_fingerprint, constraint_kind,
+                    constraint_epoch, evidence_hash
+                )
+                SELECT {$childVersionId}, source.constraint_ledger_id,
+                       source.stream_key, source.subject_id,
+                       source.target_owner_fingerprint,
+                       source.constraint_kind, source.constraint_epoch,
+                       source.evidence_hash
+                FROM ingredient_ontology_pair_constraints source
+                WHERE source.ontology_version_id = {$parentVersionId}
+                  AND source.constraint_ledger_id > {{LOWER}}
+                  AND source.constraint_ledger_id <= {{UPPER}}
+                ORDER BY source.constraint_ledger_id
+            ",
+        ],
+    ];
+}
+
+function ingredientOntologyControllerStartChunkedFork(
+    PDO $db,
+    int $parentVersionId,
+    array $metadata
+): array {
+    ingredientOntologyControllerAssertCopiedGenerationDatabase($db);
+    $parent = ingredientOntologyV3Version($db, $parentVersionId);
+    if ($parent === null || $parent['status'] !== 'ready') {
+        throw new InvalidArgumentException(
+            'ontology fork requires a ready parent version'
+        );
+    }
+    $constraintEpoch = max(
+        0,
+        (int)($metadata['constraint_epoch'] ?? 0)
+    );
+    $constraintHash = (string)(
+        $metadata['constraint_hash']
+            ?? ingredientOntologyControllerConstraintHash(
+                $db,
+                $constraintEpoch
+            )
+    );
+    $policyHash = (string)(
+        $metadata['controller_policy_hash']
+            ?? ingredientOntologyControllerPolicyHash()
+    );
+    $generationKey = (string)$metadata['generation_key'];
+    $activationPolicy = (string)(
+        $metadata['activation_policy'] ?? 'autonomous'
+    );
+    foreach ([
+        $constraintHash, $policyHash, $generationKey,
+    ] as $hash) {
+        if (!preg_match('/^[a-f0-9]{64}$/D', $hash)) {
+            throw new InvalidArgumentException(
+                'chunked ontology fork hash is invalid'
+            );
+        }
+    }
+    $existing = $db->prepare("
+        SELECT version.id, version.version, version.status,
+               progress.status AS fork_status
+        FROM ingredient_ontology_versions version
+        LEFT JOIN ontology_version_fork_progress progress
+          ON progress.candidate_version_id = version.id
+        WHERE version.parent_version_id = ?
+          AND version.controller_generation_key = ?
+        ORDER BY version.id DESC
+        LIMIT 1
+    ");
+    $existing->execute([$parentVersionId, $generationKey]);
+    $row = $existing->fetch(PDO::FETCH_ASSOC);
+    if ($row) {
+        return [
+            'parent_version_id' => $parentVersionId,
+            'version_id' => (int)$row['id'],
+            'version' => (string)$row['version'],
+            'status' => (string)$row['status'],
+            'fork_status' => (string)($row['fork_status'] ?? 'complete'),
+            'generation_key' => $generationKey,
+            'constraint_epoch' => $constraintEpoch,
+            'constraint_hash' => $constraintHash,
+            'replayed' => true,
+        ];
+    }
+    $versionName = mb_substr(
+        (string)$parent['version'],
+        0,
+        48,
+        'UTF-8'
+    ) . '-auto-' . substr($generationKey, 0, 12);
+    $db->exec('BEGIN IMMEDIATE');
+    try {
+        $existing->execute([$parentVersionId, $generationKey]);
+        $row = $existing->fetch(PDO::FETCH_ASSOC);
+        if ($row) {
+            $db->exec('COMMIT');
+            return [
+                'parent_version_id' => $parentVersionId,
+                'version_id' => (int)$row['id'],
+                'version' => (string)$row['version'],
+                'status' => (string)$row['status'],
+                'fork_status' =>
+                    (string)($row['fork_status'] ?? 'complete'),
+                'generation_key' => $generationKey,
+                'constraint_epoch' => $constraintEpoch,
+                'constraint_hash' => $constraintHash,
+                'replayed' => true,
+            ];
+        }
+        $db->prepare("
+            INSERT INTO ingredient_ontology_versions (
+                version, status, schema_hash, prompt_hash, model_hash,
+                model_name, corpus_hash, content_hash, parent_version_id,
+                validation_report_json, activation_policy,
+                activation_block_reason, corpus_profile,
+                frozen_corpus_hash, frozen_subjects_hash, policy_hash,
+                portable_content_hash, review_manifest_hash,
+                resolution_gold_hash, seal_hash,
+                controller_base_content_hash,
+                controller_constraint_epoch,
+                controller_constraint_hash,
+                controller_policy_hash,
+                controller_generation_key,
+                controller_activation_policy
+            )
+            SELECT ?, 'building', schema_hash, prompt_hash, model_hash,
+                   model_name, corpus_hash, content_hash, id,
+                   '{}', activation_policy, activation_block_reason,
+                   corpus_profile, frozen_corpus_hash,
+                   frozen_subjects_hash, policy_hash,
+                   portable_content_hash, review_manifest_hash,
+                   resolution_gold_hash, seal_hash,
+                   content_hash, ?, ?, ?, ?, ?
+            FROM ingredient_ontology_versions
+            WHERE id = ?
+        ")->execute([
+            $versionName,
+            $constraintEpoch,
+            $constraintHash,
+            $policyHash,
+            $generationKey,
+            $activationPolicy,
+            $parentVersionId,
+        ]);
+        $childVersionId = (int)$db->lastInsertId();
+        if ($childVersionId <= 0) {
+            throw new RuntimeException(
+                'chunked ontology child version was not created'
+            );
+        }
+        $db->prepare("
+            INSERT INTO ontology_version_fork_progress (
+                candidate_version_id, parent_version_id, chunk_rows
+            )
+            VALUES (?, ?, ?)
+        ")->execute([
+            $childVersionId,
+            $parentVersionId,
+            ingredientOntologyControllerForkChunkRows(),
+        ]);
+        $db->exec('COMMIT');
+        return [
+            'parent_version_id' => $parentVersionId,
+            'version_id' => $childVersionId,
+            'version' => $versionName,
+            'status' => 'building',
+            'fork_status' => 'copying',
+            'generation_key' => $generationKey,
+            'constraint_epoch' => $constraintEpoch,
+            'constraint_hash' => $constraintHash,
+        ];
+    } catch (Throwable $error) {
+        try {
+            $db->exec('ROLLBACK');
+        } catch (Throwable $ignored) {
+        }
+        throw $error;
+    }
+}
+
+function ingredientOntologyControllerRunChunkedFork(
+    PDO $db,
+    int $childVersionId
+): array {
+    ingredientOntologyControllerAssertCopiedGenerationDatabase($db);
+    $token = hash('sha256', random_bytes(32) . ':' . hrtime(true));
+    $db->exec('BEGIN IMMEDIATE');
+    try {
+        $claim = $db->prepare("
+            UPDATE ontology_version_fork_progress
+            SET lease_token = ?,
+                lease_generation = lease_generation + 1,
+                leased_until = datetime('now', '+10 minutes'),
+                updated_at = CURRENT_TIMESTAMP
+            WHERE candidate_version_id = ?
+              AND status IN ('copying', 'verifying', 'cleanup')
+              AND (
+                  lease_token IS NULL
+                  OR leased_until IS NULL
+                  OR leased_until <= CURRENT_TIMESTAMP
+              )
+        ");
+        $claim->execute([$token, $childVersionId]);
+        if ($claim->rowCount() !== 1) {
+            $complete = $db->prepare("
+                SELECT * FROM ontology_version_fork_progress
+                WHERE candidate_version_id = ?
+            ");
+            $complete->execute([$childVersionId]);
+            $row = $complete->fetch(PDO::FETCH_ASSOC);
+            $complete->closeCursor();
+            $db->exec('COMMIT');
+            if (($row['status'] ?? '') === 'complete') {
+                return $row;
+            }
+            throw new RuntimeException(
+                'controller_chunked_fork_lease_busy_retryable'
+            );
+        }
+        $leaseGenerationStatement = $db->query("
+            SELECT lease_generation
+            FROM ontology_version_fork_progress
+            WHERE candidate_version_id = {$childVersionId}
+        ");
+        $leaseGeneration =
+            (int)$leaseGenerationStatement->fetchColumn();
+        $leaseGenerationStatement->closeCursor();
+        $db->exec('COMMIT');
+    } catch (Throwable $error) {
+        try {
+            $db->exec('ROLLBACK');
+        } catch (Throwable $ignored) {
+        }
+        throw $error;
+    }
+    try {
+        while (true) {
+            $read = $db->prepare("
+                SELECT * FROM ontology_version_fork_progress
+                WHERE candidate_version_id = ?
+                  AND lease_token = ?
+                  AND lease_generation = ?
+            ");
+            $read->execute([
+                $childVersionId,
+                $token,
+                $leaseGeneration,
+            ]);
+            $progress = $read->fetch(PDO::FETCH_ASSOC);
+            $read->closeCursor();
+            if (!$progress) {
+                throw new RuntimeException(
+                    'controller_chunked_fork_lease_lost'
+                );
+            }
+            if ((string)$progress['status'] === 'complete') {
+                return $progress;
+            }
+            if ((string)$progress['status'] === 'failed') {
+                throw new RuntimeException(
+                    (string)$progress['last_error']
+                );
+            }
+            $parentVersionId = (int)$progress['parent_version_id'];
+            $phases = ingredientOntologyControllerForkPhaseDefinitions(
+                $parentVersionId,
+                $childVersionId
+            );
+            $phase = (int)$progress['phase'];
+            if (
+                $phase >= count($phases)
+                && (string)$progress['status'] !== 'cleanup'
+            ) {
+                $parentPortable = ingredientOntologyV3PortableContentHash(
+                    $db,
+                    $parentVersionId
+                );
+                $childPortable = ingredientOntologyV3PortableContentHash(
+                    $db,
+                    $childVersionId
+                );
+                if (!hash_equals($parentPortable, $childPortable)) {
+                    throw new RuntimeException(
+                        'unchanged ontology fork portable content hash mismatch'
+                    );
+                }
+                $db->exec('BEGIN IMMEDIATE');
+                try {
+                    $finish = $db->prepare("
+                        UPDATE ontology_version_fork_progress
+                        SET status = 'cleanup',
+                            lease_token = ?,
+                            leased_until = datetime('now', '+10 minutes'),
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE candidate_version_id = ?
+                          AND lease_token = ?
+                          AND lease_generation = ?
+                          AND status IN ('copying', 'verifying')
+                    ");
+                    $finish->execute([
+                        $token,
+                        $childVersionId,
+                        $token,
+                        $leaseGeneration,
+                    ]);
+                    $db->exec('COMMIT');
+                } catch (Throwable $error) {
+                    try {
+                        $db->exec('ROLLBACK');
+                    } catch (Throwable $ignored) {
+                    }
+                    throw $error;
+                }
+                continue;
+            }
+            if ((string)$progress['status'] === 'cleanup') {
+                $kind = $db->prepare("
+                    SELECT map_kind
+                    FROM ontology_version_fork_id_map
+                    WHERE candidate_version_id = ?
+                    ORDER BY map_kind, old_id
+                    LIMIT 1
+                ");
+                $kind->execute([$childVersionId]);
+                $mapKind = $kind->fetchColumn();
+                $kind->closeCursor();
+                if ($mapKind === false) {
+                    $db->exec('BEGIN IMMEDIATE');
+                    try {
+                        $complete = $db->prepare("
+                            UPDATE ontology_version_fork_progress
+                            SET status = 'complete',
+                                lease_token = NULL,
+                                leased_until = NULL,
+                                completed_at = CURRENT_TIMESTAMP,
+                                updated_at = CURRENT_TIMESTAMP
+                            WHERE candidate_version_id = ?
+                              AND lease_token = ?
+                              AND lease_generation = ?
+                              AND status = 'cleanup'
+                        ");
+                        $complete->execute([
+                            $childVersionId,
+                            $token,
+                            $leaseGeneration,
+                        ]);
+                        $db->exec('COMMIT');
+                    } catch (Throwable $error) {
+                        try {
+                            $db->exec('ROLLBACK');
+                        } catch (Throwable $ignored) {
+                        }
+                        throw $error;
+                    }
+                    ingredientOntologyControllerHook(
+                        'controller_fork_before_commit',
+                        [
+                            'parent_version_id' => $parentVersionId,
+                            'child_version_id' => $childVersionId,
+                            'generation_key' => (string)$db->query("
+                                SELECT controller_generation_key
+                                FROM ingredient_ontology_versions
+                                WHERE id = {$childVersionId}
+                            ")->fetchColumn(),
+                            'chunked' => true,
+                        ]
+                    );
+                    $completeRow = $db->prepare("
+                        SELECT * FROM ontology_version_fork_progress
+                        WHERE candidate_version_id = ?
+                    ");
+                    $completeRow->execute([$childVersionId]);
+                    return $completeRow->fetch(PDO::FETCH_ASSOC) ?: [
+                        'candidate_version_id' => $childVersionId,
+                        'status' => 'complete',
+                    ];
+                }
+                $chunkRows = max(25, (int)$progress['chunk_rows']);
+                $started = hrtime(true);
+                $db->exec('BEGIN IMMEDIATE');
+                try {
+                    $delete = $db->prepare("
+                        DELETE FROM ontology_version_fork_id_map
+                        WHERE candidate_version_id = ?
+                          AND map_kind = ?
+                          AND old_id IN (
+                              SELECT old_id
+                              FROM ontology_version_fork_id_map
+                              WHERE candidate_version_id = ?
+                                AND map_kind = ?
+                              ORDER BY old_id
+                              LIMIT {$chunkRows}
+                          )
+                    ");
+                    $delete->execute([
+                        $childVersionId,
+                        (string)$mapKind,
+                        $childVersionId,
+                        (string)$mapKind,
+                    ]);
+                    $preCommitMs =
+                        (hrtime(true) - $started) / 1000000;
+                    $db->prepare("
+                        UPDATE ontology_version_fork_progress
+                        SET last_reservation_ms = ?,
+                            maximum_reservation_ms =
+                                MAX(maximum_reservation_ms, ?),
+                            leased_until = datetime('now', '+10 minutes'),
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE candidate_version_id = ?
+                          AND lease_token = ?
+                          AND lease_generation = ?
+                    ")->execute([
+                        $preCommitMs,
+                        $preCommitMs,
+                        $childVersionId,
+                        $token,
+                        $leaseGeneration,
+                    ]);
+                    $db->exec('COMMIT');
+                    $elapsedMs =
+                        (hrtime(true) - $started) / 1000000;
+                    $postCommitChunkRows = $elapsedMs > 250.0
+                        ? max(25, intdiv($chunkRows, 2))
+                        : $chunkRows;
+                    $db->prepare("
+                        UPDATE ontology_version_fork_progress
+                        SET chunk_rows = ?,
+                            last_reservation_ms = ?,
+                            maximum_reservation_ms =
+                                MAX(maximum_reservation_ms, ?),
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE candidate_version_id = ?
+                          AND lease_token = ?
+                          AND lease_generation = ?
+                    ")->execute([
+                        $postCommitChunkRows,
+                        $elapsedMs,
+                        $elapsedMs,
+                        $childVersionId,
+                        $token,
+                        $leaseGeneration,
+                    ]);
+                } catch (Throwable $error) {
+                    try {
+                        $db->exec('ROLLBACK');
+                    } catch (Throwable $ignored) {
+                    }
+                    throw $error;
+                }
+                continue;
+            }
+            $definition = $phases[$phase];
+            $cursor = (int)$progress['source_cursor'];
+            $chunkRows = max(25, (int)$progress['chunk_rows']);
+            $nextStatement = $db->query("
+                SELECT COALESCE(MAX(source_cursor), 0)
+                FROM (
+                    SELECT {$definition['cursor']} AS source_cursor
+                    FROM {$definition['table']}
+                    WHERE ontology_version_id = {$parentVersionId}
+                      AND {$definition['cursor']} > {$cursor}
+                    ORDER BY {$definition['cursor']}
+                    LIMIT {$chunkRows}
+                )
+            ");
+            $next = $nextStatement->fetchColumn();
+            $nextStatement->closeCursor();
+            $nextCursor = (int)$next;
+            if ($nextCursor <= $cursor) {
+                $db->exec('BEGIN IMMEDIATE');
+                try {
+                    $advance = $db->prepare("
+                        UPDATE ontology_version_fork_progress
+                        SET phase = phase + 1,
+                            source_cursor = 0,
+                            leased_until = datetime('now', '+10 minutes'),
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE candidate_version_id = ?
+                          AND lease_token = ?
+                          AND lease_generation = ?
+                          AND phase = ?
+                          AND source_cursor = ?
+                    ");
+                    $advance->execute([
+                        $childVersionId,
+                        $token,
+                        $leaseGeneration,
+                        $phase,
+                        $cursor,
+                    ]);
+                    $db->exec('COMMIT');
+                } catch (Throwable $error) {
+                    try {
+                        $db->exec('ROLLBACK');
+                    } catch (Throwable $ignored) {
+                    }
+                    throw $error;
+                }
+                continue;
+            }
+            $sql = str_replace(
+                ['{{LOWER}}', '{{UPPER}}'],
+                [(string)$cursor, (string)$nextCursor],
+                (string)$definition['insert']
+            );
+            $mapSql = isset($definition['map'])
+                ? str_replace(
+                    ['{{LOWER}}', '{{UPPER}}'],
+                    [(string)$cursor, (string)$nextCursor],
+                    (string)$definition['map']
+                )
+                : null;
+            $started = hrtime(true);
+            $db->exec('BEGIN IMMEDIATE');
+            try {
+                $inserted = $db->exec($sql);
+                if ($mapSql !== null) {
+                    $db->exec($mapSql);
+                }
+                $preCommitMs =
+                    (hrtime(true) - $started) / 1000000;
+                $nextChunkRows = $chunkRows;
+                if ($preCommitMs > 250.0) {
+                    $nextChunkRows = max(25, intdiv($chunkRows, 2));
+                } elseif (
+                    $preCommitMs < 75.0
+                    && $chunkRows
+                        < ingredientOntologyControllerForkChunkRows()
+                ) {
+                    $nextChunkRows = min(
+                        ingredientOntologyControllerForkChunkRows(),
+                        $chunkRows * 2
+                    );
+                }
+                $update = $db->prepare("
+                    UPDATE ontology_version_fork_progress
+                    SET source_cursor = ?,
+                        chunk_rows = ?,
+                        rows_copied = rows_copied + ?,
+                        last_reservation_ms = ?,
+                        maximum_reservation_ms =
+                            MAX(maximum_reservation_ms, ?),
+                        leased_until = datetime('now', '+10 minutes'),
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE candidate_version_id = ?
+                      AND lease_token = ?
+                      AND lease_generation = ?
+                      AND phase = ?
+                      AND source_cursor = ?
+                ");
+                $update->execute([
+                    $nextCursor,
+                    $nextChunkRows,
+                    max(0, (int)$inserted),
+                    $preCommitMs,
+                    $preCommitMs,
+                    $childVersionId,
+                    $token,
+                    $leaseGeneration,
+                    $phase,
+                    $cursor,
+                ]);
+                if ($update->rowCount() !== 1) {
+                    throw new RuntimeException(
+                        'controller_chunked_fork_progress_fence_lost'
+                    );
+                }
+                $db->exec('COMMIT');
+                $elapsedMs =
+                    (hrtime(true) - $started) / 1000000;
+                $postCommitChunkRows = $elapsedMs > 250.0
+                    ? max(25, intdiv($nextChunkRows, 2))
+                    : $nextChunkRows;
+                $db->prepare("
+                    UPDATE ontology_version_fork_progress
+                    SET chunk_rows = ?,
+                        last_reservation_ms = ?,
+                        maximum_reservation_ms =
+                            MAX(maximum_reservation_ms, ?),
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE candidate_version_id = ?
+                      AND lease_token = ?
+                      AND lease_generation = ?
+                ")->execute([
+                    $postCommitChunkRows,
+                    $elapsedMs,
+                    $elapsedMs,
+                    $childVersionId,
+                    $token,
+                    $leaseGeneration,
+                ]);
+            } catch (Throwable $error) {
+                try {
+                    $db->exec('ROLLBACK');
+                } catch (Throwable $ignored) {
+                }
+                throw $error;
+            }
+            ingredientOntologyControllerHook(
+                'controller_chunked_fork_after_chunk',
+                [
+                    'parent_version_id' => $parentVersionId,
+                    'child_version_id' => $childVersionId,
+                    'phase' => $phase,
+                    'source_cursor' => $nextCursor,
+                    'reservation_ms' => $elapsedMs,
+                ]
+            );
+        }
+    } catch (Throwable $error) {
+        try {
+            $release = $db->prepare("
+                UPDATE ontology_version_fork_progress
+                SET lease_token = NULL,
+                    leased_until = NULL,
+                    last_error = ?,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE candidate_version_id = ?
+                  AND lease_token = ?
+                  AND lease_generation = ?
+            ");
+            $release->execute([
+                mb_substr($error->getMessage(), 0, 1000, 'UTF-8'),
+                $childVersionId,
+                $token,
+                $leaseGeneration,
+            ]);
+        } catch (Throwable $ignored) {
+        }
+        throw $error;
+    }
+}
+
+function ingredientOntologyControllerChunkedFork(
+    PDO $db,
+    int $parentVersionId,
+    array $metadata
+): array {
+    ingredientOntologyControllerAssertCopiedGenerationDatabase($db);
+    $fork = ingredientOntologyControllerStartChunkedFork(
+        $db,
+        $parentVersionId,
+        $metadata
+    );
+    $progress = ingredientOntologyControllerRunChunkedFork(
+        $db,
+        (int)$fork['version_id']
+    );
+    $childVersionId = (int)$fork['version_id'];
+    return $fork + [
+        'fork_status' => (string)$progress['status'],
+        'portable_content_hash' =>
+            ingredientOntologyV3PortableContentHash(
+                $db,
+                $childVersionId
+            ),
+        'content_hash' => ingredientOntologyV3ContentHash(
+            $db,
+            $childVersionId
+        ),
+        'rows_copied' => (int)$progress['rows_copied'],
+        'maximum_reservation_ms' =>
+            (float)$progress['maximum_reservation_ms'],
+    ];
+}
+
+function ingredientOntologyControllerForkCleanupTables(): array {
+    return [
+        'ingredient_ontology_pair_constraints',
+        'ingredient_ontology_subject_resolutions',
+        'ingredient_ontology_curated_provider_conflict_reviews',
+        'ingredient_ontology_curated_provider_reviews',
+        'ingredient_ontology_mapping_assertion_history',
+        'ingredient_ontology_provider_observations',
+        'ingredient_ontology_curated_product_assertions',
+        'ingredient_ontology_primary_edge_reviews',
+        'ingredient_ontology_recipe_cohorts',
+        'ingredient_ontology_label_context_policies',
+        'ingredient_ontology_entity_facet_policies',
+        'ingredient_ontology_mapping_relations',
+        'ingredient_ontology_mapping_attributes',
+        'ingredient_ontology_label_attributes',
+        'ingredient_ontology_entity_defaults',
+        'ingredient_ontology_relations',
+        'ingredient_ontology_mappings',
+        'ingredient_ontology_provider_terms',
+        'ingredient_ontology_terminal_dispositions',
+        'ingredient_ontology_disposition_scopes',
+        'ingredient_ontology_evidence_sources',
+        'ingredient_ontology_labels',
+        'ingredient_ontology_resolution_manifests',
+        'ingredient_ontology_facet_values',
+        'ingredient_ontology_facets',
+        'ingredient_ontology_entities',
+    ];
+}
+
+function ingredientOntologyControllerPurgeForkChunk(
+    PDO $db,
+    int $versionId,
+    int $chunkRows = 250
+): array {
+    $chunkRows = max(25, min(5000, $chunkRows));
+    $progress = $db->prepare("
+        SELECT * FROM ontology_version_fork_progress
+        WHERE candidate_version_id = ?
+    ");
+    $progress->execute([$versionId]);
+    $row = $progress->fetch(PDO::FETCH_ASSOC);
+    if (!$row) {
+        return ['complete' => false, 'reason' => 'not_chunked'];
+    }
+    $db->exec('BEGIN IMMEDIATE');
+    try {
+        $db->prepare("
+            UPDATE ontology_version_fork_progress
+            SET status = 'purging',
+                lease_token = NULL,
+                leased_until = NULL,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE candidate_version_id = ?
+              AND status <> 'purging'
+        ")->execute([$versionId]);
+        $mapKind = $db->prepare("
+            SELECT map_kind
+            FROM ontology_version_fork_id_map
+            WHERE candidate_version_id = ?
+            ORDER BY map_kind, old_id
+            LIMIT 1
+        ");
+        $mapKind->execute([$versionId]);
+        $kind = $mapKind->fetchColumn();
+        if ($kind !== false) {
+            $deleteMap = $db->prepare("
+                DELETE FROM ontology_version_fork_id_map
+                WHERE candidate_version_id = ?
+                  AND map_kind = ?
+                  AND old_id IN (
+                      SELECT old_id
+                      FROM ontology_version_fork_id_map
+                      WHERE candidate_version_id = ?
+                        AND map_kind = ?
+                      ORDER BY old_id
+                      LIMIT {$chunkRows}
+                  )
+            ");
+            $deleteMap->execute([
+                $versionId,
+                (string)$kind,
+                $versionId,
+                (string)$kind,
+            ]);
+            $deleted = $deleteMap->rowCount();
+            $db->exec('COMMIT');
+            return [
+                'complete' => false,
+                'phase' => 'id_map',
+                'deleted' => $deleted,
+            ];
+        }
+        $tables = ingredientOntologyControllerForkCleanupTables();
+        $phase = (int)$row['cleanup_phase'];
+        if ($phase < count($tables)) {
+            $table = $tables[$phase];
+            $delete = $db->prepare("
+                DELETE FROM {$table}
+                WHERE rowid IN (
+                    SELECT rowid FROM {$table}
+                    WHERE ontology_version_id = ?
+                    LIMIT {$chunkRows}
+                )
+            ");
+            $delete->execute([$versionId]);
+            $deleted = $delete->rowCount();
+            if ($deleted === 0) {
+                $db->prepare("
+                    UPDATE ontology_version_fork_progress
+                    SET cleanup_phase = cleanup_phase + 1,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE candidate_version_id = ?
+                ")->execute([$versionId]);
+            }
+            $db->exec('COMMIT');
+            return [
+                'complete' => false,
+                'phase' => $table,
+                'deleted' => $deleted,
+            ];
+        }
+        $db->prepare("
+            DELETE FROM ingredient_ontology_versions
+            WHERE id = ? AND status IN ('building', 'failed', 'retired')
+        ")->execute([$versionId]);
+        $db->exec('COMMIT');
+        return ['complete' => true, 'version_id' => $versionId];
+    } catch (Throwable $error) {
+        try {
+            $db->exec('ROLLBACK');
+        } catch (Throwable $ignored) {
+        }
+        throw $error;
+    }
+}
+
+function ingredientOntologyControllerDriveForkCleanup(
+    PDO $db,
+    int $limit = 10
+): array {
+    $limit = max(1, min(100, $limit));
+    $ids = $db->query("
+        SELECT candidate_version_id
+        FROM ontology_version_fork_progress
+        WHERE status = 'purging'
+        ORDER BY updated_at, candidate_version_id
+        LIMIT {$limit}
+    ")->fetchAll(PDO::FETCH_COLUMN);
+    $results = [];
+    foreach ($ids as $versionId) {
+        try {
+            $results[] = ingredientOntologyControllerPurgeForkChunk(
+                $db,
+                (int)$versionId,
+                ingredientOntologyControllerForkChunkRows()
+            );
+        } catch (Throwable $error) {
+            $results[] = [
+                'version_id' => (int)$versionId,
+                'error' => mb_substr(
+                    $error->getMessage(),
+                    0,
+                    500,
+                    'UTF-8'
+                ),
+            ];
+        }
+    }
+    return $results;
+}
+
+function ingredientOntologyControllerPortablePlan(
+    PDO $db,
+    int $versionId,
+    array $plan
+): array {
+    $entitySlugs = [];
+    $stmt = $db->prepare("
+        SELECT id, slug
+        FROM ingredient_ontology_entities
+        WHERE ontology_version_id = ?
+    ");
+    $stmt->execute([$versionId]);
+    while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
+        $entitySlugs[(int)$row['id']] = (string)$row['slug'];
+    }
+    $portable = static function (mixed $candidate) use (
+        $entitySlugs
+    ): mixed {
+        if (
+            $candidate === null
+            || $candidate === ''
+            || $candidate === 'none'
+            || (
+                is_string($candidate)
+                && (
+                    str_starts_with($candidate, 'tmp:')
+                    || str_starts_with($candidate, 'slug:')
+                )
+            )
+        ) {
+            return $candidate;
+        }
+        if (
+            is_string($candidate)
+            && preg_match('/^e([1-9][0-9]*)$/D', $candidate, $match)
+        ) {
+            $entityId = (int)$match[1];
+        } elseif (is_int($candidate) || ctype_digit((string)$candidate)) {
+            $entityId = (int)$candidate;
+        } else {
+            throw new RuntimeException(
+                'activation bundle contains an invalid entity reference'
+            );
+        }
+        if (!isset($entitySlugs[$entityId])) {
+            throw new RuntimeException(
+                'activation bundle entity reference is unavailable'
+            );
+        }
+        return 'slug:' . $entitySlugs[$entityId];
+    };
+    $walk = static function (mixed $value) use (&$walk, $portable): mixed {
+        if (!is_array($value)) {
+            return $value;
+        }
+        foreach ($value as $key => $item) {
+            if (in_array((string)$key, [
+                'entity_candidate_id',
+                'parent_candidate_id',
+                'to_candidate_id',
+                'from_candidate_id',
+            ], true)) {
+                $value[$key] = $portable($item);
+                continue;
+            }
+            $value[$key] = $walk($item);
+        }
+        return $value;
+    };
+    $result = $walk($plan);
+    if (!is_array($result)) {
+        throw new RuntimeException(
+            'activation bundle portable plan is invalid'
+        );
+    }
+    unset($result['controller_rebind']);
+    return $result;
+}
+
+function ingredientOntologyControllerSourceInventoryFingerprint(
+    PDO $db
+): string {
+    $rows = [];
+    foreach (
+        recipeInventoryCandidates($db, ['exclude_expired' => true])
+        as $candidate
+    ) {
+        $rows[] = [
+            'inventory_id' => (int)$candidate['inventory_id'],
+            'product_id' => (int)$candidate['product_id'],
+            'quantity' => round((float)$candidate['quantity'], 6),
+            'unit' => (string)$candidate['unit'],
+            'default_quantity' => round(
+                (float)($candidate['default_quantity'] ?? 0),
+                6
+            ),
+            'package_unit' =>
+                (string)($candidate['package_unit'] ?? ''),
+            'effective_expiry_date' =>
+                $candidate['effective_expiry_date'] ?? null,
+        ];
+    }
+    return ingredientOntologyV3Hash($rows);
+}
+
+function ingredientOntologyControllerActivationBundle(
+    PDO $db,
+    int $generationId
+): array {
+    ingredientOntologyControllerAssertCopiedGenerationDatabase($db);
+    $generationStmt = $db->prepare("
+        SELECT * FROM ontology_generations WHERE id = ?
+    ");
+    $generationStmt->execute([$generationId]);
+    $generation = $generationStmt->fetch(PDO::FETCH_ASSOC);
+    if (
+        !$generation
+        || !in_array(
+            (string)$generation['status'],
+            ['promotable', 'promoted'],
+            true
+        )
+    ) {
+        throw new InvalidArgumentException(
+            'activation bundle generation is not sealed and promotable'
+        );
+    }
+    $parentVersionId =
+        (int)$generation['parent_ontology_version_id'];
+    $candidateVersionId = (int)$generation['candidate_version_id'];
+    $parentScoreId =
+        (int)($generation['parent_score_revision_id'] ?? 0);
+    $candidateScoreId =
+        (int)($generation['candidate_score_revision_id'] ?? 0);
+    $parentVersion = ingredientOntologyV3Version(
+        $db,
+        $parentVersionId
+    );
+    $candidateVersion = ingredientOntologyV3Version(
+        $db,
+        $candidateVersionId
+    );
+    $parentScore = recipeScoreRevision($db, $parentScoreId);
+    $candidateScore = recipeScoreRevision($db, $candidateScoreId);
+    if (
+        $parentVersion === null
+        || $candidateVersion === null
+        || $parentScore === null
+        || $candidateScore === null
+        || (string)$candidateVersion['status'] !== 'ready'
+        || (string)$candidateScore['status'] !== 'ready'
+    ) {
+        throw new RuntimeException(
+            'activation bundle sealed candidate artifacts are incomplete'
+        );
+    }
+    $plans = $db->prepare("
+        SELECT item.ordinal, plan.*, job.subject_id,
+               subject.subject_fingerprint
+        FROM ontology_generation_plans item
+        JOIN ontology_mutation_plans plan
+          ON plan.id = item.mutation_plan_id
+        JOIN ontology_controller_jobs job ON job.id = plan.job_id
+        LEFT JOIN ontology_subjects subject
+          ON subject.id = job.subject_id
+        WHERE item.generation_id = ?
+        ORDER BY item.ordinal
+    ");
+    $plans->execute([$generationId]);
+    $portablePlans = [];
+    foreach ($plans->fetchAll(PDO::FETCH_ASSOC) as $row) {
+        $plan = json_decode(
+            (string)$row['plan_json'],
+            true,
+            64,
+            JSON_THROW_ON_ERROR
+        );
+        $planVersionId = (int)($row['candidate_version_id'] ?? 0);
+        $portablePlan = ingredientOntologyControllerPortablePlan(
+            $db,
+            $planVersionId > 0
+                ? $planVersionId
+                : $candidateVersionId,
+            is_array($plan) ? $plan : []
+        );
+        $portablePlans[] = [
+            'ordinal' => (int)$row['ordinal'],
+            'plan_hash' => (string)$row['plan_hash'],
+            'repair_kind' => (string)$row['repair_kind'],
+            'risk_tier' => (string)$row['risk_tier'],
+            'subject_fingerprint' =>
+                $row['subject_fingerprint'] !== null
+                    ? (string)$row['subject_fingerprint']
+                    : null,
+            'portable_plan' => $portablePlan,
+        ];
+    }
+    $document = [
+        'schema_version' =>
+            'ontology-controller-activation-bundle-v1',
+        'generation' => [
+            'generation_key' => (string)$generation['generation_key'],
+            'controller_generation' =>
+                (int)$generation['controller_generation'],
+            'constraint_epoch' => (int)$generation['constraint_epoch'],
+            'constraint_hash' => (string)$generation['constraint_hash'],
+            'controller_policy_hash' =>
+                (string)$generation['controller_policy_hash'],
+            'status' => (string)$generation['status'],
+        ],
+        'parent' => [
+            'score_revision_id' => $parentScoreId,
+            'ontology_version_id' => $parentVersionId,
+            'content_hash' => (string)$parentVersion['content_hash'],
+            'portable_content_hash' =>
+                (string)$parentVersion['portable_content_hash'],
+            'seal_hash' => (string)$parentVersion['seal_hash'],
+            'controller_seal_hash' =>
+                (string)($parentVersion['controller_seal_hash'] ?? ''),
+        ],
+        'candidate' => [
+            'score_revision_id' => $candidateScoreId,
+            'ontology_version_id' => $candidateVersionId,
+            'content_hash' => (string)$candidateVersion['content_hash'],
+            'portable_content_hash' =>
+                (string)$candidateVersion['portable_content_hash'],
+            'seal_hash' => (string)$candidateVersion['seal_hash'],
+            'controller_seal_hash' =>
+                (string)$candidateVersion['controller_seal_hash'],
+            'score_rows_hash' =>
+                (string)$candidateScore['score_rows_hash'],
+            'match_rows_hash' =>
+                (string)$candidateScore['match_rows_hash'],
+            'materialization_hash' =>
+                (string)$candidateScore['materialization_hash'],
+            'catalog_id_set_hash' =>
+                (string)$candidateScore['catalog_id_set_hash'],
+            'ingredient_id_set_hash' =>
+                (string)$candidateScore['ingredient_id_set_hash'],
+        ],
+        'source_fence' => [
+            'active_score_revision_id' => $parentScoreId,
+            'inventory_revision' =>
+                (int)$candidateScore['inventory_revision'],
+            'catalog_revision' =>
+                (int)$candidateScore['catalog_revision'],
+            'ontology_source_revision' =>
+                (int)$candidateScore['ontology_source_revision'],
+            'ontology_source_hash' =>
+                (string)$candidateScore['ontology_source_hash'],
+            'inventory_fingerprint' =>
+                (string)$candidateScore['inventory_fingerprint'],
+            'source_inventory_fingerprint' =>
+                ingredientOntologyControllerSourceInventoryFingerprint(
+                    $db
+                ),
+            'catalog_fingerprint' =>
+                (string)$candidateScore['catalog_fingerprint'],
+            'catalog_max_id' => (int)$candidateScore['catalog_max_id'],
+            'score_date' => (string)$candidateScore['score_date'],
+        ],
+        'import_capability' => [
+            'activation_ready' => false,
+            'reason' =>
+                'portable candidate and score materialization importer is not implemented',
+            'required_payloads' => [
+                'portable_version_rows',
+                'mapping_and_relation_id_rebinding',
+                'score_and_match_materializations',
+                'source_change_high_water_mark',
+                'under_reservation_import_cas',
+            ],
+        ],
+        'plans' => $portablePlans,
+    ];
+    $document['bundle_hash'] = ingredientOntologyV3Hash($document);
+    return $document;
+}
+
+function ingredientOntologyControllerActivationBundlePreflight(
+    PDO $db,
+    array $bundle
+): array {
+    $errors = [];
+    $expectedHash = (string)($bundle['bundle_hash'] ?? '');
+    $hashPayload = $bundle;
+    unset($hashPayload['bundle_hash']);
+    if (
+        !preg_match('/^[a-f0-9]{64}$/D', $expectedHash)
+        || !hash_equals(
+            ingredientOntologyV3Hash($hashPayload),
+            $expectedHash
+        )
+    ) {
+        $errors[] = 'activation bundle hash is invalid';
+    }
+    if (
+        (string)($bundle['schema_version'] ?? '')
+            !== 'ontology-controller-activation-bundle-v1'
+    ) {
+        $errors[] = 'activation bundle schema is unsupported';
+    }
+    $state = recipeScoreState($db);
+    $fence = is_array($bundle['source_fence'] ?? null)
+        ? $bundle['source_fence']
+        : [];
+    $parent = is_array($bundle['parent'] ?? null)
+        ? $bundle['parent']
+        : [];
+    if (
+        (int)($state['active_score_revision_id'] ?? 0)
+            !== (int)($fence['active_score_revision_id'] ?? -1)
+    ) {
+        $errors[] = 'activation bundle parent pointer changed';
+    }
+    $activeVersion = ingredientOntologyV3ActiveVersion($db);
+    if (
+        $activeVersion === null
+        || !hash_equals(
+            (string)($parent['content_hash'] ?? ''),
+            (string)($activeVersion['content_hash'] ?? '')
+        )
+        || !hash_equals(
+            (string)($parent['portable_content_hash'] ?? ''),
+            (string)($activeVersion['portable_content_hash'] ?? '')
+        )
+    ) {
+        $errors[] = 'activation bundle parent ontology changed';
+    }
+    foreach ([
+        'inventory_revision',
+        'catalog_revision',
+        'ontology_source_revision',
+    ] as $field) {
+        if (
+            (int)($state[$field] ?? -1)
+                !== (int)($fence[$field] ?? -2)
+        ) {
+            $errors[] = "activation bundle {$field} changed";
+        }
+    }
+    $currentCorpusHash = ingredientOntologyV3CorpusHash($db);
+    if (
+        !hash_equals(
+            (string)($state['ontology_source_hash'] ?? ''),
+            (string)($fence['ontology_source_hash'] ?? '')
+        )
+        || !hash_equals(
+            $currentCorpusHash,
+            (string)($fence['ontology_source_hash'] ?? '')
+        )
+    ) {
+        $errors[] = 'activation bundle ontology source changed';
+    }
+    if (
+        !hash_equals(
+            recipeScoreCatalogFingerprint($db),
+            (string)($fence['catalog_fingerprint'] ?? '')
+        )
+    ) {
+        $errors[] = 'activation bundle catalog fingerprint changed';
+    }
+    if (
+        !hash_equals(
+            ingredientOntologyControllerSourceInventoryFingerprint($db),
+            (string)($fence['source_inventory_fingerprint'] ?? '')
+        )
+    ) {
+        $errors[] =
+            'activation bundle inventory fingerprint changed';
+    }
+    return [
+        'valid' => !$errors,
+        'errors' => $errors,
+        'bundle_hash' => $expectedHash,
+        'activation_permitted' => false,
+        'importer_available' => false,
+        'active_score_revision_id' =>
+            $state['active_score_revision_id'],
+    ];
+}
+
+function ingredientOntologyControllerBuildActivationBundle(
+    PDO $db,
+    array $options = []
+): array {
+    ingredientOntologyControllerAssertCopiedGenerationDatabase($db);
+    $limit = max(1, min(50, (int)($options['limit'] ?? 50)));
+    $maximumCycles = max(
+        1,
+        min(1000, (int)($options['maximum_cycles'] ?? 100))
+    );
+    $claimedTotal = 0;
+    for ($cycle = 0; $cycle < $maximumCycles; $cycle++) {
+        $result = ingredientOntologyControllerProcessQueue(
+            $db,
+            min($limit - min($limit, $claimedTotal), $limit),
+            $options + [
+                'generation_intents_only' => true,
+                'suppress_due_generations' => true,
+                'run_generation' => false,
+                'promote' => false,
+                'job_types' => [
+                    'subject_resolution', 'correction', 'compensation',
+                ],
+            ]
+        );
+        $claimed = (int)($result['claimed'] ?? 0);
+        $claimedTotal += $claimed;
+        if ($claimed === 0 || $claimedTotal >= $limit) {
+            break;
+        }
+    }
+    $generationResults =
+        ingredientOntologyControllerProcessDueGenerations(
+            $db,
+            $options + [
+                'bypass_debounce' => true,
+                'promote' => false,
+                'disable_automatic_promotion' => true,
+            ]
+        );
+    $generationId = 0;
+    foreach (array_reverse($generationResults) as $result) {
+        if (in_array(
+            (string)($result['status'] ?? ''),
+            ['promotable', 'promoted'],
+            true
+        )) {
+            $generationId = (int)($result['generation_id'] ?? 0);
+            break;
+        }
+    }
+    if ($generationId <= 0) {
+        $generationId = (int)$db->query("
+            SELECT id FROM ontology_generations
+            WHERE status IN ('promotable', 'promoted')
+            ORDER BY id DESC LIMIT 1
+        ")->fetchColumn();
+    }
+    if ($generationId <= 0) {
+        throw new RuntimeException(
+            'copied database generation did not become bundle-ready'
+        );
+    }
+    return [
+        'claimed_intents' => $claimedTotal,
+        'generation_results' => $generationResults,
+        'bundle' => ingredientOntologyControllerActivationBundle(
+            $db,
+            $generationId
+        ),
+    ];
 }

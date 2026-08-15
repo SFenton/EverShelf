@@ -11,7 +11,7 @@ function ontologyControllerCliUsage(): never {
         "Usage:\n"
         . "  php scripts/ontology-controller.php status --db=copy.sqlite\n"
         . "  php scripts/ontology-controller.php backfill --db=copy.sqlite [--write] [--json-out=report.json]\n"
-        . "  php scripts/ontology-controller.php work --db=copy.sqlite --write [--limit=10] [--minimum-priority=50] [--provider=fake] [--model=ID] [--critic-provider=KEY] [--critic-model=ID] [--allow-network] [--copy-generation --run-generation [--promote] [--allow-active-generation]] [--loop] [--max-cycles=N]\n"
+        . "  php scripts/ontology-controller.php work --db=copy.sqlite --write [--limit=10] [--minimum-priority=50] [--provider=fake] [--model=ID] [--critic-provider=KEY] [--critic-model=ID] [--allow-network] [--copy-generation --run-generation [--promote]] [--loop] [--max-cycles=N]\n"
         . "  php scripts/ontology-controller.php generation --db=copy.sqlite --generation-id=N --write [--promote]\n"
         . "  php scripts/ontology-controller.php monitor --db=copy.sqlite --generation-id=N --write\n"
         . "  php scripts/ontology-controller.php gold-build --db=copy.sqlite --write\n"
@@ -19,14 +19,16 @@ function ontologyControllerCliUsage(): never {
         . "  php scripts/ontology-controller.php gold-advance --db=copy.sqlite --release-id=N --write\n"
         . "  php scripts/ontology-controller.php benchmark-import --db=copy.sqlite --file=policy.json --write [--activate]\n"
         . "  php scripts/ontology-controller.php benchmark-list --db=copy.sqlite\n"
+        . "  php scripts/ontology-controller.php bundle-build --db=copy.sqlite --write --out=activation-bundle.json [--limit=50]\n"
+        . "  php scripts/ontology-controller.php bundle-export --db=copy.sqlite --generation-id=N --out=activation-bundle.json\n"
+        . "  php scripts/ontology-controller.php bundle-validate --db=target.sqlite --file=activation-bundle.json\n"
         . "\nAll runtime/model/promotion paths are disabled by default. "
         . "Network calls additionally require --allow-network and the "
         . "separate controller feature flags/API key. Backfill is dry-run "
         . "unless --write is supplied. Mutating commands refuse the active "
         . "database unless --allow-active-db is explicitly provided. "
-        . "Active-database generation additionally requires "
-        . "--allow-active-generation, --run-generation, --promote, and the "
-        . "promotion feature gate.\n"
+        . "Candidate generation, shadowing, and promotion always require a "
+        . "copied database; the active database is intake-only.\n"
     );
     exit(1);
 }
@@ -36,6 +38,7 @@ $valid = [
     'status', 'backfill', 'work', 'generation', 'monitor',
     'gold-build', 'gold-export', 'gold-advance',
     'benchmark-import', 'benchmark-list',
+    'bundle-build', 'bundle-export', 'bundle-validate',
 ];
 if (!in_array($command, $valid, true)) {
     ontologyControllerCliUsage();
@@ -56,12 +59,12 @@ $write = isset($options['write']);
 $mutating = in_array($command, [
     'backfill', 'work', 'generation', 'monitor',
     'gold-build', 'gold-advance',
-    'benchmark-import',
+    'benchmark-import', 'bundle-build',
 ], true) && ($command !== 'backfill' || $write);
 if (
     in_array($command, [
         'work', 'generation', 'monitor', 'gold-build', 'gold-advance',
-        'benchmark-import',
+        'benchmark-import', 'bundle-build',
     ], true)
     && !$write
 ) {
@@ -71,10 +74,17 @@ if (
 }
 $generationCopyOnly = in_array($command, [
     'generation', 'monitor', 'gold-build', 'gold-advance',
+    'bundle-build',
 ], true);
 $databasePath = recipeCliAssertDatabaseInputSafe(
     $databasePath,
-    isset($options['allow-active-db']) && !$generationCopyOnly
+    (
+        $command === 'bundle-validate'
+        || (
+            isset($options['allow-active-db'])
+            && !$generationCopyOnly
+        )
+    )
 );
 $db = new PDO('sqlite:' . $databasePath);
 $db->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
@@ -170,8 +180,10 @@ switch ($command) {
             'ontology_observation_events',
             'ontology_constraint_ledger',
             'ontology_controller_jobs',
+            'ontology_generation_intents',
             'ontology_mutation_plans',
             'ontology_generations',
+            'ontology_version_fork_progress',
             'ontology_gold_releases',
         ];
         $counts = [];
@@ -212,37 +224,21 @@ switch ($command) {
     case 'work':
         $limit = max(1, min(100, (int)($options['limit'] ?? 10)));
         $copyGeneration = isset($options['copy-generation']);
+        $activeDatabase = (
+            $databasePath === recipeCliCanonicalPath(DB_PATH)
+            || recipeCliSameFile($databasePath, DB_PATH)
+        );
         $minimumPriority = $nonNegativeInt(
             'minimum-priority',
             $copyGeneration
                 ? 0
                 : ingredientOntologyControllerMinimumPriority()
         );
-        if (
-            $copyGeneration
-            && (
-                $databasePath === recipeCliCanonicalPath(DB_PATH)
-                || recipeCliSameFile($databasePath, DB_PATH)
-            )
-        ) {
-            if (!isset($options['allow-active-generation'])) {
-                throw new RuntimeException(
-                    'active generation requires --allow-active-generation'
-                );
-            }
-            if (
-                !isset($options['run-generation'])
-                || !isset($options['promote'])
-            ) {
-                throw new RuntimeException(
-                    'active generation requires --run-generation and --promote'
-                );
-            }
-            if (!ingredientOntologyControllerPromotionEnabled()) {
-                throw new RuntimeException(
-                    'active generation requires the promotion feature gate'
-                );
-            }
+        if ($copyGeneration && $activeDatabase) {
+            throw new RuntimeException(
+                'ontology generation requires a copied database; '
+                . 'the active database is intake-only'
+            );
         }
         $workOptions = [
             'provider' => (string)(
@@ -382,5 +378,47 @@ switch ($command) {
             ORDER BY risk_tier, created_at, id
         ")->fetchAll(PDO::FETCH_ASSOC) : [];
         $writeJson(['policies' => $rows]);
+        break;
+
+    case 'bundle-build':
+        $out = trim((string)($options['out'] ?? ''));
+        if ($out === '') {
+            throw new InvalidArgumentException('--out is required');
+        }
+        $built = ingredientOntologyControllerBuildActivationBundle(
+            $db,
+            [
+                'limit' => max(
+                    1,
+                    min(50, (int)($options['limit'] ?? 50))
+                ),
+                'batch_size' =>
+                    max(1, min(500, (int)($options['batch'] ?? 250))),
+            ]
+        );
+        $writeJson($built['bundle'], $out);
+        break;
+
+    case 'bundle-export':
+        $out = trim((string)($options['out'] ?? ''));
+        if ($out === '') {
+            throw new InvalidArgumentException('--out is required');
+        }
+        $writeJson(
+            ingredientOntologyControllerActivationBundle(
+                $db,
+                $positiveInt('generation-id')
+            ),
+            $out
+        );
+        break;
+
+    case 'bundle-validate':
+        $writeJson(
+            ingredientOntologyControllerActivationBundlePreflight(
+                $db,
+                $readJson((string)($options['file'] ?? ''))
+            )
+        );
         break;
 }

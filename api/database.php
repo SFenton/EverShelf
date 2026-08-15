@@ -10,6 +10,8 @@
 require_once __DIR__ . '/lib/recipes/schema.php';
 
 define('DB_PATH', __DIR__ . '/../data/evershelf.db');
+// Bump whenever migrateDB() or a nested schema migration changes.
+const EVERSHELF_DATABASE_SCHEMA_VERSION = 2026081402;
 
 /**
  * Ensure the data directory exists and is writable by the web-server user.
@@ -55,39 +57,178 @@ function _ensureDbWritable(): void {
     }
 }
 
+function databaseConfiguredBusyTimeoutMs(): int {
+    return max(
+        100,
+        min(5000, (int)(getenv('SQLITE_BUSY_TIMEOUT_MS') ?: 1500))
+    );
+}
+
+function databaseSchemaVersion(PDO $db): ?int {
+    $settingsExists = $db->query(
+        "SELECT 1
+         FROM sqlite_master
+         WHERE type = 'table' AND name = 'app_settings'"
+    )->fetchColumn();
+    if (!$settingsExists) {
+        return null;
+    }
+
+    $stmt = $db->prepare(
+        "SELECT value FROM app_settings
+         WHERE key = 'database_schema_version'"
+    );
+    $stmt->execute();
+    $version = $stmt->fetchColumn();
+    if ($version === false || !ctype_digit((string)$version)) {
+        return null;
+    }
+    return (int)$version;
+}
+
+function databaseEnsureMigrated(
+    PDO $db,
+    ?string $lockPath = null
+): void {
+    $currentVersion = databaseSchemaVersion($db);
+    if ($currentVersion === EVERSHELF_DATABASE_SCHEMA_VERSION) {
+        return;
+    }
+    if (
+        $currentVersion !== null
+        && $currentVersion > EVERSHELF_DATABASE_SCHEMA_VERSION
+    ) {
+        throw new RuntimeException(
+            'Database schema is newer than this EverShelf build'
+        );
+    }
+
+    $lockPath ??= DB_PATH . '.migration.lock';
+    $lock = fopen($lockPath, 'c+');
+    if ($lock === false) {
+        throw new RuntimeException(
+            'Cannot open database migration lock: ' . $lockPath
+        );
+    }
+
+    $timeoutSeconds = max(
+        1,
+        min(
+            300,
+            (int)(getenv('DATABASE_MIGRATION_LOCK_TIMEOUT_SECONDS') ?: 60)
+        )
+    );
+    $deadline = microtime(true) + $timeoutSeconds;
+    $locked = false;
+    try {
+        do {
+            $locked = flock($lock, LOCK_EX | LOCK_NB);
+            if (!$locked) {
+                usleep(100000);
+            }
+        } while (!$locked && microtime(true) < $deadline);
+
+        if (!$locked) {
+            throw new RuntimeException(
+                'Timed out waiting for the database migration lock'
+            );
+        }
+        $currentVersion = databaseSchemaVersion($db);
+        if ($currentVersion === EVERSHELF_DATABASE_SCHEMA_VERSION) {
+            return;
+        }
+        if (
+            $currentVersion !== null
+            && $currentVersion > EVERSHELF_DATABASE_SCHEMA_VERSION
+        ) {
+            throw new RuntimeException(
+                'Database schema is newer than this EverShelf build'
+            );
+        }
+
+        $steadyBusyTimeout = databaseConfiguredBusyTimeoutMs();
+        $migrationBusyTimeout = max(
+            $steadyBusyTimeout,
+            min(
+                300000,
+                (int)(
+                    getenv('DATABASE_MIGRATION_BUSY_TIMEOUT_MS')
+                    ?: 120000
+                )
+            )
+        );
+        $db->exec('PRAGMA busy_timeout = ' . $migrationBusyTimeout);
+        try {
+            $journalMode = strtolower(
+                (string)$db->query('PRAGMA journal_mode')->fetchColumn()
+            );
+            if ($journalMode !== 'wal') {
+                $db->exec('PRAGMA journal_mode = WAL');
+            }
+            migrateDB($db);
+            $stmt = $db->prepare("
+                INSERT INTO app_settings (key, value, updated_at)
+                VALUES ('database_schema_version', ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(key) DO UPDATE SET
+                    value = excluded.value,
+                    updated_at = CURRENT_TIMESTAMP
+            ");
+            $stmt->execute([
+                (string)EVERSHELF_DATABASE_SCHEMA_VERSION,
+            ]);
+        } finally {
+            $db->exec('PRAGMA busy_timeout = ' . $steadyBusyTimeout);
+        }
+    } finally {
+        if ($locked) {
+            flock($lock, LOCK_UN);
+        }
+        fclose($lock);
+    }
+}
+
 function getDB(): PDO {
     _ensureDataDir();
     _ensureDbWritable();
     // logger.php is required by index.php before getDB() is called.
     // In cron context it may not be loaded yet — guard with class_exists.
     $useLogging = class_exists('LoggingPDO', false);
-    $isNew = !file_exists(DB_PATH);
     $db = $useLogging
         ? new LoggingPDO('sqlite:' . DB_PATH)
         : new PDO('sqlite:' . DB_PATH);
     $db->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
-    // Set a busy timeout to prevent "database is locked" errors under high concurrency.
-    // This gives SQLite up to 5 seconds to acquire a lock before throwing an exception.
-    $db->setAttribute(PDO::ATTR_TIMEOUT, 5); // PDO::ATTR_TIMEOUT is in seconds for MySQL, but not directly for SQLite.
-                                             // For SQLite, we use PRAGMA busy_timeout.
-    $db->exec('PRAGMA journal_mode = WAL;');
-    $db->exec('PRAGMA busy_timeout = 10000;'); // 10 s — cron + PWA writes can contend under WAL
+    $db->setAttribute(PDO::ATTR_TIMEOUT, 2);
+    $db->exec(
+        'PRAGMA busy_timeout = ' . databaseConfiguredBusyTimeoutMs()
+    );
 
     $db->setAttribute(PDO::ATTR_DEFAULT_FETCH_MODE, PDO::FETCH_ASSOC);
-    $db->exec("PRAGMA journal_mode=WAL");
     $db->exec("PRAGMA foreign_keys=ON");
     $db->exec("PRAGMA synchronous=NORMAL");    // faster writes, still safe with WAL
     $db->exec("PRAGMA cache_size=-8000");      // ~8 MB page cache (was 2 MB)
     $db->exec("PRAGMA temp_store=MEMORY");     // temp tables in RAM
     
-    if ($isNew) {
-        initializeDB($db);
-    }
-    
-    // Run migrations
-    migrateDB($db);
+    // The schema marker makes this a read-only fast path after deployment.
+    databaseEnsureMigrated($db);
     
     return $db;
+}
+
+function databaseIsLockError(Throwable $error): bool {
+    if (!$error instanceof PDOException) {
+        return false;
+    }
+    return str_contains(
+        strtolower($error->getMessage()),
+        'database is locked'
+    ) || str_contains(
+        strtolower($error->getMessage()),
+        'database table is locked'
+    ) || in_array(
+        (int)($error->errorInfo[1] ?? 0),
+        [5, 6],
+        true
+    );
 }
 
 /**
@@ -104,17 +245,7 @@ function dbWithRetry(callable $fn, int $maxAttempts = 4): mixed {
             return $fn();
         } catch (\PDOException $e) {
             $attempt++;
-            $locked = str_contains(
-                $e->getMessage(),
-                'database is locked'
-            ) || str_contains(
-                $e->getMessage(),
-                'database table is locked'
-            ) || in_array(
-                (int)($e->errorInfo[1] ?? 0),
-                [5, 6],
-                true
-            );
+            $locked = databaseIsLockError($e);
             if (!$locked || $attempt >= $maxAttempts) {
                 throw $e;
             }
@@ -530,16 +661,67 @@ function databaseAddColumnIfMissing(
     }
 }
 
-function migrateDB(PDO $db): void {
-    // Guard: if core tables don't exist yet (e.g. DB file present but empty / partial init),
-    // run initializeDB first so all tables are created, then return — no ALTER TABLE needed.
-    $productsExists = $db->query(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name='products'"
-    )->fetchColumn();
-    if (!$productsExists) {
-        initializeDB($db);
+function databaseCoreTableExists(PDO $db, string $table): bool {
+    if (!preg_match('/^[A-Za-z_][A-Za-z0-9_]*$/', $table)) {
+        throw new InvalidArgumentException(
+            'Invalid database table identifier'
+        );
+    }
+    $stmt = $db->prepare("
+        SELECT 1
+        FROM sqlite_master
+        WHERE type = 'table' AND name = ?
+        LIMIT 1
+    ");
+    $stmt->execute([$table]);
+    return (bool)$stmt->fetchColumn();
+}
+
+function databaseReconcileLegacyTransactions(PDO $db): void {
+    if (!databaseCoreTableExists($db, 'transactions_old')) {
         return;
     }
+
+    $ownsTransaction = !$db->inTransaction();
+    if ($ownsTransaction) {
+        $db->exec('BEGIN IMMEDIATE');
+    }
+    try {
+        if (!databaseCoreTableExists($db, 'transactions')) {
+            $db->exec(
+                'ALTER TABLE transactions_old RENAME TO transactions'
+            );
+        } else {
+            $db->exec("
+                INSERT OR IGNORE INTO transactions (
+                    id, product_id, type, quantity, location,
+                    notes, created_at
+                )
+                SELECT
+                    id, product_id, type, quantity, location,
+                    notes, created_at
+                FROM transactions_old
+            ");
+            $db->exec('DROP TABLE transactions_old');
+        }
+        if ($ownsTransaction) {
+            $db->exec('COMMIT');
+        }
+    } catch (Throwable $error) {
+        if ($ownsTransaction) {
+            try {
+                $db->exec('ROLLBACK');
+            } catch (Throwable $rollbackError) {
+            }
+        }
+        throw $error;
+    }
+}
+
+function migrateDB(PDO $db): void {
+    // CREATE IF NOT EXISTS makes arbitrary partial first-boot states repairable.
+    initializeDB($db);
+    databaseReconcileLegacyTransactions($db);
 
     foreach ([
         'request_generation' => 'INTEGER NOT NULL DEFAULT 1',
@@ -593,7 +775,19 @@ function migrateDB(PDO $db): void {
     }
 
     // Empty barcode strings break UNIQUE (only one '' allowed); normalize to NULL.
-    $db->exec("UPDATE products SET barcode = NULL WHERE barcode IS NOT NULL AND TRIM(barcode) = ''");
+    $hasEmptyBarcode = $db->query("
+        SELECT 1
+        FROM products
+        WHERE barcode IS NOT NULL AND TRIM(barcode) = ''
+        LIMIT 1
+    ")->fetchColumn();
+    if ($hasEmptyBarcode) {
+        $db->exec("
+            UPDATE products
+            SET barcode = NULL
+            WHERE barcode IS NOT NULL AND TRIM(barcode) = ''
+        ");
+    }
 
     $invCols = $db->query("PRAGMA table_info(inventory)")->fetchAll();
     $invColNames = array_column($invCols, 'name');
@@ -617,28 +811,64 @@ function migrateDB(PDO $db): void {
     // Migrate transactions CHECK constraint to allow 'waste' type
     $sql = $db->query("SELECT sql FROM sqlite_master WHERE type='table' AND name='transactions'")->fetchColumn();
     if ($sql && strpos($sql, "'waste'") === false) {
-        $db->exec("ALTER TABLE transactions RENAME TO transactions_old");
-        $db->exec("
-            CREATE TABLE transactions (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                product_id INTEGER NOT NULL,
-                type TEXT NOT NULL CHECK(type IN ('in', 'out', 'waste')),
-                quantity REAL NOT NULL,
-                location TEXT NOT NULL DEFAULT 'dispensa',
-                notes TEXT DEFAULT '',
-                undone INTEGER DEFAULT 0,
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE CASCADE
-            )
-        ");
-        // Insert with explicit columns: transactions_old may lack 'undone' (pre-v1.7.x DB)
-        $db->exec("INSERT INTO transactions (id, product_id, type, quantity, location, notes, created_at)
-                   SELECT id, product_id, type, quantity, location, notes, created_at FROM transactions_old");
-        $db->exec("DROP TABLE transactions_old");
-        $db->exec("CREATE INDEX IF NOT EXISTS idx_transactions_product ON transactions(product_id)");
-        $db->exec("CREATE INDEX IF NOT EXISTS idx_transactions_date ON transactions(created_at)");
-        $db->exec("CREATE INDEX IF NOT EXISTS idx_transactions_type_date ON transactions(type, created_at)");
-        $db->exec("CREATE INDEX IF NOT EXISTS idx_transactions_pid_type_undone ON transactions(product_id, type, undone)");
+        $db->exec('BEGIN IMMEDIATE');
+        try {
+            $db->exec(
+                'ALTER TABLE transactions RENAME TO transactions_old'
+            );
+            $db->exec("
+                CREATE TABLE transactions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    product_id INTEGER NOT NULL,
+                    inventory_id INTEGER DEFAULT NULL,
+                    type TEXT NOT NULL
+                        CHECK(type IN ('in', 'out', 'waste')),
+                    quantity REAL NOT NULL,
+                    location TEXT NOT NULL DEFAULT 'dispensa',
+                    prepared_food INTEGER DEFAULT NULL,
+                    inventory_expiry_date DATE DEFAULT NULL,
+                    inventory_expiry_user_set INTEGER DEFAULT NULL,
+                    inventory_vacuum_sealed INTEGER DEFAULT NULL,
+                    inventory_opened_at DATETIME DEFAULT NULL,
+                    accounting_only INTEGER NOT NULL DEFAULT 0,
+                    undo_safe INTEGER NOT NULL DEFAULT 1,
+                    notes TEXT DEFAULT '',
+                    undone INTEGER DEFAULT 0,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (product_id)
+                        REFERENCES products(id) ON DELETE CASCADE
+                )
+            ");
+            // Legacy tables may not contain the newer audit columns.
+            $db->exec("
+                INSERT INTO transactions (
+                    id, product_id, type, quantity, location,
+                    notes, created_at
+                )
+                SELECT
+                    id, product_id, type, quantity, location,
+                    notes, created_at
+                FROM transactions_old
+            ");
+            $db->exec('DROP TABLE transactions_old');
+            $db->exec("
+                CREATE INDEX IF NOT EXISTS idx_transactions_product
+                    ON transactions(product_id);
+                CREATE INDEX IF NOT EXISTS idx_transactions_date
+                    ON transactions(created_at);
+                CREATE INDEX IF NOT EXISTS idx_transactions_type_date
+                    ON transactions(type, created_at);
+                CREATE INDEX IF NOT EXISTS idx_transactions_pid_type_undone
+                    ON transactions(product_id, type, undone);
+            ");
+            $db->exec('COMMIT');
+        } catch (Throwable $error) {
+            try {
+                $db->exec('ROLLBACK');
+            } catch (Throwable $rollbackError) {
+            }
+            throw $error;
+        }
     }
 
     // --- New shared tables ---
@@ -653,6 +883,20 @@ function migrateDB(PDO $db): void {
             );
         ");
     }
+    $db->exec("
+        CREATE TABLE IF NOT EXISTS api_idempotency_receipts (
+            action TEXT NOT NULL,
+            idempotency_key TEXT NOT NULL,
+            request_hash TEXT NOT NULL,
+            response_json TEXT NOT NULL,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            expires_at DATETIME NOT NULL,
+            PRIMARY KEY(action, idempotency_key)
+        );
+        CREATE INDEX IF NOT EXISTS idx_api_idempotency_receipts_expiry
+        ON api_idempotency_receipts(expires_at);
+    ");
 
     $db->exec("
         CREATE TABLE IF NOT EXISTS location_suggestion_cache (
@@ -813,7 +1057,19 @@ function migrateDB(PDO $db): void {
         ON shopping_list(canonical_key)
         WHERE canonical_key IS NOT NULL AND TRIM(canonical_key) <> ''
     ");
-    $db->exec("UPDATE shopping_list SET quantity = 1 WHERE quantity IS NULL OR quantity <= 0");
+    $hasInvalidShoppingQuantity = $db->query("
+        SELECT 1
+        FROM shopping_list
+        WHERE quantity IS NULL OR quantity <= 0
+        LIMIT 1
+    ")->fetchColumn();
+    if ($hasInvalidShoppingQuantity) {
+        $db->exec("
+            UPDATE shopping_list
+            SET quantity = 1
+            WHERE quantity IS NULL OR quantity <= 0
+        ");
+    }
 
     // Add is_favorite column to recipes if missing (#124)
     $recCols = array_column($db->query("PRAGMA table_info(recipes)")->fetchAll(), 'name');
@@ -1073,6 +1329,7 @@ function migrateDB(PDO $db): void {
         });
     }
 
+    shoppingClassificationSchemaMigrate($db);
     recipeSchemaMigrate($db);
     migratePreparedFoodAggregateSemantics($db);
 }

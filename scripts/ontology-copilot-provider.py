@@ -389,7 +389,12 @@ class ProviderHandler(socketserver.StreamRequestHandler):
                 "error": "internal_error",
                 "message": "bounded provider failure",
             }
-        self.wfile.write(encode_frame(response))
+        try:
+            self.wfile.write(encode_frame(response))
+        except (BrokenPipeError, ConnectionResetError):
+            # Interactive callers enforce tighter deadlines than ontology jobs.
+            # A disconnected client must not emit a server traceback.
+            return
 
 
 class ProviderServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):

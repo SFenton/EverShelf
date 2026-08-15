@@ -13809,11 +13809,10 @@ async function addSelectedSuggestions() {
 
 // ===== UTILITY FUNCTIONS =====
 
-// ===== SCAN EXPIRY DATE WITH CAMERA + GEMINI AI =====
+// ===== SCAN EXPIRY DATE WITH CAMERA + LOCAL OCR/COPILOT =====
 let expiryStream = null;
 
 async function scanExpiryWithAI() {
-    if (!_requireGemini()) return;
     // Create modal for camera capture
     document.getElementById('modal-content').innerHTML = `
         <div class="modal-header">
@@ -13869,7 +13868,7 @@ function captureExpiry() {
     const canvas = document.getElementById('expiry-canvas');
     const img = document.getElementById('expiry-preview-img');
     
-    // Crop to center 50% (matching the 2x zoom view) for better AI accuracy
+    // Crop to center 50% (matching the 2x zoom view) for better OCR accuracy
     const sw = video.videoWidth / 2;
     const sh = video.videoHeight / 2;
     const sx = (video.videoWidth - sw) / 2;
@@ -13936,8 +13935,10 @@ async function analyzeExpiryImage(dataUrl) {
             
             // Close modal after delay
             setTimeout(() => closeExpiryScanner(), 1500);
-        } else if (result.error === 'no_api_key') {
-            statusDiv.innerHTML = `<p style="color:var(--warning)">${t('ai.no_api_key').replace(/\n/g, '<br>')}</p>`;
+        } else if (result.nonfatal && result.can_continue) {
+            statusDiv.innerHTML = `<p style="color:var(--warning)">⚠️ ${t('scanner.expiry_read_fail')} ${result.raw_text ? '<br><small>' + t('scanner.expiry_raw_label') + ': ' + escapeHtml(result.raw_text) + '</small>' : ''}</p>
+                <button class="btn btn-primary" onclick="closeExpiryScanner()" style="margin-top:8px">${t('btn.close')}</button>
+                <button class="btn btn-secondary" onclick="retakeExpiry()" style="margin-top:8px">${t('btn.retry')}</button>`;
         } else {
             statusDiv.innerHTML = `<p style="color:var(--danger)">❌ ${t('scanner.expiry_read_fail')} ${result.raw_text ? '<br><small>' + t('scanner.expiry_raw_label') + ': ' + escapeHtml(result.raw_text) + '</small>' : ''}</p>
                 <button class="btn btn-secondary" onclick="retakeExpiry()" style="margin-top:8px">${t('btn.retry')}</button>`;
