@@ -9022,6 +9022,17 @@ function readExpiryFromImage(string $imageBase64): array {
     $startedAt = microtime(true);
     $totalDeadline = $startedAt
         + EXPIRY_INTERACTIVE_TIMEOUT_SECONDS;
+
+    $visionResult = readExpiryWithCopilotVision(
+        $imageBase64,
+        $startedAt,
+        $totalDeadline,
+        'copilot_vision_unavailable'
+    );
+    if (!empty($visionResult['found'])) {
+        return $visionResult;
+    }
+
     $ocrResult = tesseractReadExpiry(
         $imageBase64,
         min(
@@ -9048,91 +9059,25 @@ function readExpiryFromImage(string $imageBase64): array {
         EXPIRY_OCR_MAX_TEXT_CHARS,
         'UTF-8'
     );
-    if ($rawText === '') {
-        $result = readExpiryWithCopilotVision(
-            $imageBase64,
-            $startedAt,
-            $totalDeadline,
-            (string)($ocrResult['reason'] ?? 'expiry_not_found')
+    $reason = (string)($ocrResult['reason'] ?? '');
+    if ($reason === '') {
+        $reason = (string)(
+            $visionResult['reason'] ?? 'expiry_not_found'
         );
-        if (empty($result['found'])) {
-            EverLog::warn(
-                'Expiry OCR did not find a date',
-                [
-                    'reason' => $result['reason'] ?? 'unknown',
-                    'source' => $result['source'] ?? 'none',
-                    'elapsed_ms' => $result['elapsed_ms'] ?? 0,
-                ],
-                'expiry_ocr'
-            );
-        }
-        return $result;
     }
-    $copilotDeadline = min(
-        $totalDeadline,
-        microtime(true) + EXPIRY_COPILOT_TIMEOUT_SECONDS
+    $result = expiryNotFoundResult($reason, $rawText, $startedAt);
+    EverLog::warn(
+        'Expiry OCR did not find a date',
+        [
+            'reason' => $reason,
+            'vision_reason' =>
+                $visionResult['reason'] ?? 'expiry_not_found',
+            'raw_text_length' => mb_strlen($rawText, 'UTF-8'),
+            'elapsed_ms' => $result['elapsed_ms'],
+        ],
+        'expiry_ocr'
     );
-    if ($copilotDeadline <= microtime(true)) {
-        return expiryNotFoundResult(
-            'expiry_deadline_exceeded',
-            $rawText,
-            $startedAt
-        );
-    }
-    try {
-        $request = expiryCopilotRequest(
-            $rawText,
-            new DateTimeImmutable('today')
-        );
-        EverLog::aiCall(
-            'gemini-3.7-flash',
-            mb_strlen((string)$request['prompt'], 'UTF-8')
-        );
-        $response = expiryCopilotTransport(
-            $request,
-            $copilotDeadline
-        );
-        $envelope = $response['envelope'] ?? null;
-        $parsed = is_array($envelope)
-            ? parseExpiryCopilotEnvelope($envelope)
-            : null;
-        if ($parsed === null) {
-            throw new RuntimeException(
-                'expiry_copilot_invalid_response'
-            );
-        }
-        if (!$parsed['found']) {
-            return expiryNotFoundResult(
-                'expiry_not_found',
-                $rawText,
-                $startedAt
-            );
-        }
-        return [
-            'success' => true,
-            'found' => true,
-            'expiry_date' => $parsed['date'],
-            'raw_text' => $rawText,
-            'source' => 'copilot_ocr_text',
-            'nonfatal' => false,
-            'elapsed_ms' => (int)round(
-                (microtime(true) - $startedAt) * 1000
-            ),
-        ];
-    } catch (Throwable $error) {
-        $reason = evershelfCopilotFailureReason($error);
-        EverLog::warn(
-            'Expiry OCR Copilot fallback unavailable',
-            [
-                'reason' => mb_substr($reason, 0, 100),
-                'elapsed_ms' => (int)round(
-                    (microtime(true) - $startedAt) * 1000
-                ),
-            ],
-            'expiry_ocr'
-        );
-        return expiryNotFoundResult($reason, $rawText, $startedAt);
-    }
+    return $result;
 }
 
 function geminiReadExpiry(): void {

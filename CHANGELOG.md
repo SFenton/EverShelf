@@ -5,6 +5,12 @@ All notable changes to EverShelf will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.8.7] - 2026-08-14
+
+### Changed
+- Expiry parsing again prioritizes Gemini over heuristic OCR: Copilot Gemini
+  3.6 Vision runs first, with bounded Tesseract parsing retained as fallback.
+
 ## [1.8.6] - 2026-08-14
 
 ### Fixed

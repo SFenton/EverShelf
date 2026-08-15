@@ -370,21 +370,31 @@ $GLOBALS['EXPIRY_OCR_PROCESS_TRANSPORT'] =
         ];
     };
 $GLOBALS['EXPIRY_COPILOT_TRANSPORT'] =
-    static function () use (&$copilotExpiryCalls): array {
+    static function () use (
+        &$processOrder,
+        &$copilotExpiryCalls
+    ): array {
+        $processOrder[] = 'vision';
         $copilotExpiryCalls++;
-        throw new RuntimeException('copilot_must_not_run');
+        return [
+            'source' => 'copilot_socket',
+            'envelope' => [
+                'found' => false,
+                'date' => '',
+            ],
+        ];
     };
 $localExpiry = readExpiryFromImage($imageBase64);
 assertScanTrue(
     $localExpiry['found'] === true
     && $localExpiry['expiry_date'] === '2027-09-15'
     && $localExpiry['source'] === 'tesseract'
-    && $processOrder === ['process']
-    && $copilotExpiryCalls === 0
+    && $processOrder === ['vision', 'process']
+    && $copilotExpiryCalls === 1
     && is_float($capturedProcessRemaining)
     && $capturedProcessRemaining > 0
     && $capturedProcessRemaining <= 4.0,
-    'Local bounded Tesseract must run first and return a valid deterministic date'
+    'Copilot vision must run first and Tesseract must remain the bounded deterministic fallback'
 );
 
 $processOrder = [];
@@ -410,12 +420,23 @@ $GLOBALS['EXPIRY_COPILOT_TRANSPORT'] =
         &$processOrder,
         &$copilotExpiryCalls,
         &$capturedExpiryRequest,
-        &$capturedExpiryRemaining
+        &$capturedExpiryRemaining,
+        $expiryAttachmentDirectory
     ): array {
-        $processOrder[] = 'copilot';
+        $processOrder[] = 'vision';
         $copilotExpiryCalls++;
         $capturedExpiryRequest = $request;
         $capturedExpiryRemaining = $deadline - microtime(true);
+        $attachment = $request['attachment'] ?? [];
+        $path = $expiryAttachmentDirectory . '/'
+            . (string)($attachment['name'] ?? '');
+        assertScanTrue(
+            ($attachment['mime_type'] ?? '') === 'image/png'
+            && is_file($path)
+            && hash_file('sha256', $path)
+                === ($attachment['sha256'] ?? ''),
+            'Vision request must use one bounded, hash-bound attachment'
+        );
         return [
             'source' => 'copilot_socket',
             'envelope' => [
@@ -425,34 +446,36 @@ $GLOBALS['EXPIRY_COPILOT_TRANSPORT'] =
         ];
     };
 $copilotExpiry = readExpiryFromImage($imageBase64);
+$textRequest = expiryCopilotRequest(
+    $longOcrText,
+    new DateTimeImmutable('2026-08-14')
+);
 assertScanTrue(
     $copilotExpiry['found'] === true
     && $copilotExpiry['expiry_date'] === '2027-10-01'
-    && $copilotExpiry['source'] === 'copilot_ocr_text'
-    && $processOrder === ['process', 'copilot']
+    && $copilotExpiry['source'] === 'copilot_vision'
+    && $processOrder === ['vision']
     && ($capturedExpiryRequest['model'] ?? '')
-        === 'gemini-3.7-flash'
+        === 'gemini-3.6-flash'
     && ($capturedExpiryRequest['schema']['additionalProperties'] ?? null)
         === false
     && ($capturedExpiryRequest['schema']['required'] ?? [])
         === ['found', 'date']
-    && str_contains(
-        (string)$capturedExpiryRequest['prompt'],
-        'BEST BEFORE code unclear near cap'
-    )
-    && mb_strlen(
-        (string)$copilotExpiry['raw_text'],
-        'UTF-8'
-    ) === EXPIRY_OCR_MAX_TEXT_CHARS
+    && isset($capturedExpiryRequest['attachment'])
     && !str_contains(
         (string)$capturedExpiryRequest['prompt'],
         $imageBase64
     )
+    && ($textRequest['model'] ?? '') === 'gemini-3.7-flash'
+    && str_contains(
+        (string)$textRequest['prompt'],
+        'BEST BEFORE code unclear near cap'
+    )
     && is_float($capturedExpiryRemaining)
     && $capturedExpiryRemaining > 0
-    && $capturedExpiryRemaining <= 10.0
-    && (int)$copilotExpiry['elapsed_ms'] <= 14000,
-    'Inconclusive OCR must send only bounded text to strict Copilot Gemini under the total deadline'
+    && $capturedExpiryRemaining <= 15.0
+    && (int)$copilotExpiry['elapsed_ms'] <= 19000,
+    'Copilot Gemini vision must be the primary parser while the text contract remains bounded'
 );
 
 $processOrder = [];
@@ -467,40 +490,21 @@ $GLOBALS['EXPIRY_OCR_PROCESS_TRANSPORT'] =
         ];
     };
 $GLOBALS['EXPIRY_COPILOT_TRANSPORT'] =
-    static function (
-        array $request
-    ) use (
-        &$processOrder,
-        $expiryAttachmentDirectory
-    ): array {
+    static function () use (&$processOrder): array {
         $processOrder[] = 'vision';
-        $attachment = $request['attachment'] ?? [];
-        $path = $expiryAttachmentDirectory . '/'
-            . (string)($attachment['name'] ?? '');
-        assertScanTrue(
-            ($request['model'] ?? '') === 'gemini-3.6-flash'
-            && ($attachment['mime_type'] ?? '') === 'image/png'
-            && is_file($path)
-            && hash_file('sha256', $path)
-                === ($attachment['sha256'] ?? ''),
-            'Vision fallback must use one bounded, hash-bound attachment'
+        throw new RuntimeException(
+            'controller_copilot_socket_timeout'
         );
-        return [
-            'source' => 'copilot_socket',
-            'envelope' => [
-                'found' => true,
-                'date' => '2027-11-05',
-            ],
-        ];
     };
 $localTimeout = readExpiryFromImage($imageBase64);
 assertScanTrue(
-    $localTimeout['found'] === true
-    && $localTimeout['expiry_date'] === '2027-11-05'
-    && $localTimeout['source'] === 'copilot_vision'
-    && $processOrder === ['process', 'vision']
+    $localTimeout['found'] === false
+    && $localTimeout['nonfatal'] === true
+    && $localTimeout['can_continue'] === true
+    && $localTimeout['reason'] === 'tesseract_timeout'
+    && $processOrder === ['vision', 'process']
     && glob($expiryAttachmentDirectory . '/*') === [],
-    'Tesseract failure must use bounded Copilot Gemini vision and clean its attachment'
+    'Copilot vision failure must fall back to bounded Tesseract and clean its attachment'
 );
 
 $processOrder = [];
@@ -516,7 +520,7 @@ $GLOBALS['EXPIRY_OCR_PROCESS_TRANSPORT'] =
     };
 $GLOBALS['EXPIRY_COPILOT_TRANSPORT'] =
     static function () use (&$processOrder): array {
-        $processOrder[] = 'copilot';
+        $processOrder[] = 'vision';
         throw new RuntimeException('controller_copilot_socket_timeout');
     };
 $copilotTimeout = readExpiryFromImage($imageBase64);
@@ -525,9 +529,9 @@ assertScanTrue(
     && $copilotTimeout['nonfatal'] === true
     && $copilotTimeout['can_continue'] === true
     && str_contains((string)$copilotTimeout['reason'], 'socket_timeout')
-    && $processOrder === ['process', 'copilot']
-    && (int)$copilotTimeout['elapsed_ms'] <= 14000,
-    'Copilot timeout after OCR text must return a structured nonfatal result'
+    && $processOrder === ['vision', 'process']
+    && (int)$copilotTimeout['elapsed_ms'] <= 19000,
+    'Copilot vision timeout followed by unparseable OCR must remain nonfatal'
 );
 
 $leapDate = parseExpiryOcrText(
@@ -632,7 +636,7 @@ assertScanTrue(
     && glob(
         dirname(__DIR__) . '/data/.expiry-ocr-*.lock'
     ) === [],
-    'Expiry scan path must authenticate before a DB-independent, local-first, bounded text-only handler'
+    'Expiry scan path must authenticate before a DB-independent, Gemini-first, bounded attachment handler'
 );
 
 $barcodeAiCalls = 0;
