@@ -5,6 +5,38 @@ All notable changes to EverShelf will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.9.0] - 2026-08-15
+
+### Added
+- A lineage-bound copied-database activation pipeline now exports bounded JSON
+  manifests plus immutable SQLite sidecars, imports exact ontology and score
+  IDs in crash-resumable chunks, validates on a copy, and publishes through one
+  short score-pointer compare-and-swap.
+- Durable import leases, per-table sequence and row fences, CDC watermarks,
+  validation attestations, copied-workspace rebase, intent acknowledgement,
+  rollback-safe cleanup, and a production-sized rehearsal command.
+
+### Changed
+- The minute score cron now drives copied ontology/score activation instead of
+  building a v3 shadow on the active database. Inventory-only drift rebuilds
+  only scores; source or policy drift rebuilds the ontology candidate.
+- Copied forks use a multi-second throughput target while live imports retain
+  250 ms chunk and 100 ms activation alert budgets. Obsolete score
+  materializations are pruned in bounded resumable chunks.
+- Recent exact and validated intake intents are activated ahead of historical
+  backlog while provisional coverage continues to drain durably.
+
+### Fixed
+- Shadow and requirement builders now reject the active database on every path.
+- Quarantined model plans retain their immutable artifacts but receive a
+  separate deterministic provisional fallback, and the rejected original
+  change set no longer blocks activation.
+- Validated plans blocked by benchmark policy remain pending with a 24-hour
+  durable retry while their non-satisfying provisional fallback is active.
+- Blast comparison now uses a current-input parity control for generalized
+  changes and does not reject authoritative R0/provisional generations merely
+  because stale inventory/catalog state changed many score rows.
+
 ## [1.8.9] - 2026-08-15
 
 ### Fixed

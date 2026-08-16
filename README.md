@@ -593,9 +593,10 @@ Candidate builds must explicitly select `--corpus-profile=eval` or
 hash and exact owner counts; product and provider-term review sets use exact
 set equality. The selected profile, activation policy/reason, reviewed subject
 universe, pinned matcher fixture hash, ordered matcher case IDs, and count all
-participate in the immutable ontology seal. Activation reruns full revision,
-gold, source-universe, ID-set, and materialization integrity before and under
-the write reservation.
+participate in the immutable ontology seal. Activation runs full revision,
+gold, source-universe, ID-set, and materialization integrity on a copied
+database. The live write reservation rechecks only the sealed mutable-input,
+sequence, lease, intent, and pointer fences that determine that validation.
 
 Development and test instances may set one explicit
 `RECIPE_SCORE_PREVIEW_REVISION_ID` only when `EVERSHELF_ENV` is
@@ -780,18 +781,21 @@ needed. Configure it manually only for non-Docker installs:
 # Canonical taxonomy and smart shopping, every 5 minutes
 */5 * * * * php /path/to/evershelf/api/cron_smart_shopping.php >> /path/to/evershelf/data/cron.log 2>&1
 
-# Materialized inventory-to-recipe scores, every minute
-* * * * * php /path/to/evershelf/scripts/rebuild-recipe-scores.php >> /path/to/evershelf/data/cron.log 2>&1
+# Copied ontology/score activation, every minute
+* * * * * php /path/to/evershelf/scripts/process-ontology-activation.php --write --allow-active-db --allow-network >> /path/to/evershelf/data/cron.log 2>&1
 
 # Local recipe jobs and cadence-limited Cookidoo discovery, every minute
 * * * * * php /path/to/evershelf/scripts/process-recipe-queue.php --limit=2 --max-attempts=3 --respect-cookidoo-cadence >> /path/to/evershelf/data/cron.log 2>&1
 ```
 
 These jobs are **not optional** when their features are enabled. The first drains canonical
-ingredient/taxonomy work, the second keeps recipe browse scores current, and the third
-processes local recipe jobs plus remote metadata discovery. Without them, new products
-never receive taxonomy terms, large recipe catalogs remain temporarily unavailable, and
-remote hydration stays queued. Overlapping score and queue runs use locks/retries safely.
+ingredient/taxonomy work, the second imports copied ontology/score revisions and
+keeps recipe browse scores current, and the third processes local recipe jobs
+plus remote metadata discovery. Without them, new products never receive
+taxonomy terms, durable ontology intents remain pending, large recipe catalogs
+remain temporarily unavailable, and remote hydration stays queued. Overlapping
+activation and queue runs use the shared background-writer lock; web scans stay
+independent and force a safe rebase if their inputs change.
 
 ### Backup (Optional)
 

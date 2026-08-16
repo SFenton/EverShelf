@@ -33,6 +33,27 @@ $occurrenceMigrationDbPath =
 $priorityDbPath =
     __DIR__ . '/../data/.ontology-priority-test-'
     . getmypid() . '.sqlite';
+$activationTargetDbPath =
+    __DIR__ . '/../data/.ontology-activation-target-test-'
+    . getmypid() . '.sqlite';
+$ontologyValidationDbPath =
+    __DIR__ . '/../data/.ontology-validation-test-'
+    . getmypid() . '.sqlite';
+$scoreValidationDbPath =
+    __DIR__ . '/../data/.score-validation-test-'
+    . getmypid() . '.sqlite';
+$scoreRefreshWorkspacePath =
+    __DIR__ . '/../data/.score-refresh-workspace-test-'
+    . getmypid() . '.sqlite';
+$refreshBundleDbPath =
+    __DIR__ . '/../data/.refresh-bundle-test-'
+    . getmypid() . '.sqlite';
+$acknowledgementDbPath =
+    __DIR__ . '/../data/.acknowledgement-test-'
+    . getmypid() . '.sqlite';
+$payloadDirectory =
+    __DIR__ . '/../data/.ontology-activation-payload-test-'
+    . getmypid();
 $cleanup = [
     $dbPath,
     $dbPath . '-wal',
@@ -50,7 +71,44 @@ $cleanup = [
     dirname($priorityDbPath)
         . '/.' . basename($priorityDbPath)
         . '.recipe-score.lock',
+    $activationTargetDbPath,
+    $activationTargetDbPath . '-wal',
+    $activationTargetDbPath . '-shm',
+    dirname($activationTargetDbPath)
+        . '/.' . basename($activationTargetDbPath)
+        . '.recipe-score.lock',
+    $ontologyValidationDbPath,
+    $ontologyValidationDbPath . '-wal',
+    $ontologyValidationDbPath . '-shm',
+    dirname($ontologyValidationDbPath)
+        . '/.' . basename($ontologyValidationDbPath)
+        . '.recipe-score.lock',
+    $scoreValidationDbPath,
+    $scoreValidationDbPath . '-wal',
+    $scoreValidationDbPath . '-shm',
+    dirname($scoreValidationDbPath)
+        . '/.' . basename($scoreValidationDbPath)
+        . '.recipe-score.lock',
+    $scoreRefreshWorkspacePath,
+    $scoreRefreshWorkspacePath . '-wal',
+    $scoreRefreshWorkspacePath . '-shm',
+    dirname($scoreRefreshWorkspacePath)
+        . '/.' . basename($scoreRefreshWorkspacePath)
+        . '.recipe-score.lock',
+    $refreshBundleDbPath,
+    $refreshBundleDbPath . '-wal',
+    $refreshBundleDbPath . '-shm',
+    dirname($refreshBundleDbPath)
+        . '/.' . basename($refreshBundleDbPath)
+        . '.recipe-score.lock',
+    $acknowledgementDbPath,
+    $acknowledgementDbPath . '-wal',
+    $acknowledgementDbPath . '-shm',
+    dirname($acknowledgementDbPath)
+        . '/.' . basename($acknowledgementDbPath)
+        . '.recipe-score.lock',
 ];
+$cleanupDirectories = [$payloadDirectory];
 
 try {
     foreach ($cleanup as $path) {
@@ -64,6 +122,31 @@ try {
     $db->exec('PRAGMA foreign_keys=ON');
     initializeDB($db);
     migrateDB($db);
+    $db->exec("
+        DROP TRIGGER ontology_activation_cdc_products_update
+    ");
+    ingredientOntologyActivationSchemaMigrate($db);
+    controllerTestAssert(
+        (int)$db->query("
+            SELECT COUNT(*) FROM sqlite_master
+            WHERE type = 'trigger'
+              AND name = 'ontology_activation_cdc_products_update'
+        ")->fetchColumn() === 1,
+        'Activation schema migration must repair missing installed CDC triggers'
+    );
+    ingredientOntologyV3SetReadyMutationGuard($db, true);
+    $guardDb = new PDO('sqlite:' . $dbPath);
+    $guardDb->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+    ingredientOntologyActivationRegisterGuardFunctions($guardDb);
+    controllerTestAssert(
+        ingredientOntologyV3ReadyMutationGuardEnabled($db)
+        && !ingredientOntologyV3ReadyMutationGuardEnabled($guardDb)
+        && !ingredientOntologyV3PublicationGuardEnabled($guardDb)
+        && !ingredientOntologyV3RequirementPruneGuardEnabled($guardDb),
+        'New activation connections must register guards fail-closed without changing an existing scope'
+    );
+    ingredientOntologyV3SetReadyMutationGuard($db, false);
+    $guardDb = null;
 
     $migrationDb = new PDO(
         'sqlite:' . $occurrenceMigrationDbPath
@@ -3312,6 +3395,17 @@ try {
             SET status = ?
             WHERE id = ?
         ")->execute([$stateName, (int)$first['job_id']]);
+        if ($index === 0) {
+            $firstIntentJob = $db->query("
+                SELECT * FROM ontology_controller_jobs
+                WHERE id = " . (int)$first['job_id']
+            )->fetch(PDO::FETCH_ASSOC);
+            ingredientOntologyControllerStoreGenerationIntent(
+                $db,
+                $firstIntentJob,
+                'exact_constraint'
+            );
+        }
         $next = ingredientOntologyControllerRecordCorrection(
             $db,
             [
@@ -3326,6 +3420,29 @@ try {
                 'target_owner_fingerprint' => $targetFingerprint,
             ]
         );
+        if ($index === 0) {
+            $nextIntentJob = $db->query("
+                SELECT * FROM ontology_controller_jobs
+                WHERE id = " . (int)$next['job_id']
+            )->fetch(PDO::FETCH_ASSOC);
+            ingredientOntologyControllerStoreGenerationIntent(
+                $db,
+                $nextIntentJob,
+                'exact_constraint'
+            );
+            controllerTestAssert(
+                $db->query("
+                    SELECT status FROM ontology_generation_intents
+                    WHERE source_job_id = " . (int)$first['job_id']
+                )->fetchColumn() === 'superseded',
+                'A newer correction epoch must supersede the older exact generation intent'
+            );
+            ingredientOntologyControllerUpdateGenerationIntent(
+                $db,
+                (int)$next['job_id'],
+                'applied'
+            );
+        }
         controllerTestAssert(
             $db->query("
                 SELECT status FROM ontology_controller_jobs
@@ -4066,6 +4183,8 @@ try {
                     );
                 }
             };
+        $corpusBeforeGenerationCrash =
+            ingredientOntologyV3CorpusHash($db);
         $generationCrashed = false;
         try {
             ingredientOntologyControllerFinalizeGeneration(
@@ -4087,6 +4206,8 @@ try {
         } finally {
             unset($GLOBALS['ONTOLOGY_CONTROLLER_TEST_HOOK']);
         }
+        $corpusAfterGenerationCrash =
+            ingredientOntologyV3CorpusHash($db);
         $scoreCountAfterCrash = controllerTestCount(
             $db,
             "SELECT COUNT(*) FROM recipe_score_revisions
@@ -4121,7 +4242,19 @@ try {
                     && $scoreCountAfterResume === 1
                 )
             ),
-            "Generation crash {$generationPhase} must resume without a duplicate shadow or partial ready version"
+            "Generation crash {$generationPhase} must resume without a duplicate shadow or partial ready version: "
+                . ingredientOntologyControllerStableJson([
+                    'crashed' => $generationCrashed,
+                    'resumed' => $resumedGeneration,
+                    'score_count_after_crash' => $scoreCountAfterCrash,
+                    'score_count_after_resume' => $scoreCountAfterResume,
+                    'corpus_before_crash' =>
+                        $corpusBeforeGenerationCrash,
+                    'corpus_after_crash' =>
+                        $corpusAfterGenerationCrash,
+                    'corpus_after_resume' =>
+                        ingredientOntologyV3CorpusHash($db),
+                ])
         );
         if ($generationPhase === 'after_shadow') {
             $promotionCrashFixture = $fixture;
@@ -5687,6 +5820,59 @@ try {
             ),
             "A durable {$criticMode} critic must fail closed"
         );
+        if ($criticMode === 'block') {
+            $criticFallback =
+                ingredientOntologyControllerCreateQuarantinedFallbackGeneration(
+                    $db,
+                    $syntheticGenerationId,
+                    'blocked critic test'
+                );
+            $generalizedSourceSubjectId = (int)$db->query("
+                SELECT job.subject_id
+                FROM ontology_generation_plans item
+                JOIN ontology_mutation_plans plan
+                  ON plan.id = item.mutation_plan_id
+                JOIN ontology_controller_jobs job ON job.id = plan.job_id
+                WHERE item.generation_id = {$syntheticGenerationId}
+                ORDER BY item.ordinal
+                LIMIT 1
+            ")->fetchColumn();
+            $existingAcceptedFallback = controllerTestCount(
+                $db,
+                "SELECT COUNT(*)
+                 FROM ingredient_ontology_subject_resolutions
+                 WHERE ontology_version_id = ?
+                   AND subject_id = ?
+                   AND status = 'accepted'",
+                [
+                    (int)$generalizedGeneration[
+                        'parent_ontology_version_id'
+                    ],
+                    $generalizedSourceSubjectId,
+                ]
+            ) > 0;
+            controllerTestAssert(
+                (
+                    $criticFallback !== null
+                    && controllerTestCount(
+                        $db,
+                        "SELECT COUNT(*)
+                         FROM ontology_generation_plans item
+                         JOIN ontology_mutation_plans plan
+                           ON plan.id = item.mutation_plan_id
+                         WHERE item.generation_id = ?
+                           AND plan.repair_kind =
+                               'materialize_provisional_subject'",
+                        [(int)$criticFallback['id']]
+                    ) > 0
+                )
+                || $existingAcceptedFallback,
+                'A rejected generalized generation must produce a fresh deterministic provisional fallback: '
+                    . ingredientOntologyControllerStableJson([
+                        'fallback' => $criticFallback,
+                    ])
+            );
+        }
     }
 
     $db->prepare("
@@ -6369,19 +6555,22 @@ try {
             'building', 'shadowing', 'promotable', 'promoting'
         )
     ");
+    databaseMaintenanceOnlineBackup(
+        $dbPath,
+        $activationTargetDbPath
+    );
     $copiedBundleBuild =
         ingredientOntologyControllerBuildActivationBundle(
             $db,
             [
-                'limit' => 1,
+                'limit' => 10,
                 'maximum_cycles' => 2,
-                'critic' => [
-                    'verdict' => 'pass',
-                    'reason' => 'copied bundle test critic',
-                ],
+                'critic_provider' => 'fake_critic_clear',
+                'critic_model' => 'fake-clear',
                 'bypass_cadence' => true,
                 'allow_test_fixture' => true,
                 'batch_size' => 40,
+                'payload_directory' => $payloadDirectory,
             ]
         );
     $liveIntentRow = $db->query("
@@ -6389,6 +6578,579 @@ try {
         WHERE source_job_id = " . (int)$liveIntakeJob['id']
     )->fetch(PDO::FETCH_ASSOC);
     $copiedBundle = $copiedBundleBuild['bundle'];
+    $bundleSet = $copiedBundleBuild['bundle_set'];
+    foreach (['ontology', 'score'] as $bundleKind) {
+        $payloadPath = $payloadDirectory . '/'
+            . $bundleSet[$bundleKind]['payload']['file'];
+        $cleanup[] = $payloadPath;
+        controllerTestAssert(
+            is_file($payloadPath)
+            && hash_equals(
+                (string)$bundleSet[$bundleKind]['payload']['sha256'],
+                (string)hash_file('sha256', $payloadPath)
+            )
+            && !is_file($payloadPath . '-wal')
+            && !is_file($payloadPath . '-shm')
+            && strlen(ingredientOntologyControllerStableJson(
+                $bundleSet[$bundleKind]
+            )) < 1048576,
+            "Activation {$bundleKind} payload must be immutable, "
+                . 'single-file, hash-bound, and manifest-bounded'
+        );
+    }
+    controllerTestAssert(
+        $bundleSet['schema_version']
+            === 'ontology-activation-bundle-set-v2'
+        && count($bundleSet['ontology']['tables']) === 32
+        && count($bundleSet['score']['tables']) === 3
+        && $bundleSet['ontology']['database_lineage_uuid']
+            === ingredientOntologyActivationLineageUuid($db)
+        && $bundleSet['ontology']['candidate']['ontology_version_id']
+            === $copiedBundle['candidate']['ontology_version_id']
+        && $bundleSet['score']['candidate']['score_revision_id']
+            === $copiedBundle['candidate']['score_revision_id'],
+        'Bundle v2 must preserve the complete ontology and score payload graph'
+    );
+    $activationTarget = new PDO(
+        'sqlite:' . $activationTargetDbPath
+    );
+    $activationTarget->setAttribute(
+        PDO::ATTR_ERRMODE,
+        PDO::ERRMODE_EXCEPTION
+    );
+    $activationTarget->setAttribute(
+        PDO::ATTR_DEFAULT_FETCH_MODE,
+        PDO::FETCH_ASSOC
+    );
+    $activationTarget->exec('PRAGMA foreign_keys = ON');
+    $activationTarget->exec('PRAGMA busy_timeout = 10000');
+    $GLOBALS['ONTOLOGY_CONTROLLER_ACTIVE_DB_PATH_OVERRIDE'] =
+        $activationTargetDbPath;
+    try {
+        $ontologyImport =
+            ingredientOntologyActivationRegisterImport(
+                $activationTarget,
+                $bundleSet['ontology'],
+                $payloadDirectory
+            );
+        $ontologyImport =
+            ingredientOntologyActivationRunImport(
+                $activationTarget,
+                (int)$ontologyImport['id'],
+                10000
+            );
+        $ontologyTransport =
+            ingredientOntologyActivationVerifyImportedRows(
+                $activationTarget,
+                (int)$ontologyImport['id']
+            );
+    } finally {
+        unset($GLOBALS['ONTOLOGY_CONTROLLER_ACTIVE_DB_PATH_OVERRIDE']);
+    }
+    controllerTestAssert(
+        $ontologyImport['status'] === 'verifying'
+        && $ontologyTransport['valid'] === true
+        && $activationTarget->query("
+            SELECT status
+            FROM ingredient_ontology_versions
+            WHERE id = "
+                . (int)$bundleSet['ontology']['candidate'][
+                    'ontology_version_id'
+                ]
+        )->fetchColumn() === 'building'
+        && controllerTestCount(
+            $activationTarget,
+            "SELECT COUNT(*)
+             FROM ingredient_ontology_mappings
+             WHERE ontology_version_id = ?",
+            [
+                (int)$bundleSet['ontology']['candidate'][
+                    'ontology_version_id'
+                ],
+            ]
+        ) > 0,
+        'Exact-ID ontology import must resume through verified building rows'
+    );
+    databaseMaintenanceOnlineBackup(
+        $activationTargetDbPath,
+        $ontologyValidationDbPath
+    );
+    $ontologyValidationDb = new PDO(
+        'sqlite:' . $ontologyValidationDbPath
+    );
+    $ontologyValidationDb->setAttribute(
+        PDO::ATTR_ERRMODE,
+        PDO::ERRMODE_EXCEPTION
+    );
+    $ontologyValidationDb->setAttribute(
+        PDO::ATTR_DEFAULT_FETCH_MODE,
+        PDO::FETCH_ASSOC
+    );
+    $ontologyValidationDb->exec('PRAGMA foreign_keys = ON');
+    $ontologyAttestation =
+        ingredientOntologyActivationValidateImportOnCopy(
+            $ontologyValidationDb,
+            (int)$ontologyImport['id'],
+            ['allow_test_fixture' => true]
+        );
+    $ontologyValidationDb = null;
+    $GLOBALS['ONTOLOGY_CONTROLLER_ACTIVE_DB_PATH_OVERRIDE'] =
+        $activationTargetDbPath;
+    try {
+        ingredientOntologyActivationStoreValidation(
+            $activationTarget,
+            (int)$ontologyImport['id'],
+            $ontologyAttestation
+        );
+        $ontologyImport =
+            ingredientOntologyActivationActivateImport(
+                $activationTarget,
+                (int)$ontologyImport['id']
+            );
+    } finally {
+        unset($GLOBALS['ONTOLOGY_CONTROLLER_ACTIVE_DB_PATH_OVERRIDE']);
+    }
+    controllerTestAssert(
+        $ontologyImport['status'] === 'complete'
+        && (float)$ontologyImport['maximum_reservation_ms'] <= 250
+        && $activationTarget->query("
+            SELECT status
+            FROM ingredient_ontology_versions
+            WHERE id = "
+                . (int)$bundleSet['ontology']['candidate'][
+                    'ontology_version_id'
+                ]
+        )->fetchColumn() === 'ready'
+        && $activationTarget->query("
+            SELECT status
+            FROM ontology_generation_intents
+            WHERE source_job_id = " . (int)$liveIntakeJob['id']
+        )->fetchColumn() === 'pending',
+        'Ontology publication must remain inactive until score activation'
+    );
+    $GLOBALS['ONTOLOGY_CONTROLLER_ACTIVE_DB_PATH_OVERRIDE'] =
+        $activationTargetDbPath;
+    try {
+        $scoreImport = ingredientOntologyActivationRegisterImport(
+            $activationTarget,
+            $bundleSet['score'],
+            $payloadDirectory
+        );
+        $scoreImport = ingredientOntologyActivationRunImport(
+            $activationTarget,
+            (int)$scoreImport['id'],
+            10000
+        );
+        $scoreTransport =
+            ingredientOntologyActivationVerifyImportedRows(
+                $activationTarget,
+                (int)$scoreImport['id']
+            );
+    } finally {
+        unset($GLOBALS['ONTOLOGY_CONTROLLER_ACTIVE_DB_PATH_OVERRIDE']);
+    }
+    recipeScoreMarkDirty($activationTarget);
+    databaseMaintenanceOnlineBackup(
+        $activationTargetDbPath,
+        $scoreValidationDbPath
+    );
+    $scoreValidationDb = new PDO(
+        'sqlite:' . $scoreValidationDbPath
+    );
+    $scoreValidationDb->setAttribute(
+        PDO::ATTR_ERRMODE,
+        PDO::ERRMODE_EXCEPTION
+    );
+    $scoreValidationDb->setAttribute(
+        PDO::ATTR_DEFAULT_FETCH_MODE,
+        PDO::FETCH_ASSOC
+    );
+    $scoreValidationDb->exec('PRAGMA foreign_keys = ON');
+    $scoreAttestation =
+        ingredientOntologyActivationValidateImportOnCopy(
+            $scoreValidationDb,
+            (int)$scoreImport['id'],
+            ['allow_test_fixture' => true]
+        );
+    $scoreValidationDb = null;
+    $GLOBALS['ONTOLOGY_CONTROLLER_ACTIVE_DB_PATH_OVERRIDE'] =
+        $activationTargetDbPath;
+    try {
+        ingredientOntologyActivationStoreValidation(
+            $activationTarget,
+            (int)$scoreImport['id'],
+            $scoreAttestation
+        );
+        recipeScoreFailAbandonedBuilds($activationTarget);
+        recipeScorePruneRevisions($activationTarget);
+        $importCandidateProtected = recipeScoreRevision(
+            $activationTarget,
+            (int)$scoreImport['candidate_score_revision_id']
+        ) !== null;
+        $scoreImport = ingredientOntologyActivationActivateImport(
+            $activationTarget,
+            (int)$scoreImport['id']
+        );
+    } finally {
+        unset($GLOBALS['ONTOLOGY_CONTROLLER_ACTIVE_DB_PATH_OVERRIDE']);
+    }
+    $activatedScoreId = (int)$bundleSet['score']['candidate'][
+        'score_revision_id'
+    ];
+    controllerTestAssert(
+        $scoreTransport['valid'] === true
+        && $importCandidateProtected
+        && $scoreImport['status'] === 'active'
+        && (float)$scoreImport['maximum_reservation_ms'] <= 250
+        && (float)$scoreImport['last_reservation_ms'] <= 100
+        && (string)$scoreImport['last_error'] === ''
+        && recipeScoreState($activationTarget)[
+            'active_score_revision_id'
+        ] === $activatedScoreId
+        && strlen(
+            recipeScoreState($activationTarget)['ontology_source_hash']
+        ) === 64
+        && (int)recipeScoreRevision(
+            $activationTarget,
+            $activatedScoreId
+        )['inventory_revision']
+            === recipeScoreState($activationTarget)['inventory_revision']
+        && $activationTarget->query("
+            SELECT status
+            FROM ontology_generation_intents
+            WHERE source_job_id = " . (int)$liveIntakeJob['id']
+        )->fetchColumn() === 'applied'
+        && (int)ingredientOntologyV3ActiveVersion(
+            $activationTarget
+        )['id'] === (int)$bundleSet['ontology']['candidate'][
+            'ontology_version_id'
+        ],
+        'Score activation must atomically publish ranking and consume intents'
+    );
+    databaseMaintenanceOnlineBackup(
+        $activationTargetDbPath,
+        $refreshBundleDbPath
+    );
+    $refreshBundleDb = ingredientOntologyActivationOpenDatabase(
+        $refreshBundleDbPath
+    );
+    $refreshBundleDb->exec("
+        UPDATE ontology_generation_intents
+        SET status = 'applied',
+            finished_at = CURRENT_TIMESTAMP,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE status = 'pending'
+    ");
+    $refreshBundleDb->exec("
+        UPDATE recipe_score_state
+        SET ontology_source_revision = ontology_source_revision + 1,
+            ontology_source_hash = '',
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = 1
+    ");
+    $sourceRefreshSnapshot =
+        ingredientOntologyActivationCaptureBuildSnapshot($refreshBundleDb);
+    $sourceRefreshBundle =
+        ingredientOntologyActivationBuildRefreshBundleSet(
+            $refreshBundleDb,
+            $sourceRefreshSnapshot,
+            $payloadDirectory,
+            [
+                'allow_test_fixture' => true,
+                'batch_size' => 40,
+            ]
+        );
+    $refreshBundleDb = null;
+    $cleanup[] = $payloadDirectory . '/'
+        . $sourceRefreshBundle['ontology']['payload']['file'];
+    $cleanup[] = $payloadDirectory . '/'
+        . $sourceRefreshBundle['score']['payload']['file'];
+    controllerTestAssert(
+        $sourceRefreshBundle['ontology']['bundle_kind'] === 'ontology'
+        && $sourceRefreshBundle['score']['bundle_kind'] === 'score'
+        && (int)$sourceRefreshBundle['ontology']['candidate'][
+            'ontology_version_id'
+        ] > (int)$sourceRefreshBundle['ontology']['parent'][
+            'ontology_version_id'
+        ],
+        'Source drift without pending intents must create a deterministic refresh bundle'
+    );
+
+    $ackSourceJobId = (int)$activationTarget->query("
+        SELECT source_job_id
+        FROM ontology_generation_intents
+        WHERE status = 'pending'
+        ORDER BY id
+        LIMIT 1
+    ")->fetchColumn();
+    if ($ackSourceJobId <= 0) {
+        $sourceJob = $activationTarget->query("
+            SELECT * FROM ontology_controller_jobs
+            WHERE id = " . (int)$liveIntakeJob['id']
+        )->fetch(PDO::FETCH_ASSOC);
+        $activationTarget->prepare("
+            INSERT INTO ontology_controller_jobs (
+                job_key, job_type, subject_id, trigger_event_id,
+                stream_key, required_epoch, controller_generation,
+                base_ontology_version_id, base_content_hash,
+                controller_policy_hash, status, priority,
+                input_hash, input_json, response_artifact_id,
+                finished_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                    'promoted', ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        ")->execute([
+            hash('sha256', 'activation-no-op-ack-job'),
+            (string)$sourceJob['job_type'],
+            $sourceJob['subject_id'],
+            $sourceJob['trigger_event_id'],
+            $sourceJob['stream_key'],
+            (int)$sourceJob['required_epoch'],
+            (int)$sourceJob['controller_generation'],
+            (int)$sourceJob['base_ontology_version_id'],
+            (string)$sourceJob['base_content_hash'],
+            (string)$sourceJob['controller_policy_hash'],
+            (int)$sourceJob['priority'],
+            hash('sha256', 'activation-no-op-ack-input'),
+            (string)$sourceJob['input_json'],
+            $sourceJob['response_artifact_id'],
+        ]);
+        $ackSourceJobId = (int)$activationTarget->lastInsertId();
+        $ackJob = $activationTarget->query("
+            SELECT * FROM ontology_controller_jobs
+            WHERE id = {$ackSourceJobId}
+        ")->fetch(PDO::FETCH_ASSOC);
+        ingredientOntologyControllerStoreGenerationIntent(
+            $activationTarget,
+            $ackJob,
+            'provisional'
+        );
+    }
+    databaseMaintenanceOnlineBackup(
+        $activationTargetDbPath,
+        $acknowledgementDbPath
+    );
+    $ackDb = ingredientOntologyActivationOpenDatabase(
+        $acknowledgementDbPath
+    );
+    $ackBuilt = ingredientOntologyControllerBuildActivationBundle(
+        $ackDb,
+        [
+            'limit' => 1,
+            'maximum_cycles' => 2,
+            'payload_directory' => $payloadDirectory,
+            'allow_test_fixture' => true,
+            'batch_size' => 40,
+        ]
+    );
+    $ackDocument = $ackBuilt['acknowledgement'];
+    $ackDb = null;
+    $pointerBeforeAck = recipeScoreState(
+        $activationTarget
+    )['active_score_revision_id'];
+    $ackRaceDb = new PDO('sqlite:' . $activationTargetDbPath);
+    $ackRaceDb->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+    $GLOBALS['ONTOLOGY_ACTIVATION_BEFORE_ACK_RESERVATION'] =
+        static function () use ($ackRaceDb): void {
+            $ackRaceDb->exec("
+                UPDATE recipe_score_state
+                SET ontology_source_revision =
+                        ontology_source_revision + 1,
+                    ontology_source_hash = '',
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = 1
+            ");
+        };
+    $GLOBALS['ONTOLOGY_CONTROLLER_ACTIVE_DB_PATH_OVERRIDE'] =
+        $activationTargetDbPath;
+    $ackRaceRejected = false;
+    try {
+        try {
+            ingredientOntologyActivationAcknowledgeNoOp(
+                $activationTarget,
+                $ackDocument
+            );
+        } catch (RuntimeException $error) {
+            $ackRaceRejected = str_contains(
+                $error->getMessage(),
+                'reservation parent changed'
+            );
+        }
+    } finally {
+        unset($GLOBALS['ONTOLOGY_ACTIVATION_BEFORE_ACK_RESERVATION']);
+        unset($GLOBALS['ONTOLOGY_CONTROLLER_ACTIVE_DB_PATH_OVERRIDE']);
+    }
+    $ackRaceDb = null;
+    $activationTarget->prepare("
+        UPDATE recipe_score_state
+        SET ontology_source_revision = ?,
+            ontology_source_hash = ?,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = 1
+    ")->execute([
+        (int)$ackDocument['source_fence']['ontology_source_revision'],
+        (string)recipeScoreActiveRevision(
+            $activationTarget
+        )['ontology_source_hash'],
+    ]);
+    $GLOBALS['ONTOLOGY_CONTROLLER_ACTIVE_DB_PATH_OVERRIDE'] =
+        $activationTargetDbPath;
+    try {
+        $ackResult = ingredientOntologyActivationAcknowledgeNoOp(
+            $activationTarget,
+            $ackDocument
+        );
+    } finally {
+        unset($GLOBALS['ONTOLOGY_CONTROLLER_ACTIVE_DB_PATH_OVERRIDE']);
+    }
+    controllerTestAssert(
+        $ackRaceRejected
+        && $ackResult['applied'] === true
+        && $ackResult['intent_count'] === 1
+        && $activationTarget->query("
+            SELECT status
+            FROM ontology_generation_intents
+            WHERE source_job_id = {$ackSourceJobId}
+        ")->fetchColumn() === 'applied'
+        && recipeScoreState($activationTarget)[
+            'active_score_revision_id'
+        ] === $pointerBeforeAck,
+        'Copied semantic no-ops must acknowledge live intents without moving the pointer'
+    );
+
+    databaseMaintenanceOnlineBackup(
+        $activationTargetDbPath,
+        $scoreRefreshWorkspacePath
+    );
+    $scoreRefreshDb = ingredientOntologyActivationOpenDatabase(
+        $scoreRefreshWorkspacePath
+    );
+    $refreshSnapshot =
+        ingredientOntologyActivationCaptureBuildSnapshot($scoreRefreshDb);
+    $refreshBundle = ingredientOntologyActivationBuildScoreBundle(
+        $scoreRefreshDb,
+        (int)ingredientOntologyV3ActiveVersion($scoreRefreshDb)['id'],
+        $refreshSnapshot,
+        $payloadDirectory,
+        [],
+        [
+            'allow_test_fixture' => true,
+            'batch_size' => 40,
+        ]
+    );
+    $scoreRefreshDb = null;
+    $cleanup[] = $payloadDirectory . '/'
+        . $refreshBundle['payload']['file'];
+    $GLOBALS['ONTOLOGY_CONTROLLER_ACTIVE_DB_PATH_OVERRIDE'] =
+        $activationTargetDbPath;
+    try {
+        $refreshImport = ingredientOntologyActivationRegisterImport(
+            $activationTarget,
+            $refreshBundle,
+            $payloadDirectory
+        );
+        $refreshImport = ingredientOntologyActivationRunImport(
+            $activationTarget,
+            (int)$refreshImport['id'],
+            10000
+        );
+        ingredientOntologyActivationVerifyImportedRows(
+            $activationTarget,
+            (int)$refreshImport['id']
+        );
+        $refreshAttestation =
+            ingredientOntologyActivationValidationCopy(
+                $activationTarget,
+                (int)$refreshImport['id'],
+                ['allow_test_fixture' => true]
+            );
+        ingredientOntologyActivationStoreValidation(
+            $activationTarget,
+            (int)$refreshImport['id'],
+            $refreshAttestation
+        );
+        $activationTarget->prepare("
+            DELETE FROM recipe_inventory_scores
+            WHERE rowid IN (
+                SELECT rowid FROM recipe_inventory_scores
+                WHERE score_revision_id = ?
+                LIMIT 1
+            )
+        ")->execute([
+            (int)$refreshImport['candidate_score_revision_id'],
+        ]);
+        $corruptionRejected = false;
+        try {
+            ingredientOntologyActivationActivateImport(
+                $activationTarget,
+                (int)$refreshImport['id']
+            );
+        } catch (RuntimeException $error) {
+            $corruptionRejected = str_contains(
+                $error->getMessage(),
+                'activation score rows changed'
+            );
+        }
+        $refreshImport =
+            ingredientOntologyActivationCleanupImport(
+                $activationTarget,
+                (int)$refreshImport['id'],
+                1
+            );
+        $cleanupRootSurvived = recipeScoreRevision(
+            $activationTarget,
+            (int)$refreshBundle['candidate']['score_revision_id']
+        ) !== null;
+        do {
+            $refreshImport =
+                ingredientOntologyActivationCleanupImport(
+                    $activationTarget,
+                    (int)$refreshImport['id'],
+                    10000
+                );
+        } while ((string)$refreshImport['status'] === 'purging');
+    } finally {
+        unset($GLOBALS['ONTOLOGY_CONTROLLER_ACTIVE_DB_PATH_OVERRIDE']);
+    }
+    controllerTestAssert(
+        $corruptionRejected
+        && $cleanupRootSurvived
+        && $refreshImport['status'] === 'cleaned'
+        && recipeScoreRevision(
+            $activationTarget,
+            (int)$refreshBundle['candidate']['score_revision_id']
+        ) === null
+        && recipeScoreState($activationTarget)[
+            'active_score_revision_id'
+        ] === $activatedScoreId,
+        'Failed score imports must drain children before the root without moving the active pointer'
+    );
+    $cdcHighWaterBefore =
+        ingredientOntologyActivationCdcSnapshot($activationTarget);
+    $activationTarget->exec("
+        INSERT INTO ontology_activation_cdc (
+            domain, table_name, operation, owner_type,
+            owner_id, created_at
+        )
+        VALUES
+            ('source', 'products', 'update', 'product', 1,
+             datetime('now', '-8 days')),
+            ('source', 'products', 'update', 'product', 2,
+             datetime('now', '-8 days'))
+    ");
+    ingredientOntologyActivationPruneCdc($activationTarget, 1000);
+    controllerTestAssert(
+        ingredientOntologyActivationCdcSnapshot($activationTarget)
+            === $cdcHighWaterBefore
+        && controllerTestCount(
+            $activationTarget,
+            "SELECT COUNT(*) FROM ontology_activation_cdc
+             WHERE domain = 'source'
+               AND created_at < datetime('now', '-7 days')"
+        ) <= 1,
+        'CDC retention must not lower durable per-domain high-water fences'
+    );
+    $activationTarget = null;
     $bundlePreflight =
         ingredientOntologyControllerActivationBundlePreflight(
             $db,
@@ -7281,6 +8043,11 @@ try {
     foreach ($cleanup as $path) {
         if (is_file($path)) {
             unlink($path);
+        }
+    }
+    foreach ($cleanupDirectories as $directory) {
+        if (is_dir($directory)) {
+            rmdir($directory);
         }
     }
 }

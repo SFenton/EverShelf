@@ -1180,6 +1180,41 @@ function ingredientOntologyV3BuildShadow(
     }
     ingredientOntologyV3SchemaMigrate($db);
     $version = ingredientOntologyV3Version($db, $versionId);
+    $activeVersion = ingredientOntologyV3ActiveVersion($db);
+    if (
+        $version !== null
+        && (string)$version['status'] === 'ready'
+        && ($activeVersion === null
+            || (int)$activeVersion['id'] !== $versionId)
+        && function_exists('ingredientOntologyControllerSealVersion')
+        && !hash_equals(
+            (string)$version['corpus_hash'],
+            ingredientOntologyV3CorpusHash($db)
+        )
+    ) {
+        ingredientOntologyV3WithReadyMutationGuard(
+            $db,
+            static function () use ($db, $versionId): void {
+                $db->prepare("
+                    UPDATE ingredient_ontology_versions
+                    SET status = 'building',
+                        ready_at = NULL,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ? AND status = 'ready'
+                ")->execute([$versionId]);
+            }
+        );
+        ingredientOntologyControllerSealVersion(
+            $db,
+            $versionId,
+            [
+                'allow_test_fixture' =>
+                    defined('RECIPE_BACKEND_TEST_MODE')
+                    && RECIPE_BACKEND_TEST_MODE,
+            ]
+        );
+        $version = ingredientOntologyV3Version($db, $versionId);
+    }
     if ($version === null || $version['status'] !== 'ready') {
         throw new InvalidArgumentException(
             'shadow scoring requires a ready ontology version'
@@ -1302,33 +1337,44 @@ function ingredientOntologyV3BuildShadow(
             $db,
             $versionId
         );
-        if (
-            !$sourceIntegrity['valid']
-            || !hash_equals(
-                (string)$version['schema_hash'],
-                ingredientOntologyV3SchemaHash()
-            )
-            || !hash_equals(
-                (string)$version['prompt_hash'],
-                ingredientOntologyV3PromptHash()
-            )
-            || !hash_equals(
-                (string)$version['model_hash'],
-                ingredientOntologyV3ModelHash(
-                    (string)$version['model_name']
-                )
-            )
-            || !hash_equals(
-                (string)$version['corpus_hash'],
-                ingredientOntologyV3CorpusHash($db)
-            )
-            || !hash_equals(
-                (string)$version['content_hash'],
-                ingredientOntologyV3ContentHash($db, $versionId)
-            )
-        ) {
+        $currentHashes = [
+            'schema' => ingredientOntologyV3SchemaHash(),
+            'prompt' => ingredientOntologyV3PromptHash(),
+            'model' => ingredientOntologyV3ModelHash(
+                (string)$version['model_name']
+            ),
+            'corpus' => ingredientOntologyV3CorpusHash($db),
+            'content' =>
+                ingredientOntologyV3ContentHash($db, $versionId),
+        ];
+        $stale = [];
+        if (!$sourceIntegrity['valid']) {
+            $stale[] = 'owner_fingerprints';
+        }
+        foreach ([
+            'schema' => 'schema_hash',
+            'prompt' => 'prompt_hash',
+            'model' => 'model_hash',
+            'corpus' => 'corpus_hash',
+            'content' => 'content_hash',
+        ] as $name => $column) {
+            if (!hash_equals(
+                (string)$version[$column],
+                (string)$currentHashes[$name]
+            )) {
+                $stale[] = $name;
+            }
+        }
+        if ($stale) {
             throw new RuntimeException(
-                'shadow scoring source or ontology hashes are stale'
+                'shadow scoring source or ontology hashes are stale: '
+                . ingredientOntologyV3Json([
+                    'fields' => $stale,
+                    'sealed_corpus' => (string)$version['corpus_hash'],
+                    'current_corpus' => (string)$currentHashes['corpus'],
+                    'source_revision' =>
+                        (int)$state['ontology_source_revision'],
+                ])
             );
         }
         $context = new IngredientOntologyV3MatcherContext($db, $versionId);
@@ -1699,6 +1745,22 @@ function ingredientOntologyV3ScheduledRebuild(
             throw new RuntimeException(
                 'active ontology revision has an unsupported scoring model'
             );
+        }
+        if (
+            function_exists('ingredientOntologyControllerDatabaseIsActive')
+            && ingredientOntologyControllerDatabaseIsActive($db)
+            && !(
+                defined('RECIPE_BACKEND_TEST_MODE')
+                && RECIPE_BACKEND_TEST_MODE
+            )
+        ) {
+            return [
+                'rebuilt' => false,
+                'reason' => 'copied_activation_required',
+                'revision_id' => (int)$active['id'],
+                'ontology_version_id' =>
+                    (int)$active['ontology_version_id'],
+            ];
         }
         $state = recipeScoreState($db);
         $versionId = (int)$active['ontology_version_id'];

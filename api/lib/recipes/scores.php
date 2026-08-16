@@ -802,6 +802,27 @@ function recipeScoreReleaseLock(mixed $handle): void {
     }
 }
 
+function recipeScoreImportOwnedRevisionIds(PDO $db): array {
+    $exists = $db->query("
+        SELECT 1 FROM sqlite_master
+        WHERE type = 'table'
+          AND name = 'ontology_activation_imports'
+    ")->fetchColumn();
+    if (!$exists) {
+        return [];
+    }
+    return array_map('intval', $db->query("
+        SELECT DISTINCT candidate_score_revision_id
+        FROM ontology_activation_imports
+        WHERE bundle_kind = 'score'
+          AND candidate_score_revision_id IS NOT NULL
+          AND status IN (
+              'staging', 'importing', 'verifying', 'activatable',
+              'rebase_required', 'failed', 'purging'
+          )
+    ")->fetchAll(PDO::FETCH_COLUMN));
+}
+
 function recipeScoreFailAbandonedBuilds(PDO $db): int {
     $error = mb_substr(
         'abandoned building revision recovered after '
@@ -810,14 +831,21 @@ function recipeScoreFailAbandonedBuilds(PDO $db): int {
         1000,
         'UTF-8'
     );
+    $protected = recipeScoreImportOwnedRevisionIds($db);
+    $where = "status = 'building'";
+    if ($protected) {
+        $where .= ' AND id NOT IN ('
+            . implode(',', array_fill(0, count($protected), '?'))
+            . ')';
+    }
     $stmt = $db->prepare("
         UPDATE recipe_score_revisions SET
             status = 'failed',
             last_error = ?,
             completed_at = CURRENT_TIMESTAMP
-        WHERE status = 'building'
+        WHERE {$where}
     ");
-    $stmt->execute([$error]);
+    $stmt->execute(array_merge([$error], $protected));
     return $stmt->rowCount();
 }
 
@@ -1063,6 +1091,11 @@ function recipeScorePruneRevisions(PDO $db): array {
             'recipe score pruning keep set exceeded its bounded limit'
         );
     }
+    $keep = array_values(array_unique(array_merge(
+        $keep,
+        recipeScoreImportOwnedRevisionIds($db)
+    )));
+    sort($keep, SORT_NUMERIC);
     if (
         defined('RECIPE_BACKEND_TEST_MODE')
         && RECIPE_BACKEND_TEST_MODE

@@ -79,86 +79,103 @@ function ingredientOntologyV3MatcherGoldCaseIds(): array {
     ];
 }
 
-function ingredientOntologyV3SetRequirementPruneGuard(
+function ingredientOntologyV3GuardStates(): WeakMap {
+    static $states = null;
+    if (!$states instanceof WeakMap) {
+        $states = new WeakMap();
+    }
+    return $states;
+}
+
+function ingredientOntologyV3SetGuard(
     PDO $db,
+    string $guard,
+    string $functionName,
     bool $enabled
 ): void {
     if (!method_exists($db, 'sqliteCreateFunction')) {
         throw new RuntimeException(
-            'SQLite prune guard functions are unavailable'
+            'SQLite ontology guard functions are unavailable'
         );
     }
-    $key = 'ingredient_ontology_prune_guard:' . spl_object_id($db);
-    $GLOBALS[$key] = $enabled ? 1 : 0;
+    $states = ingredientOntologyV3GuardStates();
+    $state = $states[$db] ?? [
+        'prune' => false,
+        'ready' => false,
+        'publication' => false,
+    ];
+    $state[$guard] = $enabled;
+    $states[$db] = $state;
+    $reference = WeakReference::create($db);
     $db->sqliteCreateFunction(
-        'ingredient_ontology_prune_guard',
-        static fn(): int => (int)($GLOBALS[$key] ?? 0),
+        $functionName,
+        static function () use ($reference, $guard): int {
+            $connection = $reference->get();
+            if (!$connection instanceof PDO) {
+                return 0;
+            }
+            $states = ingredientOntologyV3GuardStates();
+            return !empty(($states[$connection] ?? [])[$guard]) ? 1 : 0;
+        },
         0
     );
 }
 
+function ingredientOntologyV3SetRequirementPruneGuard(
+    PDO $db,
+    bool $enabled
+): void {
+    ingredientOntologyV3SetGuard(
+        $db,
+        'prune',
+        'ingredient_ontology_prune_guard',
+        $enabled
+    );
+}
+
 function ingredientOntologyV3SetReadyMutationGuard(
-        PDO $db,
-        bool $enabled
-    ): void {
-        if (!method_exists($db, 'sqliteCreateFunction')) {
-            throw new RuntimeException(
-                'SQLite ready mutation guard functions are unavailable'
-            );
-        }
-        $key = 'ingredient_ontology_ready_mutation_guard:'
-            . spl_object_id($db);
-        $GLOBALS[$key] = $enabled ? 1 : 0;
-        $db->sqliteCreateFunction(
-            'ingredient_ontology_ready_mutation_guard',
-            static fn(): int => (int)($GLOBALS[$key] ?? 0),
-            0
-        );
-    }
+    PDO $db,
+    bool $enabled
+): void {
+    ingredientOntologyV3SetGuard(
+        $db,
+        'ready',
+        'ingredient_ontology_ready_mutation_guard',
+        $enabled
+    );
+}
 
 function ingredientOntologyV3SetPublicationGuard(
     PDO $db,
     bool $enabled
 ): void {
-    if (!method_exists($db, 'sqliteCreateFunction')) {
-        throw new RuntimeException(
-            'SQLite publication guard functions are unavailable'
-        );
-    }
-    $key = 'ingredient_ontology_publication_guard:'
-        . spl_object_id($db);
-    $GLOBALS[$key] = $enabled ? 1 : 0;
-    $db->sqliteCreateFunction(
+    ingredientOntologyV3SetGuard(
+        $db,
+        'publication',
         'ingredient_ontology_publication_guard',
-        static fn(): int => (int)($GLOBALS[$key] ?? 0),
-        0
+        $enabled
     );
 }
 
 function ingredientOntologyV3RequirementPruneGuardEnabled(
     PDO $db
 ): bool {
-    return !empty($GLOBALS[
-        'ingredient_ontology_prune_guard:' . spl_object_id($db)
-    ]);
+    $states = ingredientOntologyV3GuardStates();
+    return !empty(($states[$db] ?? [])['prune']);
 }
 
 function ingredientOntologyV3ReadyMutationGuardEnabled(
     PDO $db
 ): bool {
-    return !empty($GLOBALS[
-        'ingredient_ontology_ready_mutation_guard:'
-            . spl_object_id($db)
-    ]);
+    $states = ingredientOntologyV3GuardStates();
+    return !empty(($states[$db] ?? [])['ready']);
 }
 
 function ingredientOntologyV3PublicationGuardEnabled(
     PDO $db
 ): bool {
-    return !empty($GLOBALS[
-        'ingredient_ontology_publication_guard:'
-            . spl_object_id($db)
-    ]);
+    $states = ingredientOntologyV3GuardStates();
+    return !empty(($states[$db] ?? [])['publication']);
 }
 
 function ingredientOntologyV3WithReadyMutationGuard(
@@ -1615,17 +1632,13 @@ function ingredientOntologyV3SchemaMigrate(PDO $db): void {
         $db,
         ingredientOntologyV3RequirementPruneGuardEnabled($db)
     );
-    $publicationGuardKey = 'ingredient_ontology_publication_guard:'
-        . spl_object_id($db);
     ingredientOntologyV3SetPublicationGuard(
         $db,
-        !empty($GLOBALS[$publicationGuardKey])
+        ingredientOntologyV3PublicationGuardEnabled($db)
     );
-    $readyGuardKey = 'ingredient_ontology_ready_mutation_guard:'
-        . spl_object_id($db);
     ingredientOntologyV3SetReadyMutationGuard(
         $db,
-        !empty($GLOBALS[$readyGuardKey])
+        ingredientOntologyV3ReadyMutationGuardEnabled($db)
     );
     $db->exec("
         CREATE TABLE IF NOT EXISTS ingredient_ontology_versions (
@@ -2985,8 +2998,10 @@ function ingredientOntologyV3SchemaMigrate(PDO $db): void {
             SELECT RAISE(ABORT, 'ontology lifecycle events are immutable');
         END;
 
-        CREATE TRIGGER IF NOT EXISTS ingredient_ontology_change_events_immutable_delete
+        CREATE TRIGGER IF NOT EXISTS
+            ingredient_ontology_change_events_immutable_delete
         BEFORE DELETE ON ingredient_ontology_change_events
+        WHEN ingredient_ontology_prune_guard() <> 1
         BEGIN
             SELECT RAISE(ABORT, 'ontology lifecycle events are append-only');
         END;
@@ -3777,10 +3792,38 @@ function ingredientOntologyV3SchemaMigrate(PDO $db): void {
     ");
         }
     );
+    $changeEventDeleteSql = (string)($db->query("
+        SELECT sql FROM sqlite_master
+        WHERE type = 'trigger'
+          AND name =
+              'ingredient_ontology_change_events_immutable_delete'
+    ")->fetchColumn() ?: '');
+    if (!str_contains(
+        $changeEventDeleteSql,
+        'ingredient_ontology_prune_guard'
+    )) {
+        $db->exec("
+            DROP TRIGGER IF EXISTS
+                ingredient_ontology_change_events_immutable_delete;
+            CREATE TRIGGER
+                ingredient_ontology_change_events_immutable_delete
+            BEFORE DELETE ON ingredient_ontology_change_events
+            WHEN ingredient_ontology_prune_guard() <> 1
+            BEGIN
+                SELECT RAISE(
+                    ABORT,
+                    'ontology lifecycle events are append-only'
+                );
+            END
+        ");
+    }
     ingredientOntologyV3EnsureHistoricalShadowMatchOwners($db);
     ingredientOntologyV3EnsurePendingEdgeReviewDisposition($db);
     if (function_exists('ingredientOntologyControllerSchemaMigrate')) {
         ingredientOntologyControllerSchemaMigrate($db);
+    }
+    if (function_exists('ingredientOntologyActivationSchemaMigrate')) {
+        ingredientOntologyActivationSchemaMigrate($db);
     }
     ingredientOntologyV3MigrateReadyGuards($db);
     ingredientOntologyV3MigrateMaterializationGuards($db);

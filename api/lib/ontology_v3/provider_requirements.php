@@ -2507,6 +2507,11 @@ function ingredientOntologyV3BuildRequirementProjection(
     int $batchSize = 250,
     ?callable $progress = null
 ): array {
+    if (function_exists(
+        'ingredientOntologyControllerAssertCopiedGenerationDatabase'
+    )) {
+        ingredientOntologyControllerAssertCopiedGenerationDatabase($db);
+    }
     ingredientOntologyV3SchemaMigrate($db);
     $version = ingredientOntologyV3Version($db, $versionId);
     if ($version === null || $version['status'] !== 'ready') {

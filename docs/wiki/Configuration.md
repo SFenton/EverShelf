@@ -248,18 +248,35 @@ php scripts/ontology-controller.php work \
 ```
 
 Copy the database safely, then consume and coalesce the stored intents, build
-one candidate and complete shadow, and export a sealed portable manifest:
+one candidate and complete shadow, and export a sealed manifest plus immutable
+SQLite sidecars:
 
 ```bash
 php scripts/ontology-controller.php bundle-build \
   --db=/path/to/evershelf-copy.sqlite --write \
-  --out=/path/to/activation-bundle.json
+  --out=/path/to/activation-bundle.json \
+  --payload-dir=/path/to/activation-payloads
 ```
 
-`bundle-validate` rechecks the parent pointer, ontology hashes, source
-revision/hash, catalog fingerprint, and source inventory fingerprint. No
-production bundle importer is currently provided; validation never moves a
-pointer.
+Set `ONTOLOGY_ACTIVATION_ENABLED=true` to let
+`scripts/process-ontology-activation.php` run this workflow automatically under
+the shared background-writer lock. It imports ontology and score payloads in
+lease-fenced chunks, validates the imported candidate on a fresh database copy,
+then publishes through one short score-pointer CAS. Inventory-only drift
+rebuilds only the score sidecar; source, policy, or constraint drift rebases from
+a fresh copy without another proposer call. Imported intents are acknowledged
+only in the same transaction that activates their score revision.
+
+`ONTOLOGY_ACTIVATION_DIRECTORY` must point inside durable storage with enough
+space for a database copy plus sidecars. `RECIPE_SCORE_PRUNE_CHUNK_ROWS` and
+`RECIPE_SCORE_PRUNE_MAX_CHUNKS` bound obsolete materialization cleanup. The
+active database remains intake-only: fork, generation, shadow scoring, and full
+semantic validation still run only on copies.
+
+Live import chunks have a 250 ms alert budget and final publication has a
+100 ms alert budget. They are measured and persisted after commit rather than
+treated as hard transaction deadlines because SQLite commit latency cannot be
+predicted before issuing the commit.
 
 The repository Compose worker must be configured as intake-only before it is
 started against `evershelf.db`. Any command retaining `--copy-generation`,

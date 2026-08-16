@@ -19,7 +19,7 @@ function ontologyControllerCliUsage(): never {
         . "  php scripts/ontology-controller.php gold-advance --db=copy.sqlite --release-id=N --write\n"
         . "  php scripts/ontology-controller.php benchmark-import --db=copy.sqlite --file=policy.json --write [--activate]\n"
         . "  php scripts/ontology-controller.php benchmark-list --db=copy.sqlite\n"
-        . "  php scripts/ontology-controller.php bundle-build --db=copy.sqlite --write --out=activation-bundle.json [--limit=50]\n"
+        . "  php scripts/ontology-controller.php bundle-build --db=copy.sqlite --write --out=activation-bundle.json [--payload-dir=/absolute/path] [--limit=50]\n"
         . "  php scripts/ontology-controller.php bundle-export --db=copy.sqlite --generation-id=N --out=activation-bundle.json\n"
         . "  php scripts/ontology-controller.php bundle-validate --db=target.sqlite --file=activation-bundle.json\n"
         . "\nAll runtime/model/promotion paths are disabled by default. "
@@ -394,9 +394,39 @@ switch ($command) {
                 ),
                 'batch_size' =>
                     max(1, min(500, (int)($options['batch'] ?? 250))),
+                'payload_directory' =>
+                    is_string($options['payload-dir'] ?? null)
+                        ? (string)$options['payload-dir']
+                        : null,
+                'provider' => (string)(
+                    $options['provider']
+                        ?? ingredientOntologyControllerProvider()
+                ),
+                'model' => (string)(
+                    $options['model']
+                        ?? ingredientOntologyControllerProposerModel()
+                ),
+                'critic_provider' => (string)(
+                    $options['critic-provider']
+                        ?? ingredientOntologyControllerCriticProvider()
+                ),
+                'critic_model' => (string)(
+                    $options['critic-model']
+                        ?? ingredientOntologyControllerCriticModel()
+                ),
+                'allow_network' => isset($options['allow-network']),
             ]
         );
-        $writeJson($built['bundle'], $out);
+        $writeJson(
+            is_array($built['bundle_set'] ?? null)
+                ? $built['bundle_set']
+                : (
+                    is_array($built['acknowledgement'] ?? null)
+                        ? $built['acknowledgement']
+                        : $built['bundle']
+                ),
+            $out
+        );
         break;
 
     case 'bundle-export':

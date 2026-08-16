@@ -499,18 +499,25 @@ try {
     $migrationLockSubject = null;
 
     $cronFile = file_get_contents(__DIR__ . '/../docker/evershelf-cron');
-    $rebuildScript = file_get_contents(
-        __DIR__ . '/rebuild-recipe-scores.php'
+    $activationScript = file_get_contents(
+        __DIR__ . '/process-ontology-activation.php'
     );
     ontologyV3TestAssert(
         is_string($cronFile)
-        && str_contains($cronFile, 'scripts/rebuild-recipe-scores.php')
-        && is_string($rebuildScript)
         && str_contains(
-            $rebuildScript,
-            'ingredientOntologyV3ScheduledRebuild'
+            $cronFile,
+            'scripts/process-ontology-activation.php'
+        )
+        && str_contains(
+            $cronFile,
+            'scripts/rebuild-recipe-scores.php'
+        )
+        && is_string($activationScript)
+        && str_contains(
+            $activationScript,
+            'ingredientOntologyActivationRunOnce'
         ),
-        'Cron must invoke the model-aware ontology v3 score scheduler'
+        'Cron must invoke the copied-database ontology activation scheduler'
     );
 
     foreach ([

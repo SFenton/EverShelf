@@ -172,6 +172,15 @@ dispensa/
   fork, shadow, or promote. One collecting or shadowing child is permitted per
   copied parent. Exact semantic no-ops skip shadow scoring, while safe shadow
   retries reuse the completed child.
+- Production activation uses lineage-bound manifest v2 plus immutable SQLite
+  sidecars. Exact copied IDs are admitted only when baseline sequences match,
+  imported in adaptive chunks, and validated on a copy. Ontology publication
+  remains inactive until a separately imported score revision passes semantic
+  fingerprints and one short pointer CAS; drift triggers cleanup and fresh-copy
+  replay of durable intents. The 250 ms import and 100 ms publication values are
+  operational alert budgets, not transactional deadlines: SQLite commit latency
+  cannot be known before commit, so breaches are persisted for monitoring and
+  chunk sizes are reduced on the next reservation.
 - One primary navigation `is_a` plus at most two secondary parents is supported
   only when all accepted `is_a` edges form a food-rooted DAG with depth, ancestor,
   and path caps. Secondary ancestry and all typed relations remain non-satisfying.

@@ -77,6 +77,7 @@ if ($json) {
             'validation_failed',
             'previous_failure',
             'ontology_stale',
+            'copied_activation_required',
         ],
         true
     );
@@ -96,6 +97,7 @@ if (empty($result['rebuilt'])) {
             'validation_failed',
             'previous_failure',
             'ontology_stale',
+            'copied_activation_required',
         ],
         true
     ) ? 2 : 0);

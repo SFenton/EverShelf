@@ -9,8 +9,13 @@ SHELL=/bin/sh
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 */5 * * * * www-data sleep 30 && flock -n /var/www/html/data/.background-writer.lock php /var/www/html/api/cron_smart_shopping.php >> /var/www/html/data/cron.log 2>&1
-# The shared-lock rebuild preserves an active v3 ontology/version and fails closed.
-* * * * * www-data flock -n /var/www/html/data/.background-writer.lock php /var/www/html/scripts/rebuild-recipe-scores.php >> /var/www/html/data/cron.log 2>&1
+# Copied-database ontology/score generation and exact-ID activation share the
+# background writer lock with catalog ingestion. Web scans remain independent;
+# any scan-time drift causes a safe copied-workspace rebase.
+* * * * * www-data flock -n /var/www/html/data/.background-writer.lock php /var/www/html/scripts/process-ontology-activation.php --write --allow-active-db --allow-network >> /var/www/html/data/cron.log 2>&1
+# Preserve legacy-v2 score maintenance. For active v3 revisions this reports
+# that copied activation owns refresh instead of attempting a live shadow.
+* * * * * www-data sleep 5 && flock -n /var/www/html/data/.background-writer.lock php /var/www/html/scripts/rebuild-recipe-scores.php >> /var/www/html/data/cron.log 2>&1
 * * * * * www-data sleep 15 && flock -n /var/www/html/data/.background-writer.lock php /var/www/html/scripts/process-recipe-queue.php --limit=2 --max-attempts=3 --respect-cookidoo-cadence >> /var/www/html/data/cron.log 2>&1
 * * * * * www-data sleep 45 && flock -n /var/www/html/data/.background-writer.lock php /var/www/html/scripts/process-shopping-classification-queue.php --limit=1 >> /var/www/html/data/cron.log 2>&1
 47 4 * * * www-data flock -w 120 /var/www/html/data/.background-writer.lock php /var/www/html/api/cron_maintenance.php >> /var/www/html/data/cron.log 2>&1
