@@ -4218,6 +4218,27 @@ function ingredientOntologyActivationAssertActiveDatabase(PDO $db): void {
                 $db->exec('ROLLBACK');
             } catch (Throwable $ignored) {
             }
+            if (
+                function_exists('databaseIsLockError')
+                && databaseIsLockError($error)
+            ) {
+                $db->prepare("
+                    UPDATE ontology_activation_imports
+                    SET last_error = ?,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ? AND status = 'activatable'
+                ")->execute([
+                    mb_substr(
+                        'Retryable SQLite contention: '
+                            . $error->getMessage(),
+                        0,
+                        1000,
+                        'UTF-8'
+                    ),
+                    $importId,
+                ]);
+                throw $error;
+            }
             $db->prepare("
                 UPDATE ontology_activation_imports
                 SET status = 'rebase_required',
@@ -4678,6 +4699,7 @@ function ingredientOntologyActivationAssertActiveDatabase(PDO $db): void {
             1,
             min(10000, (int)($options['maximum_chunks'] ?? 500))
         );
+        $lockRetries = 0;
         for ($loop = 0; $loop < $maximumLoops; $loop++) {
             $row = ingredientOntologyActivationImportRow($db, $importId);
             $status = (string)$row['status'];
@@ -4730,6 +4752,41 @@ function ingredientOntologyActivationAssertActiveDatabase(PDO $db): void {
                 }
                 return $row;
             } catch (Throwable $error) {
+                if (
+                    function_exists('databaseIsLockError')
+                    && databaseIsLockError($error)
+                ) {
+                    $lockRetries++;
+                    $db->prepare("
+                        UPDATE ontology_activation_imports
+                        SET lease_token = NULL,
+                            leased_until = NULL,
+                            last_error = ?,
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE id = ?
+                          AND status IN (
+                              'staging', 'importing', 'verifying',
+                              'activatable', 'purging'
+                          )
+                    ")->execute([
+                        mb_substr(
+                            'Retryable SQLite contention: '
+                                . $error->getMessage(),
+                            0,
+                            1000,
+                            'UTF-8'
+                        ),
+                        $importId,
+                    ]);
+                    if ($lockRetries >= 4) {
+                        return ingredientOntologyActivationImportRow(
+                            $db,
+                            $importId
+                        );
+                    }
+                    usleep(150000 * $lockRetries);
+                    continue;
+                }
                 ingredientOntologyActivationFailImport(
                     $db,
                     $importId,

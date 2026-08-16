@@ -6633,6 +6633,41 @@ try {
                 $bundleSet['ontology'],
                 $payloadDirectory
             );
+        $ontologyCandidateId = (int)$bundleSet['ontology'][
+            'candidate'
+        ]['ontology_version_id'];
+        $activationTarget->exec("
+            CREATE TRIGGER activation_test_retryable_lock
+            BEFORE INSERT ON ingredient_ontology_versions
+            WHEN NEW.id = {$ontologyCandidateId}
+            BEGIN
+                SELECT RAISE(ABORT, 'database is locked');
+            END
+        ");
+        $retryableImport = ingredientOntologyActivationDriveImport(
+            $activationTarget,
+            (int)$ontologyImport['id'],
+            [
+                'maximum_loops' => 4,
+                'maximum_chunks' => 1,
+                'allow_test_fixture' => true,
+            ]
+        );
+        $activationTarget->exec(
+            'DROP TRIGGER activation_test_retryable_lock'
+        );
+        controllerTestAssert(
+            in_array(
+                (string)$retryableImport['status'],
+                ['staging', 'importing'],
+                true
+            )
+            && str_contains(
+                (string)$retryableImport['last_error'],
+                'Retryable SQLite contention'
+            ),
+            'SQLite contention must preserve a resumable activation import'
+        );
         $ontologyImport =
             ingredientOntologyActivationRunImport(
                 $activationTarget,
