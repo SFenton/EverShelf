@@ -6827,6 +6827,12 @@ try {
         ],
         'Score activation must atomically publish ranking and consume intents'
     );
+    controllerTestAssert(
+        ingredientOntologyActivationStaleOntologyImport(
+            $activationTarget
+        ) === null,
+        'An ontology import must not become stale merely because its score activation made it active'
+    );
     databaseMaintenanceOnlineBackup(
         $activationTargetDbPath,
         $refreshBundleDbPath

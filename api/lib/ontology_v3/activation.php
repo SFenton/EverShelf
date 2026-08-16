@@ -4804,6 +4804,13 @@ function ingredientOntologyActivationAssertActiveDatabase(PDO $db): void {
             FROM ontology_activation_imports ontology_import
             WHERE ontology_import.bundle_kind = 'ontology'
               AND ontology_import.status = 'complete'
+              AND ontology_import.candidate_ontology_version_id <> (
+                  SELECT score.ontology_version_id
+                  FROM recipe_score_state state
+                  JOIN recipe_score_revisions score
+                    ON score.id = state.active_score_revision_id
+                  WHERE state.id = 1
+              )
               AND ontology_import.parent_ontology_version_id <> (
                   SELECT score.ontology_version_id
                   FROM recipe_score_state state
