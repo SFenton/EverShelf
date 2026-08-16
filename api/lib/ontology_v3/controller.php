@@ -6736,7 +6736,8 @@ function ingredientOntologyControllerStreamEpoch(
     function ingredientOntologyControllerSelectModelPlan(
         array $plans,
         ?array $critic,
-        array $policy = []
+        array $policy = [],
+        ?callable $riskResolver = null
     ): array {
         if (!$plans) {
             return [
@@ -6805,7 +6806,10 @@ function ingredientOntologyControllerStreamEpoch(
             $selected = $canonical[array_key_first($canonical)]['plan'];
         }
         $repair = (string)($selected['repair_kind'] ?? 'abstain');
-        $risk = ingredientOntologyControllerRepairRisk($repair);
+        $risk = $riskResolver !== null
+            ? (string)$riskResolver($selected)
+            : ingredientOntologyControllerRepairRisk($repair);
+        ingredientOntologyControllerRiskRank($risk);
         if ($risk !== 'R0') {
             if (
                 $critic === null
@@ -7349,6 +7353,20 @@ function ingredientOntologyControllerStreamEpoch(
         return $risk;
     }
 
+    function ingredientOntologyControllerRiskRank(string $riskTier): int {
+        $rank = array_search(
+            $riskTier,
+            ['R0', 'R1', 'R2', 'R3', 'R4'],
+            true
+        );
+        if ($rank === false) {
+            throw new InvalidArgumentException(
+                'controller risk tier is invalid'
+            );
+        }
+        return $rank;
+    }
+
     function ingredientOntologyControllerRiskAuthorized(
         PDO $db,
         string $riskTier,
@@ -7758,7 +7776,14 @@ function ingredientOntologyControllerStreamEpoch(
             );
         }
         $repair = (string)($plan['repair_kind'] ?? 'abstain');
-        $risk = ingredientOntologyControllerRepairRisk($repair);
+        $risk = ingredientOntologyControllerEffectivePlanRisk(
+            $db,
+            $versionId,
+            $plan,
+            $job['subject_id'] !== null
+                ? (int)$job['subject_id']
+                : null
+        )['risk'];
         $jobInput = json_decode(
             (string)$job['input_json'],
             true
@@ -8932,6 +8957,297 @@ function ingredientOntologyControllerStreamEpoch(
             $count++;
         }
         return $count;
+    }
+
+    function ingredientOntologyControllerFoodOnHierarchyProof(
+        PDO $db,
+        int $versionId,
+        int $subjectId,
+        int $entityId
+    ): ?array {
+        $target = $db->prepare("
+            SELECT entity.slug AS entity_slug,
+                   entity.identity_role,
+                   canonical.slug AS canonical_slug,
+                   canonical.external_ids_json
+            FROM ingredient_ontology_entities entity
+            JOIN canonical_ingredients canonical
+              ON canonical.id =
+                 entity.legacy_canonical_ingredient_id
+            WHERE entity.ontology_version_id = ?
+              AND entity.id = ?
+              AND entity.active = 1
+              AND entity.identity_role NOT IN (
+                  'structural_category', 'staple_class'
+              )
+        ");
+        $target->execute([$versionId, $entityId]);
+        $target = $target->fetch(PDO::FETCH_ASSOC);
+        if (!$target) {
+            return null;
+        }
+        $targetIds = json_decode(
+            (string)$target['external_ids_json'],
+            true
+        );
+        $targetFoodOnId = is_array($targetIds)
+            ? trim((string)($targetIds['foodon']['id'] ?? ''))
+            : '';
+        if (
+            $targetFoodOnId === ''
+            || (string)($targetIds['foodon']['source'] ?? '')
+                !== 'ebi_ols4'
+        ) {
+            return null;
+        }
+        $occurrences = $db->prepare("
+            SELECT owner_type, owner_id, owner_fingerprint
+            FROM ontology_subject_occurrences
+            WHERE subject_id = ? AND active = 1
+            ORDER BY owner_type, owner_id, owner_fingerprint
+        ");
+        $occurrences->execute([$subjectId]);
+        $occurrences = $occurrences->fetchAll(PDO::FETCH_ASSOC);
+        if (!$occurrences) {
+            return null;
+        }
+        $sourceCanonical = $db->prepare("
+            SELECT canonical.slug, canonical.external_ids_json
+            FROM product_ingredients product_mapping
+            JOIN canonical_ingredients canonical
+              ON canonical.id = product_mapping.ingredient_id
+            WHERE product_mapping.product_id = ?
+              AND product_mapping.role = 'primary'
+            ORDER BY product_mapping.confidence DESC,
+                     product_mapping.id
+        ");
+        $products = [];
+        $sourceSlugs = [];
+        $sourceFoodOnIds = [];
+        $maximumDepth = 0;
+        foreach ($occurrences as $occurrence) {
+            if ((string)$occurrence['owner_type'] !== 'product') {
+                return null;
+            }
+            $sourceCanonical->execute([(int)$occurrence['owner_id']]);
+            $sources = $sourceCanonical->fetchAll(PDO::FETCH_ASSOC);
+            if (count($sources) !== 1) {
+                return null;
+            }
+            $source = $sources[0];
+            $ids = json_decode(
+                (string)$source['external_ids_json'],
+                true
+            );
+            $parent = is_array($ids)
+                ? ($ids['foodon']['resolved_parent'] ?? null)
+                : null;
+            $sourceFoodOnId = is_array($ids)
+                ? trim((string)($ids['foodon']['id'] ?? ''))
+                : '';
+            $recomputed = is_array($ids)
+                ? canonicalIngredientResolveFoodOnParents(
+                    $db,
+                    [[
+                        'slug' => (string)$source['slug'],
+                        'name' => (string)$source['slug'],
+                        'parent_slug' => null,
+                        'external_ids' => $ids,
+                    ]]
+                )
+                : [];
+            $recomputedParent = $recomputed[0][
+                'external_ids'
+            ]['foodon']['resolved_parent'] ?? null;
+            $parentDepth = is_array($parent)
+                ? (int)($parent['depth'] ?? 0)
+                : 0;
+            $hierarchy = is_array($ids)
+                ? ($ids['foodon']['hierarchy'] ?? null)
+                : null;
+            $hierarchyMatch = false;
+            if (is_array($hierarchy) && $parentDepth > 0) {
+                foreach ($hierarchy as $ancestor) {
+                    if (
+                        is_array($ancestor)
+                        && hash_equals(
+                            $targetFoodOnId,
+                            (string)($ancestor['id'] ?? '')
+                        )
+                        && (int)($ancestor['depth'] ?? 0)
+                            === $parentDepth
+                    ) {
+                        $hierarchyMatch = true;
+                        break;
+                    }
+                }
+            }
+            if (
+                !is_array($parent)
+                || $sourceFoodOnId === ''
+                || (string)($ids['foodon']['source'] ?? '')
+                    !== 'ebi_ols4'
+                || !hash_equals(
+                    $sourceFoodOnId,
+                    (string)($parent['child_id'] ?? '')
+                )
+                || !hash_equals(
+                    $targetFoodOnId,
+                    (string)($parent['id'] ?? '')
+                )
+                || !hash_equals(
+                    (string)$target['canonical_slug'],
+                    (string)($parent['slug'] ?? '')
+                )
+                || (string)($parent['source'] ?? '')
+                    !== 'ebi_ols4_hierarchy'
+                || $parentDepth < 1
+                || $parentDepth > 2
+                || !is_array($recomputedParent)
+                || !hash_equals(
+                    (string)($parent['child_id'] ?? ''),
+                    (string)($recomputedParent['child_id'] ?? '')
+                )
+                || !hash_equals(
+                    (string)($parent['id'] ?? ''),
+                    (string)($recomputedParent['id'] ?? '')
+                )
+                || !hash_equals(
+                    (string)($parent['slug'] ?? ''),
+                    (string)($recomputedParent['slug'] ?? '')
+                )
+                || $parentDepth
+                    !== (int)($recomputedParent['depth'] ?? 0)
+                || !$hierarchyMatch
+            ) {
+                return null;
+            }
+            $products[] = (int)$occurrence['owner_id'];
+            $sourceSlugs[] = (string)$source['slug'];
+            $sourceFoodOnIds[] = $sourceFoodOnId;
+            $maximumDepth = max($maximumDepth, $parentDepth);
+        }
+        $mappingIds =
+            ingredientOntologyControllerSubjectMappingIds(
+                $db,
+                $versionId,
+                $subjectId
+            );
+        if (count($mappingIds) !== count($occurrences)) {
+            return null;
+        }
+        $mappingAttributes = $db->prepare("
+            SELECT mapping.attributes_json,
+                   (
+                       SELECT COUNT(*)
+                       FROM ingredient_ontology_mapping_attributes attribute
+                       WHERE attribute.mapping_id = mapping.id
+                   ) AS relational_attribute_count
+            FROM ingredient_ontology_mappings mapping
+            WHERE mapping.id = ?
+              AND mapping.ontology_version_id = ?
+        ");
+        foreach ($mappingIds as $mappingId) {
+            $mappingAttributes->execute([$mappingId, $versionId]);
+            $mapping = $mappingAttributes->fetch(PDO::FETCH_ASSOC);
+            $attributes = $mapping
+                ? json_decode((string)$mapping['attributes_json'], true)
+                : null;
+            if (
+                !$mapping
+                || !is_array($attributes)
+                || $attributes
+                || (int)$mapping['relational_attribute_count'] !== 0
+            ) {
+                return null;
+            }
+        }
+        $resolution = $db->prepare("
+            SELECT attributes_json
+            FROM ingredient_ontology_subject_resolutions
+            WHERE ontology_version_id = ? AND subject_id = ?
+        ");
+        $resolution->execute([$versionId, $subjectId]);
+        $resolutionAttributes = $resolution->fetchColumn();
+        if ($resolutionAttributes !== false) {
+            $resolutionAttributes = json_decode(
+                (string)$resolutionAttributes,
+                true
+            );
+            if (
+                !is_array($resolutionAttributes)
+                || $resolutionAttributes
+            ) {
+                return null;
+            }
+        }
+        return [
+            'source' => 'ebi_ols4_hierarchy',
+            'subject_id' => $subjectId,
+            'product_id' => $products[0],
+            'product_ids' => array_values(array_unique($products)),
+            'occurrence_count' => count($occurrences),
+            'canonical_slug' => $sourceSlugs[0],
+            'canonical_slugs' =>
+                array_values(array_unique($sourceSlugs)),
+            'foodon_child_id' => $sourceFoodOnIds[0],
+            'foodon_child_ids' =>
+                array_values(array_unique($sourceFoodOnIds)),
+            'mapping_ids' => $mappingIds,
+            'target_entity_id' => $entityId,
+            'target_entity_slug' =>
+                (string)$target['entity_slug'],
+            'target_identity_role' =>
+                (string)$target['identity_role'],
+            'target_canonical_slug' =>
+                (string)$target['canonical_slug'],
+            'foodon_parent_id' => $targetFoodOnId,
+            'depth' => $maximumDepth,
+        ];
+    }
+
+    function ingredientOntologyControllerEffectivePlanRisk(
+        PDO $db,
+        int $versionId,
+        array $plan,
+        ?int $subjectId = null
+    ): array {
+        $repair = (string)($plan['repair_kind'] ?? 'abstain');
+        $baseRisk = ingredientOntologyControllerRepairRisk($repair);
+        $subjectId ??= (int)(
+            $plan['controller_context']['subject_id'] ?? 0
+        );
+        $entityId = ingredientOntologyControllerEntityId(
+            $db,
+            $versionId,
+            $plan['entity_candidate_id'] ?? null
+        );
+        $foodOnProof = null;
+        if (
+            $repair === 'map_source_to_target_entity'
+            && $subjectId > 0
+            && $entityId !== null
+            && empty($plan['new_entity'])
+            && empty($plan['attributes'])
+            && empty($plan['relations'])
+            && empty($plan['optional_deltas'])
+            && (float)($plan['confidence'] ?? 0) >= 0.9
+        ) {
+            $foodOnProof =
+                ingredientOntologyControllerFoodOnHierarchyProof(
+                    $db,
+                    $versionId,
+                    $subjectId,
+                    $entityId
+                );
+        }
+        return [
+            'risk' => $foodOnProof !== null ? 'R0' : $baseRisk,
+            'base_risk' => $baseRisk,
+            'entity_id' => $entityId,
+            'subject_id' => $subjectId,
+            'foodon_hierarchy_proof' => $foodOnProof,
+        ];
     }
 
     function ingredientOntologyV3ApplyChangeSet(
@@ -13969,20 +14285,52 @@ function ingredientOntologyControllerResumeDurableJob(
                         $plan === null
                         && is_array($options['model_plans'] ?? null)
                     ) {
-                        $firstModelPlan = $options['model_plans'][0] ?? [];
-                        $firstRepair = is_array($firstModelPlan)
-                            ? (string)(
-                                $firstModelPlan['repair_kind'] ?? 'abstain'
-                            )
-                            : 'abstain';
-                        $firstRisk =
-                            ingredientOntologyControllerRepairRisk(
-                                $firstRepair
-                            );
+                        $modelPlanRisks = [];
+                        foreach ($options['model_plans'] as $modelPlan) {
+                            if (!is_array($modelPlan)) {
+                                $modelPlanRisks[] = 'R4';
+                                continue;
+                            }
+                            $modelPlanValidation =
+                                ingredientOntologyControllerValidatePlan(
+                                    $modelPlan,
+                                    $artifact['manifest']
+                                );
+                            if (empty($modelPlanValidation['valid'])) {
+                                $modelPlanRisks[] = 'R4';
+                                continue;
+                            }
+                            try {
+                                $modelPlanRisks[] =
+                                    ingredientOntologyControllerEffectivePlanRisk(
+                                        $db,
+                                        $childVersionId,
+                                        $modelPlan,
+                                        $lease['subject_id'] !== null
+                                            ? (int)$lease['subject_id']
+                                            : null
+                                    )['risk'];
+                            } catch (InvalidArgumentException $ignored) {
+                                $modelPlanRisks[] = 'R4';
+                            }
+                        }
+                        $selectionRisk = 'R0';
+                        foreach ($modelPlanRisks as $modelPlanRisk) {
+                            if (
+                                ingredientOntologyControllerRiskRank(
+                                    $modelPlanRisk
+                                )
+                                > ingredientOntologyControllerRiskRank(
+                                    $selectionRisk
+                                )
+                            ) {
+                                $selectionRisk = $modelPlanRisk;
+                            }
+                        }
                         $benchmark =
                             ingredientOntologyControllerBenchmarkPolicy(
                                 $db,
-                                $firstRisk
+                                $selectionRisk
                             );
                         $measuredPolicy = is_array($benchmark)
                             ? (array)($benchmark['policy'] ?? []) + [
@@ -14012,10 +14360,10 @@ function ingredientOntologyControllerResumeDurableJob(
                                 + $measuredPolicy;
                         }
                         if (
-                            $firstRisk !== 'R0'
+                            $selectionRisk !== 'R0'
                             && !ingredientOntologyControllerRiskAuthorized(
                                 $db,
-                                $firstRisk,
+                                $selectionRisk,
                                 $options
                             )
                         ) {
@@ -14044,7 +14392,21 @@ function ingredientOntologyControllerResumeDurableJob(
                                 is_array($options['critic'] ?? null)
                                     ? $options['critic']
                                     : null,
-                                $measuredPolicy
+                                $measuredPolicy,
+                                function (array $selectedPlan) use (
+                                    $db,
+                                    $childVersionId,
+                                    $lease
+                                ): string {
+                                    return ingredientOntologyControllerEffectivePlanRisk(
+                                        $db,
+                                        $childVersionId,
+                                        $selectedPlan,
+                                        $lease['subject_id'] !== null
+                                            ? (int)$lease['subject_id']
+                                            : null
+                                    )['risk'];
+                                }
                             );
                         if (($selection['decision'] ?? '') !== 'apply') {
                             $terminal = ($selection['decision'] ?? '')
@@ -14301,9 +14663,12 @@ function ingredientOntologyControllerResumeDurableJob(
                         (string)($plan['decision'] ?? '') === 'apply'
                     ) {
                         $planRisk =
-                            ingredientOntologyControllerRepairRisk(
-                                (string)$plan['repair_kind']
-                            );
+                            ingredientOntologyControllerEffectivePlanRisk(
+                                $db,
+                                $childVersionId,
+                                $plan,
+                                (int)($lease['subject_id'] ?? 0)
+                            )['risk'];
                         if (
                             $planRisk !== 'R0'
                             && !ingredientOntologyControllerRiskAuthorized(
@@ -17879,24 +18244,6 @@ function ingredientOntologyV3ApplyChangeSetContinue(
                 'controller change set is not applyable'
             );
         }
-        $risk = (string)$row['risk_tier'];
-        if (!ingredientOntologyControllerRiskAuthorized(
-            $db,
-            $risk,
-            $options
-        )) {
-            $db->prepare("
-                UPDATE ontology_mutation_plans
-                SET status = 'quarantined'
-                WHERE id = ? AND status = 'staged'
-            ")->execute([(int)$row['plan_id']]);
-            return [
-                'applied' => false,
-                'quarantined' => true,
-                'reason' => 'R4 requires an explicit benchmark policy',
-                'change_set_id' => $changeSetId,
-            ];
-        }
         $plan = json_decode(
             (string)$row['plan_json'],
             true,
@@ -17915,15 +18262,9 @@ function ingredientOntologyV3ApplyChangeSetContinue(
                 ? $plan['attributes']
                 : []
         );
-        $entityId = ingredientOntologyControllerEntityId(
-            $db,
-            $versionId,
-            $plan['entity_candidate_id'] ?? null
-        );
-        $evidenceHash = ingredientOntologyV3Hash([
-            'plan_hash' => (string)$row['plan_hash'],
-            'evidence' => $plan['evidence'] ?? [],
-        ]);
+        $entityId = null;
+        $foodOnProof = null;
+        $evidenceHash = '';
         $ownsTransaction = !$db->inTransaction();
         if ($ownsTransaction) {
             $db->exec('BEGIN IMMEDIATE');
@@ -17968,6 +18309,73 @@ function ingredientOntologyV3ApplyChangeSetContinue(
                     );
                 }
             }
+            $authorization =
+                ingredientOntologyControllerEffectivePlanRisk(
+                    $db,
+                    $versionId,
+                    $plan,
+                    $subjectId
+                );
+            $risk = (string)$authorization['risk'];
+            $entityId = $authorization['entity_id'] !== null
+                ? (int)$authorization['entity_id']
+                : null;
+            $foodOnProof =
+                $authorization['foodon_hierarchy_proof'];
+            $stagedRisk = (string)$row['risk_tier'];
+            if ($stagedRisk !== $risk) {
+                $db->prepare("
+                    UPDATE ontology_mutation_plans
+                    SET risk_tier = ?
+                    WHERE id = ? AND status = 'staged'
+                ")->execute([$risk, (int)$row['plan_id']]);
+            }
+            if (
+                ingredientOntologyControllerRiskRank($risk)
+                > ingredientOntologyControllerRiskRank($stagedRisk)
+            ) {
+                $db->prepare("
+                    UPDATE ontology_mutation_plans
+                    SET status = 'quarantined'
+                    WHERE id = ? AND status = 'staged'
+                ")->execute([(int)$row['plan_id']]);
+                if ($ownsTransaction) {
+                    $db->exec('COMMIT');
+                }
+                return [
+                    'applied' => false,
+                    'quarantined' => true,
+                    'reason' =>
+                        'controller plan risk increased after staging',
+                    'change_set_id' => $changeSetId,
+                ];
+            }
+            if (!ingredientOntologyControllerRiskAuthorized(
+                $db,
+                $risk,
+                $options
+            )) {
+                $db->prepare("
+                    UPDATE ontology_mutation_plans
+                    SET status = 'quarantined'
+                    WHERE id = ? AND status = 'staged'
+                ")->execute([(int)$row['plan_id']]);
+                if ($ownsTransaction) {
+                    $db->exec('COMMIT');
+                }
+                return [
+                    'applied' => false,
+                    'quarantined' => true,
+                    'reason' =>
+                        $risk . ' requires an explicit benchmark policy',
+                    'change_set_id' => $changeSetId,
+                ];
+            }
+            $evidenceHash = ingredientOntologyV3Hash([
+                'plan_hash' => (string)$row['plan_hash'],
+                'evidence' => $plan['evidence'] ?? [],
+                'foodon_hierarchy_proof' => $foodOnProof,
+            ]);
             $newEntity = null;
             if (is_array($plan['new_entity'] ?? null)) {
                 $definition = $plan['new_entity'];
@@ -18054,7 +18462,9 @@ function ingredientOntologyV3ApplyChangeSetContinue(
                         $mappingId,
                         $entityId,
                         $attributes,
-                        'autonomous_controller',
+                        $foodOnProof !== null
+                            ? 'foodon_hierarchy'
+                            : 'autonomous_controller',
                         $evidenceHash
                     );
                 }
@@ -18400,6 +18810,24 @@ function ingredientOntologyV3ForkVersionContinue(
             48,
             'UTF-8'
         ) . '-auto-' . substr($generationKey, 0, 12);
+        $versionNameExists = $db->prepare("
+            SELECT 1
+            FROM ingredient_ontology_versions
+            WHERE version = ?
+            LIMIT 1
+        ");
+        $versionNameExists->execute([$versionName]);
+        if ($versionNameExists->fetchColumn()) {
+            $versionName = mb_substr(
+                $versionName,
+                0,
+                69,
+                'UTF-8'
+            ) . '-r' . substr(hash(
+                'sha256',
+                $generationKey . ':' . random_bytes(16)
+            ), 0, 8);
+        }
     }
     if (
         strlen($versionName) > 80
@@ -20116,6 +20544,11 @@ function ingredientOntologyControllerStartChunkedFork(
           ON progress.candidate_version_id = version.id
         WHERE version.parent_version_id = ?
           AND version.controller_generation_key = ?
+          AND (
+              version.status = 'ready'
+              OR progress.status IS NOT NULL
+          )
+          AND version.status NOT IN ('failed', 'retired')
         ORDER BY version.id DESC
         LIMIT 1
     ");
@@ -20140,6 +20573,24 @@ function ingredientOntologyControllerStartChunkedFork(
         48,
         'UTF-8'
     ) . '-auto-' . substr($generationKey, 0, 12);
+    $versionNameExists = $db->prepare("
+        SELECT 1
+        FROM ingredient_ontology_versions
+        WHERE version = ?
+        LIMIT 1
+    ");
+    $versionNameExists->execute([$versionName]);
+    if ($versionNameExists->fetchColumn()) {
+        $versionName = mb_substr(
+            $versionName,
+            0,
+            69,
+            'UTF-8'
+        ) . '-r' . substr(hash(
+            'sha256',
+            $generationKey . ':' . random_bytes(16)
+        ), 0, 8);
+    }
     $db->exec('BEGIN IMMEDIATE');
     try {
         $existing->execute([$parentVersionId, $generationKey]);

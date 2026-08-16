@@ -8,7 +8,7 @@
  */
 
 const CANONICAL_INGREDIENT_RULESET_VERSION = 'evershelf_common_ingredients_v2';
-const FOODON_LOOKUP_CACHE_VERSION = 'foodon_ols4_v5';
+const FOODON_LOOKUP_CACHE_VERSION = 'foodon_ols4_v6';
 const USDA_FDC_LOOKUP_CACHE_VERSION = 'usda_fdc_v5';
 
 function canonicalIngredientNormalizeText(string $text): string {
@@ -726,17 +726,137 @@ function canonicalIngredientFoodOnNormalizeLabel(string $label, bool $stripQuali
     return canonicalIngredientNormalizeText($label);
 }
 
-function canonicalIngredientFoodOnSelectBest(array $docs, string $name, string $query): ?array {
+function canonicalIngredientOboIdentityTuple(
+    mixed $shortForm,
+    mixed $iri,
+    mixed $oboId = null
+): ?array {
+    if (
+        !is_string($shortForm)
+        || !preg_match(
+            '/^([A-Z][A-Z0-9]*)_([A-Za-z0-9_]+)$/D',
+            $shortForm,
+            $match
+        )
+        || !is_string($iri)
+    ) {
+        return null;
+    }
+    $expectedIri =
+        'http://purl.obolibrary.org/obo/' . $shortForm;
+    $expectedId = $match[1] . ':' . $match[2];
+    if (
+        !hash_equals($expectedIri, trim($iri))
+        || (
+            $oboId !== null
+            && (
+                !is_string($oboId)
+                || !hash_equals($expectedId, trim($oboId))
+            )
+        )
+    ) {
+        return null;
+    }
+    return [
+        'namespace' => $match[1],
+        'local_id' => $match[2],
+        'id' => $expectedId,
+        'short_form' => $shortForm,
+        'iri' => $expectedIri,
+    ];
+}
+
+function canonicalIngredientFoodOnIdentityTuple(
+    mixed $shortForm,
+    mixed $iri,
+    mixed $oboId = null
+): ?array {
+    $identity = canonicalIngredientOboIdentityTuple(
+        $shortForm,
+        $iri,
+        $oboId
+    );
+    if (
+        $identity === null
+        || $identity['namespace'] !== 'FOODON'
+        || !ctype_digit((string)$identity['local_id'])
+    ) {
+        return null;
+    }
+    return $identity;
+}
+
+function canonicalIngredientFoodOnDecodeSearchDocs(
+    string $body
+): ?array {
+    $decoded = json_decode($body);
+    if (
+        !is_object($decoded)
+        || !is_object($decoded->response ?? null)
+        || !property_exists($decoded->response, 'docs')
+        || !is_array($decoded->response->docs)
+    ) {
+        return null;
+    }
+    $docs = [];
+    foreach ($decoded->response->docs as $doc) {
+        if (!is_object($doc)) {
+            return null;
+        }
+        $encoded = json_encode($doc, JSON_UNESCAPED_UNICODE);
+        if (!is_string($encoded)) {
+            return null;
+        }
+        $row = json_decode($encoded, true);
+        if (!is_array($row)) {
+            return null;
+        }
+        $docs[] = $row;
+    }
+    return $docs;
+}
+
+function canonicalIngredientFoodOnSelectBest(
+    array $docs,
+    string $name,
+    string $query,
+    ?bool &$malformedIdentity = null
+): ?array {
+    $malformedIdentity = false;
     $target = canonicalIngredientNormalizeText($name);
     $queryNorm = canonicalIngredientNormalizeText($query);
     $best = null;
     $bestScore = 0;
     foreach ($docs as $doc) {
-        $label = (string)($doc['label'] ?? '');
-        $iri = (string)($doc['iri'] ?? '');
-        $shortForm = (string)($doc['short_form'] ?? '');
-        if ($label === '' || $iri === '' || !str_starts_with($shortForm, 'FOODON_')) {
+        if (!is_array($doc)) {
+            $malformedIdentity = true;
+            return null;
+        }
+        $oboIdentity = canonicalIngredientOboIdentityTuple(
+            $doc['short_form'] ?? null,
+            $doc['iri'] ?? null,
+            $doc['obo_id'] ?? null
+        );
+        if ($oboIdentity === null) {
+            $malformedIdentity = true;
+            return null;
+        }
+        if ($oboIdentity['namespace'] !== 'FOODON') {
             continue;
+        }
+        $label = $doc['label'] ?? null;
+        $identity = canonicalIngredientFoodOnIdentityTuple(
+            $oboIdentity['short_form'],
+            $oboIdentity['iri'],
+            $oboIdentity['id']
+        );
+        if (
+            !is_string($label)
+            || trim($label) === ''
+            || $identity === null
+        ) {
+            $malformedIdentity = true;
+            return null;
         }
 
         $labelNorm = canonicalIngredientFoodOnNormalizeLabel($label);
@@ -759,7 +879,9 @@ function canonicalIngredientFoodOnSelectBest(array $docs, string $name, string $
 
         if ($score > $bestScore) {
             $bestScore = $score;
-            $best = $doc + ['_match_score' => $score];
+            $best = $doc;
+            $best['_match_score'] = $score;
+            $best['_foodon_identity'] = $identity;
         }
     }
     return $bestScore >= 35 ? $best : null;
@@ -777,6 +899,156 @@ function canonicalIngredientFoodOnThrottle(): void {
         usleep((int)(($intervalMs - $elapsedMs) * 1000));
     }
     $lastRequestAt = microtime(true);
+}
+
+function canonicalIngredientFoodOnDecodeParentTerms(
+    string $body
+): ?array {
+    $decoded = json_decode((string)$body);
+    if (
+        !is_object($decoded)
+        || !is_object($decoded->_embedded ?? null)
+        || !property_exists($decoded->_embedded, 'terms')
+        || !is_array($decoded->_embedded->terms)
+    ) {
+        return null;
+    }
+    $parents = [];
+    foreach ($decoded->_embedded->terms as $term) {
+        if (!is_object($term)) {
+            return null;
+        }
+        $shortForm = $term->short_form ?? null;
+        $oboIdentity = canonicalIngredientOboIdentityTuple(
+            $shortForm,
+            $term->iri ?? null,
+            $term->obo_id ?? null
+        );
+        if ($oboIdentity === null) {
+            return null;
+        }
+        if ($oboIdentity['namespace'] !== 'FOODON') {
+            continue;
+        }
+        $label = $term->label ?? null;
+        $identity = canonicalIngredientFoodOnIdentityTuple(
+            $oboIdentity['short_form'],
+            $oboIdentity['iri'],
+            $oboIdentity['id']
+        );
+        if (!is_string($label) || $identity === null) {
+            return null;
+        }
+        $parents[] = [
+            'id' => $identity['id'],
+            'short_form' => $identity['short_form'],
+            'iri' => $identity['iri'],
+            'label' => $label,
+        ];
+    }
+    return $parents;
+}
+
+function canonicalIngredientFoodOnAppendHierarchyParents(
+    array &$hierarchy,
+    array &$next,
+    array &$seen,
+    array $parents,
+    int $depth,
+    int $maximumTerms = 16
+): bool {
+    foreach ($parents as $parent) {
+        if (isset($seen[$parent['iri']])) {
+            continue;
+        }
+        if (count($hierarchy) >= $maximumTerms) {
+            return false;
+        }
+        $seen[$parent['iri']] = true;
+        $parent['depth'] = $depth;
+        $hierarchy[] = $parent;
+        $next[] = $parent['iri'];
+    }
+    return true;
+}
+
+function canonicalIngredientFoodOnParentTerms(string $iri): ?array {
+    $iri = trim($iri);
+    if (
+        $iri === ''
+        || !str_starts_with(
+            $iri,
+            'http://purl.obolibrary.org/obo/FOODON_'
+        )
+    ) {
+        return [];
+    }
+    canonicalIngredientFoodOnThrottle();
+    $timeout = max(2, (int)(function_exists('env')
+        ? env('FOODON_TIMEOUT_SEC', '6')
+        : '6'));
+    $userAgent = function_exists('env')
+        ? env(
+            'FOODON_USER_AGENT',
+            'EverShelf/1.0 (FoodOn integration; https://github.com/SFenton/EverShelf)'
+        )
+        : 'EverShelf/1.0 (FoodOn integration; https://github.com/SFenton/EverShelf)';
+    $encoded = rawurlencode(rawurlencode($iri));
+    $url = 'https://www.ebi.ac.uk/ols4/api/ontologies/foodon/terms/'
+        . $encoded . '/parents?page=0&size=1000';
+    $ch = curl_init($url);
+    curl_setopt_array($ch, [
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_TIMEOUT => $timeout,
+        CURLOPT_CONNECTTIMEOUT => min(3, $timeout),
+        CURLOPT_FOLLOWLOCATION => false,
+        CURLOPT_HTTPHEADER => [
+            'Accept: application/json',
+            'Accept-Encoding: gzip, deflate',
+            'User-Agent: ' . $userAgent,
+        ],
+        CURLOPT_ENCODING => '',
+    ]);
+    $body = curl_exec($ch);
+    $code = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    curl_close($ch);
+    if ($body === false || $code < 200 || $code >= 300) {
+        return null;
+    }
+    return canonicalIngredientFoodOnDecodeParentTerms((string)$body);
+}
+
+function canonicalIngredientFoodOnHierarchy(
+    string $iri,
+    int $maximumDepth = 2
+): ?array {
+    $maximumDepth = max(1, min(4, $maximumDepth));
+    $frontier = [$iri];
+    $seen = [$iri => true];
+    $hierarchy = [];
+    for ($depth = 1; $depth <= $maximumDepth; $depth++) {
+        $next = [];
+        foreach ($frontier as $currentIri) {
+            $parents = canonicalIngredientFoodOnParentTerms($currentIri);
+            if ($parents === null) {
+                return null;
+            }
+            if (!canonicalIngredientFoodOnAppendHierarchyParents(
+                $hierarchy,
+                $next,
+                $seen,
+                $parents,
+                $depth
+            )) {
+                return null;
+            }
+        }
+        if (!$next) {
+            break;
+        }
+        $frontier = $next;
+    }
+    return $hierarchy;
 }
 
 function canonicalIngredientFoodOnLookup(string $name, string $slug = '', string $category = ''): ?array {
@@ -835,18 +1107,45 @@ function canonicalIngredientFoodOnLookup(string $name, string $slug = '', string
         return null;
     }
 
-    $decoded = json_decode((string)$body, true);
-    $docs = $decoded['response']['docs'] ?? [];
-    $best = is_array($docs) ? canonicalIngredientFoodOnSelectBest($docs, $name, $query) : null;
+    $docs = canonicalIngredientFoodOnDecodeSearchDocs((string)$body);
+    if ($docs === null) {
+        if (class_exists('EverLog', false)) {
+            EverLog::warn(
+                'FoodOn search response malformed',
+                ['query' => $query]
+            );
+        }
+        return null;
+    }
+    $malformedIdentity = false;
+    $best = canonicalIngredientFoodOnSelectBest(
+        $docs,
+        $name,
+        $query,
+        $malformedIdentity
+    );
+    if ($malformedIdentity) {
+        if (class_exists('EverLog', false)) {
+            EverLog::warn(
+                'FoodOn search identity mismatch',
+                ['query' => $query]
+            );
+        }
+        return null;
+    }
     if (!$best) {
         canonicalIngredientFoodOnCacheStore($cacheKey, ['ts' => time(), 'found' => false, 'query' => $query]);
         return null;
     }
 
+    $identity = $best['_foodon_identity'] ?? null;
+    if (!is_array($identity)) {
+        return null;
+    }
     $foodOn = [
-        'id' => $best['obo_id'] ?? str_replace('_', ':', (string)$best['short_form']),
-        'short_form' => $best['short_form'],
-        'iri' => $best['iri'],
+        'id' => $identity['id'],
+        'short_form' => $identity['short_form'],
+        'iri' => $identity['iri'],
         'label' => $best['label'],
         'query' => $query,
         'source' => 'ebi_ols4',
@@ -855,6 +1154,19 @@ function canonicalIngredientFoodOnLookup(string $name, string $slug = '', string
     if (!empty($best['description'][0])) {
         $foodOn['description'] = mb_substr((string)$best['description'][0], 0, 500, 'UTF-8');
     }
+    $hierarchy = canonicalIngredientFoodOnHierarchy(
+        (string)$foodOn['iri']
+    );
+    if ($hierarchy === null) {
+        if (class_exists('EverLog', false)) {
+            EverLog::warn(
+                'FoodOn hierarchy lookup failed',
+                ['query' => $query, 'foodon_id' => $foodOn['id']]
+            );
+        }
+        return null;
+    }
+    $foodOn['hierarchy'] = $hierarchy;
     canonicalIngredientFoodOnCacheStore($cacheKey, ['ts' => time(), 'found' => true, 'query' => $query, 'foodon' => $foodOn]);
     return $foodOn;
 }
@@ -864,7 +1176,10 @@ function canonicalIngredientMergeExternalIds(?string $existingJson, array $newEx
     if (!is_array($existing)) {
         $existing = [];
     }
-    return array_replace_recursive($existing, $newExternalIds);
+    foreach ($newExternalIds as $provider => $externalId) {
+        $existing[$provider] = $externalId;
+    }
+    return $existing;
 }
 
 function canonicalIngredientEnrichMappingsWithFoodOn(array $mappings): array {
@@ -872,7 +1187,13 @@ function canonicalIngredientEnrichMappingsWithFoodOn(array $mappings): array {
         return $mappings;
     }
     foreach ($mappings as &$mapping) {
-        if (!empty($mapping['external_ids']['foodon'])) {
+        if (
+            !empty($mapping['external_ids']['foodon'])
+            && array_key_exists(
+                'hierarchy',
+                (array)$mapping['external_ids']['foodon']
+            )
+        ) {
             continue;
         }
         $foodOn = canonicalIngredientFoodOnLookup(
@@ -888,12 +1209,94 @@ function canonicalIngredientEnrichMappingsWithFoodOn(array $mappings): array {
     return $mappings;
 }
 
+function canonicalIngredientResolveFoodOnParents(
+    PDO $db,
+    array $mappings
+): array {
+    $find = $db->prepare("
+        SELECT id, slug, name
+        FROM canonical_ingredients
+        WHERE json_valid(external_ids_json) = 1
+          AND json_extract(
+              external_ids_json,
+              '$.foodon.id'
+          ) = ?
+        ORDER BY id
+    ");
+    foreach ($mappings as &$mapping) {
+        $foodOn = $mapping['external_ids']['foodon'] ?? null;
+        if (is_array($foodOn)) {
+            unset(
+                $mapping['external_ids']['foodon']['resolved_parent']
+            );
+            $foodOn = $mapping['external_ids']['foodon'];
+        }
+        $hierarchy = is_array($foodOn)
+            ? ($foodOn['hierarchy'] ?? [])
+            : [];
+        if (!is_array($hierarchy)) {
+            continue;
+        }
+        $hierarchy = array_values(array_filter($hierarchy, 'is_array'));
+        $ancestorsByDepth = [];
+        foreach ($hierarchy as $ancestor) {
+            $depth = (int)($ancestor['depth'] ?? 0);
+            $ancestorId = trim((string)($ancestor['id'] ?? ''));
+            if ($depth < 1 || $depth > 2 || $ancestorId === '') {
+                continue;
+            }
+            $ancestorsByDepth[$depth][$ancestorId] = true;
+        }
+        ksort($ancestorsByDepth);
+        foreach ($ancestorsByDepth as $depth => $ancestorIds) {
+            $candidates = [];
+            foreach (array_keys($ancestorIds) as $ancestorId) {
+                $find->execute([$ancestorId]);
+                foreach ($find->fetchAll(PDO::FETCH_ASSOC) as $parent) {
+                    if (
+                        (string)$parent['slug']
+                        === (string)($mapping['slug'] ?? '')
+                    ) {
+                        continue;
+                    }
+                    $candidates[(int)$parent['id']] = [
+                        'id' => $ancestorId,
+                        'slug' => (string)$parent['slug'],
+                        'label' => (string)$parent['name'],
+                    ];
+                }
+            }
+            if (count($candidates) !== 1) {
+                if ($candidates) {
+                    break;
+                }
+                continue;
+            }
+            $parent = array_values($candidates)[0];
+            $mapping['external_ids']['foodon']['resolved_parent'] = [
+                'child_id' => trim((string)($foodOn['id'] ?? '')),
+                'id' => (string)$parent['id'],
+                'slug' => (string)$parent['slug'],
+                'label' => (string)$parent['label'],
+                'depth' => (int)$depth,
+                'source' => 'ebi_ols4_hierarchy',
+            ];
+            break;
+        }
+    }
+    unset($mapping);
+    return $mappings;
+}
+
 function canonicalIngredientUpsert(PDO $db, array $mapping): int {
     $externalIds = $mapping['external_ids'] ?? [];
     if (!empty($externalIds)) {
         $existing = $db->prepare("SELECT external_ids_json FROM canonical_ingredients WHERE slug = ?");
         $existing->execute([$mapping['slug']]);
-        $externalIds = canonicalIngredientMergeExternalIds($existing->fetchColumn() ?: null, $externalIds);
+        $externalIds = canonicalIngredientMergeExternalIds(
+            $existing->fetchColumn() ?: null,
+            $externalIds
+        );
     }
     $stmt = $db->prepare("
         INSERT INTO canonical_ingredients (slug, name, parent_slug, category, source, external_ids_json, updated_at)
@@ -953,6 +1356,7 @@ function canonicalIngredientSyncProduct(PDO $db, int $productId, ?array $product
     }
 
     $mappings = canonicalIngredientEnrichMappingsWithFoodOn($mappings);
+    $mappings = canonicalIngredientResolveFoodOnParents($db, $mappings);
     $mappings = canonicalIngredientEnrichMappingsWithUsda($mappings);
     $tags = canonicalProductInferTags($product, $mappings);
     $db->beginTransaction();
@@ -1567,7 +1971,7 @@ function canonicalIngredientEnrichFoodOnTable(PDO $db, bool $missingOnly = true,
     $where = $missingOnly
         ? "WHERE external_ids_json IS NULL OR external_ids_json NOT LIKE '%\"foodon\"%'"
         : "";
-    $sql = "SELECT id, slug, name, category, external_ids_json FROM canonical_ingredients $where ORDER BY name ASC";
+    $sql = "SELECT id, slug, name, parent_slug, category, external_ids_json FROM canonical_ingredients $where ORDER BY name ASC";
     if ($limit > 0) {
         $sql .= " LIMIT " . (int)$limit;
     }
@@ -1582,7 +1986,21 @@ function canonicalIngredientEnrichFoodOnTable(PDO $db, bool $missingOnly = true,
             $misses++;
             continue;
         }
-        $externalIds = canonicalIngredientMergeExternalIds($row['external_ids_json'] ?? null, ['foodon' => $foodOn]);
+        $resolved = canonicalIngredientResolveFoodOnParents(
+            $db,
+            [[
+                'slug' => (string)$row['slug'],
+                'name' => (string)$row['name'],
+                'parent_slug' => $row['parent_slug'],
+                'category' => (string)($row['category'] ?? ''),
+                'external_ids' => ['foodon' => $foodOn],
+            ]]
+        );
+        $foodOn = $resolved[0]['external_ids']['foodon'] ?? $foodOn;
+        $externalIds = canonicalIngredientMergeExternalIds(
+            $row['external_ids_json'] ?? null,
+            ['foodon' => $foodOn]
+        );
         $stmt->execute([json_encode($externalIds, JSON_UNESCAPED_UNICODE), (int)$row['id']]);
         $updated++;
         if (count($examples) < 20) {

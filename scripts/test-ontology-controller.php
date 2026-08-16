@@ -2134,6 +2134,60 @@ try {
             ])
     );
 
+    $failedForkKey = ingredientOntologyV3Hash([
+            'test' => 'failed-fork-retry',
+    ]);
+    $failedFork = ingredientOntologyControllerStartChunkedFork(
+            $db,
+            $baseVersionId,
+            [
+                'generation_key' => $failedForkKey,
+                'constraint_epoch' => 0,
+                'constraint_hash' =>
+                    ingredientOntologyControllerConstraintHash($db, 0),
+                'controller_policy_hash' =>
+                    ingredientOntologyControllerPolicyHash(),
+                'activation_policy' => 'autonomous',
+            ]
+    );
+    $db->prepare("
+            DELETE FROM ontology_version_fork_progress
+            WHERE candidate_version_id = ?
+    ")->execute([(int)$failedFork['version_id']]);
+    $db->prepare("
+            UPDATE ingredient_ontology_versions
+            SET status = 'failed', failed_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+    ")->execute([(int)$failedFork['version_id']]);
+    $retryFork = ingredientOntologyControllerStartChunkedFork(
+            $db,
+            $baseVersionId,
+            [
+                'generation_key' => $failedForkKey,
+                'constraint_epoch' => 0,
+                'constraint_hash' =>
+                    ingredientOntologyControllerConstraintHash($db, 0),
+                'controller_policy_hash' =>
+                    ingredientOntologyControllerPolicyHash(),
+                'activation_policy' => 'autonomous',
+            ]
+    );
+    controllerTestAssert(
+            (int)$retryFork['version_id'] !== (int)$failedFork['version_id']
+            && (string)$retryFork['version'] !== (string)$failedFork['version']
+            && $retryFork['fork_status'] === 'copying',
+            'A failed progressless fork must create a fresh retry candidate'
+    );
+    $db->prepare("
+            DELETE FROM ontology_version_fork_progress
+            WHERE candidate_version_id = ?
+    ")->execute([(int)$retryFork['version_id']]);
+    $db->prepare("
+            UPDATE ingredient_ontology_versions
+            SET status = 'failed', failed_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+    ")->execute([(int)$retryFork['version_id']]);
+
     $noOpJob = ingredientOntologyControllerEnqueueJob(
         $db,
         'subject_resolution',
@@ -5687,6 +5741,1234 @@ try {
         'product',
         $cloveProductId
     );
+    $foodOnTarget = $db->query("
+        SELECT entity.id, entity.slug,
+               entity.legacy_canonical_ingredient_id,
+               entity.identity_role
+        FROM ontology_subject_occurrences occurrence
+        JOIN ingredient_ontology_mappings mapping
+          ON mapping.ontology_version_id = {$baseVersionId}
+         AND mapping.owner_type = occurrence.owner_type
+         AND mapping.owner_id = occurrence.owner_id
+         AND mapping.owner_fingerprint = occurrence.owner_fingerprint
+        JOIN ingredient_ontology_entities entity
+          ON entity.id = mapping.entity_id
+         AND entity.ontology_version_id = mapping.ontology_version_id
+        WHERE occurrence.subject_id = " . (int)$productSubject['id'] . "
+          AND occurrence.active = 1
+        ORDER BY mapping.id
+        LIMIT 1
+    ")->fetch(PDO::FETCH_ASSOC);
+    $db->beginTransaction();
+    try {
+        $db->prepare("
+            INSERT INTO canonical_ingredients (
+                slug, name, source, external_ids_json
+            )
+            VALUES (
+                'foodon-controller-parent',
+                'FoodOn Controller Parent',
+                'test',
+                ?
+            )
+        ")->execute([
+            json_encode([
+                'foodon' => [
+                    'id' => 'FOODON:TEST_TARGET',
+                    'source' => 'ebi_ols4',
+                ],
+            ]),
+        ]);
+        $foodOnTargetCanonicalId = (int)$db->lastInsertId();
+        ingredientOntologyV3SetReadyMutationGuard($db, true);
+        $db->prepare("
+            UPDATE ingredient_ontology_entities
+            SET legacy_canonical_ingredient_id = ?
+            WHERE id = ? AND ontology_version_id = ?
+        ")->execute([
+            $foodOnTargetCanonicalId,
+            (int)$foodOnTarget['id'],
+            $baseVersionId,
+        ]);
+        ingredientOntologyV3SetReadyMutationGuard($db, false);
+        $db->prepare("
+            INSERT INTO canonical_ingredients (
+                slug, name, source, external_ids_json
+            )
+            VALUES (
+                'foodon-controller-child',
+                'FoodOn Controller Child',
+                'test',
+                ?
+            )
+        ")->execute([json_encode([
+            'foodon' => [
+                'id' => 'FOODON:TEST_CHILD',
+                'source' => 'ebi_ols4',
+                'hierarchy' => [[
+                    'id' => 'FOODON:TEST_TARGET',
+                    'depth' => 2,
+                ]],
+                'resolved_parent' => [
+                    'child_id' => 'FOODON:TEST_CHILD',
+                    'id' => 'FOODON:TEST_TARGET',
+                    'slug' => 'foodon-controller-parent',
+                    'label' => 'FoodOn Controller Parent',
+                    'depth' => 2,
+                    'source' => 'ebi_ols4_hierarchy',
+                ],
+            ],
+        ])]);
+        $foodOnChildId = (int)$db->lastInsertId();
+        $db->prepare("
+            DELETE FROM product_ingredients
+            WHERE product_id = ? AND role = 'primary'
+        ")->execute([$cloveProductId]);
+        $db->prepare("
+            INSERT INTO product_ingredients (
+                product_id, ingredient_id, role,
+                confidence, source, evidence
+            )
+            VALUES (?, ?, 'primary', 0.99, 'test', 'FoodOn hierarchy')
+        ")->execute([$cloveProductId, $foodOnChildId]);
+        $foodOnMappingIds =
+            ingredientOntologyControllerSubjectMappingIds(
+                $db,
+                $baseVersionId,
+                (int)$productSubject['id']
+            );
+        ingredientOntologyV3SetReadyMutationGuard($db, true);
+        foreach ($foodOnMappingIds as $foodOnMappingId) {
+            $db->prepare("
+                DELETE FROM ingredient_ontology_mapping_attributes
+                WHERE mapping_id = ?
+            ")->execute([$foodOnMappingId]);
+            $db->prepare("
+                UPDATE ingredient_ontology_mappings
+                SET attributes_json = '[]'
+                WHERE id = ? AND ontology_version_id = ?
+            ")->execute([$foodOnMappingId, $baseVersionId]);
+        }
+        $db->prepare("
+            UPDATE ingredient_ontology_subject_resolutions
+            SET attributes_json = '[]'
+            WHERE ontology_version_id = ? AND subject_id = ?
+        ")->execute([
+            $baseVersionId,
+            (int)$productSubject['id'],
+        ]);
+        ingredientOntologyV3SetReadyMutationGuard($db, false);
+        $foodOnProof =
+            ingredientOntologyControllerFoodOnHierarchyProof(
+                $db,
+                $baseVersionId,
+                (int)$productSubject['id'],
+                (int)$foodOnTarget['id']
+            );
+        $foodOnPlan = [
+            'repair_kind' => 'map_source_to_target_entity',
+            'entity_candidate_id' =>
+                'e' . (int)$foodOnTarget['id'],
+            'new_entity' => null,
+            'attributes' => [],
+            'relations' => [],
+            'optional_deltas' => [],
+            'confidence' => 0.95,
+            'controller_context' => [
+                'subject_id' => (int)$productSubject['id'],
+            ],
+        ];
+        $foodOnRisk =
+            ingredientOntologyControllerEffectivePlanRisk(
+                $db,
+                $baseVersionId,
+                $foodOnPlan
+            );
+        ingredientOntologyV3SetReadyMutationGuard($db, true);
+        $db->prepare("
+            UPDATE ingredient_ontology_entities
+            SET identity_role = 'structural_category'
+            WHERE id = ? AND ontology_version_id = ?
+        ")->execute([
+            (int)$foodOnTarget['id'],
+            $baseVersionId,
+        ]);
+        ingredientOntologyV3SetReadyMutationGuard($db, false);
+        $foodOnStructuralProof =
+            ingredientOntologyControllerFoodOnHierarchyProof(
+                $db,
+                $baseVersionId,
+                (int)$productSubject['id'],
+                (int)$foodOnTarget['id']
+            );
+        $foodOnStructuralRisk =
+            ingredientOntologyControllerEffectivePlanRisk(
+                $db,
+                $baseVersionId,
+                $foodOnPlan
+            );
+        ingredientOntologyV3SetReadyMutationGuard($db, true);
+        $db->prepare("
+            UPDATE ingredient_ontology_entities
+            SET identity_role = 'staple_class'
+            WHERE id = ? AND ontology_version_id = ?
+        ")->execute([
+            (int)$foodOnTarget['id'],
+            $baseVersionId,
+        ]);
+        ingredientOntologyV3SetReadyMutationGuard($db, false);
+        $foodOnStapleProof =
+            ingredientOntologyControllerFoodOnHierarchyProof(
+                $db,
+                $baseVersionId,
+                (int)$productSubject['id'],
+                (int)$foodOnTarget['id']
+            );
+        $foodOnStapleRisk =
+            ingredientOntologyControllerEffectivePlanRisk(
+                $db,
+                $baseVersionId,
+                $foodOnPlan
+            );
+        ingredientOntologyV3SetReadyMutationGuard($db, true);
+        $db->prepare("
+            UPDATE ingredient_ontology_entities
+            SET identity_role = ?
+            WHERE id = ? AND ontology_version_id = ?
+        ")->execute([
+            (string)$foodOnTarget['identity_role'],
+            (int)$foodOnTarget['id'],
+            $baseVersionId,
+        ]);
+        ingredientOntologyV3SetReadyMutationGuard($db, false);
+        $foodOnLowConfidence =
+            ingredientOntologyControllerEffectivePlanRisk(
+                $db,
+                $baseVersionId,
+                array_replace($foodOnPlan, [
+                    'confidence' => 0.89,
+                ])
+            );
+        $foodOnWithDelta =
+            ingredientOntologyControllerEffectivePlanRisk(
+                $db,
+                $baseVersionId,
+                array_replace($foodOnPlan, [
+                    'optional_deltas' => [['id' => 'unsafe']],
+                ])
+            );
+        $foodOnFacet = $db->query("
+            SELECT facet.id AS facet_id,
+                   facet.facet_key,
+                   value.id AS value_id,
+                   value.value_key
+            FROM ingredient_ontology_facets facet
+            JOIN ingredient_ontology_facet_values value
+              ON value.facet_id = facet.id
+             AND value.ontology_version_id =
+                    facet.ontology_version_id
+            WHERE facet.ontology_version_id = {$baseVersionId}
+            ORDER BY facet.id, value.id
+            LIMIT 1
+        ")->fetch(PDO::FETCH_ASSOC);
+        ingredientOntologyV3SetReadyMutationGuard($db, true);
+        $db->prepare("
+            UPDATE ingredient_ontology_mappings
+            SET attributes_json = ?
+            WHERE id = ? AND ontology_version_id = ?
+        ")->execute([
+            ingredientOntologyControllerStableJson([
+                (string)$foodOnFacet['facet_key'] =>
+                    (string)$foodOnFacet['value_key'],
+            ]),
+            (int)$foodOnMappingIds[0],
+            $baseVersionId,
+        ]);
+        $db->prepare("
+            INSERT INTO ingredient_ontology_mapping_attributes (
+                ontology_version_id, mapping_id, facet_id,
+                facet_value_id, is_defining, provenance
+            )
+            VALUES (?, ?, ?, ?, 1, 'foodon-attribute-fixture')
+        ")->execute([
+            $baseVersionId,
+            (int)$foodOnMappingIds[0],
+            (int)$foodOnFacet['facet_id'],
+            (int)$foodOnFacet['value_id'],
+        ]);
+        ingredientOntologyV3SetReadyMutationGuard($db, false);
+        $foodOnAttributedProof =
+            ingredientOntologyControllerFoodOnHierarchyProof(
+                $db,
+                $baseVersionId,
+                (int)$productSubject['id'],
+                (int)$foodOnTarget['id']
+            );
+        $foodOnAttributedRisk =
+            ingredientOntologyControllerEffectivePlanRisk(
+                $db,
+                $baseVersionId,
+                $foodOnPlan
+            );
+        ingredientOntologyV3SetReadyMutationGuard($db, true);
+        $db->prepare("
+            DELETE FROM ingredient_ontology_mapping_attributes
+            WHERE mapping_id = ?
+        ")->execute([(int)$foodOnMappingIds[0]]);
+        $db->prepare("
+            UPDATE ingredient_ontology_mappings
+            SET attributes_json = '[]'
+            WHERE id = ? AND ontology_version_id = ?
+        ")->execute([
+            (int)$foodOnMappingIds[0],
+            $baseVersionId,
+        ]);
+        ingredientOntologyV3SetReadyMutationGuard($db, false);
+        $db->prepare("
+            INSERT INTO canonical_ingredients (
+                slug, name, source, external_ids_json
+            )
+            VALUES (
+                'foodon-controller-parent-duplicate',
+                'FoodOn Controller Parent Duplicate',
+                'test',
+                ?
+            )
+        ")->execute([json_encode([
+            'foodon' => [
+                'id' => 'FOODON:TEST_TARGET',
+                'source' => 'ebi_ols4',
+            ],
+        ])]);
+        $foodOnDuplicateCanonicalId = (int)$db->lastInsertId();
+        $foodOnAmbiguousProof =
+            ingredientOntologyControllerFoodOnHierarchyProof(
+                $db,
+                $baseVersionId,
+                (int)$productSubject['id'],
+                (int)$foodOnTarget['id']
+            );
+        $foodOnAmbiguousRisk =
+            ingredientOntologyControllerEffectivePlanRisk(
+                $db,
+                $baseVersionId,
+                $foodOnPlan
+            );
+        $db->prepare("
+            DELETE FROM canonical_ingredients WHERE id = ?
+        ")->execute([$foodOnDuplicateCanonicalId]);
+        $db->exec("
+            INSERT INTO products (name, prepared_food)
+            VALUES ('FoodOn Unproven Occurrence', 0)
+        ");
+        $foodOnUnprovenProductId = (int)$db->lastInsertId();
+        $db->prepare("
+            INSERT INTO canonical_ingredients (
+                slug, name, source, external_ids_json
+            )
+            VALUES (
+                'foodon-controller-unproven-child',
+                'FoodOn Controller Unproven Child',
+                'test',
+                ?
+            )
+        ")->execute([json_encode([
+            'foodon' => [
+                'id' => 'FOODON:UNPROVEN_CHILD',
+                'source' => 'ebi_ols4',
+                'hierarchy' => [],
+            ],
+        ])]);
+        $foodOnUnprovenCanonicalId = (int)$db->lastInsertId();
+        $db->prepare("
+            INSERT INTO product_ingredients (
+                product_id, ingredient_id, role,
+                confidence, source, evidence
+            )
+            VALUES (?, ?, 'primary', 0.99, 'test', 'Unproven occurrence')
+        ")->execute([
+            $foodOnUnprovenProductId,
+            $foodOnUnprovenCanonicalId,
+        ]);
+        $foodOnUnprovenFingerprint = hash(
+            'sha256',
+            'foodon-unproven-occurrence'
+        );
+        $foodOnUnprovenProvenance =
+            ingredientOntologyControllerStableJson([
+                'fixture' => 'foodon-unproven-occurrence',
+            ]);
+        $db->prepare("
+            INSERT INTO ontology_subject_occurrences (
+                subject_id, owner_type, owner_id,
+                owner_fingerprint, provenance_hash,
+                provenance_json
+            )
+            VALUES (?, 'product', ?, ?, ?, ?)
+        ")->execute([
+            (int)$productSubject['id'],
+            $foodOnUnprovenProductId,
+            $foodOnUnprovenFingerprint,
+            hash('sha256', $foodOnUnprovenProvenance),
+            $foodOnUnprovenProvenance,
+        ]);
+        $foodOnUnprovenOccurrenceId = (int)$db->lastInsertId();
+        $foodOnMixedOccurrenceProof =
+            ingredientOntologyControllerFoodOnHierarchyProof(
+                $db,
+                $baseVersionId,
+                (int)$productSubject['id'],
+                (int)$foodOnTarget['id']
+            );
+        $foodOnMixedOccurrenceRisk =
+            ingredientOntologyControllerEffectivePlanRisk(
+                $db,
+                $baseVersionId,
+                $foodOnPlan
+            );
+        $db->prepare("
+            UPDATE ontology_subject_occurrences
+            SET active = 0
+            WHERE id = ?
+        ")->execute([$foodOnUnprovenOccurrenceId]);
+        $db->prepare("
+            UPDATE canonical_ingredients
+            SET external_ids_json = ?
+            WHERE id = ?
+        ")->execute([
+            json_encode([
+                'foodon' => [
+                    'id' => 'FOODON:TEST_CHILD',
+                    'source' => 'ebi_ols4',
+                    'hierarchy' => [[
+                        'id' => 'FOODON:TEST_TARGET',
+                        'depth' => 3,
+                    ]],
+                    'resolved_parent' => [
+                        'child_id' => 'FOODON:TEST_CHILD',
+                        'id' => 'FOODON:TEST_TARGET',
+                        'slug' => 'foodon-controller-parent',
+                        'label' => 'FoodOn Controller Parent',
+                        'depth' => 3,
+                        'source' => 'ebi_ols4_hierarchy',
+                    ],
+                ],
+            ]),
+            $foodOnChildId,
+        ]);
+        $foodOnTooDeep =
+            ingredientOntologyControllerFoodOnHierarchyProof(
+                $db,
+                $baseVersionId,
+                (int)$productSubject['id'],
+                (int)$foodOnTarget['id']
+            );
+        $foodOnTooDeepRisk =
+            ingredientOntologyControllerEffectivePlanRisk(
+                $db,
+                $baseVersionId,
+                $foodOnPlan
+            );
+        $db->prepare("
+            UPDATE canonical_ingredients
+            SET external_ids_json = ?
+            WHERE id = ?
+        ")->execute([
+            json_encode([
+                'foodon' => [
+                    'id' => '',
+                    'source' => 'ebi_ols4',
+                    'hierarchy' => [[
+                        'id' => 'FOODON:TEST_TARGET',
+                        'depth' => 2,
+                    ]],
+                    'resolved_parent' => [
+                        'child_id' => '',
+                        'id' => 'FOODON:TEST_TARGET',
+                        'slug' => 'foodon-controller-parent',
+                        'label' => 'FoodOn Controller Parent',
+                        'depth' => 2,
+                        'source' => 'ebi_ols4_hierarchy',
+                    ],
+                ],
+            ]),
+            $foodOnChildId,
+        ]);
+        $foodOnEmptyChild =
+            ingredientOntologyControllerFoodOnHierarchyProof(
+                $db,
+                $baseVersionId,
+                (int)$productSubject['id'],
+                (int)$foodOnTarget['id']
+            );
+        $db->prepare("
+            UPDATE canonical_ingredients
+            SET external_ids_json = ?
+            WHERE id = ?
+        ")->execute([
+            json_encode([
+                'foodon' => [
+                    'id' => 'FOODON:TEST_CHILD',
+                    'source' => 'ebi_ols4',
+                    'hierarchy' => [[
+                        'id' => 'FOODON:TEST_TARGET',
+                        'depth' => 2,
+                    ]],
+                    'resolved_parent' => [
+                        'child_id' => 'FOODON:OTHER_CHILD',
+                        'id' => 'FOODON:TEST_TARGET',
+                        'slug' => 'foodon-controller-parent',
+                        'label' => 'FoodOn Controller Parent',
+                        'depth' => 2,
+                        'source' => 'ebi_ols4_hierarchy',
+                    ],
+                ],
+            ]),
+            $foodOnChildId,
+        ]);
+        $foodOnWrongChild =
+            ingredientOntologyControllerFoodOnHierarchyProof(
+                $db,
+                $baseVersionId,
+                (int)$productSubject['id'],
+                (int)$foodOnTarget['id']
+            );
+        $foodOnWrongChildRisk =
+            ingredientOntologyControllerEffectivePlanRisk(
+                $db,
+                $baseVersionId,
+                $foodOnPlan
+            );
+        $db->prepare("
+            UPDATE canonical_ingredients
+            SET external_ids_json = ?
+            WHERE id = ?
+        ")->execute([
+            json_encode([
+                'foodon' => [
+                    'id' => 'FOODON:TEST_CHILD',
+                    'source' => 'ebi_ols4',
+                    'hierarchy' => [[
+                        'id' => 'FOODON:TEST_TARGET',
+                        'depth' => 2,
+                    ]],
+                    'resolved_parent' => [
+                        'child_id' => 'FOODON:TEST_CHILD',
+                        'id' => 'FOODON:TEST_TARGET',
+                        'slug' => (string)$foodOnTarget['slug'],
+                        'label' => (string)$foodOnTarget['slug'],
+                        'depth' => 2,
+                        'source' => 'ebi_ols4_hierarchy',
+                    ],
+                ],
+            ]),
+            $foodOnChildId,
+        ]);
+        $foodOnWrongSlug =
+            ingredientOntologyControllerFoodOnHierarchyProof(
+                $db,
+                $baseVersionId,
+                (int)$productSubject['id'],
+                (int)$foodOnTarget['id']
+            );
+        $foodOnWrongSlugRisk =
+            ingredientOntologyControllerEffectivePlanRisk(
+                $db,
+                $baseVersionId,
+                $foodOnPlan
+            );
+        $db->rollBack();
+    } catch (Throwable $error) {
+        ingredientOntologyV3SetReadyMutationGuard($db, false);
+        if ($db->inTransaction()) {
+            $db->rollBack();
+        }
+        throw $error;
+    }
+    controllerTestAssert(
+        $foodOnProof !== null
+        && $foodOnStructuralProof === null
+        && $foodOnStapleProof === null
+        && $foodOnAttributedProof === null
+        && $foodOnAmbiguousProof === null
+        && $foodOnMixedOccurrenceProof === null
+        && $foodOnTooDeep === null
+        && $foodOnEmptyChild === null
+        && $foodOnWrongChild === null
+        && $foodOnWrongSlug === null
+        && $foodOnRisk['risk'] === 'R0'
+        && $foodOnStructuralRisk['risk'] === 'R1'
+        && $foodOnStapleRisk['risk'] === 'R1'
+        && $foodOnLowConfidence['risk'] === 'R1'
+        && $foodOnWithDelta['risk'] === 'R1'
+        && $foodOnAttributedRisk['risk'] === 'R1'
+        && $foodOnAmbiguousRisk['risk'] === 'R1'
+        && $foodOnMixedOccurrenceRisk['risk'] === 'R1'
+        && $foodOnTooDeepRisk['risk'] === 'R1'
+        && $foodOnWrongChildRisk['risk'] === 'R1'
+        && $foodOnWrongSlugRisk['risk'] === 'R1'
+        && $foodOnProof['source'] === 'ebi_ols4_hierarchy'
+        && $foodOnProof['foodon_child_id']
+            === 'FOODON:TEST_CHILD'
+        && $foodOnProof['foodon_parent_id']
+            === 'FOODON:TEST_TARGET'
+        && $foodOnProof['target_identity_role']
+            === (string)$foodOnTarget['identity_role'],
+        'Authoritative FoodOn hierarchy must authorize a source-local existing-entity mapping'
+    );
+
+    $foodOnE2eSubject = [
+        'subject_id' => (int)$productSubject['id'],
+        'product_id' => $cloveProductId,
+        'subject_fingerprint' =>
+            (string)$productSubject['subject_fingerprint'],
+        'entity_slug' => (string)$foodOnTarget['slug'],
+    ];
+    $foodOnE2eProductId = (int)$foodOnE2eSubject['product_id'];
+    $foodOnPrimaryRows = $db->prepare("
+        SELECT ingredient_id, role, confidence, source, evidence,
+               created_at, updated_at
+        FROM product_ingredients
+        WHERE product_id = ? AND role = 'primary'
+        ORDER BY id
+    ");
+    $foodOnPrimaryRows->execute([$foodOnE2eProductId]);
+    $foodOnPrimaryRows = $foodOnPrimaryRows->fetchAll(PDO::FETCH_ASSOC);
+    $db->prepare("
+        INSERT INTO canonical_ingredients (
+            slug, name, source, external_ids_json
+        )
+        VALUES (
+            'foodon-controller-parent-e2e',
+            'FoodOn Controller Parent E2E',
+            'test',
+            ?
+        )
+    ")->execute([
+        json_encode([
+            'foodon' => [
+                'id' => 'FOODON:TEST_TARGET_E2E',
+                'source' => 'ebi_ols4',
+            ],
+        ]),
+    ]);
+    $foodOnE2eTargetCanonicalId = (int)$db->lastInsertId();
+    $foodOnE2eTargetCanonical = [
+        'slug' => 'foodon-controller-parent-e2e',
+        'name' => 'FoodOn Controller Parent E2E',
+    ];
+    $foodOnE2eProof = [
+        'foodon' => [
+            'id' => 'FOODON:TEST_CHILD_E2E',
+            'source' => 'ebi_ols4',
+            'hierarchy' => [[
+                'id' => 'FOODON:TEST_TARGET_E2E',
+                'depth' => 2,
+            ]],
+            'resolved_parent' => [
+                'child_id' => 'FOODON:TEST_CHILD_E2E',
+                'id' => 'FOODON:TEST_TARGET_E2E',
+                'slug' =>
+                    (string)$foodOnE2eTargetCanonical['slug'],
+                'label' =>
+                    (string)$foodOnE2eTargetCanonical['name'],
+                'depth' => 2,
+                'source' => 'ebi_ols4_hierarchy',
+            ],
+        ],
+    ];
+    $db->prepare("
+        INSERT INTO canonical_ingredients (
+            slug, name, source, external_ids_json
+        )
+        VALUES (
+            'foodon-controller-child-e2e',
+            'FoodOn Controller Child E2E',
+            'test',
+            ?
+        )
+    ")->execute([json_encode($foodOnE2eProof)]);
+    $foodOnE2eChildId = (int)$db->lastInsertId();
+    $db->prepare("
+        DELETE FROM product_ingredients
+        WHERE product_id = ? AND role = 'primary'
+    ")->execute([$foodOnE2eProductId]);
+    $db->prepare("
+        INSERT INTO product_ingredients (
+            product_id, ingredient_id, role,
+            confidence, source, evidence
+        )
+        VALUES (?, ?, 'primary', 0.99, 'test', 'FoodOn hierarchy E2E')
+    ")->execute([$foodOnE2eProductId, $foodOnE2eChildId]);
+    $foodOnTargetSlug = (string)$foodOnE2eSubject['entity_slug'];
+    ingredientOntologyControllerRegisterProvider(
+        'fake_foodon_r0',
+        static function (
+            array $artifact,
+            array $request
+        ) use ($foodOnTargetSlug): array {
+            $candidateId = 'none';
+            foreach (
+                (array)$artifact['manifest']['candidate_map']
+                as $id => $candidate
+            ) {
+                if (
+                    (string)($candidate['slug'] ?? '')
+                    === $foodOnTargetSlug
+                ) {
+                    $candidateId = (string)$id;
+                    break;
+                }
+            }
+            $evidenceId = (string)array_key_first(
+                $artifact['manifest']['evidence_map']
+            );
+            $evidenceText = (string)$artifact['manifest'][
+                'evidence_map'
+            ][$evidenceId]['text'];
+            return [
+                'source' => 'fake',
+                'envelope' => [
+                    'schema_version' =>
+                        'ontology-controller-plan-v1',
+                    'request_id' => (string)$artifact['request_id'],
+                    'input_hash' => (string)$artifact['input_hash'],
+                    'decision' => 'apply',
+                    'repair_kind' =>
+                        'map_source_to_target_entity',
+                    'entity_candidate_id' => $candidateId,
+                    'new_entity' => null,
+                    'attributes' => [],
+                    'relations' => [],
+                    'evidence' => [[
+                        'evidence_id' => $evidenceId,
+                        'quote' => mb_substr(
+                            $evidenceText,
+                            0,
+                            min(40, mb_strlen(
+                                $evidenceText,
+                                'UTF-8'
+                            )),
+                            'UTF-8'
+                        ),
+                    ]],
+                    'optional_deltas' => [],
+                    'confidence' => 0.99,
+                ],
+                'request_hash' => ingredientOntologyV3Hash($request),
+            ];
+        },
+        ['strict_schema' => true]
+    );
+    $foodOnActiveR1Ids = $db->query("
+        SELECT id
+        FROM ontology_controller_benchmark_policies
+        WHERE risk_tier = 'R1' AND active = 1
+        ORDER BY id
+    ")->fetchAll(PDO::FETCH_COLUMN);
+    $db->exec("
+        UPDATE ontology_controller_benchmark_policies
+        SET active = 0
+        WHERE risk_tier = 'R1' AND active = 1
+    ");
+    $foodOnCandidateIds = [];
+    $GLOBALS['ONTOLOGY_CONTROLLER_TEST_HOOK'] =
+        static function (
+            string $name,
+            array $context
+        ) use (
+            $db,
+            $foodOnTargetSlug,
+            $foodOnE2eTargetCanonicalId,
+            $foodOnE2eSubject
+        ): void {
+            if ($name === 'controller_fork_before_commit') {
+                $childVersionId = (int)$context['child_version_id'];
+                $db->prepare("
+                    UPDATE ingredient_ontology_entities
+                    SET legacy_canonical_ingredient_id = ?
+                    WHERE ontology_version_id = ? AND slug = ?
+                ")->execute([
+                    $foodOnE2eTargetCanonicalId,
+                    $childVersionId,
+                    $foodOnTargetSlug,
+                ]);
+                foreach (
+                    ingredientOntologyControllerSubjectMappingIds(
+                        $db,
+                        $childVersionId,
+                        (int)$foodOnE2eSubject['subject_id']
+                    )
+                    as $mappingId
+                ) {
+                    $db->prepare("
+                        DELETE FROM ingredient_ontology_mapping_attributes
+                        WHERE mapping_id = ?
+                    ")->execute([$mappingId]);
+                    $db->prepare("
+                        UPDATE ingredient_ontology_mappings
+                        SET attributes_json = '[]'
+                        WHERE id = ? AND ontology_version_id = ?
+                    ")->execute([$mappingId, $childVersionId]);
+                }
+                $db->prepare("
+                    UPDATE ingredient_ontology_subject_resolutions
+                    SET attributes_json = '[]'
+                    WHERE ontology_version_id = ? AND subject_id = ?
+                ")->execute([
+                    $childVersionId,
+                    (int)$foodOnE2eSubject['subject_id'],
+                ]);
+            }
+        };
+    try {
+        $foodOnE2eJob = ingredientOntologyControllerEnqueueJob(
+            $db,
+            'subject_resolution',
+            [
+                'subject_kind' => 'product',
+                'subject_fingerprint' =>
+                    (string)$foodOnE2eSubject['subject_fingerprint'],
+                'controller_test' => 'foodon-r0-no-policy',
+            ],
+            (int)$foodOnE2eSubject['subject_id'],
+            null,
+            null,
+            0,
+            1000000,
+            true
+        );
+        $foodOnE2eProcess =
+            ingredientOntologyControllerProcessQueue(
+                $db,
+                1,
+                [
+                    'provider' => 'fake_foodon_r0',
+                    'model' => 'unmeasured-foodon-fixture',
+                    'job_types' => ['subject_resolution'],
+                ]
+            );
+        $foodOnE2eJobRow = $db->query("
+            SELECT * FROM ontology_controller_jobs
+            WHERE id = " . (int)$foodOnE2eJob['id']
+        )->fetch(PDO::FETCH_ASSOC);
+        $foodOnCandidateIds[] =
+            (int)$foodOnE2eJobRow['candidate_version_id'];
+        $foodOnE2ePlan = $db->query("
+            SELECT *
+            FROM ontology_mutation_plans
+            WHERE id = " . (int)$foodOnE2eJobRow['mutation_plan_id']
+        )->fetch(PDO::FETCH_ASSOC);
+        $foodOnE2eMapping = $db->query("
+            SELECT mapping.id, mapping.status, mapping.mapping_source,
+                   mapping.entity_id, entity.slug AS entity_slug
+            FROM ontology_subject_occurrences occurrence
+            JOIN ingredient_ontology_mappings mapping
+              ON mapping.ontology_version_id =
+                    " . (int)$foodOnE2eJobRow[
+                        'candidate_version_id'
+                    ] . "
+             AND mapping.owner_type = occurrence.owner_type
+             AND mapping.owner_id = occurrence.owner_id
+             AND mapping.owner_fingerprint =
+                    occurrence.owner_fingerprint
+            LEFT JOIN ingredient_ontology_entities entity
+              ON entity.ontology_version_id =
+                    mapping.ontology_version_id
+             AND entity.id = mapping.entity_id
+            WHERE occurrence.subject_id =
+                    " . (int)$foodOnE2eSubject['subject_id'] . "
+              AND occurrence.active = 1
+            ORDER BY mapping.id
+            LIMIT 1
+        ")->fetch(PDO::FETCH_ASSOC);
+        $foodOnE2eResolution = $db->query("
+            SELECT status, entity_id
+            FROM ingredient_ontology_subject_resolutions
+            WHERE ontology_version_id =
+                    " . (int)$foodOnE2eJobRow[
+                        'candidate_version_id'
+                    ] . "
+              AND subject_id = "
+                    . (int)$foodOnE2eSubject['subject_id']
+        )->fetch(PDO::FETCH_ASSOC);
+        $foodOnE2eResponse = $db->query("
+            SELECT parsed_plan_json
+            FROM ontology_controller_responses
+            WHERE id = " . (int)$foodOnE2eJobRow[
+                'response_artifact_id'
+            ]
+        )->fetchColumn();
+        $foodOnE2eTargetRow = $db->query("
+            SELECT id, slug, legacy_canonical_ingredient_id
+            FROM ingredient_ontology_entities
+            WHERE ontology_version_id =
+                    " . (int)$foodOnE2eJobRow[
+                        'candidate_version_id'
+                    ] . "
+              AND slug = " . $db->quote($foodOnTargetSlug)
+        )->fetch(PDO::FETCH_ASSOC);
+        $foodOnE2eProofAtEnd =
+            ingredientOntologyControllerFoodOnHierarchyProof(
+                $db,
+                (int)$foodOnE2eJobRow['candidate_version_id'],
+                (int)$foodOnE2eSubject['subject_id'],
+                (int)$foodOnE2eMapping['entity_id']
+            );
+        controllerTestAssert(
+            !ingredientOntologyControllerRiskAuthorized($db, 'R1')
+            && $foodOnE2eProcess['results'][0]['status']
+                === 'generation_pending'
+            && $foodOnE2eJobRow['status'] === 'generation_pending'
+            && $foodOnE2ePlan['risk_tier'] === 'R0'
+            && $foodOnE2ePlan['status'] === 'applied'
+            && $foodOnE2eMapping['status'] === 'accepted'
+            && $foodOnE2eMapping['mapping_source']
+                === 'foodon_hierarchy'
+            && $foodOnE2eMapping['entity_slug']
+                === $foodOnTargetSlug
+            && $foodOnE2eResolution['status'] === 'accepted'
+            && (int)$foodOnE2eResolution['entity_id']
+                === (int)$foodOnE2eMapping['entity_id'],
+            'A child-bound FoodOn plan must apply end to end as R0 without an R1 policy: '
+                . ingredientOntologyControllerStableJson([
+                    'r1_authorized' =>
+                        ingredientOntologyControllerRiskAuthorized(
+                            $db,
+                            'R1'
+                        ),
+                    'process' => $foodOnE2eProcess,
+                    'job' => $foodOnE2eJobRow,
+                    'plan' => $foodOnE2ePlan,
+                    'mapping' => $foodOnE2eMapping,
+                    'resolution' => $foodOnE2eResolution,
+                    'response' => $foodOnE2eResponse,
+                    'target' => $foodOnE2eTargetRow,
+                    'proof' => $foodOnE2eProofAtEnd,
+                ])
+        );
+        $foodOnPlanTemplate = json_decode(
+            (string)$foodOnE2eResponse,
+            true,
+            64,
+            JSON_THROW_ON_ERROR
+        );
+        $stageFoodOnRiskFixture =
+            static function (string $label) use (
+                $db,
+                $baseVersionId,
+                $foodOnE2eSubject,
+                $foodOnE2eJobRow,
+                $foodOnPlanTemplate
+            ): array {
+                $inputJson =
+                    ingredientOntologyControllerStableJson([
+                        'fixture' => $label,
+                    ]);
+                $db->prepare("
+                    INSERT INTO ontology_controller_jobs (
+                        job_key, job_type, subject_id,
+                        controller_generation,
+                        base_ontology_version_id,
+                        base_content_hash,
+                        controller_policy_hash,
+                        status, priority, input_hash, input_json
+                    )
+                    VALUES (
+                        ?, 'subject_resolution', ?, ?, ?, ?, ?,
+                        'staged', 1000000, ?, ?
+                    )
+                ")->execute([
+                    hash('sha256', 'foodon-stage-' . $label),
+                    (int)$foodOnE2eSubject['subject_id'],
+                    (int)$db->query("
+                        SELECT controller_generation
+                        FROM ontology_controller_state
+                        WHERE id = 1
+                    ")->fetchColumn(),
+                    $baseVersionId,
+                    ingredientOntologyV3ContentHash(
+                        $db,
+                        $baseVersionId
+                    ),
+                    ingredientOntologyControllerPolicyHash(),
+                    hash('sha256', $inputJson),
+                    $inputJson,
+                ]);
+                $jobId = (int)$db->lastInsertId();
+                $artifact = [
+                    'input_hash' => hash(
+                        'sha256',
+                        'foodon-input-' . $label
+                    ),
+                    'prompt_hash' => hash(
+                        'sha256',
+                        'foodon-prompt-' . $label
+                    ),
+                    'schema_hash' => hash(
+                        'sha256',
+                        'foodon-schema-' . $label
+                    ),
+                ];
+                return ingredientOntologyControllerStagePlan(
+                    $db,
+                    $jobId,
+                    (int)$foodOnE2eJobRow[
+                        'candidate_version_id'
+                    ],
+                    $artifact,
+                    $foodOnPlanTemplate,
+                    ['valid' => true, 'errors' => []]
+                );
+            };
+        $foodOnMappingSnapshot = static function () use (
+            $db,
+            $foodOnE2eMapping
+        ): array {
+            $row = $db->prepare("
+                SELECT entity_id, status, confidence,
+                       mapping_source, evidence_json,
+                       attributes_json, updated_at
+                FROM ingredient_ontology_mappings
+                WHERE id = ?
+            ");
+            $row->execute([(int)$foodOnE2eMapping['id']]);
+            return $row->fetch(PDO::FETCH_ASSOC) ?: [];
+        };
+        $foodOnStagedWithoutPolicy =
+            $stageFoodOnRiskFixture('proof-invalid-no-policy');
+        $foodOnMappingBeforeInvalidation =
+            $foodOnMappingSnapshot();
+        $db->prepare("
+            UPDATE canonical_ingredients
+            SET external_ids_json = ?
+            WHERE id = ?
+        ")->execute([
+            json_encode([
+                'foodon' => [
+                    'id' => 'FOODON:TEST_CHILD_E2E',
+                    'source' => 'ebi_ols4',
+                    'hierarchy' => [],
+                ],
+            ]),
+            $foodOnE2eChildId,
+        ]);
+        $foodOnInvalidWithoutPolicy =
+            ingredientOntologyV3ApplyChangeSet(
+                $db,
+                (int)$foodOnStagedWithoutPolicy['change_set_id']
+            );
+        $foodOnPlanAfterInvalidation = $db->query("
+            SELECT plan.*, change_set.review_state
+            FROM ontology_mutation_plans plan
+            JOIN ingredient_ontology_change_sets change_set
+              ON change_set.id = plan.change_set_id
+            WHERE plan.id =
+                " . (int)$foodOnStagedWithoutPolicy['id']
+        )->fetch(PDO::FETCH_ASSOC);
+        controllerTestAssert(
+            $foodOnStagedWithoutPolicy['risk_tier'] === 'R0'
+            && !empty($foodOnInvalidWithoutPolicy['quarantined'])
+            && $foodOnPlanAfterInvalidation['risk_tier'] === 'R1'
+            && $foodOnPlanAfterInvalidation['status']
+                === 'quarantined'
+            && $foodOnPlanAfterInvalidation['review_state']
+                === 'pending'
+            && $foodOnMappingSnapshot()
+                === $foodOnMappingBeforeInvalidation,
+            'FoodOn proof removed after staging must fail closed before any mapping write'
+        );
+
+        $db->prepare("
+            UPDATE canonical_ingredients
+            SET external_ids_json = ?
+            WHERE id = ?
+        ")->execute([
+            json_encode($foodOnE2eProof),
+            $foodOnE2eChildId,
+        ]);
+        foreach ($foodOnActiveR1Ids as $policyId) {
+            $db->prepare("
+                UPDATE ontology_controller_benchmark_policies
+                SET active = 1
+                WHERE id = ?
+            ")->execute([(int)$policyId]);
+        }
+        $foodOnStagedWithPolicy =
+            $stageFoodOnRiskFixture('proof-invalid-r1-policy');
+        $foodOnMappingBeforeAuthorizedInvalidation =
+            $foodOnMappingSnapshot();
+        $db->prepare("
+            UPDATE canonical_ingredients
+            SET external_ids_json = ?
+            WHERE id = ?
+        ")->execute([
+            json_encode([
+                'foodon' => [
+                    'id' => 'FOODON:TEST_CHILD_E2E',
+                    'source' => 'ebi_ols4',
+                    'hierarchy' => [],
+                ],
+            ]),
+            $foodOnE2eChildId,
+        ]);
+        $foodOnInvalidWithPolicy =
+            ingredientOntologyV3ApplyChangeSet(
+                $db,
+                (int)$foodOnStagedWithPolicy['change_set_id']
+            );
+        $foodOnPlanAfterAuthorizedInvalidation = $db->query("
+            SELECT *
+            FROM ontology_mutation_plans
+            WHERE id = " . (int)$foodOnStagedWithPolicy['id']
+        )->fetch(PDO::FETCH_ASSOC);
+        controllerTestAssert(
+            ingredientOntologyControllerRiskAuthorized($db, 'R1')
+            && $foodOnStagedWithPolicy['risk_tier'] === 'R0'
+            && !empty($foodOnInvalidWithPolicy['quarantined'])
+            && $foodOnPlanAfterAuthorizedInvalidation['risk_tier']
+                === 'R1'
+            && $foodOnPlanAfterAuthorizedInvalidation['status']
+                === 'quarantined'
+            && $foodOnMappingSnapshot()
+                === $foodOnMappingBeforeAuthorizedInvalidation,
+            'A post-stage risk increase must require renewed review even when R1 policy is active'
+        );
+
+        $db->prepare("
+            UPDATE canonical_ingredients
+            SET external_ids_json = ?
+            WHERE id = ?
+        ")->execute([
+            json_encode($foodOnE2eProof),
+            $foodOnE2eChildId,
+        ]);
+        $foodOnStagedBeforeRoleChange =
+            $stageFoodOnRiskFixture('target-role-ineligible');
+        $foodOnMappingBeforeRoleChange =
+            $foodOnMappingSnapshot();
+        $db->prepare("
+            UPDATE ingredient_ontology_entities
+            SET identity_role = 'structural_category'
+            WHERE id = ? AND ontology_version_id = ?
+        ")->execute([
+            (int)$foodOnE2eMapping['entity_id'],
+            (int)$foodOnE2eJobRow['candidate_version_id'],
+        ]);
+        $foodOnInvalidRole =
+            ingredientOntologyV3ApplyChangeSet(
+                $db,
+                (int)$foodOnStagedBeforeRoleChange['change_set_id']
+            );
+        $foodOnPlanAfterRoleChange = $db->query("
+            SELECT *
+            FROM ontology_mutation_plans
+            WHERE id = " . (int)$foodOnStagedBeforeRoleChange['id']
+        )->fetch(PDO::FETCH_ASSOC);
+        $db->prepare("
+            UPDATE ingredient_ontology_entities
+            SET identity_role = ?
+            WHERE id = ? AND ontology_version_id = ?
+        ")->execute([
+            (string)$foodOnTarget['identity_role'],
+            (int)$foodOnE2eMapping['entity_id'],
+            (int)$foodOnE2eJobRow['candidate_version_id'],
+        ]);
+        controllerTestAssert(
+            $foodOnStagedBeforeRoleChange['risk_tier'] === 'R0'
+            && !empty($foodOnInvalidRole['quarantined'])
+            && $foodOnPlanAfterRoleChange['risk_tier'] === 'R1'
+            && $foodOnPlanAfterRoleChange['status'] === 'quarantined'
+            && $foodOnMappingSnapshot()
+                === $foodOnMappingBeforeRoleChange,
+            'A FoodOn target that becomes identity-ineligible after staging must quarantine before any mapping write'
+        );
+    } finally {
+        unset($GLOBALS['ONTOLOGY_CONTROLLER_TEST_HOOK']);
+        $db->prepare("
+            UPDATE canonical_ingredients
+            SET external_ids_json = ?
+            WHERE id = ?
+        ")->execute([
+            json_encode($foodOnE2eProof),
+            $foodOnE2eChildId,
+        ]);
+        foreach ($foodOnActiveR1Ids as $policyId) {
+            $db->prepare("
+                UPDATE ontology_controller_benchmark_policies
+                SET active = 1
+                WHERE id = ?
+            ")->execute([(int)$policyId]);
+        }
+        if (
+            isset(
+                $foodOnE2eMapping['entity_id'],
+                $foodOnE2eJobRow['candidate_version_id']
+            )
+        ) {
+            $db->prepare("
+                UPDATE ingredient_ontology_entities
+                SET identity_role = ?
+                WHERE id = ? AND ontology_version_id = ?
+            ")->execute([
+                (string)$foodOnTarget['identity_role'],
+                (int)$foodOnE2eMapping['entity_id'],
+                (int)$foodOnE2eJobRow['candidate_version_id'],
+            ]);
+        }
+        if (isset($foodOnE2eJob['id'])) {
+            $db->prepare("
+                UPDATE ontology_controller_jobs
+                SET status = 'failed',
+                    finished_at = CURRENT_TIMESTAMP,
+                    lease_token = NULL,
+                    leased_until = NULL
+                WHERE id = ?
+            ")->execute([(int)$foodOnE2eJob['id']]);
+        }
+        foreach (array_unique(array_filter(
+            array_map('intval', $foodOnCandidateIds)
+        )) as $candidateId) {
+            $db->prepare("
+                UPDATE ontology_generations
+                SET status = 'failed'
+                WHERE candidate_version_id = ?
+                  AND status IN (
+                      'building', 'shadowing',
+                      'promotable', 'promoting'
+                  )
+            ")->execute([$candidateId]);
+            $db->prepare("
+                UPDATE ingredient_ontology_versions
+                SET status = 'failed',
+                    failed_at = CURRENT_TIMESTAMP
+                WHERE id = ? AND status = 'building'
+            ")->execute([$candidateId]);
+        }
+        $db->prepare("
+            DELETE FROM product_ingredients
+            WHERE product_id = ? AND role = 'primary'
+        ")->execute([$foodOnE2eProductId]);
+        $restoreFoodOnPrimary = $db->prepare("
+            INSERT INTO product_ingredients (
+                product_id, ingredient_id, role, confidence,
+                source, evidence, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ");
+        foreach ($foodOnPrimaryRows as $primaryRow) {
+            $restoreFoodOnPrimary->execute([
+                $foodOnE2eProductId,
+                (int)$primaryRow['ingredient_id'],
+                (string)$primaryRow['role'],
+                (float)$primaryRow['confidence'],
+                (string)$primaryRow['source'],
+                (string)$primaryRow['evidence'],
+                (string)$primaryRow['created_at'],
+                (string)$primaryRow['updated_at'],
+            ]);
+        }
+    }
     $generalizedJob = ingredientOntologyControllerEnqueueJob(
         $db,
         'subject_resolution',

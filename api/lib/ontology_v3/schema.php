@@ -1,7 +1,7 @@
 <?php
 declare(strict_types=1);
 
-const INGREDIENT_ONTOLOGY_V3_SCHEMA_VERSION = 'ingredient-ontology-v3.17';
+const INGREDIENT_ONTOLOGY_V3_SCHEMA_VERSION = 'ingredient-ontology-v3.18';
 const INGREDIENT_ONTOLOGY_V3_PROMPT_SCHEMA_VERSION =
     'ingredient_topology_benchmark_v3';
 const INGREDIENT_ONTOLOGY_V3_DEFAULT_MODEL = 'gemini-3.5-flash';

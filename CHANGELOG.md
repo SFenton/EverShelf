@@ -5,6 +5,23 @@ All notable changes to EverShelf will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.9.7] - 2026-08-16
+
+### Added
+- Child-bound EBI FoodOn hierarchy evidence can authorize an exact
+  source-to-existing-canonical ontology mapping as deterministic R0.
+
+### Fixed
+- FoodOn hierarchy refreshes replace stale provider evidence atomically,
+  require one unique nearest depth-1/2 ancestor plus unanimous,
+  attribute-safe proof across active occurrences, reject structural and staple
+  targets, and never create accepted primary taxonomy edges from an external
+  parent response.
+- Apply-time proof loss or risk escalation now quarantines the plan instead of
+  bypassing the model-policy and critic gates used for generalized mappings.
+- Ontology schema v3.18 versions the expanded portable identity seal before
+  automatic candidate activation.
+
 ## [1.9.6] - 2026-08-15
 
 ### Fixed

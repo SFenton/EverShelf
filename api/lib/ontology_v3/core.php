@@ -2975,11 +2975,15 @@ function ingredientOntologyV3PortableContentHash(
         $db,
         $hash,
         'entities',
-        "SELECT slug, canonical_name, entity_kind, identity_role,
-                active, provenance
-         FROM ingredient_ontology_entities
-         WHERE ontology_version_id = ?
-         ORDER BY slug",
+        "SELECT entity.slug, entity.canonical_name,
+                entity.entity_kind, entity.identity_role,
+                entity.active, entity.provenance,
+                COALESCE(canonical.slug, '')
+         FROM ingredient_ontology_entities entity
+         LEFT JOIN canonical_ingredients canonical
+           ON canonical.id = entity.legacy_canonical_ingredient_id
+         WHERE entity.ontology_version_id = ?
+         ORDER BY entity.slug",
         [$versionId]
     );
     ingredientOntologyV3HashQuery(

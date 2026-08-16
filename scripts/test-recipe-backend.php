@@ -10523,6 +10523,367 @@ try {
     );
     unset($GLOBALS['ONTOLOGY_AUTONOMOUS_ENABLED_OVERRIDE']);
 
+    $db->prepare("
+        INSERT INTO canonical_ingredients (
+            slug, name, source, external_ids_json
+        )
+        VALUES (
+            'foodon-parent-test',
+            'FoodOn Parent Test',
+            'test',
+            ?
+        )
+        ON CONFLICT(slug) DO UPDATE SET
+            external_ids_json = excluded.external_ids_json
+    ")->execute([json_encode([
+        'foodon' => ['id' => 'FOODON:TEST_PARENT'],
+    ])]);
+    $validFoodOnParent = [
+        'short_form' => 'FOODON_00000001',
+        'obo_id' => 'FOODON:00000001',
+        'iri' =>
+            'http://purl.obolibrary.org/obo/FOODON_00000001',
+        'label' => 'Valid FoodOn Parent',
+    ];
+    $decodedFoodOnParent =
+        canonicalIngredientFoodOnDecodeParentTerms(json_encode([
+            '_embedded' => ['terms' => [$validFoodOnParent]],
+        ]));
+    $mixedFoodOnParents = $validFoodOnParent;
+    unset($mixedFoodOnParents['label']);
+    $mismatchedFoodOnIri = $validFoodOnParent;
+    $mismatchedFoodOnIri['iri'] =
+        'http://purl.obolibrary.org/obo/FOODON_00000002';
+    $mismatchedFoodOnId = $validFoodOnParent;
+    $mismatchedFoodOnId['obo_id'] = 'FOODON:00000002';
+    $consistentForeignParent = [
+        'short_form' => 'CHEBI_24866',
+        'obo_id' => 'CHEBI:24866',
+        'iri' =>
+            'http://purl.obolibrary.org/obo/CHEBI_24866',
+        'label' => 'salt',
+    ];
+    $crossNamespaceParent = [
+        'short_form' => 'BFO_0000001',
+        'obo_id' => 'BFO:0000001',
+        'iri' =>
+            'http://purl.obolibrary.org/obo/FOODON_00000001',
+        'label' => 'Cross Namespace Parent',
+    ];
+    $decodedMixedNamespaceParents =
+        canonicalIngredientFoodOnDecodeParentTerms(json_encode([
+            '_embedded' => [
+                'terms' => [
+                    $consistentForeignParent,
+                    $validFoodOnParent,
+                ],
+            ],
+        ]));
+    $decodedSearchDocs =
+        canonicalIngredientFoodOnDecodeSearchDocs(json_encode([
+            'response' => ['docs' => [$validFoodOnParent]],
+        ]));
+    $malformedRootIdentity = false;
+    $mismatchedRoot = canonicalIngredientFoodOnSelectBest(
+        [[
+            'label' => 'Valid FoodOn Parent',
+            'short_form' => 'FOODON_00000001',
+            'obo_id' => 'FOODON:00000002',
+            'iri' =>
+                'http://purl.obolibrary.org/obo/FOODON_00000001',
+            'type' => 'class',
+        ]],
+        'Valid FoodOn Parent',
+        'Valid FoodOn Parent',
+        $malformedRootIdentity
+    );
+    $validRootDoc = [
+        'label' => 'Valid FoodOn Parent',
+        'short_form' => 'FOODON_00000001',
+        'obo_id' => 'FOODON:00000001',
+        'iri' =>
+            'http://purl.obolibrary.org/obo/FOODON_00000001',
+        'type' => 'class',
+        '_foodon_identity' => [
+            'id' => 'FOODON:99999999',
+            'iri' => 'http://invalid.example/forged',
+        ],
+        '_match_score' => 999,
+    ];
+    $validRootMalformed = null;
+    $validRoot = canonicalIngredientFoodOnSelectBest(
+        [$validRootDoc],
+        'Valid FoodOn Parent',
+        'Valid FoodOn Parent',
+        $validRootMalformed
+    );
+    $mixedRootMalformed = null;
+    $mixedImportedRoot = canonicalIngredientFoodOnSelectBest(
+        [[
+            'label' => 'salt',
+            'short_form' => 'CHEBI_24866',
+            'obo_id' => 'CHEBI:24866',
+            'iri' =>
+                'http://purl.obolibrary.org/obo/CHEBI_24866',
+            'type' => 'class',
+        ], $validRootDoc],
+        'Valid FoodOn Parent',
+        'Valid FoodOn Parent',
+        $mixedRootMalformed
+    );
+    $foreignOnlyMalformed = null;
+    $foreignOnlyRoot = canonicalIngredientFoodOnSelectBest(
+        [[
+            'label' => 'salt',
+            'short_form' => 'CHEBI_24866',
+            'obo_id' => 'CHEBI:24866',
+            'iri' =>
+                'http://purl.obolibrary.org/obo/CHEBI_24866',
+            'type' => 'class',
+        ]],
+        'salt',
+        'salt',
+        $foreignOnlyMalformed
+    );
+    recipeTestAssert(
+        canonicalIngredientFoodOnDecodeParentTerms('not-json') === null
+        && canonicalIngredientFoodOnDecodeParentTerms('{}') === null
+        && canonicalIngredientFoodOnDecodeSearchDocs('{}') === null
+        && canonicalIngredientFoodOnDecodeSearchDocs(
+            '{"response":{"docs":{}}}'
+        ) === null
+        && count($decodedSearchDocs ?? []) === 1
+        && canonicalIngredientFoodOnDecodeParentTerms(
+            '{"_embedded":{"terms":{}}}'
+        ) === null
+        && canonicalIngredientFoodOnDecodeParentTerms(json_encode([
+            '_embedded' => [
+                'terms' => [
+                    $validFoodOnParent,
+                    $mixedFoodOnParents,
+                ],
+            ],
+        ])) === null
+        && canonicalIngredientFoodOnDecodeParentTerms(json_encode([
+            '_embedded' => ['terms' => []],
+        ])) === []
+        && canonicalIngredientFoodOnDecodeParentTerms(json_encode([
+            '_embedded' => ['terms' => [$mismatchedFoodOnIri]],
+        ])) === null
+        && canonicalIngredientFoodOnDecodeParentTerms(json_encode([
+            '_embedded' => ['terms' => [$mismatchedFoodOnId]],
+        ])) === null
+        && canonicalIngredientFoodOnDecodeParentTerms(json_encode([
+            '_embedded' => ['terms' => [$crossNamespaceParent]],
+        ])) === null
+        && count($decodedMixedNamespaceParents ?? []) === 1
+        && count($decodedFoodOnParent ?? []) === 1
+        && $mismatchedRoot === null
+        && $malformedRootIdentity
+        && $validRootMalformed === false
+        && ($validRoot['_foodon_identity']['id'] ?? null)
+            === 'FOODON:00000001'
+        && ($validRoot['_foodon_identity']['iri'] ?? null)
+            === 'http://purl.obolibrary.org/obo/FOODON_00000001'
+        && (int)($validRoot['_match_score'] ?? 0) !== 999
+        && $mixedRootMalformed === false
+        && ($mixedImportedRoot['_foodon_identity']['id'] ?? null)
+            === 'FOODON:00000001'
+        && $foreignOnlyRoot === null
+        && $foreignOnlyMalformed === false,
+        'Malformed FoodOn parent responses must remain retryable while a verified empty parent set is accepted'
+    );
+    $overflowParents = [];
+    for ($index = 1; $index <= 17; $index++) {
+        $short = 'FOODON_' . str_pad(
+            (string)$index,
+            8,
+            '0',
+            STR_PAD_LEFT
+        );
+        $overflowParents[] = [
+            'id' => str_replace('_', ':', $short),
+            'short_form' => $short,
+            'iri' => 'http://purl.obolibrary.org/obo/' . $short,
+            'label' => $index === 17
+                ? 'Omitted Canonical Alternative'
+                : 'FoodOn Parent ' . $index,
+        ];
+    }
+    $overflowHierarchy = [];
+    $overflowNext = [];
+    $overflowSeen = [];
+    $overflowComplete =
+        canonicalIngredientFoodOnAppendHierarchyParents(
+            $overflowHierarchy,
+            $overflowNext,
+            $overflowSeen,
+            $overflowParents,
+            1
+        );
+    recipeTestAssert(
+        !$overflowComplete
+        && count($overflowHierarchy) === 16
+        && !in_array(
+            'http://purl.obolibrary.org/obo/FOODON_00000017',
+            $overflowNext,
+            true
+        ),
+        'FoodOn parent overflow must remain incomplete instead of authorizing from a truncated hierarchy'
+    );
+    $foodOnResolved = canonicalIngredientResolveFoodOnParents(
+        $db,
+        [[
+            'slug' => 'foodon-child-test',
+            'name' => 'FoodOn Child Test',
+            'parent_slug' => 'curated-parent-test',
+            'external_ids' => [
+                'foodon' => [
+                    'id' => 'FOODON:TEST_CHILD',
+                    'hierarchy' => [[
+                        'id' => 'FOODON:TEST_PARENT',
+                        'label' => 'FoodOn Parent Test',
+                        'depth' => 2,
+                    ]],
+                ],
+            ],
+        ]]
+    );
+    recipeTestAssert(
+        $foodOnResolved[0]['parent_slug'] === 'curated-parent-test'
+        && $foodOnResolved[0]['external_ids']['foodon'][
+            'resolved_parent'
+        ]['id'] === 'FOODON:TEST_PARENT'
+        && $foodOnResolved[0]['external_ids']['foodon'][
+            'resolved_parent'
+        ]['child_id'] === 'FOODON:TEST_CHILD',
+        'FoodOn hierarchy must retain a child-bound canonical proof without creating a primary parent edge'
+    );
+    canonicalIngredientUpsert($db, $foodOnResolved[0]);
+    canonicalIngredientUpsert($db, [
+        'slug' => 'foodon-child-test',
+        'name' => 'FoodOn Child Test',
+        'parent_slug' => null,
+        'category' => '',
+        'external_ids' => [
+            'foodon' => [
+                'id' => 'FOODON:TEST_REPLACED_CHILD',
+                'hierarchy' => [],
+            ],
+        ],
+    ]);
+    $refreshedFoodOn = json_decode(
+        (string)$db->query("
+            SELECT external_ids_json
+            FROM canonical_ingredients
+            WHERE slug = 'foodon-child-test'
+        ")->fetchColumn(),
+        true
+    );
+    recipeTestAssert(
+        ($refreshedFoodOn['foodon']['id'] ?? null)
+            === 'FOODON:TEST_REPLACED_CHILD'
+        && ($refreshedFoodOn['foodon']['hierarchy'] ?? null) === []
+        && !isset($refreshedFoodOn['foodon']['resolved_parent']),
+        'A FoodOn identity refresh must replace stale hierarchy proof atomically'
+    );
+    $db->prepare("
+        INSERT INTO canonical_ingredients (
+            slug, name, source, external_ids_json
+        )
+        VALUES (
+            'foodon-nearest-test',
+            'FoodOn Nearest Test',
+            'test',
+            ?
+        )
+    ")->execute([json_encode([
+        'foodon' => ['id' => 'FOODON:TEST_NEAREST'],
+    ])]);
+    $foodOnNearest = canonicalIngredientResolveFoodOnParents(
+        $db,
+        [[
+            'slug' => 'foodon-nearest-child-test',
+            'name' => 'FoodOn Nearest Child Test',
+            'parent_slug' => null,
+            'external_ids' => [
+                'foodon' => [
+                    'id' => 'FOODON:TEST_NEAREST_CHILD',
+                    'hierarchy' => [[
+                        'id' => 'FOODON:TEST_PARENT',
+                        'depth' => 2,
+                    ], [
+                        'id' => 'FOODON:TEST_NEAREST',
+                        'depth' => 1,
+                    ]],
+                ],
+            ],
+        ]]
+    );
+    $db->prepare("
+        INSERT INTO canonical_ingredients (
+            slug, name, source, external_ids_json
+        )
+        VALUES (
+            'foodon-nearest-duplicate-test',
+            'FoodOn Nearest Duplicate Test',
+            'test',
+            ?
+        )
+    ")->execute([json_encode([
+        'foodon' => ['id' => 'FOODON:TEST_NEAREST'],
+    ])]);
+    $foodOnAmbiguous = canonicalIngredientResolveFoodOnParents(
+        $db,
+        [[
+            'slug' => 'foodon-ambiguous-child-test',
+            'name' => 'FoodOn Ambiguous Child Test',
+            'parent_slug' => null,
+            'external_ids' => [
+                'foodon' => [
+                    'id' => 'FOODON:TEST_AMBIGUOUS_CHILD',
+                    'hierarchy' => [[
+                        'id' => 'FOODON:TEST_NEAREST',
+                        'depth' => 1,
+                    ]],
+                ],
+            ],
+        ]]
+    );
+    $foodOnTooDeep = canonicalIngredientResolveFoodOnParents(
+        $db,
+        [[
+            'slug' => 'foodon-deep-child-test',
+            'name' => 'FoodOn Deep Child Test',
+            'parent_slug' => null,
+            'external_ids' => [
+                'foodon' => [
+                    'id' => 'FOODON:TEST_DEEP_CHILD',
+                    'hierarchy' => [[
+                        'id' => 'FOODON:TEST_PARENT',
+                        'depth' => 3,
+                    ]],
+                ],
+            ],
+        ]]
+    );
+    recipeTestAssert(
+        ($foodOnNearest[0]['external_ids']['foodon'][
+            'resolved_parent'
+        ]['id'] ?? null) === 'FOODON:TEST_NEAREST'
+        && !isset(
+            $foodOnAmbiguous[0]['external_ids']['foodon'][
+                'resolved_parent'
+            ]
+        )
+        && !isset(
+            $foodOnTooDeep[0]['external_ids']['foodon'][
+                'resolved_parent'
+            ]
+        ),
+        'FoodOn proof must select one unique nearest depth-1/2 canonical ancestor'
+    );
+
     $disabledDb = new PDO('sqlite:' . $disabledPath);
     $disabledDb->setAttribute(
         PDO::ATTR_ERRMODE,
