@@ -5425,6 +5425,35 @@ try {
             'controller-r1-benchmark-manifest'
         ),
     ];
+    $deferredPolicySubjectId = (int)$db->query("
+        SELECT id FROM ontology_subjects ORDER BY id LIMIT 1
+    ")->fetchColumn();
+    $deferredPolicyJob = ingredientOntologyControllerEnqueueJob(
+        $db,
+        'subject_resolution',
+        ['controller_test' => 'deferred-policy-wake'],
+        $deferredPolicySubjectId,
+        null,
+        null,
+        0,
+        100,
+        true
+    );
+    ingredientOntologyControllerStoreGenerationIntent(
+        $db,
+        $deferredPolicyJob,
+        'validated_plan'
+    );
+    $db->prepare("
+        UPDATE ontology_controller_jobs
+        SET status = 'promoted',
+            next_attempt_at = datetime('now', '+24 hours'),
+            last_error_kind = 'generation_policy_deferred',
+            last_error =
+                'Validated plan awaits an authorized benchmark policy.',
+            finished_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+    ")->execute([(int)$deferredPolicyJob['id']]);
     $r1Import =
         ingredientOntologyControllerImportBenchmarkPolicy(
             $db,
@@ -5455,10 +5484,26 @@ try {
     }
     controllerTestAssert(
         !empty($r1Import['imported'])
+        && (int)$r1Import['deferred_woken'] >= 1
         && !empty($r1Replay['replayed'])
         && ingredientOntologyControllerRiskAuthorized($db, 'R1')
+        && (string)$db->query("
+            SELECT last_error_kind
+            FROM ontology_controller_jobs
+            WHERE id = " . (int)$deferredPolicyJob['id']
+        )->fetchColumn() === 'generation_policy_changed'
+        && strtotime((string)$db->query("
+            SELECT next_attempt_at
+            FROM ontology_controller_jobs
+            WHERE id = " . (int)$deferredPolicyJob['id']
+        )->fetchColumn()) <= time()
         && $r1ConflictRejected,
         'Immutable benchmark policy import must activate measured R1 evidence and reject key reuse with changed content'
+    );
+    ingredientOntologyControllerUpdateGenerationIntent(
+        $db,
+        (int)$deferredPolicyJob['id'],
+        'applied'
     );
     controllerTestAssert(
         !ingredientOntologyControllerRiskAuthorized($db, 'R4'),

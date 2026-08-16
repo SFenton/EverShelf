@@ -7517,6 +7517,7 @@ function ingredientOntologyControllerStreamEpoch(
         $contentHash = ingredientOntologyV3Hash($content);
         $policyJson =
             ingredientOntologyControllerStableJson($policyPayload);
+        $deferredWoken = 0;
         $db->exec('BEGIN IMMEDIATE');
         try {
             $existing = $db->prepare("
@@ -7577,6 +7578,43 @@ function ingredientOntologyControllerStreamEpoch(
                     ")->execute([$policyId]);
                 }
             }
+            if ($activate && !empty($document['authorized'])) {
+                $wake = $db->prepare("
+                    UPDATE ontology_controller_jobs
+                    SET next_attempt_at = CURRENT_TIMESTAMP,
+                        last_error_kind = 'generation_policy_changed',
+                        last_error =
+                            'An authorized benchmark policy activated; deferred generation is ready.',
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE last_error_kind = 'generation_policy_deferred'
+                      AND EXISTS (
+                          SELECT 1
+                          FROM ontology_generation_intents intent
+                          WHERE intent.source_job_id =
+                                ontology_controller_jobs.id
+                            AND intent.status = 'pending'
+                      )
+                ");
+                $wake->execute();
+                $deferredWoken = $wake->rowCount();
+                if ($deferredWoken > 0) {
+                    $db->exec("
+                        UPDATE ontology_generation_intents
+                        SET last_error =
+                                'Authorized benchmark policy activated; retry is ready.',
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE status = 'pending'
+                          AND EXISTS (
+                              SELECT 1
+                              FROM ontology_controller_jobs job
+                              WHERE job.id =
+                                    ontology_generation_intents.source_job_id
+                                AND job.last_error_kind =
+                                    'generation_policy_changed'
+                          )
+                    ");
+                }
+            }
             $db->exec('COMMIT');
         } catch (Throwable $error) {
             try {
@@ -7593,6 +7631,7 @@ function ingredientOntologyControllerStreamEpoch(
         return [
             'imported' => true,
             'replayed' => isset($row) && (bool)$row,
+            'deferred_woken' => $deferredWoken,
             'policy' => $stored->fetch(PDO::FETCH_ASSOC),
         ];
     }
