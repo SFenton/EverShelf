@@ -8,35 +8,48 @@ function getApiToken() {
 }
 
 function setApiToken(token) {
-    const t = (token || '').trim();
+    const t = typeof token === 'string' ? token.trim() : '';
     if (t) {
         localStorage.setItem(EVERSHELF_TOKEN_KEY, t);
     } else {
         localStorage.removeItem(EVERSHELF_TOKEN_KEY);
     }
+    const settingsField = typeof document !== 'undefined'
+        ? document.getElementById('setting-settings-token')
+        : null;
+    if (settingsField && settingsField.value !== t) {
+        settingsField.value = t;
+    }
 }
 
 function apiAuthHeaders() {
     const fromStorage = getApiToken();
-    const fromSettingsField = document.getElementById('setting-settings-token')?.value.trim() || '';
-    const token = fromSettingsField || fromStorage;
+    const fromSettingsField = typeof document !== 'undefined'
+        ? document.getElementById('setting-settings-token')?.value.trim() || ''
+        : '';
+    const token = fromStorage || fromSettingsField;
     if (!token) return {};
     return { 'X-API-Token': token };
 }
 
 /** Fetch API token from server when loading the UI from the same origin. */
-async function ensureApiToken() {
+async function ensureApiToken({ signal } = {}) {
     if (getApiToken()) return true;
     try {
-        const res = await fetch('api/index.php?action=app_bootstrap', { cache: 'no-store' });
+        const res = await fetch('api/index.php?action=app_bootstrap', {
+            cache: 'no-store',
+            ...(signal ? { signal } : {}),
+        });
         if (!res.ok) return false;
         const data = await res.json();
         window._apiTokenRequired = !!data.api_token_required;
-        if (data.api_token) {
+        if (typeof data.api_token === 'string' && data.api_token.trim()) {
             setApiToken(data.api_token);
             return true;
         }
-    } catch (_) { /* offline / network */ }
+    } catch (err) {
+        if (err?.name === 'AbortError') throw err;
+    }
     return !!getApiToken();
 }
 

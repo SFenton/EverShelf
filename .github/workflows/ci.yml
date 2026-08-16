@@ -26,6 +26,9 @@ jobs:
         run: |
           find api/ -name '*.php' -exec php -l {} \;
 
+      - name: Test startup health scope
+        run: php scripts/test-startup-health.php
+
   lint-js:
     name: JavaScript Lint
     runs-on: ubuntu-latest
@@ -34,7 +37,12 @@ jobs:
 
       - name: Check JS syntax
         run: |
+          node -c assets/js/core/auth.js
+          node -c assets/js/core/startup-health.js
           node -c assets/js/app.js
+
+      - name: Test startup health client contract
+        run: node scripts/test-startup-health-client.js
 
   docker-build:
     name: Docker Build Test

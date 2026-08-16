@@ -1122,7 +1122,7 @@ async function discoverScaleGateway() {
 }
 
 // ===== i18n TRANSLATION SYSTEM =====
-const _I18N_VERSION = '20260803a'; // bump when translations change
+const _I18N_VERSION = '20260816a'; // bump when translations change
 let _i18nStrings = null;   // current language translations (flat)
 let _i18nFallback = null;  // Italian fallback (flat)
 let _i18nLoadedVersion = null;
@@ -3421,9 +3421,10 @@ async function loadSettingsUI() {
         const settingsTokenRequired = !!(serverSettings.api_token_required || serverSettings.settings_token_set);
         const tokenHintEl = document.getElementById('settings-token-status-hint');
         if (tokenHintEl) tokenHintEl.style.display = settingsTokenRequired ? 'block' : 'none';
-        if (settingsTokenRequired && typeof setApiToken === 'function') {
-            const fieldTok = document.getElementById('setting-settings-token')?.value.trim();
-            if (fieldTok) setApiToken(fieldTok);
+        if (settingsTokenRequired && typeof getApiToken === 'function') {
+            const tokenField = document.getElementById('setting-settings-token');
+            const storedToken = getApiToken();
+            if (tokenField && storedToken) tokenField.value = storedToken;
         }
         let changed = false;
         for (const key of serverKeys) {
@@ -4121,13 +4122,18 @@ function togglePasswordVisibility(inputId) {
     input.type = input.type === 'password' ? 'text' : 'password';
 }
 
-async function _recoverApiTokenFromBootstrap() {
+async function _recoverApiTokenFromBootstrap({ signal } = {}) {
     try {
-        const res = await fetch(`${API_BASE}?action=app_bootstrap`, { cache: 'no-store' });
+        const res = await fetch(`${API_BASE}?action=app_bootstrap`, {
+            cache: 'no-store',
+            ...(signal ? { signal } : {}),
+        });
         if (!res.ok) return false;
         const data = await res.json();
         window._apiTokenRequired = !!data.api_token_required;
-        if (data.api_token && typeof setApiToken === 'function') {
+        if (typeof data.api_token === 'string'
+            && data.api_token.trim()
+            && typeof setApiToken === 'function') {
             setApiToken(data.api_token);
             return true;
         }
@@ -4138,6 +4144,9 @@ async function _recoverApiTokenFromBootstrap() {
             _promptApiTokenIfNeeded();
         }
     } catch (err) {
+        if (err?.name === 'AbortError') {
+            throw err;
+        }
         if (typeof remoteLog === 'function') {
             remoteLog('API_AUTH_RECOVERY_FAIL', err?.message || String(err));
         }
@@ -20796,12 +20805,6 @@ async function _runStartupCheck() {
     if (spinnerEl) spinnerEl.style.display = 'none';
     wrapEl.style.display = '';
 
-    // Auto-provision API token for same-origin browser sessions
-    if (typeof ensureApiToken === 'function') {
-        setProgress(5, tl('token_autoconfig', 'Configurazione accesso...'), 'ok');
-        await ensureApiToken();
-    }
-
     // Phase 1: animate 0→15% while fetching (so it never looks stuck)
     setProgress(0, tl('connecting', 'Connessione al server...'));
     let _fetchDone = false;
@@ -20812,35 +20815,113 @@ async function _runStartupCheck() {
         }
     }, 100);
 
+    const healthUrl = 'api/index.php?action=health_check&scope=startup';
+    const healthDeadline = Date.now() + 12000;
+    const withinHealthDeadline = async (operation) => {
+        const remainingMs = healthDeadline - Date.now();
+        if (remainingMs <= 0) {
+            throw new Error('Startup health check timed out');
+        }
+        const ctrl = new AbortController();
+        const tid = setTimeout(() => ctrl.abort(), remainingMs);
+        try {
+            return await operation(ctrl.signal);
+        } catch (e) {
+            if (e?.name === 'AbortError') {
+                throw new Error('Startup health check timed out');
+            }
+            throw e;
+        } finally {
+            clearTimeout(tid);
+        }
+    };
+    const fetchStartupHealth = async (headers) => {
+        return withinHealthDeadline(async (signal) => {
+            const resp = await fetch(healthUrl, {
+                signal,
+                headers,
+                cache: 'no-store',
+            });
+            const text = await resp.text();
+            let body = null;
+            if (text) {
+                try {
+                    body = JSON.parse(text);
+                } catch (_) {}
+            }
+            if (!resp.ok) {
+                throw new Error(typeof body?.error === 'string'
+                    ? `Health check failed: ${body.error}`
+                    : `Health check failed: HTTP ${resp.status}`);
+            }
+            if (!body || typeof body !== 'object' || Array.isArray(body)) {
+                throw new Error('Health check returned an invalid response');
+            }
+            return body;
+        });
+    };
+    const pauseForApiToken = () => {
+        window._apiTokenRequired = true;
+        if (typeof setApiToken === 'function') setApiToken('');
+        if (typeof _promptApiTokenIfNeeded === 'function') _promptApiTokenIfNeeded();
+        clearInterval(slowAnim);
+        _fetchDone = true;
+        setProgress(100, tl('token_required', 'Token API richiesto'), 'warn');
+        return false;
+    };
+    const startupHealthContract = window.EverShelfStartupHealth;
+
     // Make the request
     let result = null;
     try {
-        const ctrl = new AbortController();
-        const tid  = setTimeout(() => ctrl.abort(), 12000);
-        const resp = await fetch('api/index.php?action=health_check', {
-            signal: ctrl.signal,
-            headers: { ...(typeof apiAuthHeaders === 'function' ? apiAuthHeaders() : {}) },
-        });
-        clearTimeout(tid);
-        result = await resp.json();
-        if (result.public && result.api_token_required && typeof getApiToken === 'function' && !getApiToken()) {
-            window._apiTokenRequired = true;
-            if (typeof _promptApiTokenIfNeeded === 'function') _promptApiTokenIfNeeded();
-            setProgress(100, tl('token_required', 'Token API richiesto'), 'warn');
-            return false;
+        if (typeof ensureApiToken === 'function') {
+            setProgress(5, tl('token_autoconfig', 'Configurazione accesso...'), 'ok');
+            await withinHealthDeadline(
+                signal => ensureApiToken({ signal })
+            );
         }
-        if (result.public && result.api_token_required && typeof getApiToken === 'function' && getApiToken()) {
-            const resp2 = await fetch('api/index.php?action=health_check', { headers: apiAuthHeaders() });
-            result = await resp2.json();
+        setProgress(0, tl('connecting', 'Connessione al server...'));
+        result = await fetchStartupHealth({
+            ...(typeof apiAuthHeaders === 'function' ? apiAuthHeaders() : {}),
+        });
+        if (result.public && result.api_token_required) {
+            window._apiTokenRequired = true;
+            const recovered = typeof _recoverApiTokenFromBootstrap === 'function'
+                && await withinHealthDeadline(
+                    signal => _recoverApiTokenFromBootstrap({ signal })
+                );
+            if (recovered) {
+                const recoveredToken = typeof getApiToken === 'function'
+                    ? getApiToken()
+                    : '';
+                result = await fetchStartupHealth(recoveredToken
+                    ? { 'X-API-Token': recoveredToken }
+                    : {});
+            }
+        }
+        if (result.public && result.api_token_required) {
+            return pauseForApiToken();
+        }
+        if (!startupHealthContract?.validateStartupHealth(result)) {
+            throw new Error('Health check did not return authenticated diagnostics');
         }
     } catch(e) {
         clearInterval(slowAnim);
+        const diagnostic = e?.message || String(e);
+        const networkFailure = e instanceof TypeError;
+        const failureTitle = networkFailure
+            ? tl('error_network', 'Impossibile contattare il server.')
+            : tl('check_failed', 'Controllo di avvio non riuscito');
+        const failureDetail = networkFailure
+            ? tl('error_network_detail', 'Il browser non riesce a raggiungere il server PHP. Controlla la rete e riprova.')
+            : tl('check_failed_detail', 'EverShelf non ha potuto completare i controlli di avvio. Verifica il server e riprova.');
+        console.error('[startup-health]', e);
         _showStartupErrorPopup(
-            tl('error_network', 'Impossibile contattare il server'),
-            tl('error_network_detail', 'Il browser non riesce a raggiungere il server PHP.\n\nPossibili cause:\n• Il server Apache/PHP non è in esecuzione\n• Problema di rete o firewall\n• URL dell\'app non corretta\n\nControlla che il server sia avviato e riprova.'),
+            failureTitle,
+            failureDetail + `\n\n${diagnostic}`,
             errorEl, retryBtn
         );
-        setProgress(100, tl('error_network', 'Server non raggiungibile'), 'error');
+        setProgress(100, failureTitle, 'error');
         return false;
     }
     clearInterval(slowAnim);
@@ -20871,6 +20952,7 @@ async function _runStartupCheck() {
         { key: 'db_legacy',         label: tl('check_db_legacy',   'DB legacy'),            critical: false },
         { key: 'db_connect',        label: tl('check_db_connect',  'Connessione DB'),       critical: true  },
         { key: 'db_tables',         label: tl('check_db_tables',   'Tabelle DB'),           critical: true  },
+        { key: 'db_writable',       label: tl('check_db_writable', 'Scrittura DB'),          critical: true  },
         { key: 'db_integrity',      label: tl('check_db_integrity','Integrità DB'),         critical: true  },
         { key: 'db_wal',            label: tl('check_db_wal',      'WAL mode'),             critical: false },
         { key: 'db_size',           label: tl('check_db_size',     'Dimensione DB'),        critical: false },
@@ -20900,9 +20982,10 @@ async function _runStartupCheck() {
 
         done++;
         const pct    = 15 + Math.round((done / total) * 83); // 15→98%
-        const isOk   = c.ok === true;
-        const isOpt  = c.optional === true || !def.critical;
-        const isFresh = c.fresh === true;
+        const classification = startupHealthContract.classifyCheck(def, c);
+        const isOk = classification.isOk;
+        const isOpt = classification.isOptional;
+        const isFresh = classification.isFresh;
 
         // Build label with value
         let lbl = def.label;
@@ -20950,7 +21033,7 @@ async function _runStartupCheck() {
         // Hide warning popup
         warningsEl.style.display = 'none';
     } else {
-        setProgress(100, tl('all_ok', 'Sistema OK'), 'ok');
+        setProgress(100, tl('all_ok', 'Controlli di avvio OK'), 'ok');
         await new Promise(r => setTimeout(r, 600));
     }
 
@@ -20980,26 +21063,50 @@ async function _runStartupCheck() {
 
 /** Builds and shows the warning popup with countdown (auto-closes after 5s). */
 function _showStartupWarningPopup(warnings, container, tl) {
-    const lines = warnings.map(w => {
-        const hint = w.c.hint || null;
-        return `<div class="startup-warn-item">
-            <span class="startup-warn-icon">⚠️</span>
-            <div class="startup-warn-body">
-                <strong>${w.def.label}</strong>
-                ${hint ? `<p>${hint}</p>` : ''}
-            </div>
-        </div>`;
-    }).join('');
+    const popup = document.createElement('div');
+    popup.className = 'startup-popup startup-popup-warn';
 
-    container.innerHTML = `
-        <div class="startup-popup startup-popup-warn">
-            <div class="startup-popup-header">
-                <span>⚠️ ${warnings.length} ${tl('warnings_found', 'avviso/i rilevato/i')}</span>
-                <span class="startup-popup-countdown" id="startup-countdown">5</span>
-            </div>
-            <div class="startup-popup-body">${lines}</div>
-            <div class="startup-popup-bar-wrap"><div class="startup-popup-bar" id="startup-popup-bar"></div></div>
-        </div>`;
+    const header = document.createElement('div');
+    header.className = 'startup-popup-header';
+    const heading = document.createElement('span');
+    heading.textContent = `⚠️ ${warnings.length} ${tl('warnings_found', 'avviso/i rilevato/i')}`;
+    const countdown = document.createElement('span');
+    countdown.className = 'startup-popup-countdown';
+    countdown.id = 'startup-countdown';
+    countdown.textContent = '5';
+    header.append(heading, countdown);
+
+    const body = document.createElement('div');
+    body.className = 'startup-popup-body';
+    for (const warning of warnings) {
+        const item = document.createElement('div');
+        item.className = 'startup-warn-item';
+        const icon = document.createElement('span');
+        icon.className = 'startup-warn-icon';
+        icon.textContent = '⚠️';
+        const content = document.createElement('div');
+        content.className = 'startup-warn-body';
+        const label = document.createElement('strong');
+        label.textContent = warning.def.label;
+        content.appendChild(label);
+        if (warning.c.hint) {
+            const hint = document.createElement('p');
+            hint.textContent = warning.c.hint;
+            content.appendChild(hint);
+        }
+        item.append(icon, content);
+        body.appendChild(item);
+    }
+
+    const barWrap = document.createElement('div');
+    barWrap.className = 'startup-popup-bar-wrap';
+    const bar = document.createElement('div');
+    bar.className = 'startup-popup-bar';
+    bar.id = 'startup-popup-bar';
+    barWrap.appendChild(bar);
+
+    popup.append(header, body, barWrap);
+    container.replaceChildren(popup);
     container.style.display = '';
 
     // Animate countdown bar
@@ -21026,7 +21133,9 @@ function _showStartupWarningPopup(warnings, container, tl) {
 /** Shows a blocking error in the preloader (no auto-close). */
 function _showStartupErrorPopup(title, detail, errorEl, retryBtn) {
     if (!errorEl) return;
-    errorEl.innerHTML = `<strong>${title}</strong>\n${detail}`;
+    const heading = document.createElement('strong');
+    heading.textContent = title;
+    errorEl.replaceChildren(heading, document.createTextNode(`\n${detail}`));
     errorEl.style.display = '';
     if (retryBtn) retryBtn.style.display = '';
 }

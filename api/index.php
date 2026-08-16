@@ -70,6 +70,7 @@ if (($_GET['action'] ?? '') === 'kiosk_update') {
 
 // ── App bootstrap — same-origin browsers receive API token automatically ───────
 if (($_GET['action'] ?? '') === 'app_bootstrap') {
+    header('Cache-Control: no-cache, no-store, must-revalidate');
     $required = evershelfApiTokenRequired();
     $out = ['api_token_required' => $required];
     if ($required && evershelfIsSameOriginBrowser()) {
@@ -405,6 +406,8 @@ if (($_GET['action'] ?? '') === 'gemini_usage') {
 
 // ── Health check — minimal public probe; full diagnostics require API token ──
 if (($_GET['action'] ?? '') === 'health_check') {
+    header('Cache-Control: no-cache, no-store, must-revalidate');
+    header('Vary: X-API-Token');
     if (evershelfApiTokenRequired() && !evershelfApiTokenValid()) {
         header('Content-Type: application/json');
         echo json_encode([
@@ -414,6 +417,20 @@ if (($_GET['action'] ?? '') === 'health_check') {
         ], JSON_UNESCAPED_UNICODE);
         exit;
     }
+    $scopeParam = $_GET['scope'] ?? 'full';
+    $scope = is_string($scopeParam) ? $scopeParam : '';
+    if (!in_array($scope, ['full', 'startup'], true)) {
+        http_response_code(400);
+        header('Content-Type: application/json');
+        echo json_encode([
+            'ok'             => false,
+            'error'          => 'invalid_scope',
+            'allowed_scopes' => ['full', 'startup'],
+        ], JSON_UNESCAPED_UNICODE);
+        exit;
+    }
+    $runDbIntegrity = $scope === 'full';
+    $skippedChecks = $runDbIntegrity ? [] : ['db_integrity'];
     $checks = [];
 
     // ── Helper: read .env values without triggering app init ─────────────────
@@ -522,7 +539,10 @@ if (($_GET['action'] ?? '') === 'health_check') {
     if ($isFresh) {
         $checks['db_connect']   = ['ok' => true, 'fresh' => true, 'value' => 'fresh install'];
         $checks['db_tables']    = ['ok' => true, 'fresh' => true];
-        $checks['db_integrity'] = ['ok' => true, 'fresh' => true];
+        $checks['db_writable']  = ['ok' => true, 'fresh' => true];
+        if ($runDbIntegrity) {
+            $checks['db_integrity'] = ['ok' => true, 'fresh' => true];
+        }
         $checks['db_wal']       = ['ok' => true, 'fresh' => true, 'optional' => true];
         $checks['db_size']      = ['ok' => true, 'value' => '0 KB', 'optional' => true];
         $checks['db_row_count'] = ['ok' => true, 'value' => '0 prodotti', 'optional' => true];
@@ -552,13 +572,14 @@ if (($_GET['action'] ?? '') === 'health_check') {
                 'hint' => !empty($missing) ? 'Missing tables: ' . implode(', ', $missing) . ' — call any API endpoint to auto-initialize the DB' : null,
             ];
 
-            // Integrity
-            $integ = $pdo->query("PRAGMA quick_check")->fetchColumn();
-            $checks['db_integrity'] = [
-                'ok'    => $integ === 'ok',
-                'value' => $integ !== 'ok' ? $integ : null,
-                'hint'  => $integ !== 'ok' ? 'Database corrotto: ' . $integ . ' — ripristina da un backup in data/backups/' : null,
-            ];
+            if ($runDbIntegrity) {
+                $integ = $pdo->query("PRAGMA quick_check")->fetchColumn();
+                $checks['db_integrity'] = [
+                    'ok'    => $integ === 'ok',
+                    'value' => $integ !== 'ok' ? $integ : null,
+                    'hint'  => $integ !== 'ok' ? 'Database corrotto: ' . $integ . ' — ripristina da un backup in data/backups/' : null,
+                ];
+            }
 
             // WAL
             $wal = $pdo->query("PRAGMA journal_mode")->fetchColumn();
@@ -580,8 +601,11 @@ if (($_GET['action'] ?? '') === 'health_check') {
                 $checks['db_row_count'] = ['ok' => true, 'value' => '0 prodotti in inventario', 'optional' => true];
             }
         } else {
-            foreach (['db_tables', 'db_integrity'] as $k)
-                $checks[$k] = ['ok' => false, 'hint' => 'Cannot verify — DB connection failed'];
+            $checks['db_tables'] = ['ok' => false, 'hint' => 'Cannot verify — DB connection failed'];
+            $checks['db_writable'] = ['ok' => false, 'hint' => 'Cannot verify — DB connection failed'];
+            if ($runDbIntegrity) {
+                $checks['db_integrity'] = ['ok' => false, 'hint' => 'Cannot verify — DB connection failed'];
+            }
             foreach (['db_wal', 'db_size', 'db_row_count'] as $k)
                 $checks[$k] = ['ok' => false, 'optional' => true];
         }
@@ -679,11 +703,20 @@ if (($_GET['action'] ?? '') === 'health_check') {
 
     // ── Compute overall result ────────────────────────────────────────────────
     $criticalKeys = ['php_version', 'ext_pdo_sqlite', 'ext_curl', 'ext_json', 'ext_mbstring',
-                     'data_dir', 'data_write_test', 'db_connect', 'db_tables', 'db_integrity'];
+                     'data_dir', 'data_write_test', 'db_connect', 'db_tables', 'db_writable'];
+    if ($runDbIntegrity) {
+        $criticalKeys[] = 'db_integrity';
+    }
     $allOk = array_reduce($criticalKeys, fn($c, $k) => $c && ($checks[$k]['ok'] ?? false), true);
 
     header('Content-Type: application/json');
-    echo json_encode(['ok' => $allOk, 'checks' => $checks, 'fresh' => $isFresh], JSON_UNESCAPED_UNICODE);
+    echo json_encode([
+        'ok'             => $allOk,
+        'scope'          => $scope,
+        'checks'         => $checks,
+        'fresh'          => $isFresh,
+        'skipped_checks' => $skippedChecks,
+    ], JSON_UNESCAPED_UNICODE);
     exit;
 }
 

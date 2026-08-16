@@ -5,6 +5,18 @@ All notable changes to EverShelf will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.9.8] - 2026-08-16
+
+### Fixed
+- Browser startup now uses a bounded, authenticated health scope that omits the
+  full SQLite integrity scan while reporting that omission explicitly.
+- Rotated API tokens recover during startup, and malformed or non-JSON health
+  responses fail closed with actionable diagnostics.
+- Critical health metadata cannot demote failures, database writability now
+  blocks startup, and authenticated diagnostics are never cached.
+- Full diagnostics and backup verification retain `PRAGMA quick_check`, and
+  malformed health scopes fail without silently running or skipping checks.
+
 ## [1.9.7] - 2026-08-16
 
 ### Added
