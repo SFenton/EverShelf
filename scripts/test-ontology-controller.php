@@ -6902,6 +6902,26 @@ try {
         ) === null,
         'An ontology import must not become stale merely because its score activation made it active'
     );
+    $activationTarget->prepare("
+        UPDATE recipe_score_state
+        SET active_score_revision_id = ?
+        WHERE id = 1
+    ")->execute([
+        (int)$bundleSet['score']['parent']['score_revision_id'],
+    ]);
+    $retainedImportAfterRollback =
+        ingredientOntologyActivationStaleOntologyImport(
+            $activationTarget
+        );
+    $activationTarget->prepare("
+        UPDATE recipe_score_state
+        SET active_score_revision_id = ?
+        WHERE id = 1
+    ")->execute([$activatedScoreId]);
+    controllerTestAssert(
+        $retainedImportAfterRollback === null,
+        'A ready rollback score must retain its imported ontology without stale cleanup'
+    );
     databaseMaintenanceOnlineBackup(
         $activationTargetDbPath,
         $refreshBundleDbPath

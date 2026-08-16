@@ -5,6 +5,12 @@ All notable changes to EverShelf will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.9.5] - 2026-08-15
+
+### Fixed
+- Imported ontology versions referenced by ready rollback scores are retained
+  instead of being misclassified as stale sibling candidates.
+
 ## [1.9.4] - 2026-08-15
 
 ### Fixed

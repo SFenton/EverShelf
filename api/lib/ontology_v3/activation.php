@@ -4876,6 +4876,13 @@ function ingredientOntologyActivationAssertActiveDatabase(PDO $db): void {
                     ON score.id = state.active_score_revision_id
                   WHERE state.id = 1
               )
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM recipe_score_revisions retained_score
+                  WHERE retained_score.ontology_version_id =
+                        ontology_import.candidate_ontology_version_id
+                    AND retained_score.status = 'ready'
+              )
             ORDER BY ontology_import.id
             LIMIT 1
         ")->fetch(PDO::FETCH_ASSOC);
