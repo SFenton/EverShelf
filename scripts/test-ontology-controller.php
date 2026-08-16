@@ -147,6 +147,20 @@ try {
     );
     ingredientOntologyV3SetReadyMutationGuard($db, false);
     $guardDb = null;
+    controllerTestAssert(
+        (int)$db->query("
+            SELECT COUNT(*) FROM sqlite_master
+            WHERE type = 'index'
+              AND name IN (
+                  'idx_ontology_shadow_recipe_mapping',
+                  'idx_ontology_shadow_inventory_mapping',
+                  'idx_ontology_shadow_requirement_inventory_mapping',
+                  'idx_ontology_assertion_history_mapping',
+                  'idx_ontology_curated_conflict_mapping'
+              )
+        ")->fetchColumn() === 5,
+        'Mapping foreign-key indexes must keep failed-import cleanup bounded'
+    );
 
     $migrationDb = new PDO(
         'sqlite:' . $occurrenceMigrationDbPath

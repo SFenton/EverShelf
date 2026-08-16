@@ -2898,6 +2898,8 @@ function ingredientOntologyV3SchemaMigrate(PDO $db): void {
             ON ingredient_ontology_mapping_assertion_history(
                 ontology_version_id, owner_type, owner_fingerprint, phase
             );
+        CREATE INDEX IF NOT EXISTS idx_ontology_assertion_history_mapping
+            ON ingredient_ontology_mapping_assertion_history(mapping_id);
         CREATE INDEX IF NOT EXISTS idx_ontology_curated_products_status
             ON ingredient_ontology_curated_product_assertions(
                 ontology_version_id, status, review_state, product_id
@@ -2909,6 +2911,10 @@ function ingredientOntologyV3SchemaMigrate(PDO $db): void {
         CREATE INDEX IF NOT EXISTS idx_ontology_curated_conflict_disposition
             ON ingredient_ontology_curated_provider_conflict_reviews(
                 ontology_version_id, disposition, mapping_id
+            );
+        CREATE INDEX IF NOT EXISTS idx_ontology_curated_conflict_mapping
+            ON ingredient_ontology_curated_provider_conflict_reviews(
+                mapping_id
             );
         CREATE INDEX IF NOT EXISTS idx_ontology_change_sets_review
             ON ingredient_ontology_change_sets(
@@ -2930,6 +2936,12 @@ function ingredientOntologyV3SchemaMigrate(PDO $db): void {
             ON ingredient_ontology_shadow_matches(
                 score_revision_id, recipe_mapping_id
             );
+        CREATE INDEX IF NOT EXISTS idx_ontology_shadow_recipe_mapping
+            ON ingredient_ontology_shadow_matches(recipe_mapping_id)
+            WHERE recipe_mapping_id IS NOT NULL;
+        CREATE INDEX IF NOT EXISTS idx_ontology_shadow_inventory_mapping
+            ON ingredient_ontology_shadow_matches(inventory_mapping_id)
+            WHERE inventory_mapping_id IS NOT NULL;
         CREATE INDEX IF NOT EXISTS idx_ontology_provider_terms_scope
             ON ingredient_ontology_provider_terms(
                 ontology_version_id, connector, metadata_schema_version,
@@ -2984,6 +2996,12 @@ function ingredientOntologyV3SchemaMigrate(PDO $db): void {
             ON ingredient_ontology_shadow_requirement_matches(
                 requirement_revision_id, score_revision_id
             );
+        CREATE INDEX IF NOT EXISTS
+            idx_ontology_shadow_requirement_inventory_mapping
+            ON ingredient_ontology_shadow_requirement_matches(
+                inventory_mapping_id
+            )
+            WHERE inventory_mapping_id IS NOT NULL;
 
         CREATE TRIGGER IF NOT EXISTS ingredient_ontology_change_sets_hash_immutable
         BEFORE UPDATE OF input_hash, prompt_hash, model_hash, schema_hash
