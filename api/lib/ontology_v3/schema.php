@@ -603,6 +603,90 @@ function ingredientOntologyV3AddColumn(
     }
 }
 
+function ingredientOntologyV3EnsureForeignKeyIndexes(PDO $db): int {
+    $quote = static fn(string $identifier): string =>
+        '"' . str_replace('"', '""', $identifier) . '"';
+    $created = 0;
+    $tables = $db->query("
+        SELECT name FROM sqlite_master
+        WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
+        ORDER BY name
+    ")->fetchAll(PDO::FETCH_COLUMN);
+    foreach ($tables as $table) {
+        $foreignKeys = [];
+        foreach (
+            $db->query(
+                'PRAGMA foreign_key_list(' . $quote((string)$table) . ')'
+            )->fetchAll(PDO::FETCH_ASSOC)
+            as $foreignKey
+        ) {
+            $parent = (string)$foreignKey['table'];
+            if (!str_starts_with($parent, 'ingredient_ontology_')) {
+                continue;
+            }
+            $foreignKeys[(int)$foreignKey['id']][
+                (int)$foreignKey['seq']
+            ] = (string)$foreignKey['from'];
+        }
+        if (!$foreignKeys) {
+            continue;
+        }
+        $indexPrefixes = [];
+        foreach (
+            $db->query(
+                'PRAGMA index_list(' . $quote((string)$table) . ')'
+            )->fetchAll(PDO::FETCH_ASSOC)
+            as $index
+        ) {
+            $columns = array_map(
+                static fn(array $column): string =>
+                    (string)$column['name'],
+                $db->query(
+                    'PRAGMA index_info('
+                        . $quote((string)$index['name'])
+                        . ')'
+                )->fetchAll(PDO::FETCH_ASSOC)
+            );
+            if ($columns) {
+                $indexPrefixes[] = $columns;
+            }
+        }
+        foreach ($foreignKeys as $columns) {
+            ksort($columns, SORT_NUMERIC);
+            $columns = array_values($columns);
+            $covered = false;
+            foreach ($indexPrefixes as $indexColumns) {
+                if (
+                    array_slice($indexColumns, 0, count($columns))
+                        === $columns
+                ) {
+                    $covered = true;
+                    break;
+                }
+            }
+            if ($covered) {
+                continue;
+            }
+            $indexName = 'idx_ontology_fk_'
+                . substr(hash(
+                    'sha256',
+                    (string)$table . ':' . implode(',', $columns)
+                ), 0, 16);
+            $db->exec(
+                'CREATE INDEX IF NOT EXISTS '
+                    . $quote($indexName)
+                    . ' ON ' . $quote((string)$table)
+                    . ' ('
+                    . implode(', ', array_map($quote, $columns))
+                    . ')'
+            );
+            $indexPrefixes[] = $columns;
+            $created++;
+        }
+    }
+    return $created;
+}
+
 function ingredientOntologyV3MigrateImmutableTriggers(PDO $db): void {
     $triggerVersion = 'requirement-immutability-v3.6';
     $db->exec("
@@ -3034,6 +3118,7 @@ function ingredientOntologyV3SchemaMigrate(PDO $db): void {
         CREATE TRIGGER IF NOT EXISTS
             ingredient_ontology_resolution_manifests_immutable_delete
         BEFORE DELETE ON ingredient_ontology_resolution_manifests
+        WHEN ingredient_ontology_prune_guard() <> 1
         BEGIN
             SELECT RAISE(ABORT, 'resolution manifests are immutable');
         END;
@@ -3048,6 +3133,7 @@ function ingredientOntologyV3SchemaMigrate(PDO $db): void {
         CREATE TRIGGER IF NOT EXISTS
             ingredient_ontology_evidence_sources_immutable_delete
         BEFORE DELETE ON ingredient_ontology_evidence_sources
+        WHEN ingredient_ontology_prune_guard() <> 1
         BEGIN
             SELECT RAISE(ABORT, 'ontology evidence sources are immutable');
         END;
@@ -3062,6 +3148,7 @@ function ingredientOntologyV3SchemaMigrate(PDO $db): void {
         CREATE TRIGGER IF NOT EXISTS
             ingredient_ontology_disposition_scopes_immutable_delete
         BEFORE DELETE ON ingredient_ontology_disposition_scopes
+        WHEN ingredient_ontology_prune_guard() <> 1
         BEGIN
             SELECT RAISE(ABORT, 'ontology disposition scopes are immutable');
         END;
@@ -3076,6 +3163,7 @@ function ingredientOntologyV3SchemaMigrate(PDO $db): void {
         CREATE TRIGGER IF NOT EXISTS
             ingredient_ontology_terminal_dispositions_immutable_delete
         BEFORE DELETE ON ingredient_ontology_terminal_dispositions
+        WHEN ingredient_ontology_prune_guard() <> 1
         BEGIN
             SELECT RAISE(ABORT, 'terminal ontology dispositions are immutable');
         END;
@@ -3090,6 +3178,7 @@ function ingredientOntologyV3SchemaMigrate(PDO $db): void {
         CREATE TRIGGER IF NOT EXISTS
             ingredient_ontology_review_import_rows_immutable_delete
         BEFORE DELETE ON ingredient_ontology_review_import_rows
+        WHEN ingredient_ontology_prune_guard() <> 1
         BEGIN
             SELECT RAISE(ABORT, 'ontology review import rows are immutable');
         END;
@@ -3835,6 +3924,55 @@ function ingredientOntologyV3SchemaMigrate(PDO $db): void {
             END
         ");
     }
+    foreach ([
+        [
+            'ingredient_ontology_resolution_manifests_immutable_delete',
+            'ingredient_ontology_resolution_manifests',
+            'resolution manifests are immutable',
+        ],
+        [
+            'ingredient_ontology_evidence_sources_immutable_delete',
+            'ingredient_ontology_evidence_sources',
+            'ontology evidence sources are immutable',
+        ],
+        [
+            'ingredient_ontology_disposition_scopes_immutable_delete',
+            'ingredient_ontology_disposition_scopes',
+            'ontology disposition scopes are immutable',
+        ],
+        [
+            'ingredient_ontology_terminal_dispositions_immutable_delete',
+            'ingredient_ontology_terminal_dispositions',
+            'terminal ontology dispositions are immutable',
+        ],
+        [
+            'ingredient_ontology_review_import_rows_immutable_delete',
+            'ingredient_ontology_review_import_rows',
+            'ontology review import rows are immutable',
+        ],
+    ] as [$trigger, $table, $message]) {
+        $installedSql = $db->prepare("
+            SELECT sql FROM sqlite_master
+            WHERE type = 'trigger' AND name = ?
+        ");
+        $installedSql->execute([$trigger]);
+        $installedSql = (string)($installedSql->fetchColumn() ?: '');
+        if (str_contains(
+            $installedSql,
+            'ingredient_ontology_prune_guard'
+        )) {
+            continue;
+        }
+        $db->exec("
+            DROP TRIGGER IF EXISTS {$trigger};
+            CREATE TRIGGER {$trigger}
+            BEFORE DELETE ON {$table}
+            WHEN ingredient_ontology_prune_guard() <> 1
+            BEGIN
+                SELECT RAISE(ABORT, '{$message}');
+            END
+        ");
+    }
     ingredientOntologyV3EnsureHistoricalShadowMatchOwners($db);
     ingredientOntologyV3EnsurePendingEdgeReviewDisposition($db);
     if (function_exists('ingredientOntologyControllerSchemaMigrate')) {
@@ -3843,6 +3981,7 @@ function ingredientOntologyV3SchemaMigrate(PDO $db): void {
     if (function_exists('ingredientOntologyActivationSchemaMigrate')) {
         ingredientOntologyActivationSchemaMigrate($db);
     }
+    ingredientOntologyV3EnsureForeignKeyIndexes($db);
     ingredientOntologyV3MigrateReadyGuards($db);
     ingredientOntologyV3MigrateMaterializationGuards($db);
 }

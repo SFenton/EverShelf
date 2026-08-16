@@ -4477,6 +4477,7 @@ function ingredientOntologyActivationAssertActiveDatabase(PDO $db): void {
             $db->prepare("
                 UPDATE ontology_activation_imports
                 SET status = 'cleaned',
+                    last_error = '',
                     completed_at = CURRENT_TIMESTAMP,
                     updated_at = CURRENT_TIMESTAMP
                 WHERE id = ? AND status = 'purging'

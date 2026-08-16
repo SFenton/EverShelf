@@ -5,6 +5,13 @@ All notable changes to EverShelf will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.9.4] - 2026-08-15
+
+### Fixed
+- Explicit bounded cleanup may now delete immutable candidate-only manifests,
+  evidence, dispositions, review rows, and lifecycle events through the prune
+  guard while ordinary mutations remain blocked.
+
 ## [1.9.3] - 2026-08-15
 
 ### Fixed

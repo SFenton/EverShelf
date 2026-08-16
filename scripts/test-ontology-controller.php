@@ -161,6 +161,26 @@ try {
         ")->fetchColumn() === 5,
         'Mapping foreign-key indexes must keep failed-import cleanup bounded'
     );
+    controllerTestAssert(
+        ingredientOntologyV3EnsureForeignKeyIndexes($db) === 0,
+        'Every ontology foreign key must already have a covering child index'
+    );
+    controllerTestAssert(
+        (int)$db->query("
+            SELECT COUNT(*) FROM sqlite_master
+            WHERE type = 'trigger'
+              AND name IN (
+                  'ingredient_ontology_change_events_immutable_delete',
+                  'ingredient_ontology_resolution_manifests_immutable_delete',
+                  'ingredient_ontology_evidence_sources_immutable_delete',
+                  'ingredient_ontology_disposition_scopes_immutable_delete',
+                  'ingredient_ontology_terminal_dispositions_immutable_delete',
+                  'ingredient_ontology_review_import_rows_immutable_delete'
+              )
+              AND sql LIKE '%ingredient_ontology_prune_guard%'
+        ")->fetchColumn() === 6,
+        'Immutable ontology delete guards must allow explicit bounded pruning'
+    );
 
     $migrationDb = new PDO(
         'sqlite:' . $occurrenceMigrationDbPath
