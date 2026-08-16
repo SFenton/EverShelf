@@ -3,8 +3,22 @@
  * EverShelf — shared path constants.
  */
 
+if (!function_exists('array_is_list')) {
+    function array_is_list(array $array): bool {
+        $expectedKey = 0;
+        foreach ($array as $key => $_value) {
+            if ($key !== $expectedKey) {
+                return false;
+            }
+            $expectedKey++;
+        }
+        return true;
+    }
+}
+
 define('EVERSHELF_ROOT', dirname(__DIR__, 2));
 define('GH_REPO', 'dadaloop82/EverShelf');
+define('CATEGORY_REFINEMENT_CACHE_NAMESPACE', 'v2:');
 define('PRICE_CACHE_PATH',         EVERSHELF_ROOT . '/data/shopping_price_cache.json');
 define('CATEGORY_CACHE_PATH',      EVERSHELF_ROOT . '/data/category_ai_cache.json');
 define('SHELF_CACHE_PATH',         EVERSHELF_ROOT . '/data/opened_shelf_cache.json');

@@ -11,6 +11,7 @@
         'ext_json',
         'ext_mbstring',
         'data_dir',
+        'data_rate_limits',
         'data_write_test',
         'db_connect',
         'db_tables',

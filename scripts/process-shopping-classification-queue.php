@@ -28,11 +28,10 @@ try {
         invalidateSmartShoppingCache();
     }
     echo json_encode(
-        [
+        array_merge([
             'success' => true,
             'limit' => $limit,
-            ...$result,
-        ],
+        ], $result),
         JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES
     ) . "\n";
 } catch (Throwable $error) {

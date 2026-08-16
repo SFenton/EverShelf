@@ -419,11 +419,21 @@ EverShelf applies file-based rate limiting to protect AI endpoints:
 
 | Tier | Limit | Endpoints |
 |------|-------|-----------|
-| Standard | 120 req/min | All general endpoints |
-| AI | 15 req/min | `gemini_*`, `generate_recipe` |
-| Strict | 5 req/min | `report_error` |
+| Standard | 120 req/min | General endpoints |
+| Category refinement | 120 req/min | `guess_category` |
+| AI | 15 req/min | Gemini, OCR, and AI suggestion endpoints |
+| Price | 60 req/min | Shopping price lookups |
+| Recipe generation | 5 req/min | `generate_recipe`, `generate_recipe_stream` |
+| Recipe refresh | 10 req/min | Recipe catalog refresh and discovery |
+| Recipe catalog | 60 req/min | Recipe catalog read/write endpoints |
+| Error reporting | 20 req/min | `report_error`, `check_update` |
 
-Rate limit state is stored in `data/rate_limits/`. To reset, delete the files in that directory.
+Concurrent requests for the same client and bucket are serialized before the
+window is checked and updated.
+
+Rate limit state is stored in `data/rate_limits/`. The directory must be
+writable and is treated as startup-critical. To reset, delete the files in that
+directory.
 
 ---
 

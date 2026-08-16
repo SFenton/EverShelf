@@ -33,7 +33,7 @@ if (count($hits) >= 6) {
     exit;
 }
 $hits[] = $now;
-@file_put_contents($rlFile, json_encode($hits), LOCK_EX);
+@file_put_contents($rlFile, json_encode(array_values($hits)), LOCK_EX);
 
 $port = (int)($_GET['port'] ?? 8765);
 if ($port < 1 || $port > 65535) {

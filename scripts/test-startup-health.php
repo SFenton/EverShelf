@@ -239,6 +239,7 @@ try {
         'ext_json',
         'ext_mbstring',
         'data_dir',
+        'data_rate_limits',
         'data_write_test',
         'db_connect',
         'db_tables',
@@ -323,6 +324,36 @@ try {
             )),
         'Database missing-table details must be an array of strings'
     );
+
+    $rateLimitPath = $root . '/data/rate_limits';
+    $removeTree($rateLimitPath);
+    if (file_put_contents($rateLimitPath, 'blocked') === false) {
+        throw new RuntimeException(
+            'Could not create blocked rate-limit fixture'
+        );
+    }
+    $blockedRateLimits = $request(
+        $healthUrl . '&scope=startup',
+        $auth
+    );
+    $assert(
+        ($blockedRateLimits['body']['ok'] ?? true) === false
+        && (
+            $blockedRateLimits['body']['checks']['data_rate_limits']['ok']
+            ?? true
+        ) === false
+        && (
+            $blockedRateLimits['body']['checks']['data_rate_limits']['optional']
+            ?? false
+        ) !== true,
+        'Unavailable rate-limit storage must fail startup aggregation'
+    );
+    unlink($rateLimitPath);
+    if (!mkdir($rateLimitPath, 0770, true)) {
+        throw new RuntimeException(
+            'Could not restore rate-limit fixture directory'
+        );
+    }
 
     $originalDbMode = fileperms($dbPath);
     if ($originalDbMode === false || !chmod($dbPath, 0440)) {

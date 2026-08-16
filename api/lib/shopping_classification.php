@@ -325,11 +325,10 @@ function shoppingClassificationCacheEntry(
             continue;
         }
         if (($entry['status'] ?? '') === 'failed') {
-            return [
-                ...$entry,
+            return array_merge($entry, [
                 'status' => 'failed',
                 'cache_key' => $key,
-            ];
+            ]);
         }
         if (($entry['status'] ?? '') !== 'success') {
             continue;
@@ -338,12 +337,11 @@ function shoppingClassificationCacheEntry(
             (string)($entry['value'] ?? '')
         );
         if ($value !== null) {
-            return [
-                ...$entry,
+            return array_merge($entry, [
                 'status' => 'success',
                 'value' => $value,
                 'cache_key' => $key,
-            ];
+            ]);
         }
     }
     return null;
@@ -1251,14 +1249,13 @@ function shoppingClassificationClaimOne(
             return null;
         }
         $db->exec('COMMIT');
-        return [
-            ...$row,
+        return array_merge($row, [
             'status' => 'leased',
             'attempts' => $attempts,
             'lease_token' => $token,
             'lease_generation' => $generation,
             'lease_seconds' => $leaseSeconds,
-        ];
+        ]);
     } catch (Throwable $error) {
         try {
             $db->exec('ROLLBACK');
@@ -1489,10 +1486,9 @@ function shoppingClassificationApplyClaim(
             $db->exec('COMMIT');
             return ['status' => 'stale'];
         }
-        $updatedProduct = [
-            ...$product,
+        $updatedProduct = array_merge($product, [
             'shopping_name' => $shoppingName,
-        ];
+        ]);
         $fingerprint = shoppingClassificationProductFingerprint(
             $updatedProduct,
             'copilot'
@@ -1597,10 +1593,9 @@ function shoppingClassificationProcessQueue(
                 'stale_product_intent'
             );
             $summary['stale']++;
-            $summary['results'][] = [
+            $summary['results'][] = array_merge([
                 'product_id' => (int)$claim['product_id'],
-                ...$outcome,
-            ];
+            ], $outcome);
             continue;
         }
         $resolution = shoppingClassificationResolveForWorker(
@@ -1649,13 +1644,12 @@ function shoppingClassificationProcessQueue(
                 $consecutiveModelFailures++;
             }
         }
-        $summary['results'][] = [
+        $summary['results'][] = array_merge([
             'product_id' => (int)$claim['product_id'],
             'attempt' => (int)$claim['attempts'],
             'cached' => !empty($resolution['cached']),
             'model_called' => !empty($resolution['model_called']),
-            ...$outcome,
-        ];
+        ], $outcome);
     }
     return $summary;
 }

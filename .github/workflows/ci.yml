@@ -11,23 +11,33 @@ env:
 
 jobs:
   lint-php:
-    name: PHP Syntax Check
+    name: PHP ${{ matrix.php-version }} Syntax Check
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        php-version: ['8.0', '8.2']
     steps:
       - uses: actions/checkout@v6
 
       - name: Setup PHP
         uses: shivammathur/setup-php@v2
         with:
-          php-version: '8.2'
+          php-version: ${{ matrix.php-version }}
           extensions: pdo_sqlite, curl, mbstring
 
       - name: Check PHP syntax
         run: |
-          find api/ -name '*.php' -exec php -l {} \;
+          find api/ -name '*.php' -print0 | xargs -0 -n1 php -l
 
       - name: Test startup health scope
         run: php scripts/test-startup-health.php
+
+      - name: Test category refinement server contract
+        run: php scripts/test-category-refinement.php
+
+      - name: Test shopping classification contract
+        run: php scripts/test-shopping-classification.php
 
   lint-js:
     name: JavaScript Lint
@@ -39,10 +49,14 @@ jobs:
         run: |
           node -c assets/js/core/auth.js
           node -c assets/js/core/startup-health.js
+          node -c assets/js/core/category-refinement.js
           node -c assets/js/app.js
 
       - name: Test startup health client contract
         run: node scripts/test-startup-health-client.js
+
+      - name: Test category refinement client contract
+        run: node scripts/test-category-refinement-client.js
 
   docker-build:
     name: Docker Build Test

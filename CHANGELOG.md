@@ -5,6 +5,24 @@ All notable changes to EverShelf will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.9.9] - 2026-08-16
+
+### Fixed
+- Pantry category refinement now reuses one inventory response, serializes and
+  deduplicates inference, caches successful classifications, rotates retries,
+  and ignores stale render results.
+- Category inference now has an isolated rate tier, strict Gemini completion
+  and safety-envelope validation, and atomic versioned cache updates.
+- File-backed rate limits now serialize updates, fail closed without rewriting
+  malformed state, clean up failed first writes, prune only valid expired
+  windows, and remain compatible with PHP 8.0.
+- Scale discovery keeps its limiter state list-shaped, and startup health now
+  treats unavailable rate-limit storage as a blocking failure.
+- Docker builds now exclude local logs, locks, caches, and Python bytecode from
+  every image layer.
+- Shopping-classification cache and queue paths now use PHP 8.0-compatible
+  associative merges, covered by the PHP 8.0 CI matrix.
+
 ## [1.9.8] - 2026-08-16
 
 ### Fixed

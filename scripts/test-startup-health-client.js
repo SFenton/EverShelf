@@ -89,6 +89,13 @@ assert(
     'Database writability must be required'
 );
 
+const missingRateLimits = validBody();
+delete missingRateLimits.checks.data_rate_limits;
+assert(
+    !validateStartupHealth(missingRateLimits),
+    'Rate-limit storage must be required'
+);
+
 const aggregateMismatch = validBody();
 aggregateMismatch.ok = false;
 assert(

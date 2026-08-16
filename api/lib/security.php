@@ -3,7 +3,306 @@
  * EverShelf — authentication, CORS, demo mode, scale gateway allowlist.
  */
 
+require_once __DIR__ . '/constants.php';
 require_once __DIR__ . '/env.php';
+
+function evershelfNormalizeApiAction(string $action): string {
+    return trim($action);
+}
+
+/**
+ * Return the independent rate-limit bucket for an API action.
+ *
+ * @return array{bucket:string,limit:int,window:int}
+ */
+function evershelfRateLimitPolicy(string $action): array {
+    $aiActions = [
+        'gemini_expiry', 'gemini_readExpiry', 'gemini_chat',
+        'gemini_identify', 'gemini_suggest_shopping', 'chat_to_recipe',
+        'recipe_from_ingredient', 'gemini_number_ocr',
+        'gemini_barcode_visual', 'location_suggestion_ai',
+    ];
+    $recipeActions = ['generate_recipe', 'generate_recipe_stream'];
+    $recipeCatalogActions = [
+        'recipe_catalog_search', 'recipe_catalog_get',
+        'recipe_catalog_suggest', 'recipe_catalog_recommendations',
+        'recipe_catalog_detail', 'recipe_catalog_grocery_add',
+        'recipe_catalog_ingredient_override',
+        'recipe_catalog_identity_feedback',
+        'recipe_catalog_ingredient_decision',
+        'recipe_catalog_planner_add', 'recipe_jobs_status',
+        'recipe_connectors', 'recipe_catalog_save',
+        'recipe_catalog_delete', 'recipe_catalog_favorite',
+    ];
+    $recipeRefreshActions = [
+        'recipe_catalog_refresh',
+        'recipe_catalog_discover',
+    ];
+    $errorActions = ['report_error', 'check_update'];
+    $priceActions = ['get_shopping_price', 'get_all_shopping_prices'];
+
+    if ($action === 'guess_category') {
+        return [
+            'bucket' => 'category_refinement',
+            'limit' => 120,
+            'window' => 60,
+        ];
+    }
+    if (in_array($action, $aiActions, true)) {
+        return ['bucket' => 'ai', 'limit' => 15, 'window' => 60];
+    }
+    if (in_array($action, $priceActions, true)) {
+        return ['bucket' => 'price', 'limit' => 60, 'window' => 60];
+    }
+    if (in_array($action, $recipeActions, true)) {
+        return ['bucket' => 'recipe', 'limit' => 5, 'window' => 60];
+    }
+    if (in_array($action, $recipeRefreshActions, true)) {
+        return [
+            'bucket' => 'recipe_refresh',
+            'limit' => 10,
+            'window' => 60,
+        ];
+    }
+    if (in_array($action, $recipeCatalogActions, true)) {
+        return [
+            'bucket' => 'recipe_catalog',
+            'limit' => 60,
+            'window' => 60,
+        ];
+    }
+    if (in_array($action, $errorActions, true)) {
+        return [
+            'bucket' => 'error_report',
+            'limit' => 20,
+            'window' => 60,
+        ];
+    }
+    return ['bucket' => 'general', 'limit' => 120, 'window' => 60];
+}
+
+/**
+ * @return list<int>|null
+ */
+function evershelfDecodeRateLimitState(
+    string $raw,
+    bool $allowBlank
+): ?array {
+    if (trim($raw) === '') {
+        return $allowBlank ? [] : null;
+    }
+
+    $decoded = json_decode($raw);
+    if (
+        json_last_error() !== JSON_ERROR_NONE
+        || !is_array($decoded)
+        || !array_is_list($decoded)
+    ) {
+        return null;
+    }
+    foreach ($decoded as $value) {
+        if (!is_int($value)) {
+            return null;
+        }
+    }
+    return $decoded;
+}
+
+/**
+ * Atomically consume one request from a file-backed rate-limit window.
+ *
+ * @return array{allowed:bool,count:int}|null
+ */
+function evershelfConsumeRateLimit(
+    string $path,
+    int $limit,
+    int $window,
+    ?int $now = null
+): ?array {
+    if ($limit < 1 || $window < 1) {
+        return null;
+    }
+
+    $directory = dirname($path);
+    if (
+        !is_dir($directory)
+        && !@mkdir($directory, 0755, true)
+        && !is_dir($directory)
+    ) {
+        return null;
+    }
+
+    $directoryLock = @fopen(
+        $directory . '/.rate-limit.lock',
+        'c+'
+    );
+    if (!is_resource($directoryLock)) {
+        return null;
+    }
+
+    $state = null;
+    $directoryLocked = false;
+    $stateLocked = false;
+    $stateCreated = false;
+    $statePersisted = false;
+    try {
+        $directoryLocked = flock($directoryLock, LOCK_SH);
+        if (!$directoryLocked) {
+            return null;
+        }
+
+        if (!is_file($path)) {
+            flock($directoryLock, LOCK_UN);
+            $directoryLocked = false;
+            $directoryLocked = flock($directoryLock, LOCK_EX);
+            if (!$directoryLocked) {
+                return null;
+            }
+            if (!is_file($path)) {
+                $state = @fopen($path, 'x+b');
+                if (!is_resource($state)) {
+                    return null;
+                }
+                $stateCreated = true;
+            }
+        }
+
+        if (!is_resource($state)) {
+            $state = @fopen($path, 'r+b');
+        }
+        if (!is_resource($state)) {
+            return null;
+        }
+        $stateLocked = flock($state, LOCK_EX);
+        if (!$stateLocked) {
+            return null;
+        }
+
+        rewind($state);
+        $raw = stream_get_contents($state);
+        if (!is_string($raw)) {
+            return null;
+        }
+
+        $data = evershelfDecodeRateLimitState(
+            $raw,
+            $stateCreated
+        );
+        if ($data === null) {
+            return null;
+        }
+
+        $timestamp = $now ?? time();
+        $cutoff = $timestamp - $window;
+        $data = array_values(array_filter(
+            $data,
+            static fn(int $value): bool => $value > $cutoff
+        ));
+
+        $count = count($data);
+        if ($count >= $limit) {
+            return ['allowed' => false, 'count' => $count];
+        }
+
+        $data[] = $timestamp;
+        $encoded = json_encode($data);
+        if (!is_string($encoded)) {
+            return null;
+        }
+
+        rewind($state);
+        $length = strlen($encoded);
+        $written = 0;
+        while ($written < $length) {
+            $result = fwrite($state, substr($encoded, $written));
+            if ($result === false || $result === 0) {
+                return null;
+            }
+            $written += $result;
+        }
+        if (!ftruncate($state, $length) || !fflush($state)) {
+            return null;
+        }
+        $statePersisted = true;
+
+        return ['allowed' => true, 'count' => count($data)];
+    } finally {
+        if (is_resource($state)) {
+            if ($stateLocked) {
+                flock($state, LOCK_UN);
+            }
+            fclose($state);
+        }
+        if ($stateCreated && !$statePersisted) {
+            @unlink($path);
+        }
+        if ($directoryLocked) {
+            flock($directoryLock, LOCK_UN);
+        }
+        fclose($directoryLock);
+    }
+}
+
+function evershelfPruneRateLimitFiles(
+    string $directory,
+    int $olderThan
+): bool {
+    if (!is_dir($directory)) {
+        return true;
+    }
+
+    $directoryLock = @fopen(
+        $directory . '/.rate-limit.lock',
+        'c+'
+    );
+    if (!is_resource($directoryLock)) {
+        return false;
+    }
+
+    $locked = false;
+    $success = true;
+    try {
+        $locked = flock($directoryLock, LOCK_EX);
+        if (!$locked) {
+            return false;
+        }
+        foreach (glob($directory . '/*.json') ?: [] as $path) {
+            clearstatcache(true, $path);
+            $modified = @filemtime($path);
+            if ($modified === false || $modified >= $olderThan) {
+                continue;
+            }
+
+            $raw = @file_get_contents($path);
+            if (!is_string($raw)) {
+                $success = false;
+                continue;
+            }
+            $data = evershelfDecodeRateLimitState($raw, false);
+            if ($data === null) {
+                $success = false;
+                continue;
+            }
+
+            $expired = true;
+            foreach ($data as $timestamp) {
+                if ($timestamp >= $olderThan) {
+                    $expired = false;
+                    break;
+                }
+            }
+            if ($expired && !@unlink($path)) {
+                $success = false;
+            }
+        }
+        return $success;
+    } finally {
+        if ($locked) {
+            flock($directoryLock, LOCK_UN);
+        }
+        fclose($directoryLock);
+    }
+}
 
 /** Effective API token: API_TOKEN takes precedence over legacy SETTINGS_TOKEN. */
 function evershelfEffectiveApiToken(): string {

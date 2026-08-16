@@ -4319,8 +4319,9 @@ function showPage(pageId, param = null, options = {}) {
             if (param !== null) {
                 currentLocation = param;
                 filterLocation(param);
+            } else {
+                loadInventory();
             }
-            loadInventory();
             break;
         case 'scan': _dismissFamilySiblingPrompt(); _resetAiFallbackForNewScan(); initScanner(); clearQuickNameResults(); updateSpesaBanner(); updateScanRecents(); _applySpesaScanUI();
             // Pre-warm the embedding model the first time user visits scan page
@@ -6564,6 +6565,25 @@ function formatPackageFraction(qty, defaultQty) {
 }
 
 // ===== INVENTORY =====
+const _categoryRefinementCoordinator =
+    window.EverShelfCategoryRefinement?.createCoordinator({
+        requestCategory: async name => {
+            const response = await api('guess_category', { name });
+            if (!response
+                || response.success === false
+                || typeof response.category !== 'string') {
+                throw new Error('category_refinement_unavailable');
+            }
+            return response.category;
+        },
+    }) || null;
+const _categoryRefinementFailureDeferral =
+    window.EverShelfCategoryRefinement?.createFailureDeferral() || null;
+const CATEGORY_REFINEMENT_FAILURE_BUDGET = 2;
+let _categoryRefinementGeneration = 0;
+let _categoryRefinementPending = false;
+let _categoryRefinementRunning = false;
+
 async function loadInventory() {
     try {
         const data = await api('inventory_list', currentLocation ? { location: currentLocation } : {});
@@ -6628,30 +6648,118 @@ function renderInventory(items) {
     const container = document.getElementById('inventory-list');
     if (items.length === 0) {
         container.innerHTML = `<div class="empty-state"><div class="empty-state-icon">📭</div><p>${t('inventory.empty_text')}</p></div>`;
+        _scheduleCategoryBadgeRefinement();
         return;
     }
     container.innerHTML = renderGroupedByCategory(items, false);
-    _refineCategoryBadgesAsync();
+    _scheduleCategoryBadgeRefinement();
 }
 
 /**
- * After rendering, find all badges still showing 'altro' and ask the server
- * (Gemini-backed, cached) for a better category. Updates the DOM in place.
+ * Mark the newest inventory render for serial category refinement.
+ */
+function _scheduleCategoryBadgeRefinement() {
+    _categoryRefinementGeneration++;
+    _categoryRefinementPending = true;
+    if (!_categoryRefinementRunning) {
+        void _refineCategoryBadgesAsync();
+    }
+}
+
+/**
+ * Rescans only the newest live inventory DOM after each request. Failed names
+ * are deferred without entering the successful category cache.
  */
 async function _refineCategoryBadgesAsync() {
-    if (!_geminiAvailable) return; // AI not available — keep 'altro' label
-    const badges = Array.from(document.querySelectorAll('.badge-category[data-cat="altro"]'));
-    for (const badge of badges) {
-        const name = badge.dataset.itemname;
-        if (!name) continue;
-        try {
-            const res = await api('guess_category', { name });
-            const cat = res.category;
-            if (cat && cat !== 'altro') {
-                badge.dataset.cat = cat;
-                badge.textContent = (CATEGORY_ICONS[cat] || '📦') + ' ' + (t('categories.' + cat) || cat);
+    if (_categoryRefinementRunning) return;
+    _categoryRefinementRunning = true;
+    try {
+        while (_categoryRefinementPending) {
+            _categoryRefinementPending = false;
+            const generation = _categoryRefinementGeneration;
+            if (!_geminiAvailable
+                || !_categoryRefinementCoordinator
+                || !_categoryRefinementFailureDeferral
+                || _offlineMode
+                || navigator.onLine === false
+                || _currentPageId !== 'inventory') {
+                continue;
             }
-        } catch (_) { /* network error — leave as 'altro' */ }
+
+            const container = document.getElementById('inventory-list');
+            if (!container) continue;
+
+            let failures = 0;
+            let failureBudgetReached = false;
+            while (generation === _categoryRefinementGeneration
+                && _currentPageId === 'inventory') {
+                const badges = Array.from(container.querySelectorAll(
+                    '.badge-category[data-cat="altro"]'
+                )).filter(candidate => {
+                    const key =
+                        window.EverShelfCategoryRefinement.normalizeName(
+                            candidate.dataset.itemname
+                        );
+                    return key
+                        && candidate.dataset.categoryRefined !== key;
+                });
+                const badge = _categoryRefinementFailureDeferral.pick(
+                    badges,
+                    generation,
+                    candidate => candidate.dataset.itemname
+                );
+                if (!badge) break;
+
+                const name = badge.dataset.itemname;
+                const key =
+                    window.EverShelfCategoryRefinement.normalizeName(name);
+                let category;
+                try {
+                    category =
+                        await _categoryRefinementCoordinator.get(name);
+                } catch (_) {
+                    _categoryRefinementFailureDeferral.record(
+                        name,
+                        generation
+                    );
+                    failures++;
+                    if (failures >= CATEGORY_REFINEMENT_FAILURE_BUDGET) {
+                        failureBudgetReached = true;
+                        break;
+                    }
+                    continue;
+                }
+                _categoryRefinementFailureDeferral.clear(name);
+
+                if (generation !== _categoryRefinementGeneration) {
+                    break;
+                }
+                if (_currentPageId !== 'inventory'
+                    || !badge.isConnected
+                    || !container.contains(badge)
+                    || window.EverShelfCategoryRefinement.normalizeName(
+                        badge.dataset.itemname
+                    ) !== key
+                    || badge.dataset.cat !== 'altro') {
+                    continue;
+                }
+
+                badge.dataset.categoryRefined = key;
+                if (category !== 'altro') {
+                    badge.dataset.cat = category;
+                    badge.textContent =
+                        (CATEGORY_ICONS[category] || '📦')
+                        + ' '
+                        + (t('categories.' + category) || category);
+                }
+            }
+            if (failureBudgetReached) break;
+        }
+    } finally {
+        _categoryRefinementRunning = false;
+        if (_categoryRefinementPending) {
+            void _refineCategoryBadgesAsync();
+        }
     }
 }
 
@@ -20944,7 +21052,7 @@ async function _runStartupCheck() {
         { key: 'php_upload',        label: tl('check_php_upload',  'Upload PHP'),           critical: false },
         // Filesystem
         { key: 'data_dir',          label: tl('check_data_dir',    'Cartella dati'),        critical: true  },
-        { key: 'data_rate_limits',  label: tl('check_rate_limits', 'Rate limits dir'),      critical: false },
+        { key: 'data_rate_limits',  label: tl('check_rate_limits', 'Rate limits dir'),      critical: true  },
         { key: 'data_backups',      label: tl('check_backups',     'Backup dir'),           critical: false },
         { key: 'data_write_test',   label: tl('check_write_test',  'Test scrittura'),       critical: true  },
         { key: 'disk_space',        label: tl('check_disk_space',  'Spazio disco'),         critical: false },

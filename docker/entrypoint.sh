@@ -9,7 +9,8 @@ set -e
 
 install -d -o www-data -g www-data -m 0775 \
     /var/www/html/data \
-    /var/www/html/data/backups
+    /var/www/html/data/backups \
+    /var/www/html/data/rate_limits
 for database_file in \
     /var/www/html/data/evershelf.db \
     /var/www/html/data/evershelf.db-wal \

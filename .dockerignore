@@ -1,5 +1,17 @@
+# Python bytecode
+__pycache__/
+*.pyc
+**/__pycache__/
+**/*.pyc
+
 # Docker runtime files
 data/evershelf.db
+data/dispensa.db
+data/*.sqlite
+data/*.sqlite-journal
+data/*.sqlite-wal
+data/*.sqlite-shm
+data/*.db-journal
 data/*.db-wal
 data/*.db-shm
 data/backups/
@@ -7,9 +19,25 @@ data/cron.log
 data/smart_shopping_cache.json
 data/bring_token.json
 data/bring_catalog.json
+data/bring_migrate_ts.json
+data/shopping_price_cache.json
+data/opened_shelf_cache.json
 data/client_debug.log
+data/rate_limits/
+data/*.lock
+data/error_reports.log
+data/latest_release_cache.json
+data/food_facts_cache.json
+data/foodon_lookup_cache.json
+data/usda_fdc_lookup_cache.json
+data/category_ai_cache.json
 data/*.crt
 data/*.pem
+logs/*.log
+
+# Local generated artifacts
+assets/img/logo/*_backup.*
+.ontology-v3-work/
 
 # Optional local frontend build outputs
 assets/js/*.min.js
@@ -44,3 +72,8 @@ docs/
 .vscode/
 *.swp
 *.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db

@@ -474,7 +474,9 @@ if (($_GET['action'] ?? '') === 'health_check') {
     // data/rate_limits/
     $rlDir = $dataDir . '/rate_limits';
     if (!is_dir($rlDir) && $dataDirOk) @mkdir($rlDir, 0775, true);
-    $checks['data_rate_limits'] = ['ok' => is_dir($rlDir) && is_writable($rlDir), 'optional' => true];
+    $checks['data_rate_limits'] = [
+        'ok' => is_dir($rlDir) && is_writable($rlDir),
+    ];
 
     // data/backups/ — written by cron as root; just verify dir exists and has recent files
     $bkDir       = $dataDir . '/backups';
@@ -703,7 +705,8 @@ if (($_GET['action'] ?? '') === 'health_check') {
 
     // ── Compute overall result ────────────────────────────────────────────────
     $criticalKeys = ['php_version', 'ext_pdo_sqlite', 'ext_curl', 'ext_json', 'ext_mbstring',
-                     'data_dir', 'data_write_test', 'db_connect', 'db_tables', 'db_writable'];
+                     'data_dir', 'data_rate_limits', 'data_write_test',
+                     'db_connect', 'db_tables', 'db_writable'];
     if ($runDbIntegrity) {
         $criticalKeys[] = 'db_integrity';
     }
@@ -723,7 +726,7 @@ if (($_GET['action'] ?? '') === 'health_check') {
 // ===== RATE LIMITING =====
 /**
  * Simple file-based rate limiter.
- * Limits: 120 req/min general, 15 req/min for AI endpoints, 5 req/min for login.
+ * Category decoration is isolated so it cannot exhaust general scan traffic.
  */
 function checkRateLimit(string $action): void {
     $rateLimitDir = __DIR__ . '/../data/rate_limits';
@@ -731,98 +734,55 @@ function checkRateLimit(string $action): void {
         mkdir($rateLimitDir, 0755, true);
     }
 
-    // Determine limit based on action
-    $aiActions = ['gemini_expiry', 'gemini_readExpiry', 'gemini_chat', 'gemini_identify', 'gemini_suggest_shopping', 'chat_to_recipe', 'recipe_from_ingredient', 'gemini_number_ocr', 'gemini_barcode_visual', 'location_suggestion_ai'];
-    $loginActions = [];
-    $recipeActions = ['generate_recipe', 'generate_recipe_stream'];
-    $recipeCatalogActions = [
-        'recipe_catalog_search', 'recipe_catalog_get', 'recipe_catalog_suggest',
-        'recipe_catalog_recommendations', 'recipe_catalog_detail',
-        'recipe_catalog_grocery_add',
-        'recipe_catalog_ingredient_override',
-        'recipe_catalog_identity_feedback',
-        'recipe_catalog_ingredient_decision',
-        'recipe_catalog_planner_add',
-        'recipe_jobs_status', 'recipe_connectors',
-        'recipe_catalog_save', 'recipe_catalog_delete', 'recipe_catalog_favorite',
-    ];
-    $recipeRefreshActions = ['recipe_catalog_refresh', 'recipe_catalog_discover'];
-    $errorActions = ['report_error', 'check_update'];
-    $priceActions = ['get_shopping_price', 'get_all_shopping_prices'];
-
-    if (in_array($action, $aiActions)) {
-        $limit = 15;
-        $window = 60;
-        $bucket = 'ai';
-    } elseif (in_array($action, $priceActions)) {
-        // Price lookups: up to 30 items × a few retries per minute, shared bucket
-        $limit = 60;
-        $window = 60;
-        $bucket = 'price';
-    } elseif (in_array($action, $recipeActions)) {
-        $limit = 5;
-        $window = 60;
-        $bucket = 'recipe';
-    } elseif (in_array($action, $recipeRefreshActions, true)) {
-        $limit = 10;
-        $window = 60;
-        $bucket = 'recipe_refresh';
-    } elseif (in_array($action, $recipeCatalogActions, true)) {
-        $limit = 60;
-        $window = 60;
-        $bucket = 'recipe_catalog';
-    } elseif (in_array($action, $errorActions)) {
-        $limit = 20;
-        $window = 60;
-        $bucket = 'error_report';
-    } elseif (in_array($action, $loginActions)) {
-        $limit = 5;
-        $window = 60;
-        $bucket = 'login';
-    } else {
-        $limit = 120;
-        $window = 60;
-        $bucket = 'general';
-    }
+    $policy = evershelfRateLimitPolicy($action);
+    $limit = $policy['limit'];
+    $window = $policy['window'];
+    $bucket = $policy['bucket'];
 
     $ip = $_SERVER['REMOTE_ADDR'] ?? '127.0.0.1';
     $file = $rateLimitDir . '/' . md5($ip . '_' . $bucket) . '.json';
 
-    // Clean up old rate limit files periodically (1% chance per request)
+    // Clean up old rate limit files periodically (1% chance per request).
     if (mt_rand(1, 100) === 1) {
-        foreach (glob($rateLimitDir . '/*.json') as $f) {
-            if (filemtime($f) < time() - 300) @unlink($f);
+        if (!evershelfPruneRateLimitFiles(
+            $rateLimitDir,
+            time() - 300
+        )) {
+            EverLog::warn('rate_limit cleanup failed');
         }
     }
 
-    $now = time();
-    $data = [];
-    if (file_exists($file)) {
-        $raw = @file_get_contents($file);
-        if ($raw) $data = json_decode($raw, true) ?: [];
+    $result = evershelfConsumeRateLimit(
+        $file,
+        $limit,
+        $window
+    );
+    if ($result === null) {
+        EverLog::error('rate_limit state unavailable', [
+            'action' => $action,
+            'bucket' => $bucket,
+        ]);
+        http_response_code(503);
+        echo json_encode([
+            'error' => 'Rate limit state unavailable.'
+        ]);
+        exit;
     }
-
-    // Remove entries outside the window
-    $data = array_values(array_filter($data, function($ts) use ($now, $window) {
-        return $ts > $now - $window;
-    }));
-
-    if (count($data) >= $limit) {
+    if (!$result['allowed']) {
         EverLog::warn('rate_limit hit', ['action' => $action, 'limit' => $limit, 'window_s' => $window]);
         http_response_code(429);
         header('Retry-After: ' . $window);
         echo json_encode(['error' => 'Too many requests. Please try again later.']);
         exit;
     }
-
-    $data[] = $now;
-    @file_put_contents($file, json_encode($data), LOCK_EX);
 }
 
-// Apply rate limiting
-$rateLimitAction = $_GET['action'] ?? '';
-if ($rateLimitAction) {
-    checkRateLimit($rateLimitAction);
+// Canonicalize once so rate limiting, authentication, and routing agree.
+$action = evershelfNormalizeApiAction(
+    (string)($_GET['action'] ?? '')
+);
+if ($action !== '') {
+    checkRateLimit($action);
 }
 
 // CSRF guard: every POST request must include
@@ -865,7 +825,6 @@ $method = (string)($_SERVER['REQUEST_METHOD'] ?? 'GET');
 if ($method === '') {
     $method = 'GET';
 }
-$action = trim((string)($_GET['action'] ?? ''));
 EverLog::request($action, $method);
 
 // Authenticate before opening SQLite so rejected requests cannot trigger work.
@@ -16856,26 +16815,35 @@ PROMPT;
 }
 
 /**
-/**
  * GET /api/?action=guess_category&name=...
  * Returns the macro-category for a product name, using a file cache + Gemini AI fallback.
- * Response: { category: string }
+ * Response: { success: bool, category?: string, retryable?: bool }
  */
 function guessCategoryFromAI(): void {
     $name = trim($_GET['name'] ?? '');
-    if ($name === '') { echo json_encode(['category' => 'altro']); return; }
+    if ($name === '') {
+        echo json_encode(['success' => true, 'category' => 'altro']);
+        return;
+    }
     EverLog::info('guessCategoryFromAI');
 
-    // Load cache
-    $cache = [];
-    if (file_exists(CATEGORY_CACHE_PATH)) {
-        $cache = json_decode(file_get_contents(CATEGORY_CACHE_PATH), true) ?? [];
+    $cache = evershelfLoadCategoryRefinementCache(CATEGORY_CACHE_PATH);
+    $key = evershelfCategoryRefinementCacheKey($name);
+    $cached = $cache[$key] ?? null;
+    if (is_string($cached) && in_array(
+        $cached,
+        evershelfCategoryRefinementCategories(),
+        true
+    )) {
+        echo json_encode(['success' => true, 'category' => $cached]);
+        return;
     }
-    $key = md5(mb_strtolower($name));
-    if (isset($cache[$key])) { echo json_encode(['category' => $cache[$key]]); return; }
 
     $apiKey = env('GEMINI_API_KEY', '');
-    if ($apiKey === '') { echo json_encode(['category' => 'altro']); return; }
+    if ($apiKey === '') {
+        echo json_encode(['success' => false, 'retryable' => true]);
+        return;
+    }
 
     $cats   = 'latticini, carne, pesce, frutta, verdura, pasta, pane, surgelati, bevande, condimenti, snack, conserve, cereali, igiene, pulizia, altro';
     $prompt = "Sei un classificatore di prodotti alimentari e domestici italiani.\n"
@@ -16891,20 +16859,34 @@ function guessCategoryFromAI(): void {
         ],
     ];
 
-    $result = callGeminiWithFallback($apiKey, $payload, 10, 'guess_category');
-    $raw    = strtolower(trim($result['data']['candidates'][0]['content']['parts'][0]['text'] ?? ''));
-    $raw    = preg_replace('/[^a-z_ ]/', '', $raw);
-    $raw    = trim($raw);
-
-    $valid  = ['latticini','carne','pesce','frutta','verdura','pasta','pane','surgelati',
-               'bevande','condimenti','snack','conserve','cereali','igiene','pulizia','altro'];
-    $cat    = in_array($raw, $valid, true) ? $raw : 'altro';
-
-    // Persist to cache
-    $cache[$key] = $cat;
-    @file_put_contents(CATEGORY_CACHE_PATH, json_encode($cache, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
-
-    echo json_encode(['category' => $cat]);
+    $result = callGeminiWithFallback(
+        $apiKey,
+        $payload,
+        10,
+        'guess_category',
+        null,
+        1
+    );
+    $outcome = evershelfApplyCategoryRefinementResult(
+        CATEGORY_CACHE_PATH,
+        $key,
+        $result
+    );
+    $category = $outcome['category'];
+    if ($category === null) {
+        EverLog::warn('guess_category unavailable', [
+            'http_code' => (int)($result['http_code'] ?? 0),
+            'model' => (string)($result['model'] ?? ''),
+        ]);
+        echo json_encode(['success' => false, 'retryable' => true]);
+        return;
+    }
+    if (!$outcome['cached']) {
+        EverLog::warn('guess_category cache write failed', [
+            'key' => substr($key, 0, 12),
+        ]);
+    }
+    echo json_encode(['success' => true, 'category' => $category]);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
