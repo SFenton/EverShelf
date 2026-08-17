@@ -25,6 +25,32 @@ function controllerTestCount(
     return (int)$stmt->fetchColumn();
 }
 
+final class OntologyControllerTransientBusyPdo extends PDO
+{
+    private int $remainingBeginFailures = 0;
+    private int $immediateBeginAttempts = 0;
+
+    public function armImmediateBeginFailures(int $failures): void {
+        $this->remainingBeginFailures = max(0, $failures);
+        $this->immediateBeginAttempts = 0;
+    }
+
+    public function immediateBeginAttempts(): int {
+        return $this->immediateBeginAttempts;
+    }
+
+    public function exec(string $statement): int|false {
+        if (strtoupper(trim($statement)) === 'BEGIN IMMEDIATE') {
+            $this->immediateBeginAttempts++;
+            if ($this->remainingBeginFailures > 0) {
+                $this->remainingBeginFailures--;
+                throw new PDOException('database is locked');
+            }
+        }
+        return parent::exec($statement);
+    }
+}
+
 $dbPath = __DIR__ . '/../data/.ontology-controller-test-'
     . getmypid() . '.sqlite';
 $occurrenceMigrationDbPath =
@@ -116,6 +142,60 @@ try {
             unlink($path);
         }
     }
+    $retryDb = new OntologyControllerTransientBusyPdo('sqlite::memory:');
+    $retryDb->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+    $retryDb->setAttribute(
+        PDO::ATTR_DEFAULT_FETCH_MODE,
+        PDO::FETCH_ASSOC
+    );
+    $retryDb->exec('PRAGMA foreign_keys=ON');
+    initializeDB($retryDb);
+    migrateDB($retryDb);
+    $retryDb->armImmediateBeginFailures(1);
+    $emptyClaims = ingredientOntologyControllerClaimJobs(
+        $retryDb,
+        1,
+        60
+    );
+    controllerTestAssert(
+        $emptyClaims === []
+        && $retryDb->immediateBeginAttempts() === 2
+        && !$retryDb->inTransaction(),
+        'Controller claims must retry transient BEGIN IMMEDIATE contention'
+    );
+    $retryDb->prepare("
+        INSERT INTO ontology_activation_imports (
+            bundle_hash, bundle_kind, database_lineage_uuid,
+            schema_version, payload_path, payload_sha256,
+            payload_bytes, manifest_json
+        )
+        VALUES (?, 'score', ?, ?, ?, ?, 0, '{}')
+    ")->execute([
+        hash('sha256', 'activation-begin-retry'),
+        str_repeat('a', 32),
+        INGREDIENT_ONTOLOGY_ACTIVATION_SCHEMA_VERSION,
+        '/unused/activation-retry.sqlite',
+        hash('sha256', ''),
+    ]);
+    $retryImportId = (int)$retryDb->lastInsertId();
+    $retryDb->armImmediateBeginFailures(1);
+    $retryLease = ingredientOntologyActivationClaimImport(
+        $retryDb,
+        $retryImportId,
+        60
+    );
+    controllerTestAssert(
+        $retryDb->immediateBeginAttempts() === 2
+        && (int)$retryLease['generation'] === 1
+        && hash_equals(
+            (string)$retryLease['token'],
+            (string)$retryLease['row']['lease_token']
+        )
+        && !$retryDb->inTransaction(),
+        'Activation import claims must retry transient BEGIN IMMEDIATE contention'
+    );
+    $retryDb = null;
+
     $db = new PDO('sqlite:' . $dbPath);
     $db->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
     $db->setAttribute(PDO::ATTR_DEFAULT_FETCH_MODE, PDO::FETCH_ASSOC);
@@ -147,6 +227,21 @@ try {
     );
     ingredientOntologyV3SetReadyMutationGuard($db, false);
     $guardDb = null;
+    $GLOBALS['ONTOLOGY_AUTONOMOUS_ENABLED_OVERRIDE'] = false;
+    $disabledGenerationRejected = false;
+    try {
+        ingredientOntologyActivationBuildGeneration($db);
+    } catch (RuntimeException $error) {
+        $disabledGenerationRejected = $error->getMessage()
+            === 'ontology_activation_generation_requires_enabled_controller';
+    } finally {
+        unset($GLOBALS['ONTOLOGY_AUTONOMOUS_ENABLED_OVERRIDE']);
+    }
+    controllerTestAssert(
+        $disabledGenerationRejected,
+        'Activation generation must reject a disabled controller before '
+            . 'copying the database'
+    );
     controllerTestAssert(
         (int)$db->query("
             SELECT COUNT(*) FROM sqlite_master
@@ -7080,6 +7175,27 @@ try {
     $generalizedPlanId = (int)$generalizedRow['mutation_plan_id'];
     $generalizedCandidateVersionId =
         (int)$generalizedRow['candidate_version_id'];
+    $distinctFallbackJob =
+        ingredientOntologyControllerProvisionalFallbackJob(
+            $db,
+            $generalizedRow,
+            $generalizedCandidateVersionId,
+            'subject-resolution fallback key regression'
+        );
+    $distinctFallbackInput = json_decode(
+        (string)$distinctFallbackJob['input_json'],
+        true
+    );
+    controllerTestAssert(
+        (int)$distinctFallbackJob['id'] !== (int)$generalizedRow['id']
+        && (string)$distinctFallbackJob['status'] === 'quarantined'
+        && (string)($distinctFallbackInput['operation'] ?? '')
+            === 'provisional_fallback'
+        && (int)($distinctFallbackInput['source_job_id'] ?? 0)
+            === (int)$generalizedRow['id'],
+        'A provisional fallback must have a distinct durable job key instead '
+            . 'of recursing through its quarantined source job'
+    );
     $generalizedGeneration = $db->query("
         SELECT * FROM ontology_generations
         WHERE id = {$generalizedGenerationId}
@@ -7988,12 +8104,106 @@ try {
     $GLOBALS['ONTOLOGY_CONTROLLER_ACTIVE_DB_PATH_OVERRIDE'] =
         $activationTargetDbPath;
     try {
-        $ontologyImport =
-            ingredientOntologyActivationRegisterImport(
+        $bundleManifestPath =
+            ingredientOntologyActivationWriteManifest(
+                $bundleSet,
+                $payloadDirectory,
+                'bundle-set'
+            );
+        $cleanup[] = $bundleManifestPath;
+        $artifactLockPhase = '';
+        try {
+            ingredientOntologyActivationRecoverPendingArtifacts(
                 $activationTarget,
-                $bundleSet['ontology'],
+                [
+                    'live_reservation' => static function (
+                        string $phase,
+                        callable $operation
+                    ): mixed {
+                        throw new
+                            IngredientOntologyActivationReservationUnavailable(
+                                $phase
+                            );
+                    },
+                ],
                 $payloadDirectory
             );
+        } catch (
+            IngredientOntologyActivationReservationUnavailable $error
+        ) {
+            $artifactLockPhase = $error->phase();
+        }
+        controllerTestAssert(
+            $artifactLockPhase === 'register_bundle_set'
+            && is_file($bundleManifestPath)
+            && is_file(
+                $payloadDirectory . '/'
+                    . $bundleSet['ontology']['payload']['file']
+            )
+            && is_file(
+                $payloadDirectory . '/'
+                    . $bundleSet['score']['payload']['file']
+            ),
+            'A missed registration reservation must retain its manifest '
+                . 'and immutable payloads'
+        );
+        $agedArtifactTime = time() - 172800;
+        touch($bundleManifestPath, $agedArtifactTime);
+        foreach (['ontology', 'score'] as $bundleKind) {
+            touch(
+                $payloadDirectory . '/'
+                    . $bundleSet[$bundleKind]['payload']['file'],
+                $agedArtifactTime
+            );
+        }
+        $agedArtifactCleanup =
+            ingredientOntologyActivationCleanupWorkFiles(
+                $activationTarget,
+                $payloadDirectory
+            );
+        controllerTestAssert(
+            $agedArtifactCleanup['deleted'] === 0
+            && is_file($bundleManifestPath)
+            && is_file(
+                $payloadDirectory . '/'
+                    . $bundleSet['ontology']['payload']['file']
+            )
+            && is_file(
+                $payloadDirectory . '/'
+                    . $bundleSet['score']['payload']['file']
+            ),
+            'Age-based cleanup must preserve payloads referenced by a valid '
+                . 'unregistered bundle manifest'
+        );
+        $resumedArtifacts =
+            ingredientOntologyActivationRecoverPendingArtifacts(
+                $activationTarget,
+                [
+                    'live_reservation' => static fn(
+                        string $phase,
+                        callable $operation
+                    ): mixed => $operation(),
+                ],
+                $payloadDirectory
+            );
+        $ontologyImport = $resumedArtifacts['ontology_import'];
+        $scoreImport = $resumedArtifacts['score_import'];
+        controllerTestAssert(
+            $resumedArtifacts['action'] === 'resume_bundle_set'
+            && !is_file($bundleManifestPath),
+            'A retained bundle manifest must resume registration without '
+                . 'rebuilding the copied generation'
+        );
+        $preRegisteredScoreImportId = (int)$scoreImport['id'];
+        controllerTestAssert(
+            (string)$scoreImport['status'] === 'staging'
+            && recipeScoreRevision(
+                $activationTarget,
+                (int)$scoreImport['candidate_score_revision_id']
+            ) === null,
+            'Score metadata may be reserved before ontology import without '
+                . 'publishing candidate rows or moving the active pointer'
+        );
         $ontologyCandidateId = (int)$bundleSet['ontology'][
             'candidate'
         ]['ontology_version_id'];
@@ -8028,6 +8238,87 @@ try {
                 'Retryable SQLite contention'
             ),
             'SQLite contention must preserve a resumable activation import'
+        );
+        $beforeSchedulerLock =
+            ingredientOntologyActivationImportRow(
+                $activationTarget,
+                (int)$ontologyImport['id']
+            );
+        $schedulerLockPhase = '';
+        try {
+            ingredientOntologyActivationDriveImport(
+                $activationTarget,
+                (int)$ontologyImport['id'],
+                [
+                    'maximum_loops' => 4,
+                    'maximum_chunks' => 1,
+                    'allow_test_fixture' => true,
+                    'yield_after_live_reservation' => true,
+                    'live_reservation' => static function (
+                        string $phase,
+                        callable $operation
+                    ): mixed {
+                        throw new
+                        IngredientOntologyActivationReservationUnavailable(
+                            $phase
+                        );
+                    },
+                ]
+            );
+        } catch (
+            IngredientOntologyActivationReservationUnavailable $error
+        ) {
+            $schedulerLockPhase = $error->phase();
+        }
+        $afterSchedulerLock =
+            ingredientOntologyActivationImportRow(
+                $activationTarget,
+                (int)$ontologyImport['id']
+            );
+        controllerTestAssert(
+            $schedulerLockPhase === 'import'
+            && $afterSchedulerLock['status']
+                === $beforeSchedulerLock['status']
+            && (int)$afterSchedulerLock['rows_imported']
+                === (int)$beforeSchedulerLock['rows_imported']
+            && (int)$afterSchedulerLock['lease_generation']
+                === (int)$beforeSchedulerLock['lease_generation'],
+            'A busy shared writer lock must leave the import resumable and '
+                . 'unmodified'
+        );
+        $reservationPhases = [];
+        $yieldedImport = ingredientOntologyActivationDriveImport(
+            $activationTarget,
+            (int)$ontologyImport['id'],
+            [
+                'maximum_loops' => 100,
+                'maximum_chunks' => 1,
+                'allow_test_fixture' => true,
+                'yield_after_live_reservation' => true,
+                'live_reservation' => static function (
+                    string $phase,
+                    callable $operation
+                ) use (&$reservationPhases): mixed {
+                    $reservationPhases[] = $phase;
+                    return $operation();
+                },
+            ]
+        );
+        controllerTestAssert(
+            $reservationPhases === ['import']
+            && in_array(
+                (string)$yieldedImport['status'],
+                ['staging', 'importing', 'verifying'],
+                true
+            )
+            && (int)$yieldedImport['rows_imported']
+                > (int)$beforeSchedulerLock['rows_imported']
+            && is_file(
+                $payloadDirectory . '/'
+                    . $bundleSet['ontology']['payload']['file']
+            ),
+            'Scheduler mode must yield after one bounded live import '
+                . 'reservation without discarding its payload'
         );
         $ontologyImport =
             ingredientOntologyActivationRunImport(
@@ -8093,10 +8384,102 @@ try {
     $GLOBALS['ONTOLOGY_CONTROLLER_ACTIVE_DB_PATH_OVERRIDE'] =
         $activationTargetDbPath;
     try {
-        ingredientOntologyActivationStoreValidation(
+        $ontologyAttestationPath =
+            ingredientOntologyActivationWriteValidationAttestation(
+                $ontologyAttestation,
+                $payloadDirectory
+            );
+        $cleanup[] = $ontologyAttestationPath;
+        $loadedOntologyAttestation =
+            ingredientOntologyActivationLoadManifest(
+                $ontologyAttestationPath,
+                'validation-attestation-' . (int)$ontologyImport['id']
+            );
+        controllerTestAssert(
+            hash_equals(
+                (string)$ontologyAttestation['attestation_hash'],
+                (string)$loadedOntologyAttestation['attestation_hash']
+            )
+            && basename($ontologyAttestationPath)
+                === 'validation-attestation-'
+                    . (int)$ontologyImport['id']
+                    . '-'
+                    . (string)$ontologyAttestation['attestation_hash']
+                    . '.json',
+            'Validation attestations must round-trip under their own '
+                . 'attestation hash'
+        );
+        $ontologyValidationCopies = 0;
+        $validationCopyObserver = static function (
+            int $observedImportId
+        ) use (&$ontologyValidationCopies, $ontologyImport): void {
+            if ($observedImportId === (int)$ontologyImport['id']) {
+                $ontologyValidationCopies++;
+            }
+        };
+        $validationLockPhase = '';
+        try {
+            ingredientOntologyActivationDriveImport(
+                $activationTarget,
+                (int)$ontologyImport['id'],
+                [
+                    'maximum_loops' => 1,
+                    'maximum_chunks' => 1,
+                    'allow_test_fixture' => true,
+                    'yield_after_live_reservation' => true,
+                    'work_directory' => $payloadDirectory,
+                    'validation_copy_observer' =>
+                        $validationCopyObserver,
+                    'live_reservation' => static function (
+                        string $phase,
+                        callable $operation
+                    ): mixed {
+                        throw new
+                            IngredientOntologyActivationReservationUnavailable(
+                                $phase
+                            );
+                    },
+                ]
+            );
+        } catch (
+            IngredientOntologyActivationReservationUnavailable $error
+        ) {
+            $validationLockPhase = $error->phase();
+        }
+        $validationLockedImport =
+            ingredientOntologyActivationImportRow(
+                $activationTarget,
+                (int)$ontologyImport['id']
+            );
+        controllerTestAssert(
+            $validationLockPhase === 'validation_store'
+            && $validationLockedImport['status'] === 'verifying'
+            && is_file($ontologyAttestationPath),
+            'A missed validation reservation must retain its durable '
+                . 'attestation and leave the import unchanged'
+        );
+        $ontologyImport = ingredientOntologyActivationDriveImport(
             $activationTarget,
             (int)$ontologyImport['id'],
-            $ontologyAttestation
+            [
+                'maximum_loops' => 1,
+                'maximum_chunks' => 1,
+                'allow_test_fixture' => true,
+                'yield_after_live_reservation' => true,
+                'work_directory' => $payloadDirectory,
+                'validation_copy_observer' => $validationCopyObserver,
+                'live_reservation' => static fn(
+                    string $phase,
+                    callable $operation
+                ): mixed => $operation(),
+            ]
+        );
+        controllerTestAssert(
+            $ontologyImport['status'] === 'activatable'
+            && !is_file($ontologyAttestationPath)
+            && $ontologyValidationCopies === 0,
+            'A durable validation attestation must resume without '
+                . 'repeating the copied validation'
         );
         $ontologyImport =
             ingredientOntologyActivationActivateImport(
@@ -8131,6 +8514,11 @@ try {
             $activationTarget,
             $bundleSet['score'],
             $payloadDirectory
+        );
+        controllerTestAssert(
+            (int)$scoreImport['id'] === $preRegisteredScoreImportId,
+            'Pre-registered score imports must resume idempotently after '
+                . 'ontology publication'
         );
         $scoreImport = ingredientOntologyActivationRunImport(
             $activationTarget,
@@ -8172,10 +8560,69 @@ try {
     $GLOBALS['ONTOLOGY_CONTROLLER_ACTIVE_DB_PATH_OVERRIDE'] =
         $activationTargetDbPath;
     try {
-        ingredientOntologyActivationStoreValidation(
+        $scoreAttestationPath =
+            ingredientOntologyActivationWriteValidationAttestation(
+                $scoreAttestation,
+                $payloadDirectory
+            );
+        $cleanup[] = $scoreAttestationPath;
+        $scoreValidationLockPhase = '';
+        try {
+            ingredientOntologyActivationDriveImport(
+                $activationTarget,
+                (int)$scoreImport['id'],
+                [
+                    'maximum_loops' => 1,
+                    'maximum_chunks' => 1,
+                    'allow_test_fixture' => true,
+                    'yield_after_live_reservation' => true,
+                    'work_directory' => $payloadDirectory,
+                    'live_reservation' => static function (
+                        string $phase,
+                        callable $operation
+                    ): mixed {
+                        throw new
+                            IngredientOntologyActivationReservationUnavailable(
+                                $phase
+                            );
+                    },
+                ]
+            );
+        } catch (
+            IngredientOntologyActivationReservationUnavailable $error
+        ) {
+            $scoreValidationLockPhase = $error->phase();
+        }
+        controllerTestAssert(
+            $scoreValidationLockPhase === 'validation_store'
+            && ingredientOntologyActivationImportRow(
+                $activationTarget,
+                (int)$scoreImport['id']
+            )['status'] === 'verifying'
+            && is_file($scoreAttestationPath),
+            'Score validation attestations must survive a missed live '
+                . 'reservation'
+        );
+        $scoreImport = ingredientOntologyActivationDriveImport(
             $activationTarget,
             (int)$scoreImport['id'],
-            $scoreAttestation
+            [
+                'maximum_loops' => 1,
+                'maximum_chunks' => 1,
+                'allow_test_fixture' => true,
+                'yield_after_live_reservation' => true,
+                'work_directory' => $payloadDirectory,
+                'live_reservation' => static fn(
+                    string $phase,
+                    callable $operation
+                ): mixed => $operation(),
+            ]
+        );
+        controllerTestAssert(
+            $scoreImport['status'] === 'activatable'
+            && !is_file($scoreAttestationPath),
+            'A retained score attestation must resume without rebuilding '
+                . 'the validation copy'
         );
         recipeScoreFailAbandonedBuilds($activationTarget);
         recipeScorePruneRevisions($activationTarget);

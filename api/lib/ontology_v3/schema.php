@@ -157,6 +157,21 @@ function ingredientOntologyV3SetPublicationGuard(
     );
 }
 
+function ingredientOntologyV3RegisterGuardFunctions(PDO $db): void {
+    ingredientOntologyV3SetRequirementPruneGuard(
+        $db,
+        ingredientOntologyV3RequirementPruneGuardEnabled($db)
+    );
+    ingredientOntologyV3SetPublicationGuard(
+        $db,
+        ingredientOntologyV3PublicationGuardEnabled($db)
+    );
+    ingredientOntologyV3SetReadyMutationGuard(
+        $db,
+        ingredientOntologyV3ReadyMutationGuardEnabled($db)
+    );
+}
+
 function ingredientOntologyV3RequirementPruneGuardEnabled(
     PDO $db
 ): bool {
@@ -1712,18 +1727,7 @@ function ingredientOntologyV3EnsurePendingEdgeReviewDisposition(
 }
 
 function ingredientOntologyV3SchemaMigrate(PDO $db): void {
-    ingredientOntologyV3SetRequirementPruneGuard(
-        $db,
-        ingredientOntologyV3RequirementPruneGuardEnabled($db)
-    );
-    ingredientOntologyV3SetPublicationGuard(
-        $db,
-        ingredientOntologyV3PublicationGuardEnabled($db)
-    );
-    ingredientOntologyV3SetReadyMutationGuard(
-        $db,
-        ingredientOntologyV3ReadyMutationGuardEnabled($db)
-    );
+    ingredientOntologyV3RegisterGuardFunctions($db);
     $db->exec("
         CREATE TABLE IF NOT EXISTS ingredient_ontology_versions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,

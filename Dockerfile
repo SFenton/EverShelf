@@ -33,8 +33,8 @@ WORKDIR /var/www/html
 # Copy application files
 COPY . /var/www/html/
 
-# Create data directory with proper permissions
-RUN mkdir -p /var/www/html/data/backups \
+# Create persistent runtime directories with proper permissions
+RUN mkdir -p /var/www/html/data/backups /var/www/html/data/logs \
     && chown -R www-data:www-data /var/www/html/data \
     && chmod -R 775 /var/www/html/data
 
@@ -45,6 +45,10 @@ RUN [ ! -f /var/www/html/.env ] && cp /var/www/html/.env.example /var/www/html/.
 RUN echo '<Directory /var/www/html>\n\
     AllowOverride All\n\
     Require all granted\n\
+</Directory>\n\
+<Directory /var/www/html/data>\n\
+    AllowOverride None\n\
+    Require all denied\n\
 </Directory>\n\
 # Traefik / reverse-proxy: treat forwarded HTTPS as on so .htaccess does not redirect-loop\n\
 SetEnvIf X-Forwarded-Proto "https" HTTPS=on' > /etc/apache2/conf-available/evershelf.conf \

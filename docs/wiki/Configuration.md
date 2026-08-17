@@ -41,6 +41,7 @@ RECIPE_QUEUE_LEASE_MINUTES=15
 # ───────────────────────────
 
 # Cookidoo email/password belong ONLY in cookidoo-bridge/.env.
+# These compatibility gates cannot override the current production policy.
 COOKIDOO_CONNECTOR_ENABLED=false
 COOKIDOO_DETAIL_HYDRATION_ENABLED=false
 COOKIDOO_BRIDGE_URL=http://cookidoo-bridge:8081
@@ -259,13 +260,21 @@ php scripts/ontology-controller.php bundle-build \
 ```
 
 Set `ONTOLOGY_ACTIVATION_ENABLED=true` to let
-`scripts/process-ontology-activation.php` run this workflow automatically under
-the shared background-writer lock. It imports ontology and score payloads in
-lease-fenced chunks, validates the imported candidate on a fresh database copy,
-then publishes through one short score-pointer CAS. Inventory-only drift
-rebuilds only the score sidecar; source, policy, or constraint drift rebases from
-a fresh copy without another proposer call. Imported intents are acknowledged
-only in the same transaction that activates their score revision.
+`scripts/process-ontology-activation.php` run this workflow automatically.
+Copied generation, scoring, and validation run without the shared
+background-writer lock. The worker takes that lock nonblocking only for bounded
+live import, reservation, and publication phases, yielding between phases. It
+validates the imported candidate on a fresh database copy, then publishes
+through one short score-pointer CAS. Inventory-only drift rebuilds only the
+score sidecar; source, policy, or constraint drift rebases from a fresh copy
+without another proposer call. Imported intents are acknowledged only in the
+same transaction that activates their score revision.
+
+Activation-only SQLite connections use file-backed temporary storage so large
+ordered verification queries stay within the worker memory limit. Generated
+bundle manifests and copied-validation attestations are written atomically in
+the activation directory; a later worker invocation revalidates their hashes,
+payloads, lineage, and publication fences before resuming.
 
 `ONTOLOGY_ACTIVATION_DIRECTORY` must point inside durable storage with enough
 space for a database copy plus sidecars. `RECIPE_SCORE_PRUNE_CHUNK_ROWS` and
@@ -372,11 +381,10 @@ connector failure or circuit accounting.
 
 ### Direct-ID metadata-v2 backfill
 
-`COOKIDOO_CONNECTOR_ENABLED` and
-`COOKIDOO_DETAIL_HYDRATION_ENABLED` must both be true for scan-triggered
-discovery. Full direct-ID backfill remains separately controlled by
-`COOKIDOO_METADATA_BACKFILL_ENABLED`; it is not required for newly discovered
-recipes.
+Direct-ID backfill and scan-triggered discovery are policy-disabled.
+`COOKIDOO_CONNECTOR_ENABLED`, `COOKIDOO_DETAIL_HYDRATION_ENABLED`, and
+`COOKIDOO_METADATA_BACKFILL_ENABLED` cannot override the policy gate. Existing
+cached recipes remain readable.
 
 ---
 

@@ -743,6 +743,18 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             },
         )
 
+    def test_runtime_environment_cannot_enable_detail_hydration(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "COOKIDOO_BRIDGE_TOKEN": "test-token",
+                "COOKIDOO_DETAIL_HYDRATION_ENABLED": "true",
+            },
+            clear=False,
+        ):
+            config = BridgeConfig.from_env()
+        self.assertFalse(config.detail_hydration_enabled)
+
     async def test_enabled_health_and_capabilities_report_discovery(
         self,
     ) -> None:

@@ -6,8 +6,8 @@ const RECIPE_COOKIDOO_CONNECTOR = 'cookidoo';
 const RECIPE_COOKIDOO_METADATA_VERSION = 'metadata-v2';
 const RECIPE_COOKIDOO_METADATA_SCHEMA_VERSION = 'ingredient-topology-v1';
 const RECIPE_COOKIDOO_METADATA_FAILURE_SCHEMA_VERSION = 'metadata-parser-v10-complete-list';
-const RECIPE_COOKIDOO_DETAIL_POLICY_VERSION = 'metadata-v3-operator-enabled';
-const RECIPE_COOKIDOO_DETAIL_POLICY_REASON = 'detail_hydration_disabled';
+const RECIPE_COOKIDOO_DETAIL_POLICY_VERSION = 'metadata-v2-detail-disabled';
+const RECIPE_COOKIDOO_DETAIL_POLICY_REASON = 'provider_detail_policy_disabled';
 const RECIPE_COOKIDOO_MAX_RESPONSE_BYTES = 1048576;
 const RECIPE_COOKIDOO_MAX_RECIPE_SECONDS =
     RECIPE_MAX_FACTUAL_DURATION_SECONDS;
@@ -94,14 +94,9 @@ function recipeCookidooMetadataRefreshDays(): int {
 }
 
 function recipeCookidooDetailHydrationPolicyAllows(): bool {
-    return recipeCookidooEnvBool(
-        'COOKIDOO_DETAIL_HYDRATION_ENABLED',
-        false
-    ) || (
-        defined('RECIPE_BACKEND_TEST_MODE')
+    return defined('RECIPE_BACKEND_TEST_MODE')
         && RECIPE_BACKEND_TEST_MODE
-        && !empty($GLOBALS['RECIPE_COOKIDOO_POLICY_TEST_OVERRIDE'])
-    );
+        && !empty($GLOBALS['RECIPE_COOKIDOO_POLICY_TEST_OVERRIDE']);
 }
 
 function recipeCookidooMetadataBackfillConfigured(): bool {
@@ -3501,6 +3496,7 @@ function recipeCookidooApplyMetadataV2(
     );
     $incomingSourceIdentityHash =
         recipeCookidooOntologySourceIdentityHash($sourceIngredients);
+    $controllerObservation = null;
 
     $ownsTransaction = !$db->inTransaction();
     if ($ownsTransaction) {
@@ -3694,6 +3690,16 @@ function recipeCookidooApplyMetadataV2(
             WHERE recipe_id = ? AND position >= ?
         ")->execute([$recipeId, count($sourceIngredients)]);
 
+        if (function_exists(
+            'ingredientOntologyControllerObserveRecipeSafely'
+        )) {
+            $controllerObservation =
+                ingredientOntologyControllerObserveRecipeSafely(
+                    $db,
+                    $recipeId
+                );
+        }
+
         $versionUpdate = $db->prepare("
             UPDATE recipe_origins SET
                 metadata_version = ?,
@@ -3739,6 +3745,12 @@ function recipeCookidooApplyMetadataV2(
         }
         throw $e;
     }
+    if (
+        !empty($controllerObservation['observed'])
+        && function_exists('ingredientOntologyControllerWake')
+    ) {
+        ingredientOntologyControllerWake();
+    }
     return [
         'recipe_id' => $recipeId,
         'origin_id' => $originId,
@@ -3756,6 +3768,25 @@ function recipeCookidooApplyMetadataV2(
         'visibility_changed' => $visibilityChanged,
         'ontology_source_changed' => $sourceIdentityChanged,
         'score_catalog_dirty_required' => $scoreCatalogDirtyRequired,
+        'ontology_observation' => is_array($controllerObservation)
+            ? [
+                'observed' =>
+                    !empty($controllerObservation['observed']),
+                'disabled' =>
+                    !empty($controllerObservation['disabled']),
+                'degraded' =>
+                    !empty($controllerObservation['degraded']),
+                'occurrence_count' => (int)(
+                    $controllerObservation['occurrence_count'] ?? 0
+                ),
+                'created_subject_count' => (int)(
+                    $controllerObservation['created_subject_count'] ?? 0
+                ),
+                'queued_job_count' => (int)(
+                    $controllerObservation['queued_job_count'] ?? 0
+                ),
+            ]
+            : null,
     ];
 }
 

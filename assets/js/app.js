@@ -4239,7 +4239,17 @@ async function api(action, params = {}, method = 'GET', body = null, extraHeader
         _offlineProductsSet(data.products);
     }
     if (data && data.error) {
-        remoteLog('API_FAIL', `${action}: ${data.error}`);
+        const errorCode = data.error;
+        remoteLog('API_FAIL', `${action}: ${errorCode}`);
+        if (
+            typeof errorCode === 'string'
+            && /^[a-z][a-z0-9_]*$/.test(errorCode)
+            && typeof data.message === 'string'
+            && data.message.trim()
+        ) {
+            data.error_code = errorCode;
+            data.error = data.message;
+        }
     }
     return data;
 }

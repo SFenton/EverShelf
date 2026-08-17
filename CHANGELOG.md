@@ -5,6 +5,53 @@ All notable changes to EverShelf will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.10.0] - 2026-08-16
+
+### Added
+- An `inventory_decrement_v1` discovery capability lets clients fail closed
+  instead of sending atomic decrement requests to older servers that ignore
+  them.
+- A bounded `processing_status_v1` API reports recipe and ontology queues,
+  activation health, recipe-score freshness, provider/logging health, and
+  source-ingredient ontology coverage.
+- A safe, resumable CLI backfills missing recipe ontology observations without
+  retrieving Cookidoo instructions or changing ranking ingredients.
+- Persistent request logs now include response status, duration, peak memory,
+  and Copilot expiry-provider timing.
+
+### Fixed
+- Cookidoo discovery and direct metadata hydration again fail locally under the
+  repository policy even when legacy operator gates are enabled; synthetic
+  adapter tests remain available without creating a production request path.
+- Copied ontology activation bounds memory-heavy hashing/import work and avoids
+  monopolizing the shared scheduler lock during long offline phases. Dedicated
+  activation connections spill SQLite sorts to disk, and durable manifests and
+  validation attestations resume safely after transient writer contention.
+- Deterministic provisional fallback jobs use distinct durable identities, so a
+  quarantined subject-resolution plan cannot recurse until PHP exhausts memory.
+- Activation generation rejects a disabled ontology controller before creating
+  a production-sized database copy instead of ending in an ambiguous no-bundle
+  retry loop.
+- Cookidoo metadata-v2 refreshes now observe every rewritten source ingredient
+  and wake ontology intake while preserving source-only score invalidation.
+- Barcode cache contention no longer discards a successful provider result;
+  user-facing write transactions use bounded SQLite begin retries.
+- Application logging now uses the writable persistent data volume and reports
+  failures through stderr instead of silently suppressing them.
+- Apache now denies the runtime data directory in server configuration, so a
+  bind mount cannot mask `.htaccess` and expose databases or request logs.
+- Row-specific inventory consumption now applies an atomic server-side
+  decrement with strict optional-unit validation, so concurrent stock changes
+  cannot be overwritten by Home Assistant.
+- Activation cleanup preserves valid manifest-referenced payloads, validation
+  attestations reload under their own integrity hash, and payload generation
+  enforces file-backed SQLite temporary storage.
+- Docker builds exclude runtime logs and activation artifacts, and the PWA
+  displays readable server messages for machine-coded API errors while
+  retaining their original error codes.
+- Every SQLite connection registers ontology trigger guard functions, including
+  current-schema fast-path connections used by normal web requests.
+
 ## [1.9.9] - 2026-08-16
 
 ### Fixed

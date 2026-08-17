@@ -29,11 +29,124 @@ function ingredientOntologyV3StableValue(mixed $value): mixed {
     return $value;
 }
 
+function ingredientOntologyV3CanonicalHashUpdate(
+    mixed $hash,
+    mixed $value
+): void {
+    if (!is_array($value)) {
+        hash_update($hash, ingredientOntologyV3Json($value));
+        return;
+    }
+    $isList = function_exists('recipeArrayIsList')
+        ? recipeArrayIsList($value)
+        : (
+            $value === []
+            || array_keys($value) === range(0, count($value) - 1)
+        );
+    if ($isList) {
+        hash_update($hash, '[');
+        $separator = '';
+        foreach ($value as $item) {
+            hash_update($hash, $separator);
+            ingredientOntologyV3CanonicalHashUpdate($hash, $item);
+            $separator = ',';
+        }
+        hash_update($hash, ']');
+        return;
+    }
+    $keys = array_keys($value);
+    sort($keys, SORT_STRING);
+    if ($keys === range(0, count($keys) - 1)) {
+        hash_update($hash, '[');
+        $separator = '';
+        foreach ($keys as $key) {
+            hash_update($hash, $separator);
+            ingredientOntologyV3CanonicalHashUpdate($hash, $value[$key]);
+            $separator = ',';
+        }
+        hash_update($hash, ']');
+        return;
+    }
+    hash_update($hash, '{');
+    $separator = '';
+    foreach ($keys as $key) {
+        hash_update(
+            $hash,
+            $separator
+                . ingredientOntologyV3Json((string)$key)
+                . ':'
+        );
+        ingredientOntologyV3CanonicalHashUpdate($hash, $value[$key]);
+        $separator = ',';
+    }
+    hash_update($hash, '}');
+}
+
 function ingredientOntologyV3Hash(mixed $value): string {
-    return hash(
-        'sha256',
-        ingredientOntologyV3Json(ingredientOntologyV3StableValue($value))
-    );
+    $hash = hash_init('sha256');
+    ingredientOntologyV3CanonicalHashUpdate($hash, $value);
+    return hash_final($hash);
+}
+
+function ingredientOntologyV3CanonicalQueryRowsHash(
+    PDO $db,
+    string $sql,
+    array $params = []
+): string {
+    $hash = hash_init('sha256');
+    hash_update($hash, '[');
+    $stmt = $db->prepare($sql);
+    $stmt->execute($params);
+    $separator = '';
+    while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
+        hash_update($hash, $separator);
+        ingredientOntologyV3CanonicalHashUpdate($hash, $row);
+        $separator = ',';
+    }
+    $stmt->closeCursor();
+    hash_update($hash, ']');
+    return hash_final($hash);
+}
+
+function ingredientOntologyV3CanonicalQueryMapHash(
+    PDO $db,
+    array $queries
+): string {
+    $keys = array_keys($queries);
+    sort($keys, SORT_STRING);
+    $hash = hash_init('sha256');
+    hash_update($hash, '{');
+    $separator = '';
+    foreach ($keys as $key) {
+        $query = $queries[$key];
+        if (
+            !is_array($query)
+            || !is_string($query['sql'] ?? null)
+        ) {
+            throw new InvalidArgumentException(
+                'canonical query hash definition is invalid'
+            );
+        }
+        hash_update(
+            $hash,
+            $separator
+                . ingredientOntologyV3Json((string)$key)
+                . ':['
+        );
+        $stmt = $db->prepare($query['sql']);
+        $stmt->execute((array)($query['params'] ?? []));
+        $rowSeparator = '';
+        while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
+            hash_update($hash, $rowSeparator);
+            ingredientOntologyV3CanonicalHashUpdate($hash, $row);
+            $rowSeparator = ',';
+        }
+        $stmt->closeCursor();
+        hash_update($hash, ']');
+        $separator = ',';
+    }
+    hash_update($hash, '}');
+    return hash_final($hash);
 }
 
 function ingredientOntologyV3SchemaHash(): string {

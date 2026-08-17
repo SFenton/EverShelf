@@ -7,6 +7,71 @@ const INGREDIENT_ONTOLOGY_ACTIVATION_TRIGGER_VERSION =
     'ontology-activation-cdc-v1';
 const INGREDIENT_ONTOLOGY_ACTIVATION_BUNDLE_VERSION =
     'ontology-activation-bundle-v2';
+const INGREDIENT_ONTOLOGY_ACTIVATION_LIVE_BUSY_TIMEOUT_MS = 2500;
+
+function ingredientOntologyActivationConfigureDatabase(
+    PDO $db,
+    int $busyTimeoutMs = 10000
+): void {
+    $busyTimeoutMs = max(1, min(60000, $busyTimeoutMs));
+    $db->exec('PRAGMA foreign_keys = ON');
+    $db->exec('PRAGMA temp_store = FILE');
+    $db->exec('PRAGMA busy_timeout = ' . $busyTimeoutMs);
+}
+
+final class IngredientOntologyActivationReservationUnavailable
+    extends RuntimeException
+{
+    private string $phase;
+
+    public function __construct(string $phase) {
+        $this->phase = $phase;
+        parent::__construct('ontology_activation_background_writer_locked');
+    }
+
+    public function phase(): string {
+        return $this->phase;
+    }
+}
+
+function ingredientOntologyActivationWithLiveReservation(
+    array $options,
+    string $phase,
+    callable $operation
+): mixed {
+    $reservation = $options['live_reservation'] ?? null;
+    if ($reservation === null) {
+        return $operation();
+    }
+    if (!is_callable($reservation)) {
+        throw new InvalidArgumentException(
+            'ontology activation live reservation callback is invalid'
+        );
+    }
+    return $reservation($phase, $operation);
+}
+
+function ingredientOntologyActivationWithNonBlockingFileLock(
+    mixed $lock,
+    string $phase,
+    callable $operation
+): mixed {
+    if (!is_resource($lock)) {
+        throw new InvalidArgumentException(
+            'ontology activation live lock handle is invalid'
+        );
+    }
+    if (!flock($lock, LOCK_EX | LOCK_NB)) {
+        throw new IngredientOntologyActivationReservationUnavailable(
+            $phase
+        );
+    }
+    try {
+        return $operation();
+    } finally {
+        flock($lock, LOCK_UN);
+    }
+}
 
 function ingredientOntologyActivationTableExists(
     PDO $db,
@@ -1137,14 +1202,15 @@ function ingredientOntologyActivationQuoteIdentifier(
                 'ontology activation copied database path is unavailable'
             );
         }
-        $payloadDb = new PDO('sqlite:' . $databasePath);
-        $payloadDb->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
-        $payloadDb->setAttribute(
-            PDO::ATTR_DEFAULT_FETCH_MODE,
-            PDO::FETCH_ASSOC
-        );
-        $payloadDb->exec('PRAGMA foreign_keys = ON');
-        $payloadDb->exec('PRAGMA busy_timeout = 10000');
+        $payloadDb =
+            ingredientOntologyActivationOpenDatabase($databasePath);
+        if (
+            (int)$payloadDb->query('PRAGMA temp_store')->fetchColumn() !== 1
+        ) {
+            throw new RuntimeException(
+                'ontology activation payload temp storage is unsafe'
+            );
+        }
         $temporary = $path . '.tmp.' . getmypid() . '.'
             . bin2hex(random_bytes(6));
         $attached = false;
@@ -1643,7 +1709,7 @@ function ingredientOntologyActivationQuoteIdentifier(
                 'ONTOLOGY_ACTIVATION_BEFORE_ACK_RESERVATION'
             ])($db, $document);
         }
-        $db->exec('BEGIN IMMEDIATE');
+        dbBeginImmediateWithRetry($db);
         try {
             $lockedState = recipeScoreState($db);
             $lockedVersion = ingredientOntologyV3ActiveVersion($db);
@@ -2399,19 +2465,8 @@ function ingredientOntologyActivationQuoteIdentifier(
     }
 
     function ingredientOntologyActivationRegisterGuardFunctions(PDO $db): void {
-        if (function_exists('ingredientOntologyV3SetRequirementPruneGuard')) {
-            ingredientOntologyV3SetRequirementPruneGuard(
-                $db,
-                ingredientOntologyV3RequirementPruneGuardEnabled($db)
-            );
-            ingredientOntologyV3SetPublicationGuard(
-                $db,
-                ingredientOntologyV3PublicationGuardEnabled($db)
-            );
-            ingredientOntologyV3SetReadyMutationGuard(
-                $db,
-                ingredientOntologyV3ReadyMutationGuardEnabled($db)
-            );
+        if (function_exists('ingredientOntologyV3RegisterGuardFunctions')) {
+            ingredientOntologyV3RegisterGuardFunctions($db);
         }
     }
 
@@ -2471,6 +2526,48 @@ function ingredientOntologyActivationAssertActiveDatabase(PDO $db): void {
         ) {
             throw new RuntimeException(
                 'ontology activation payload integrity failed'
+            );
+        }
+        return $path;
+    }
+
+    function ingredientOntologyActivationUseVerifiedPayload(
+        array $bundle,
+        string $payloadDirectory,
+        ?string $verifiedPath
+    ): string {
+        if ($verifiedPath === null) {
+            return ingredientOntologyActivationResolvePayload(
+                $bundle,
+                $payloadDirectory
+            );
+        }
+        $payload = is_array($bundle['payload'] ?? null)
+            ? $bundle['payload']
+            : [];
+        $filename = basename((string)($payload['file'] ?? ''));
+        $directory = realpath($payloadDirectory);
+        $path = realpath($verifiedPath);
+        if (
+            $filename === ''
+            || $directory === false
+            || $path === false
+            || $path !== $directory . '/' . $filename
+            || !is_file($path)
+            || is_link($path)
+        ) {
+            throw new InvalidArgumentException(
+                'ontology activation verified payload path is invalid'
+            );
+        }
+        clearstatcache(true, $path);
+        if (
+            (int)filesize($path) !== (int)($payload['bytes'] ?? -1)
+            || is_file($path . '-wal')
+            || is_file($path . '-shm')
+        ) {
+            throw new RuntimeException(
+                'ontology activation verified payload changed'
             );
         }
         return $path;
@@ -2626,7 +2723,8 @@ function ingredientOntologyActivationAssertActiveDatabase(PDO $db): void {
     function ingredientOntologyActivationRegisterImport(
         PDO $db,
         array $bundle,
-        string $payloadDirectory
+        string $payloadDirectory,
+        ?string $verifiedPayloadPath = null
     ): array {
         ingredientOntologyActivationAssertActiveDatabase($db);
         ingredientOntologyActivationVerifyBundle($bundle);
@@ -2639,9 +2737,10 @@ function ingredientOntologyActivationAssertActiveDatabase(PDO $db): void {
         $existing->execute([$bundleHash]);
         $row = $existing->fetch(PDO::FETCH_ASSOC);
         if ($row) {
-            ingredientOntologyActivationResolvePayload(
+            ingredientOntologyActivationUseVerifiedPayload(
                 $bundle,
-                $payloadDirectory
+                $payloadDirectory,
+                $verifiedPayloadPath
             );
             if (
                 !hash_equals(
@@ -2662,7 +2761,7 @@ function ingredientOntologyActivationAssertActiveDatabase(PDO $db): void {
                     'ontology activation bundle lineage or runtime changed'
                 );
             }
-            $db->exec('BEGIN IMMEDIATE');
+            dbBeginImmediateWithRetry($db);
             try {
                 foreach ((array)($bundle['intents'] ?? []) as $intent) {
                     ingredientOntologyActivationEnsureLiveIntent(
@@ -2680,9 +2779,10 @@ function ingredientOntologyActivationAssertActiveDatabase(PDO $db): void {
             }
             return $row;
         }
-        $payloadPath = ingredientOntologyActivationResolvePayload(
+        $payloadPath = ingredientOntologyActivationUseVerifiedPayload(
             $bundle,
-            $payloadDirectory
+            $payloadDirectory,
+            $verifiedPayloadPath
         );
         if (
             !hash_equals(
@@ -2807,7 +2907,7 @@ function ingredientOntologyActivationAssertActiveDatabase(PDO $db): void {
                 'ontology activation manifest exceeds its size limit'
             );
         }
-        $db->exec('BEGIN IMMEDIATE');
+        dbBeginImmediateWithRetry($db);
         try {
             $insert = $db->prepare("
                 INSERT INTO ontology_activation_imports (
@@ -2921,7 +3021,7 @@ function ingredientOntologyActivationAssertActiveDatabase(PDO $db): void {
     ): array {
         $leaseSeconds = max(30, min(3600, $leaseSeconds));
         $token = bin2hex(random_bytes(32));
-        $db->exec('BEGIN IMMEDIATE');
+        dbBeginImmediateWithRetry($db);
         try {
             $claim = $db->prepare("
                 UPDATE ontology_activation_imports
@@ -3045,7 +3145,8 @@ function ingredientOntologyActivationAssertActiveDatabase(PDO $db): void {
     function ingredientOntologyActivationRunImport(
         PDO $db,
         int $importId,
-        int $maximumChunks = 100
+        int $maximumChunks = 100,
+        ?string $verifiedPayloadPath = null
     ): array {
         ingredientOntologyActivationAssertActiveDatabase($db);
         $callerDb = $db;
@@ -3054,10 +3155,17 @@ function ingredientOntologyActivationAssertActiveDatabase(PDO $db): void {
         $row = $lease['row'];
         $bundle = ingredientOntologyActivationImportBundle($row);
         $payloadPath = (string)$row['payload_path'];
-        ingredientOntologyActivationResolvePayload(
-            $bundle,
-            dirname($payloadPath)
-        );
+        $resolvedPayloadPath =
+            ingredientOntologyActivationUseVerifiedPayload(
+                $bundle,
+                dirname($payloadPath),
+                $verifiedPayloadPath
+            );
+        if (!hash_equals($payloadPath, $resolvedPayloadPath)) {
+            throw new RuntimeException(
+                'ontology activation import payload path changed'
+            );
+        }
         $databasePath = '';
         foreach (
             $db->query('PRAGMA database_list')->fetchAll(PDO::FETCH_ASSOC)
@@ -3076,8 +3184,10 @@ function ingredientOntologyActivationAssertActiveDatabase(PDO $db): void {
         $db = new PDO('sqlite:' . $databasePath);
         $db->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
         $db->setAttribute(PDO::ATTR_DEFAULT_FETCH_MODE, PDO::FETCH_ASSOC);
-        $db->exec('PRAGMA foreign_keys = ON');
-        $db->exec('PRAGMA busy_timeout = 10000');
+        ingredientOntologyActivationConfigureDatabase(
+            $db,
+            INGREDIENT_ONTOLOGY_ACTIVATION_LIVE_BUSY_TIMEOUT_MS
+        );
         ingredientOntologyActivationRegisterGuardFunctions($db);
         $payloadUri = 'file:' . $payloadPath . '?mode=ro&immutable=1';
         $db->exec(
@@ -3100,7 +3210,7 @@ function ingredientOntologyActivationAssertActiveDatabase(PDO $db): void {
                 $progress->closeCursor();
                 $progress = null;
                 if (!$table) {
-                    $db->exec('BEGIN IMMEDIATE');
+                    dbBeginImmediateWithRetry($db);
                     try {
                         $done = $db->prepare("
                             UPDATE ontology_activation_imports
@@ -3137,7 +3247,7 @@ function ingredientOntologyActivationAssertActiveDatabase(PDO $db): void {
                 $cursor = (string)$table['cursor_column'];
                 $expectedRows = (int)$table['expected_row_count'];
                 $started = hrtime(true);
-                $db->exec('BEGIN IMMEDIATE');
+                dbBeginImmediateWithRetry($db);
                 try {
                     $current = $db->prepare("
                         SELECT status, lease_token, lease_generation,
@@ -3318,6 +3428,13 @@ function ingredientOntologyActivationAssertActiveDatabase(PDO $db): void {
                 ]);
             }
         } catch (Throwable $error) {
+            $message = (
+                function_exists('databaseIsLockError')
+                && databaseIsLockError($error)
+            )
+                ? 'Retryable SQLite contention: '
+                    . $error->getMessage()
+                : $error->getMessage();
             $db->prepare("
                 UPDATE ontology_activation_imports
                 SET lease_token = NULL,
@@ -3328,7 +3445,7 @@ function ingredientOntologyActivationAssertActiveDatabase(PDO $db): void {
                   AND lease_token = ?
                   AND lease_generation = ?
             ")->execute([
-                mb_substr($error->getMessage(), 0, 1000, 'UTF-8'),
+                mb_substr($message, 0, 1000, 'UTF-8'),
                 $importId,
                 $lease['token'],
                 $lease['generation'],
@@ -4046,7 +4163,7 @@ function ingredientOntologyActivationAssertActiveDatabase(PDO $db): void {
             );
         }
         $reservationStarted = hrtime(true);
-        $db->exec('BEGIN IMMEDIATE');
+        dbBeginImmediateWithRetry($db);
         try {
             $locked = ingredientOntologyActivationImportRow($db, $importId);
             $errors = ingredientOntologyActivationFenceErrors(
@@ -4389,7 +4506,7 @@ function ingredientOntologyActivationAssertActiveDatabase(PDO $db): void {
                 ingredientOntologyV3RequirementPruneGuardEnabled($db);
             $readyWas = ingredientOntologyV3ReadyMutationGuardEnabled($db);
             $started = hrtime(true);
-            $db->exec('BEGIN IMMEDIATE');
+            dbBeginImmediateWithRetry($db);
             try {
                 ingredientOntologyV3SetRequirementPruneGuard($db, true);
                 ingredientOntologyV3SetReadyMutationGuard($db, true);
@@ -4605,8 +4722,7 @@ function ingredientOntologyActivationAssertActiveDatabase(PDO $db): void {
         $db = new PDO('sqlite:' . $path);
         $db->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
         $db->setAttribute(PDO::ATTR_DEFAULT_FETCH_MODE, PDO::FETCH_ASSOC);
-        $db->exec('PRAGMA foreign_keys = ON');
-        $db->exec('PRAGMA busy_timeout = 10000');
+        ingredientOntologyActivationConfigureDatabase($db);
         ingredientOntologyActivationRegisterGuardFunctions($db);
         return $db;
     }
@@ -4627,22 +4743,43 @@ function ingredientOntologyActivationAssertActiveDatabase(PDO $db): void {
         }
     }
 
-    function ingredientOntologyActivationWriteManifest(
+    function ingredientOntologyActivationManifestHash(
         array $document,
-        string $directory,
         string $prefix
     ): string {
-        $hash = (string)(
-            $document['bundle_set_hash']
-                ?? $document['bundle_hash']
-                ?? $document['document_hash']
-                ?? ''
-        );
+        if ($prefix === 'bundle-set') {
+            $hash = (string)($document['bundle_set_hash'] ?? '');
+        } elseif ($prefix === 'score-bundle') {
+            $hash = (string)($document['bundle_hash'] ?? '');
+        } elseif ($prefix === 'acknowledgement') {
+            $hash = (string)($document['document_hash'] ?? '');
+        } elseif (preg_match(
+            '/^validation-attestation-[1-9][0-9]*$/D',
+            $prefix
+        )) {
+            $hash = (string)($document['attestation_hash'] ?? '');
+        } else {
+            throw new InvalidArgumentException(
+                'ontology activation manifest prefix is invalid'
+            );
+        }
         if (!preg_match('/^[a-f0-9]{64}$/D', $hash)) {
             throw new InvalidArgumentException(
                 'ontology activation manifest hash is invalid'
             );
         }
+        return $hash;
+    }
+
+    function ingredientOntologyActivationWriteManifest(
+        array $document,
+        string $directory,
+        string $prefix
+    ): string {
+        $hash = ingredientOntologyActivationManifestHash(
+            $document,
+            $prefix
+        );
         $path = $directory . '/' . $prefix . '-' . $hash . '.json';
         recipeCliWriteFileAtomically(
             $path,
@@ -4657,12 +4794,577 @@ function ingredientOntologyActivationAssertActiveDatabase(PDO $db): void {
         return $path;
     }
 
+    function ingredientOntologyActivationResolveWorkDirectory(
+        ?string $directory = null
+    ): string {
+        if ($directory === null) {
+            return ingredientOntologyActivationWorkDirectory();
+        }
+        $directory = rtrim(trim($directory), '/');
+        $resolved = realpath($directory);
+        if (
+            $directory === ''
+            || $resolved === false
+            || !is_dir($resolved)
+            || is_link($directory)
+            || !is_writable($resolved)
+        ) {
+            throw new InvalidArgumentException(
+                'ontology activation artifact directory is invalid'
+            );
+        }
+        return $resolved;
+    }
+
+    function ingredientOntologyActivationLoadManifest(
+        string $path,
+        string $prefix
+    ): array {
+        $resolved = realpath($path);
+        $directory = realpath(dirname($path));
+        if (
+            $resolved === false
+            || $directory === false
+            || $resolved !== $directory . '/' . basename($path)
+            || !is_file($resolved)
+            || is_link($path)
+        ) {
+            throw new InvalidArgumentException(
+                'ontology activation manifest path is invalid'
+            );
+        }
+        clearstatcache(true, $resolved);
+        $bytes = filesize($resolved);
+        if ($bytes === false || $bytes <= 0 || $bytes > 1048577) {
+            throw new RuntimeException(
+                'ontology activation manifest size is invalid'
+            );
+        }
+        $json = @file_get_contents($resolved);
+        if ($json === false) {
+            throw new RuntimeException(
+                'ontology activation manifest could not be read'
+            );
+        }
+        $document = json_decode(
+            $json,
+            true,
+            128,
+            JSON_THROW_ON_ERROR
+        );
+        if (!is_array($document)) {
+            throw new RuntimeException(
+                'ontology activation manifest document is invalid'
+            );
+        }
+        $hash = ingredientOntologyActivationManifestHash(
+            $document,
+            $prefix
+        );
+        if (
+            basename($resolved) !== $prefix . '-' . $hash . '.json'
+        ) {
+            throw new RuntimeException(
+                'ontology activation manifest filename is invalid'
+            );
+        }
+        $payload = $document;
+        if ($prefix === 'bundle-set') {
+            unset($payload['bundle_set_hash']);
+            if (
+                (string)($document['schema_version'] ?? '')
+                    !== 'ontology-activation-bundle-set-v2'
+                || !is_array($document['ontology'] ?? null)
+                || !is_array($document['score'] ?? null)
+                || !hash_equals(
+                    ingredientOntologyV3Hash($payload),
+                    $hash
+                )
+            ) {
+                throw new RuntimeException(
+                    'ontology activation bundle-set manifest is invalid'
+                );
+            }
+            ingredientOntologyActivationVerifyBundle(
+                $document['ontology']
+            );
+            ingredientOntologyActivationVerifyBundle(
+                $document['score']
+            );
+        } elseif ($prefix === 'score-bundle') {
+            ingredientOntologyActivationVerifyBundle($document);
+            if ((string)$document['bundle_kind'] !== 'score') {
+                throw new RuntimeException(
+                    'ontology activation score manifest kind is invalid'
+                );
+            }
+        } elseif ($prefix === 'acknowledgement') {
+            unset($payload['document_hash']);
+            if (
+                (string)($document['schema_version'] ?? '')
+                    !== 'ontology-activation-acknowledgement-v1'
+                || !hash_equals(
+                    ingredientOntologyV3Hash($payload),
+                    $hash
+                )
+            ) {
+                throw new RuntimeException(
+                    'ontology activation acknowledgement manifest is invalid'
+                );
+            }
+        } elseif (preg_match(
+            '/^validation-attestation-([1-9][0-9]*)$/D',
+            $prefix,
+            $matches
+        )) {
+            unset($payload['attestation_hash']);
+            if (
+                (string)($document['schema_version'] ?? '')
+                    !== 'ontology-activation-validation-attestation-v1'
+                || (int)($document['import_id'] ?? 0)
+                    !== (int)$matches[1]
+                || !hash_equals(
+                    ingredientOntologyV3Hash($payload),
+                    $hash
+                )
+            ) {
+                throw new RuntimeException(
+                    'ontology activation validation manifest is invalid'
+                );
+            }
+        } else {
+            throw new InvalidArgumentException(
+                'ontology activation manifest prefix is invalid'
+            );
+        }
+        return $document;
+    }
+
+    function ingredientOntologyActivationManifestCandidates(
+        string $directory
+    ): array {
+        $candidates = [];
+        foreach (new DirectoryIterator($directory) as $entry) {
+            if (!$entry->isFile() || $entry->isLink()) {
+                continue;
+            }
+            if (!preg_match(
+                '/^(bundle-set|score-bundle|acknowledgement)-'
+                    . '[a-f0-9]{64}\.json$/D',
+                $entry->getFilename(),
+                $matches
+            )) {
+                continue;
+            }
+            $candidates[] = [
+                'path' => $entry->getPathname(),
+                'prefix' => $matches[1],
+                'modified_at' => $entry->getMTime(),
+            ];
+        }
+        usort(
+            $candidates,
+            static fn(array $left, array $right): int =>
+                $right['modified_at'] <=> $left['modified_at']
+                    ?: strcmp($right['path'], $left['path'])
+        );
+        return $candidates;
+    }
+
+    function ingredientOntologyActivationImportByBundleHash(
+        PDO $db,
+        string $bundleHash
+    ): ?array {
+        $stmt = $db->prepare("
+            SELECT *
+            FROM ontology_activation_imports
+            WHERE bundle_hash = ?
+        ");
+        $stmt->execute([$bundleHash]);
+        $row = $stmt->fetch(PDO::FETCH_ASSOC);
+        return $row ?: null;
+    }
+
+    function ingredientOntologyActivationRemoveManifestFile(
+        string $path
+    ): void {
+        if (is_file($path) && !unlink($path)) {
+            throw new RuntimeException(
+                'ontology activation manifest could not be removed'
+            );
+        }
+    }
+
+    function ingredientOntologyActivationDiscardManifest(
+        PDO $db,
+        string $path,
+        array $document
+    ): void {
+        $bundles = [];
+        if (is_array($document['ontology'] ?? null)) {
+            $bundles[] = $document['ontology'];
+        }
+        if (is_array($document['score'] ?? null)) {
+            $bundles[] = $document['score'];
+        } elseif (
+            isset($document['bundle_hash'])
+            && isset($document['payload'])
+        ) {
+            $bundles[] = $document;
+        }
+        foreach ($bundles as $bundle) {
+            $bundleHash = (string)($bundle['bundle_hash'] ?? '');
+            if (
+                preg_match('/^[a-f0-9]{64}$/D', $bundleHash)
+                && ingredientOntologyActivationImportByBundleHash(
+                    $db,
+                    $bundleHash
+                ) !== null
+            ) {
+                continue;
+            }
+            $filename = basename((string)(
+                $bundle['payload']['file'] ?? ''
+            ));
+            if ($filename === '') {
+                continue;
+            }
+            $payloadPath = dirname($path) . '/' . $filename;
+            if (
+                is_file($payloadPath)
+                && !is_link($payloadPath)
+                && !unlink($payloadPath)
+            ) {
+                throw new RuntimeException(
+                    'ontology activation stale payload could not be removed'
+                );
+            }
+        }
+        ingredientOntologyActivationRemoveManifestFile($path);
+    }
+
+    function ingredientOntologyActivationLogDiscardedArtifact(
+        string $path,
+        Throwable $error
+    ): void {
+        if (class_exists('EverLog', false)) {
+            EverLog::warn(
+                'ontology activation discarded stale artifact',
+                [
+                    'manifest' => basename($path),
+                    'error' => mb_substr(
+                        $error->getMessage(),
+                        0,
+                        300,
+                        'UTF-8'
+                    ),
+                ]
+            );
+        }
+    }
+
+    function ingredientOntologyActivationRecoverPendingArtifacts(
+        PDO $db,
+        array $options = [],
+        ?string $workDirectory = null
+    ): ?array {
+        $directory = ingredientOntologyActivationResolveWorkDirectory(
+            $workDirectory
+        );
+        foreach (
+            ingredientOntologyActivationManifestCandidates($directory)
+            as $candidate
+        ) {
+            $path = (string)$candidate['path'];
+            $prefix = (string)$candidate['prefix'];
+            $document = [];
+            try {
+                $document = ingredientOntologyActivationLoadManifest(
+                    $path,
+                    $prefix
+                );
+                if ($prefix === 'acknowledgement') {
+                    $hash = (string)$document['document_hash'];
+                    $existing = $db->prepare("
+                        SELECT status
+                        FROM ontology_activation_acknowledgements
+                        WHERE document_hash = ?
+                    ");
+                    $existing->execute([$hash]);
+                    if ($existing->fetchColumn() === 'applied') {
+                        ingredientOntologyActivationRemoveManifestFile(
+                            $path
+                        );
+                        continue;
+                    }
+                    $result =
+                        ingredientOntologyActivationWithLiveReservation(
+                            $options,
+                            'acknowledge_no_op',
+                            static fn(): array =>
+                                ingredientOntologyActivationAcknowledgeNoOp(
+                                    $db,
+                                    $document
+                                )
+                        );
+                    ingredientOntologyActivationRemoveManifestFile($path);
+                    return [
+                        'action' => 'resume_acknowledgement',
+                        'acknowledgement' => $result,
+                    ];
+                }
+                if ($prefix === 'bundle-set') {
+                    $imports = [];
+                    $pending = [];
+                    foreach (['ontology', 'score'] as $kind) {
+                        $bundle = $document[$kind];
+                        $existing =
+                            ingredientOntologyActivationImportByBundleHash(
+                                $db,
+                                (string)$bundle['bundle_hash']
+                            );
+                        if ($existing !== null) {
+                            if (in_array(
+                                (string)$existing['status'],
+                                [
+                                    'rebase_required',
+                                    'failed',
+                                    'purging',
+                                    'cleaned',
+                                ],
+                                true
+                            )) {
+                                throw new RuntimeException(
+                                    'ontology activation retained bundle '
+                                        . 'has a terminal failed import'
+                                );
+                            }
+                            $imports[$kind] = $existing;
+                            continue;
+                        }
+                        $pending[$kind] = [
+                            'bundle' => $bundle,
+                            'payload_path' =>
+                                ingredientOntologyActivationResolvePayload(
+                                    $bundle,
+                                    $directory
+                                ),
+                        ];
+                    }
+                    if (!$pending) {
+                        ingredientOntologyActivationRemoveManifestFile(
+                            $path
+                        );
+                        continue;
+                    }
+                    ingredientOntologyActivationWithLiveReservation(
+                        $options,
+                        'register_bundle_set',
+                        static function () use (
+                            $db,
+                            $directory,
+                            $pending,
+                            &$imports
+                        ): void {
+                            foreach ($pending as $kind => $artifact) {
+                                $imports[$kind] =
+                                    ingredientOntologyActivationRegisterImport(
+                                        $db,
+                                        $artifact['bundle'],
+                                        $directory,
+                                        $artifact['payload_path']
+                                    );
+                            }
+                        }
+                    );
+                    ingredientOntologyActivationRemoveManifestFile($path);
+                    return [
+                        'action' => 'resume_bundle_set',
+                        'ontology_import' => $imports['ontology'] ?? null,
+                        'score_import' => $imports['score'] ?? null,
+                        'scheduled' => true,
+                    ];
+                }
+                $existing =
+                    ingredientOntologyActivationImportByBundleHash(
+                        $db,
+                        (string)$document['bundle_hash']
+                    );
+                if ($existing !== null) {
+                    if (in_array(
+                        (string)$existing['status'],
+                        [
+                            'rebase_required',
+                            'failed',
+                            'purging',
+                            'cleaned',
+                        ],
+                        true
+                    )) {
+                        throw new RuntimeException(
+                            'ontology activation retained score bundle '
+                                . 'has a terminal failed import'
+                        );
+                    }
+                    ingredientOntologyActivationRemoveManifestFile($path);
+                    continue;
+                }
+                $payloadPath =
+                    ingredientOntologyActivationResolvePayload(
+                        $document,
+                        $directory
+                    );
+                $import =
+                    ingredientOntologyActivationWithLiveReservation(
+                        $options,
+                        'register_score_import',
+                        static fn(): array =>
+                            ingredientOntologyActivationRegisterImport(
+                                $db,
+                                $document,
+                                $directory,
+                                $payloadPath
+                            )
+                    );
+                ingredientOntologyActivationRemoveManifestFile($path);
+                return [
+                    'action' => 'resume_score_bundle',
+                    'import' => $import,
+                    'scheduled' => true,
+                ];
+            } catch (
+                IngredientOntologyActivationReservationUnavailable $error
+            ) {
+                throw $error;
+            } catch (Throwable $error) {
+                if (
+                    function_exists('databaseIsLockError')
+                    && databaseIsLockError($error)
+                ) {
+                    throw $error;
+                }
+                if ($document) {
+                    ingredientOntologyActivationDiscardManifest(
+                        $db,
+                        $path,
+                        $document
+                    );
+                } else {
+                    ingredientOntologyActivationRemoveManifestFile($path);
+                }
+                ingredientOntologyActivationLogDiscardedArtifact(
+                    $path,
+                    $error
+                );
+            }
+        }
+        return null;
+    }
+
+    function ingredientOntologyActivationWriteValidationAttestation(
+        array $attestation,
+        ?string $workDirectory = null
+    ): string {
+        $importId = (int)($attestation['import_id'] ?? 0);
+        if ($importId <= 0) {
+            throw new InvalidArgumentException(
+                'ontology activation validation import is invalid'
+            );
+        }
+        return ingredientOntologyActivationWriteManifest(
+            $attestation,
+            ingredientOntologyActivationResolveWorkDirectory(
+                $workDirectory
+            ),
+            'validation-attestation-' . $importId
+        );
+    }
+
+    function ingredientOntologyActivationLoadValidationAttestation(
+        PDO $db,
+        int $importId,
+        ?string $workDirectory = null
+    ): ?array {
+        $directory = ingredientOntologyActivationResolveWorkDirectory(
+            $workDirectory
+        );
+        $prefix = 'validation-attestation-' . $importId;
+        $pattern = '/^' . preg_quote($prefix, '/') . '-'
+            . '[a-f0-9]{64}\.json$/D';
+        $candidates = [];
+        foreach (new DirectoryIterator($directory) as $entry) {
+            if (
+                $entry->isFile()
+                && !$entry->isLink()
+                && preg_match($pattern, $entry->getFilename())
+            ) {
+                $candidates[] = [
+                    'path' => $entry->getPathname(),
+                    'modified_at' => $entry->getMTime(),
+                ];
+            }
+        }
+        usort(
+            $candidates,
+            static fn(array $left, array $right): int =>
+                $right['modified_at'] <=> $left['modified_at']
+                    ?: strcmp($right['path'], $left['path'])
+        );
+        $row = ingredientOntologyActivationImportRow($db, $importId);
+        foreach ($candidates as $candidate) {
+            $path = (string)$candidate['path'];
+            try {
+                $attestation =
+                    ingredientOntologyActivationLoadManifest(
+                        $path,
+                        $prefix
+                    );
+                if (
+                    !hash_equals(
+                        (string)$row['bundle_hash'],
+                        (string)($attestation['bundle_hash'] ?? '')
+                    )
+                    || (string)$row['bundle_kind']
+                        !== (string)($attestation['bundle_kind'] ?? '')
+                ) {
+                    throw new RuntimeException(
+                        'ontology activation validation artifact changed'
+                    );
+                }
+                return [
+                    'attestation' => $attestation,
+                    'path' => $path,
+                ];
+            } catch (Throwable $error) {
+                ingredientOntologyActivationRemoveManifestFile($path);
+                ingredientOntologyActivationLogDiscardedArtifact(
+                    $path,
+                    $error
+                );
+            }
+        }
+        return null;
+    }
+
     function ingredientOntologyActivationValidationCopy(
         PDO $liveDb,
         int $importId,
         array $options = []
     ): array {
-        $directory = ingredientOntologyActivationWorkDirectory();
+        $observer = $options['validation_copy_observer'] ?? null;
+        if ($observer !== null) {
+            if (!is_callable($observer)) {
+                throw new InvalidArgumentException(
+                    'ontology activation validation observer is invalid'
+                );
+            }
+            $observer($importId);
+        }
+        $directory = ingredientOntologyActivationResolveWorkDirectory(
+            isset($options['work_directory'])
+                ? (string)$options['work_directory']
+                : null
+        );
         $path = $directory . '/validation-' . $importId . '-'
             . bin2hex(random_bytes(8)) . '.sqlite';
         ingredientOntologyActivationAssertDiskSpace(
@@ -4701,16 +5403,34 @@ function ingredientOntologyActivationAssertActiveDatabase(PDO $db): void {
             min(10000, (int)($options['maximum_chunks'] ?? 500))
         );
         $lockRetries = 0;
+        $yieldAfterReservation =
+            !empty($options['yield_after_live_reservation']);
         for ($loop = 0; $loop < $maximumLoops; $loop++) {
             $row = ingredientOntologyActivationImportRow($db, $importId);
             $status = (string)$row['status'];
             try {
                 if (in_array($status, ['staging', 'importing'], true)) {
-                    ingredientOntologyActivationRunImport(
-                        $db,
-                        $importId,
-                        $maximumChunks
+                    $bundle =
+                        ingredientOntologyActivationImportBundle($row);
+                    $verifiedPayloadPath =
+                        ingredientOntologyActivationResolvePayload(
+                            $bundle,
+                            dirname((string)$row['payload_path'])
+                        );
+                    $row = ingredientOntologyActivationWithLiveReservation(
+                        $options,
+                        'import',
+                        static fn(): array =>
+                            ingredientOntologyActivationRunImport(
+                                $db,
+                                $importId,
+                                $maximumChunks,
+                                $verifiedPayloadPath
+                            )
                     );
+                    if ($yieldAfterReservation) {
+                        return $row;
+                    }
                     continue;
                 }
                 if ($status === 'verifying') {
@@ -4722,21 +5442,88 @@ function ingredientOntologyActivationAssertActiveDatabase(PDO $db): void {
                     if (empty($transport['valid'])) {
                         continue;
                     }
-                    $attestation =
-                        ingredientOntologyActivationValidationCopy(
+                    $workDirectory = isset($options['work_directory'])
+                        ? (string)$options['work_directory']
+                        : null;
+                    $stored =
+                        ingredientOntologyActivationLoadValidationAttestation(
                             $db,
                             $importId,
-                            $options
+                            $workDirectory
                         );
-                    ingredientOntologyActivationStoreValidation(
-                        $db,
-                        $importId,
-                        $attestation
-                    );
+                    if ($stored === null) {
+                        $attestation =
+                            ingredientOntologyActivationValidationCopy(
+                                $db,
+                                $importId,
+                                $options
+                            );
+                        $attestationPath =
+                            ingredientOntologyActivationWriteValidationAttestation(
+                                $attestation,
+                                $workDirectory
+                            );
+                    } else {
+                        $attestation = $stored['attestation'];
+                        $attestationPath = (string)$stored['path'];
+                    }
+                    try {
+                        $row =
+                            ingredientOntologyActivationWithLiveReservation(
+                                $options,
+                                'validation_store',
+                                static fn(): array =>
+                                    ingredientOntologyActivationStoreValidation(
+                                        $db,
+                                        $importId,
+                                        $attestation
+                                    )
+                            );
+                    } catch (Throwable $error) {
+                        if (
+                            $error instanceof
+                                IngredientOntologyActivationReservationUnavailable
+                            || (
+                                function_exists('databaseIsLockError')
+                                && databaseIsLockError($error)
+                            )
+                        ) {
+                            throw $error;
+                        }
+                        ingredientOntologyActivationRemoveManifestFile(
+                            $attestationPath
+                        );
+                        throw $error;
+                    }
+                    try {
+                        ingredientOntologyActivationRemoveManifestFile(
+                            $attestationPath
+                        );
+                    } catch (Throwable $cleanupError) {
+                        ingredientOntologyActivationLogDiscardedArtifact(
+                            $attestationPath,
+                            $cleanupError
+                        );
+                    }
+                    if ($yieldAfterReservation) {
+                        return $row;
+                    }
                     continue;
                 }
                 if ($status === 'activatable') {
-                    ingredientOntologyActivationActivateImport($db, $importId);
+                    $row =
+                        ingredientOntologyActivationWithLiveReservation(
+                            $options,
+                            'publication',
+                            static fn(): array =>
+                                ingredientOntologyActivationActivateImport(
+                                    $db,
+                                    $importId
+                                )
+                        );
+                    if ($yieldAfterReservation) {
+                        return $row;
+                    }
                     continue;
                 }
                 if (in_array(
@@ -4744,20 +5531,39 @@ function ingredientOntologyActivationAssertActiveDatabase(PDO $db): void {
                     ['rebase_required', 'failed', 'purging'],
                     true
                 )) {
-                    ingredientOntologyActivationCleanupImport(
-                        $db,
-                        $importId,
-                        $maximumChunks
+                    $row = ingredientOntologyActivationWithLiveReservation(
+                        $options,
+                        'cleanup_import',
+                        static fn(): array =>
+                            ingredientOntologyActivationCleanupImport(
+                                $db,
+                                $importId,
+                                $maximumChunks
+                            )
                     );
+                    if ($yieldAfterReservation) {
+                        return $row;
+                    }
                     continue;
                 }
                 return $row;
             } catch (Throwable $error) {
+                if ($error instanceof
+                    IngredientOntologyActivationReservationUnavailable
+                ) {
+                    throw $error;
+                }
                 if (
                     function_exists('databaseIsLockError')
                     && databaseIsLockError($error)
                 ) {
                     $lockRetries++;
+                    if ($yieldAfterReservation) {
+                        return ingredientOntologyActivationImportRow(
+                            $db,
+                            $importId
+                        );
+                    }
                     $db->prepare("
                         UPDATE ontology_activation_imports
                         SET lease_token = NULL,
@@ -4788,11 +5594,20 @@ function ingredientOntologyActivationAssertActiveDatabase(PDO $db): void {
                     usleep(150000 * $lockRetries);
                     continue;
                 }
-                ingredientOntologyActivationFailImport(
-                    $db,
-                    $importId,
-                    $error
-                );
+                $failed =
+                    ingredientOntologyActivationWithLiveReservation(
+                        $options,
+                        'mark_import_failed',
+                        static fn(): array =>
+                            ingredientOntologyActivationFailImport(
+                                $db,
+                                $importId,
+                                $error
+                            )
+                    );
+                if ($yieldAfterReservation) {
+                    return $failed;
+                }
             }
         }
         return ingredientOntologyActivationImportRow($db, $importId);
@@ -4964,6 +5779,11 @@ function ingredientOntologyActivationAssertActiveDatabase(PDO $db): void {
         PDO $liveDb,
         array $options = []
     ): array {
+        if (!ingredientOntologyControllerEnabled()) {
+            throw new RuntimeException(
+                'ontology_activation_generation_requires_enabled_controller'
+            );
+        }
         $directory = ingredientOntologyActivationWorkDirectory();
         $before = ingredientOntologyActivationDirectoryFiles($directory);
         $workspace = $directory . '/generation-'
@@ -5151,8 +5971,57 @@ function ingredientOntologyActivationAssertActiveDatabase(PDO $db): void {
         }
     }
 
-    function ingredientOntologyActivationCleanupWorkFiles(PDO $db): array {
-        $directory = ingredientOntologyActivationWorkDirectory();
+    function ingredientOntologyActivationManifestPayloadPaths(
+        string $directory
+    ): array {
+        $referenced = [];
+        foreach (
+            ingredientOntologyActivationManifestCandidates($directory)
+            as $candidate
+        ) {
+            try {
+                $document = ingredientOntologyActivationLoadManifest(
+                    (string)$candidate['path'],
+                    (string)$candidate['prefix']
+                );
+            } catch (Throwable $error) {
+                // Recovery owns invalid-manifest disposal and diagnostics.
+                continue;
+            }
+            $bundles = [];
+            if (is_array($document['ontology'] ?? null)) {
+                $bundles[] = $document['ontology'];
+            }
+            if (is_array($document['score'] ?? null)) {
+                $bundles[] = $document['score'];
+            } elseif (
+                isset($document['bundle_hash'])
+                && is_array($document['payload'] ?? null)
+            ) {
+                $bundles[] = $document;
+            }
+            foreach ($bundles as $bundle) {
+                $filename = basename((string)(
+                    $bundle['payload']['file'] ?? ''
+                ));
+                if (
+                    $filename !== ''
+                    && preg_match('/^[A-Za-z0-9._-]+$/D', $filename)
+                ) {
+                    $referenced[$directory . '/' . $filename] = true;
+                }
+            }
+        }
+        return $referenced;
+    }
+
+    function ingredientOntologyActivationCleanupWorkFiles(
+        PDO $db,
+        ?string $workDirectory = null
+    ): array {
+        $directory = ingredientOntologyActivationResolveWorkDirectory(
+            $workDirectory
+        );
         $referenced = [];
         $paths = $db->query("
             SELECT payload_path
@@ -5162,6 +6031,8 @@ function ingredientOntologyActivationAssertActiveDatabase(PDO $db): void {
         foreach ($paths as $path) {
             $referenced[(string)$path] = true;
         }
+        $referenced +=
+            ingredientOntologyActivationManifestPayloadPaths($directory);
         $deleted = [];
         $errors = [];
         $now = time();
@@ -5192,7 +6063,8 @@ function ingredientOntologyActivationAssertActiveDatabase(PDO $db): void {
                     . '\.sqlite\.tmp\.[1-9][0-9]*\.[a-f0-9]{12}$/D',
                 $name
             ) || preg_match(
-                '/^(bundle-set|score-bundle|acknowledgement)-.+'
+                '/^(bundle-set|score-bundle|acknowledgement|'
+                    . 'validation-attestation-[1-9][0-9]*)-.+'
                     . '\.json\.tmp-[a-f0-9]{16}$/D',
                 $name
             );
@@ -5224,7 +6096,8 @@ function ingredientOntologyActivationAssertActiveDatabase(PDO $db): void {
                 }
             }
             $manifest = preg_match(
-                '/^(bundle-set|score-bundle|acknowledgement)-'
+                '/^(bundle-set|score-bundle|acknowledgement|'
+                    . 'validation-attestation-[1-9][0-9]*)-'
                     . '[a-f0-9]{64}\.json$/D',
                 $name
             );
@@ -5267,13 +6140,42 @@ function ingredientOntologyActivationAssertActiveDatabase(PDO $db): void {
         return $delete->rowCount();
     }
 
+    function ingredientOntologyActivationPruneCdcBestEffort(
+        PDO $db,
+        array $options = []
+    ): int {
+        try {
+            return ingredientOntologyActivationWithLiveReservation(
+                $options,
+                'cdc_prune',
+                static fn(): int =>
+                    ingredientOntologyActivationPruneCdc($db)
+            );
+        } catch (
+            IngredientOntologyActivationReservationUnavailable $error
+        ) {
+            return 0;
+        } catch (Throwable $error) {
+            if (
+                !function_exists('databaseIsLockError')
+                || !databaseIsLockError($error)
+            ) {
+                throw $error;
+            }
+            return 0;
+        }
+    }
+
     function ingredientOntologyActivationRunOnce(
         PDO $db,
         array $options = []
     ): array {
         ingredientOntologyActivationAssertActiveDatabase($db);
         $workCleanup = ingredientOntologyActivationCleanupWorkFiles($db);
-        $cdcPruned = ingredientOntologyActivationPruneCdc($db);
+        $cdcPruned = ingredientOntologyActivationPruneCdcBestEffort(
+            $db,
+            $options
+        );
         $pending = ingredientOntologyActivationPendingImport($db);
         if ($pending !== null) {
             $result = ingredientOntologyActivationDriveImport(
@@ -5298,14 +6200,42 @@ function ingredientOntologyActivationAssertActiveDatabase(PDO $db): void {
             ];
         }
 
+        $recovered =
+            ingredientOntologyActivationRecoverPendingArtifacts(
+                $db,
+                $options
+            );
+        if ($recovered !== null) {
+            return $recovered + [
+                'work_cleanup' => $workCleanup,
+                'cdc_pruned' => $cdcPruned,
+            ];
+        }
+
         $staleOntology =
             ingredientOntologyActivationStaleOntologyImport($db);
         if ($staleOntology !== null) {
-            ingredientOntologyActivationFailImport(
-                $db,
-                (int)$staleOntology['id'],
-                'Active ontology parent changed before score build.'
-            );
+            $failed =
+                ingredientOntologyActivationWithLiveReservation(
+                    $options,
+                    'mark_stale_import',
+                    static fn(): array =>
+                        ingredientOntologyActivationFailImport(
+                            $db,
+                            (int)$staleOntology['id'],
+                            'Active ontology parent changed before score build.'
+                        )
+                );
+            if (!empty(
+                $options['yield_after_live_reservation']
+            )) {
+                return [
+                    'action' => 'supersede_stale_ontology',
+                    'import' => $failed,
+                    'work_cleanup' => $workCleanup,
+                    'cdc_pruned' => $cdcPruned,
+                ];
+            }
             return [
                 'action' => 'supersede_stale_ontology',
                 'import' => ingredientOntologyActivationDriveImport(
@@ -5331,10 +6261,15 @@ function ingredientOntologyActivationAssertActiveDatabase(PDO $db): void {
                         $options
                     );
             } catch (Throwable $error) {
-                ingredientOntologyActivationFailImport(
-                    $db,
-                    (int)$waiting['id'],
-                    $error
+                ingredientOntologyActivationWithLiveReservation(
+                    $options,
+                    'mark_rebase_required',
+                    static fn(): array =>
+                        ingredientOntologyActivationFailImport(
+                            $db,
+                            (int)$waiting['id'],
+                            $error
+                        )
                 );
                 return [
                     'action' => 'rebase_ontology',
@@ -5344,13 +6279,36 @@ function ingredientOntologyActivationAssertActiveDatabase(PDO $db): void {
                 ];
             }
             try {
-                $import = ingredientOntologyActivationRegisterImport(
-                    $db,
-                    $scoreBundle,
-                    ingredientOntologyActivationWorkDirectory()
-                );
+                $directory =
+                    ingredientOntologyActivationWorkDirectory();
+                $verifiedPayloadPath =
+                    ingredientOntologyActivationResolvePayload(
+                        $scoreBundle,
+                        $directory
+                    );
+                $import =
+                    ingredientOntologyActivationWithLiveReservation(
+                        $options,
+                        'register_score_import',
+                        static fn(): array =>
+                            ingredientOntologyActivationRegisterImport(
+                                $db,
+                                $scoreBundle,
+                                $directory,
+                                $verifiedPayloadPath
+                            )
+                    );
+                if (!empty(
+                    $options['yield_after_live_reservation']
+                )) {
+                    return [
+                        'action' => 'build_score',
+                        'import' => $import,
+                        'work_cleanup' => $workCleanup,
+                        'cdc_pruned' => $cdcPruned,
+                    ];
+                }
             } catch (Throwable $error) {
-                ingredientOntologyActivationRemovePayload($scoreBundle);
                 throw $error;
             }
             return [
@@ -5377,32 +6335,101 @@ function ingredientOntologyActivationAssertActiveDatabase(PDO $db): void {
                         $options
                     );
             if (is_array($built['acknowledgement'] ?? null)) {
+                $acknowledgement =
+                    ingredientOntologyActivationWithLiveReservation(
+                        $options,
+                        'acknowledge_no_op',
+                        static fn(): array =>
+                            ingredientOntologyActivationAcknowledgeNoOp(
+                                $db,
+                                $built['acknowledgement']
+                            )
+                    );
                 return [
                     'action' => 'acknowledge_no_op',
-                    'acknowledgement' =>
-                        ingredientOntologyActivationAcknowledgeNoOp(
-                            $db,
-                            $built['acknowledgement']
-                        ),
+                    'acknowledgement' => $acknowledgement,
                     'work_cleanup' => $workCleanup,
                     'cdc_pruned' => $cdcPruned,
                 ];
             }
             $bundleSet = $built;
+            if (!empty($options['yield_after_live_reservation'])) {
+                $ontologyImport = null;
+                $scoreImport = null;
+                try {
+                    $directory =
+                        ingredientOntologyActivationWorkDirectory();
+                    $ontologyPayloadPath =
+                        ingredientOntologyActivationResolvePayload(
+                            $bundleSet['ontology'],
+                            $directory
+                        );
+                    $scorePayloadPath =
+                        ingredientOntologyActivationResolvePayload(
+                            $bundleSet['score'],
+                            $directory
+                        );
+                    ingredientOntologyActivationWithLiveReservation(
+                        $options,
+                        'register_bundle_set',
+                        function () use (
+                            $db,
+                            $bundleSet,
+                            $directory,
+                            $ontologyPayloadPath,
+                            $scorePayloadPath,
+                            &$ontologyImport,
+                            &$scoreImport
+                        ): void {
+                            $ontologyImport =
+                                ingredientOntologyActivationRegisterImport(
+                                    $db,
+                                    $bundleSet['ontology'],
+                                    $directory,
+                                    $ontologyPayloadPath
+                                );
+                            $scoreImport =
+                                ingredientOntologyActivationRegisterImport(
+                                    $db,
+                                    $bundleSet['score'],
+                                    $directory,
+                                    $scorePayloadPath
+                                );
+                        }
+                    );
+                } catch (Throwable $error) {
+                    throw $error;
+                }
+                return [
+                    'action' => 'build_ontology_and_score',
+                    'ontology_import' => $ontologyImport,
+                    'score_import' => $scoreImport,
+                    'scheduled' => true,
+                    'work_cleanup' => $workCleanup,
+                    'cdc_pruned' => $cdcPruned,
+                ];
+            }
             try {
-                $ontologyImport =
-                    ingredientOntologyActivationRegisterImport(
-                        $db,
+                $directory =
+                    ingredientOntologyActivationWorkDirectory();
+                $verifiedPayloadPath =
+                    ingredientOntologyActivationResolvePayload(
                         $bundleSet['ontology'],
-                        ingredientOntologyActivationWorkDirectory()
+                        $directory
+                    );
+                $ontologyImport =
+                    ingredientOntologyActivationWithLiveReservation(
+                        $options,
+                        'register_ontology_import',
+                        static fn(): array =>
+                            ingredientOntologyActivationRegisterImport(
+                                $db,
+                                $bundleSet['ontology'],
+                                $directory,
+                                $verifiedPayloadPath
+                            )
                     );
             } catch (Throwable $error) {
-                ingredientOntologyActivationRemovePayload(
-                    $bundleSet['ontology']
-                );
-                ingredientOntologyActivationRemovePayload(
-                    $bundleSet['score']
-                );
                 throw $error;
             }
             $ontologyImport = ingredientOntologyActivationDriveImport(
@@ -5411,12 +6438,6 @@ function ingredientOntologyActivationAssertActiveDatabase(PDO $db): void {
                 $options
             );
             if ((string)$ontologyImport['status'] !== 'complete') {
-                ingredientOntologyActivationRemovePayload(
-                    $bundleSet['ontology']
-                );
-                ingredientOntologyActivationRemovePayload(
-                    $bundleSet['score']
-                );
                 return [
                     'action' => 'build_ontology',
                     'import' => $ontologyImport,
@@ -5428,16 +6449,26 @@ function ingredientOntologyActivationAssertActiveDatabase(PDO $db): void {
                 $bundleSet['ontology']
             );
             try {
-                $scoreImport =
-                    ingredientOntologyActivationRegisterImport(
-                        $db,
+                $directory =
+                    ingredientOntologyActivationWorkDirectory();
+                $verifiedPayloadPath =
+                    ingredientOntologyActivationResolvePayload(
                         $bundleSet['score'],
-                        ingredientOntologyActivationWorkDirectory()
+                        $directory
+                    );
+                $scoreImport =
+                    ingredientOntologyActivationWithLiveReservation(
+                        $options,
+                        'register_score_import',
+                        static fn(): array =>
+                            ingredientOntologyActivationRegisterImport(
+                                $db,
+                                $bundleSet['score'],
+                                $directory,
+                                $verifiedPayloadPath
+                            )
                     );
             } catch (Throwable $error) {
-                ingredientOntologyActivationRemovePayload(
-                    $bundleSet['score']
-                );
                 throw $error;
             }
             $scoreImport = ingredientOntologyActivationDriveImport(
@@ -5472,13 +6503,36 @@ function ingredientOntologyActivationAssertActiveDatabase(PDO $db): void {
                 $options
             );
             try {
-                $import = ingredientOntologyActivationRegisterImport(
-                    $db,
-                    $scoreBundle,
-                    ingredientOntologyActivationWorkDirectory()
-                );
+                $directory =
+                    ingredientOntologyActivationWorkDirectory();
+                $verifiedPayloadPath =
+                    ingredientOntologyActivationResolvePayload(
+                        $scoreBundle,
+                        $directory
+                    );
+                $import =
+                    ingredientOntologyActivationWithLiveReservation(
+                        $options,
+                        'register_score_import',
+                        static fn(): array =>
+                            ingredientOntologyActivationRegisterImport(
+                                $db,
+                                $scoreBundle,
+                                $directory,
+                                $verifiedPayloadPath
+                            )
+                    );
+                if (!empty(
+                    $options['yield_after_live_reservation']
+                )) {
+                    return [
+                        'action' => 'refresh_score',
+                        'import' => $import,
+                        'work_cleanup' => $workCleanup,
+                        'cdc_pruned' => $cdcPruned,
+                    ];
+                }
             } catch (Throwable $error) {
-                ingredientOntologyActivationRemovePayload($scoreBundle);
                 throw $error;
             }
             return [
@@ -5497,5 +6551,6 @@ function ingredientOntologyActivationAssertActiveDatabase(PDO $db): void {
             'action' => 'none',
             'reason' => 'fresh',
             'work_cleanup' => $workCleanup,
+            'cdc_pruned' => $cdcPruned,
         ];
     }

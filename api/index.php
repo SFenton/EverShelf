@@ -93,6 +93,8 @@ if (($_GET['action'] ?? '') === 'ha_info' && evershelfApiTokenRequired() && !eve
         'api_token_required' => true,
         'api_version'        => 1,
         'capabilities'       => array_values(array_filter([
+            'inventory_decrement_v1',
+            'processing_status_v1',
             'recipe_catalog_v2',
             'recipe_detail_v1',
             'recipe_grocery_v1',
@@ -932,6 +934,9 @@ try {
                 ],
                 JSON_UNESCAPED_UNICODE
             );
+            break;
+        case 'processing_status':
+            evershelfProcessingStatusApi($db);
             break;
 
         // ===== INVENTORY =====
@@ -2261,6 +2266,8 @@ function haGetInfo(PDO $db): void {
         'api_token_required' => evershelfApiTokenRequired(),
         'api_version' => 1,
         'capabilities' => array_values(array_filter([
+            'inventory_decrement_v1',
+            'processing_status_v1',
             'recipe_catalog_v2',
             'recipe_detail_v1',
             'recipe_grocery_v1',
@@ -2558,9 +2565,17 @@ function barcodeFindLocalProduct(PDO $db, string $barcode): ?array {
 }
 
 function barcodeCacheGet(PDO $db, string $barcode): ?array {
-    $stmt = $db->prepare("SELECT found, source, payload, updated_at FROM barcode_cache WHERE barcode = ?");
-    $stmt->execute([$barcode]);
-    $row = $stmt->fetch(PDO::FETCH_ASSOC);
+    $row = dbWithRetry(
+        static function () use ($db, $barcode): array|false {
+            $stmt = $db->prepare("
+                SELECT found, source, payload, updated_at
+                FROM barcode_cache
+                WHERE barcode = ?
+            ");
+            $stmt->execute([$barcode]);
+            return $stmt->fetch(PDO::FETCH_ASSOC);
+        }
+    );
     if (!$row) {
         return null;
     }
@@ -2580,20 +2595,54 @@ function barcodeCacheGet(PDO $db, string $barcode): ?array {
     return $payload;
 }
 
-function barcodeCacheSet(PDO $db, string $barcode, array $payload, bool $found): void {
-    $stmt = $db->prepare("INSERT INTO barcode_cache (barcode, found, source, payload, updated_at)
-        VALUES (?, ?, ?, ?, datetime('now'))
-        ON CONFLICT(barcode) DO UPDATE SET
-            found = excluded.found,
-            source = excluded.source,
-            payload = excluded.payload,
-            updated_at = excluded.updated_at");
-    $stmt->execute([
-        $barcode,
-        $found ? 1 : 0,
-        $payload['source'] ?? ($found ? 'external' : 'miss'),
-        json_encode($payload, JSON_UNESCAPED_UNICODE),
-    ]);
+function barcodeCacheSet(
+    PDO $db,
+    string $barcode,
+    array $payload,
+    bool $found
+): bool {
+    try {
+        dbWithRetry(
+            static function () use (
+                $db,
+                $barcode,
+                $payload,
+                $found
+            ): void {
+                $stmt = $db->prepare("
+                    INSERT INTO barcode_cache (
+                        barcode, found, source, payload, updated_at
+                    )
+                    VALUES (?, ?, ?, ?, datetime('now'))
+                    ON CONFLICT(barcode) DO UPDATE SET
+                        found = excluded.found,
+                        source = excluded.source,
+                        payload = excluded.payload,
+                        updated_at = excluded.updated_at
+                ");
+                $stmt->execute([
+                    $barcode,
+                    $found ? 1 : 0,
+                    $payload['source'] ?? ($found ? 'external' : 'miss'),
+                    json_encode($payload, JSON_UNESCAPED_UNICODE),
+                ]);
+            }
+        );
+        return true;
+    } catch (PDOException $error) {
+        if (!databaseIsLockError($error)) {
+            throw $error;
+        }
+        EverLog::warn(
+            'barcode cache write deferred',
+            [
+                'barcode_hash' => substr(hash('sha256', $barcode), 0, 12),
+                'found' => $found,
+            ],
+            'resolve_barcode'
+        );
+        return false;
+    }
 }
 
 /** Parallel HTTP GET — returns map key => body (or null). */
@@ -3039,6 +3088,13 @@ function suggestLocation(PDO $db): void {
         }
     } catch (Throwable $error) {
         $reason = evershelfCopilotFailureReason($error);
+        EverLog::aiResponse(
+            LOCATION_SUGGESTION_MODEL,
+            0,
+            microtime(true) - $startedAt,
+            false,
+            $reason
+        );
         EverLog::warn(
             'Location suggestion Copilot fallback',
             [
@@ -3378,7 +3434,7 @@ function saveProduct(PDO $db): void {
         if ($id) {
             $transactionStarted = false;
             try {
-                $db->exec('BEGIN IMMEDIATE');
+                dbBeginImmediateWithRetry($db);
                 $transactionStarted = true;
                 $stmt = $db->prepare("
                     UPDATE products SET name=?, brand=?, category=?, image_url=?, unit=?,
@@ -3455,7 +3511,7 @@ function saveProduct(PDO $db): void {
 
         $transactionStarted = false;
         try {
-            $db->exec('BEGIN IMMEDIATE');
+            dbBeginImmediateWithRetry($db);
             $transactionStarted = true;
             $stmt = $db->prepare("
                 INSERT INTO products (
@@ -3549,7 +3605,7 @@ function saveProduct(PDO $db): void {
                 }
                 $transactionStarted = false;
                 try {
-                    $db->exec('BEGIN IMMEDIATE');
+                    dbBeginImmediateWithRetry($db);
                     $transactionStarted = true;
                     $stmt = $db->prepare("
                         UPDATE products SET name=?, brand=?, category=?,
@@ -3762,7 +3818,7 @@ function deleteProduct(PDO $db): void {
     $id = $input['id'] ?? 0;
     $transactionStarted = false;
     try {
-        $db->exec('BEGIN IMMEDIATE');
+        dbBeginImmediateWithRetry($db);
         $transactionStarted = true;
         if (function_exists(
             'ingredientOntologyControllerDeactivatePreparedProductSafely'
@@ -4363,7 +4419,7 @@ function addToInventory(PDO $db): void {
     }
 
     $transactionStarted = false;
-    $db->exec('BEGIN IMMEDIATE');
+    dbBeginImmediateWithRetry($db);
     $transactionStarted = true;
     try {
     if ($idempotencyKey !== null && $idempotencyHash !== null) {
@@ -4724,8 +4780,18 @@ function useFromInventory(PDO $db): void {
     } catch (\PDOException $e) {
         try { $db->exec('ROLLBACK'); } catch (Throwable $rollbackError) {}
         EverLog::error('useFromInventory db error', ['msg' => $e->getMessage()]);
-        http_response_code(500);
-        echo json_encode(['success' => false, 'error' => 'Database busy — please retry']);
+        $busy = databaseIsLockError($e);
+        http_response_code($busy ? 503 : 500);
+        if ($busy) {
+            header('Retry-After: 1');
+        }
+        echo json_encode([
+            'success' => false,
+            'error' => $busy ? 'database_busy' : 'request_failed',
+            'message' => $busy
+                ? 'EverShelf is briefly busy. Retry this request safely.'
+                : 'Inventory usage could not be saved.',
+        ]);
     } catch (Throwable $e) {
         try { $db->exec('ROLLBACK'); } catch (Throwable $rollbackError) {}
         throw $e;
@@ -4733,7 +4799,7 @@ function useFromInventory(PDO $db): void {
 }
 
 function useFromInventoryCore(PDO $db, $productId, $quantity, $useAll, $location, $notes): void {
-    $db->exec('BEGIN IMMEDIATE');
+    dbBeginImmediateWithRetry($db);
     // ── Server-side deduplication ─────────────────────────────────────────
     // Guard against accidental double-consume triggers (scale jitter, double tap,
     // delayed/offline replay burst). We only apply this stricter gate to manual
@@ -5269,10 +5335,251 @@ function resetProductUnitConversionHistory(PDO $db, int $productId): int {
     return $created;
 }
 
+function decrementInventoryEntry(
+    PDO $db,
+    int $inventoryId,
+    float $requestedQuantity,
+    ?string $requestedUnit = null
+): array {
+    $requestedQuantity = round($requestedQuantity, 6);
+    if (
+        $inventoryId <= 0
+        || !is_finite($requestedQuantity)
+        || $requestedQuantity <= 0
+    ) {
+        throw new InvalidArgumentException(
+            'Inventory decrement input is invalid'
+        );
+    }
+
+    return dbWithRetry(
+        static function () use (
+            $db,
+            $inventoryId,
+            $requestedQuantity,
+            $requestedUnit
+        ): array {
+            $db->exec('BEGIN IMMEDIATE');
+            try {
+                $stmt = $db->prepare("
+                    SELECT i.id, i.quantity, i.location, i.product_id,
+                           i.prepared_food, i.expiry_date,
+                           i.expiry_user_set, i.vacuum_sealed, i.opened_at,
+                           p.name AS product_name, p.unit AS product_unit
+                    FROM inventory i
+                    JOIN products p ON p.id = i.product_id
+                    WHERE i.id = ?
+                ");
+                $stmt->execute([$inventoryId]);
+                $row = $stmt->fetch(PDO::FETCH_ASSOC);
+                if (!$row) {
+                    $db->exec('ROLLBACK');
+                    return [
+                        'success' => false,
+                        'status' => 404,
+                        'error' => 'inventory_not_found',
+                        'message' => 'Inventory item was not found.',
+                    ];
+                }
+
+                $normalizedRequestedUnit = mb_strtolower(
+                    trim((string)($requestedUnit ?? '')),
+                    'UTF-8'
+                );
+                $normalizedStoredUnit = mb_strtolower(
+                    trim((string)($row['product_unit'] ?? '')),
+                    'UTF-8'
+                );
+                if (
+                    $normalizedRequestedUnit !== ''
+                    && (
+                        $normalizedStoredUnit === ''
+                        || $normalizedRequestedUnit
+                            !== $normalizedStoredUnit
+                    )
+                ) {
+                    $db->exec('ROLLBACK');
+                    return [
+                        'success' => false,
+                        'status' => 409,
+                        'error' => 'inventory_unit_mismatch',
+                        'message' => 'Requested unit does not match the '
+                            . 'inventory item.',
+                    ];
+                }
+
+                $currentQuantity = max(
+                    0.0,
+                    round((float)$row['quantity'], 6)
+                );
+                $usedQuantity = min(
+                    $requestedQuantity,
+                    $currentQuantity
+                );
+                $newQuantity = round(
+                    max(0.0, $currentQuantity - $usedQuantity),
+                    6
+                );
+                if ($usedQuantity > 0) {
+                    $db->prepare("
+                        UPDATE inventory
+                        SET quantity = ?,
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE id = ?
+                    ")->execute([$newQuantity, $inventoryId]);
+                    $db->prepare("
+                        INSERT INTO transactions (
+                            product_id, inventory_id, type, quantity,
+                            location, prepared_food,
+                            inventory_expiry_date,
+                            inventory_expiry_user_set,
+                            inventory_vacuum_sealed,
+                            inventory_opened_at, notes
+                        )
+                        VALUES (?, ?, 'out', ?, ?, ?, ?, ?, ?, ?,
+                                '[Inventory decrement]')
+                    ")->execute([
+                        (int)$row['product_id'],
+                        $inventoryId,
+                        $usedQuantity,
+                        (string)$row['location'],
+                        (int)($row['prepared_food'] ?? 0),
+                        $row['expiry_date'] ?? null,
+                        (int)($row['expiry_user_set'] ?? 0),
+                        (int)($row['vacuum_sealed'] ?? 0),
+                        $row['opened_at'] ?? null,
+                    ]);
+                    _syncProductPreparedFood(
+                        $db,
+                        (int)$row['product_id']
+                    );
+                    recipeJobEnqueueInventoryChanged(
+                        $db,
+                        (int)$row['product_id'],
+                        'inventory_decrement'
+                    );
+                }
+                $db->exec('COMMIT');
+                return [
+                    'success' => true,
+                    'status' => 200,
+                    'inventory_id' => $inventoryId,
+                    'product_id' => (int)$row['product_id'],
+                    'product_name' => (string)$row['product_name'],
+                    'location' => (string)$row['location'],
+                    'quantity' => $newQuantity,
+                    'used' => $usedQuantity,
+                ];
+            } catch (Throwable $error) {
+                if ($db->inTransaction()) {
+                    $db->exec('ROLLBACK');
+                }
+                throw $error;
+            }
+        }
+    );
+}
+
 function updateInventory(PDO $db): void {
     EverLog::info('updateInventory');
-    $input = json_decode(file_get_contents('php://input'), true);
+    $input = (
+        defined('RECIPE_BACKEND_TEST_MODE')
+        && RECIPE_BACKEND_TEST_MODE
+        && is_array($GLOBALS['INVENTORY_UPDATE_INPUT'] ?? null)
+    )
+        ? $GLOBALS['INVENTORY_UPDATE_INPUT']
+        : json_decode(file_get_contents('php://input'), true);
+    if (!is_array($input)) {
+        http_response_code(400);
+        echo json_encode([
+            'success' => false,
+            'error' => 'invalid_inventory_update',
+            'message' => 'Inventory update input is invalid.',
+        ]);
+        return;
+    }
     $id = $input['id'] ?? 0;
+
+    if (array_key_exists('decrement_quantity', $input)) {
+        $inventoryId = filter_var(
+            $id,
+            FILTER_VALIDATE_INT,
+            ['options' => ['min_range' => 1]]
+        );
+        if (
+            array_key_exists('quantity', $input)
+            || $inventoryId === false
+            || !is_numeric($input['decrement_quantity'])
+        ) {
+            http_response_code(400);
+            echo json_encode([
+                'success' => false,
+                'error' => 'invalid_inventory_decrement',
+                'message' => 'Inventory decrement input is invalid.',
+            ]);
+            return;
+        }
+        $decrement = round((float)$input['decrement_quantity'], 6);
+        if (!is_finite($decrement) || $decrement <= 0) {
+            http_response_code(400);
+            echo json_encode([
+                'success' => false,
+                'error' => 'invalid_inventory_decrement',
+                'message' => 'Inventory decrement must be greater than zero.',
+            ]);
+            return;
+        }
+        if (
+            array_key_exists('unit', $input)
+            && $input['unit'] !== null
+            && !is_string($input['unit'])
+        ) {
+            http_response_code(400);
+            echo json_encode([
+                'success' => false,
+                'error' => 'invalid_inventory_unit',
+                'message' => 'Inventory unit is invalid.',
+            ]);
+            return;
+        }
+        $result = decrementInventoryEntry(
+            $db,
+            (int)$inventoryId,
+            $decrement,
+            array_key_exists('unit', $input)
+                ? (string)($input['unit'] ?? '')
+                : null
+        );
+        $status = (int)$result['status'];
+        unset($result['status']);
+        http_response_code($status);
+        if (empty($result['success'])) {
+            echo json_encode($result);
+            return;
+        }
+        if ((float)$result['used'] > 0) {
+            invalidateSmartShoppingCache();
+            try {
+                bringSyncProductFromCache(
+                    $db,
+                    (int)$result['product_id']
+                );
+            } catch (Throwable $error) {
+                EverLog::warn(
+                    'inventory decrement shopping sync failed',
+                    ['error' => $error->getMessage()]
+                );
+            }
+            _fireHaWebhook('stock_update', [
+                'item' => (string)$result['product_name'],
+                'quantity' => (float)$result['quantity'],
+                'location' => (string)$result['location'],
+            ]);
+        }
+        unset($result['product_name']);
+        echo json_encode($result);
+        return;
+    }
 
     // Read current state before update (needed for transaction reconciliation)
     $prev = $db->prepare("
@@ -6353,7 +6660,7 @@ function undoTransaction(PDO $db): void {
         return;
     }
 
-    $db->exec('BEGIN IMMEDIATE');
+    dbBeginImmediateWithRetry($db);
     $lockedStmt = $db->prepare("
         SELECT t.*, p.name
         FROM transactions t
@@ -8940,6 +9247,7 @@ function readExpiryWithCopilotVision(
         $totalDeadline,
         microtime(true) + EXPIRY_COPILOT_VISION_TIMEOUT_SECONDS
     );
+    $visionStartedAt = microtime(true);
     try {
         if ($deadline <= microtime(true)) {
             return expiryNotFoundResult(
@@ -8966,6 +9274,12 @@ function readExpiryWithCopilotVision(
                 'expiry_vision_invalid_response'
             );
         }
+        EverLog::aiResponse(
+            EXPIRY_COPILOT_VISION_MODEL,
+            strlen(json_encode($envelope, JSON_UNESCAPED_UNICODE) ?: ''),
+            microtime(true) - $visionStartedAt,
+            true
+        );
         if (!$parsed['found']) {
             return expiryNotFoundResult(
                 'expiry_not_found',
@@ -15110,8 +15424,18 @@ function shoppingAdd(PDO $db): void {
             });
         } catch (\PDOException $e) {
             EverLog::error('shoppingAdd/bring db error', ['msg' => $e->getMessage()]);
-            http_response_code(500);
-            echo json_encode(['success' => false, 'error' => 'Database busy — please retry']);
+            $busy = databaseIsLockError($e);
+            http_response_code($busy ? 503 : 500);
+            if ($busy) {
+                header('Retry-After: 1');
+            }
+            echo json_encode([
+                'success' => false,
+                'error' => $busy ? 'database_busy' : 'request_failed',
+                'message' => $busy
+                    ? 'EverShelf is briefly busy. Retry this request safely.'
+                    : 'Shopping items could not be saved.',
+            ]);
         }
         return;
     }
@@ -15122,8 +15446,18 @@ function shoppingAdd(PDO $db): void {
         });
     } catch (\PDOException $e) {
         EverLog::error('shoppingAdd db error', ['msg' => $e->getMessage()]);
-        http_response_code(500);
-        echo json_encode(['success' => false, 'error' => 'Database busy — please retry']);
+        $busy = databaseIsLockError($e);
+        http_response_code($busy ? 503 : 500);
+        if ($busy) {
+            header('Retry-After: 1');
+        }
+        echo json_encode([
+            'success' => false,
+            'error' => $busy ? 'database_busy' : 'request_failed',
+            'message' => $busy
+                ? 'EverShelf is briefly busy. Retry this request safely.'
+                : 'Shopping items could not be saved.',
+        ]);
     }
 }
 

@@ -91,9 +91,6 @@ function databaseEnsureMigrated(
     ?string $lockPath = null
 ): void {
     $currentVersion = databaseSchemaVersion($db);
-    if ($currentVersion === EVERSHELF_DATABASE_SCHEMA_VERSION) {
-        return;
-    }
     if (
         $currentVersion !== null
         && $currentVersion > EVERSHELF_DATABASE_SCHEMA_VERSION
@@ -101,6 +98,10 @@ function databaseEnsureMigrated(
         throw new RuntimeException(
             'Database schema is newer than this EverShelf build'
         );
+    }
+    ingredientOntologyV3RegisterGuardFunctions($db);
+    if ($currentVersion === EVERSHELF_DATABASE_SCHEMA_VERSION) {
+        return;
     }
 
     $lockPath ??= DB_PATH . '.migration.lock';
@@ -249,9 +250,29 @@ function dbWithRetry(callable $fn, int $maxAttempts = 4): mixed {
             if (!$locked || $attempt >= $maxAttempts) {
                 throw $e;
             }
-            usleep(150000 * $attempt); // 150 ms, 300 ms, 450 ms …
+            $delayUs = 150000 * $attempt;
+            if (class_exists('EverLog', false)) {
+                EverLog::warn('sqlite busy retry', [
+                    'attempt' => $attempt,
+                    'max_attempts' => $maxAttempts,
+                    'delay_ms' => (int)round($delayUs / 1000),
+                ]);
+            }
+            usleep($delayUs); // 150 ms, 300 ms, 450 ms …
         }
     }
+}
+
+function dbBeginImmediateWithRetry(
+    PDO $db,
+    int $maxAttempts = 4
+): void {
+    dbWithRetry(
+        static function () use ($db): void {
+            $db->exec('BEGIN IMMEDIATE');
+        },
+        $maxAttempts
+    );
 }
 
 function initializeDB(PDO $db): void {

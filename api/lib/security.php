@@ -464,7 +464,7 @@ function evershelfDemoReadOnlyActions(): array {
         'recipes_list', 'recipe_catalog_search', 'recipe_catalog_get',
         'recipe_catalog_detail',
         'recipe_catalog_suggest', 'recipe_catalog_recommendations',
-        'recipe_jobs_status', 'recipe_connectors',
+        'recipe_jobs_status', 'recipe_connectors', 'processing_status',
         'chat_list', 'app_settings_get',
         'ha_sensor', 'ha_info', 'ha_shopping_items', 'ha_test', 'ha_calendar',
         'guess_category', 'get_shopping_price', 'get_all_shopping_prices',

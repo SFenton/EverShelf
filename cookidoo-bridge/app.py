@@ -66,8 +66,8 @@ MAX_RECIPE_SECONDS = 366 * 24 * 60 * 60
 MAX_SOURCE_NUMBER = 1_000_000_000
 MAX_EXCLUDED_RECIPE_IDS = 100000
 METADATA_SCHEMA_VERSION = "ingredient-topology-v1"
-DETAIL_HYDRATION_POLICY_VERSION = "metadata-v3-operator-enabled"
-DETAIL_HYDRATION_POLICY_REASON = "detail_hydration_disabled"
+DETAIL_HYDRATION_POLICY_VERSION = "metadata-v2-detail-disabled"
+DETAIL_HYDRATION_POLICY_REASON = "provider_detail_policy_disabled"
 ALLOWED_TMV = frozenset({"TM31", "TM5", "TM6", "TM7"})
 SAFE_SOURCE_UNIT_ALIASES = {
     "mg": "mg",
@@ -386,9 +386,7 @@ class BridgeConfig:
                 "COOKIDOO_DETAIL_CONCURRENCY", 1, 1, 4
             ),
             max_results=_env_int("COOKIDOO_MAX_RESULTS", 20, 1, 20),
-            detail_hydration_enabled=_env_bool(
-                "COOKIDOO_DETAIL_HYDRATION_ENABLED", False
-            ),
+            detail_hydration_enabled=False,
             password_login_enabled=_env_bool(
                 "COOKIDOO_PASSWORD_LOGIN_ENABLED", False
             ),

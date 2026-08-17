@@ -39,6 +39,15 @@ jobs:
       - name: Test shopping classification contract
         run: php scripts/test-shopping-classification.php
 
+      - name: Test atomic inventory decrement contract
+        run: php scripts/test-inventory-update.php
+
+      - name: Test processing status and contention contract
+        run: php scripts/test-processing-status.php
+
+      - name: Test activation runtime and bounded-memory contract
+        run: php scripts/test-ontology-activation-runtime.php
+
   lint-js:
     name: JavaScript Lint
     runs-on: ubuntu-latest

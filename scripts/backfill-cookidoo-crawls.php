@@ -23,7 +23,7 @@ function recipeCookidooBackfillUsage(): string {
         '  --json           Emit machine-readable JSON',
         '  --help           Show this help',
         '',
-        'Requires both Cookidoo connector and detail-hydration gates.',
+        'Provider crawl enqueue is disabled by repository policy.',
     ]) . PHP_EOL;
 }
 

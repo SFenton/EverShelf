@@ -12,8 +12,9 @@
  *   LOG_LEVEL        = INFO    (DEBUG|INFO|WARN|ERROR)
  *   LOG_ROTATE_HOURS = 24      (new file every N hours; 1–168; default 24)
  *   LOG_MAX_FILES    = 14      (max rotated files to keep; default 14)
+ *   LOG_DIR          = data/logs (writable persistent directory)
  *
- * Log files: logs/evershelf_YYYY-MM-DD_HH.log
+ * Log files: data/logs/evershelf_YYYY-MM-DD_HH.log
  * Each line:  [2026-05-18 14:23:11] [INFO ] [rid=a1b2c3d4] [action] Message {ctx}
  */
 class EverLog {
@@ -32,6 +33,11 @@ class EverLog {
     private static int    $maxFiles     = 14;
     private static string $requestId    = '';
     private static string $currentAction = '-';
+    private static bool   $writeHealthy = true;
+    private static ?string $lastWriteError = null;
+    private static bool   $fallbackReported = false;
+    private static ?float $requestStartedAt = null;
+    private static bool   $requestShutdownRegistered = false;
 
     // ── Init (called lazily on first write) ────────────────────────────────
     private static function init(): void {
@@ -53,11 +59,23 @@ class EverLog {
         self::$maxFiles    = $maxFiles;
         self::$requestId   = substr(bin2hex(random_bytes(4)), 0, 8);
 
-        // Ensure log directory exists
-        $base         = dirname(__DIR__) . '/logs';
+        // Runtime data is volume-backed and writable by www-data.
+        $configuredDir = trim((string)(getenv('LOG_DIR') ?: ''));
+        $base = $configuredDir !== ''
+            ? $configuredDir
+            : dirname(__DIR__) . '/data/logs';
         self::$logDir = $base;
         if (!is_dir($base)) {
-            @mkdir($base, 0755, true);
+            if (!@mkdir($base, 0775, true) && !is_dir($base)) {
+                self::recordWriteFailure(
+                    'log_directory_create_failed'
+                );
+            }
+        }
+        if (is_dir($base) && !is_writable($base)) {
+            self::recordWriteFailure(
+                'log_directory_not_writable'
+            );
         }
 
         // Compute current log file path (slot by rotate-hours bucket)
@@ -76,7 +94,18 @@ class EverLog {
         sort($files); // oldest first (filenames are lexicographically sortable by date)
         $toDelete = array_slice($files, 0, count($files) - self::$maxFiles);
         foreach ($toDelete as $f) {
-            @unlink($f);
+            if (!@unlink($f) && file_exists($f)) {
+                self::recordWriteFailure('log_rotation_delete_failed');
+            }
+        }
+    }
+
+    private static function recordWriteFailure(string $error): void {
+        self::$writeHealthy = false;
+        self::$lastWriteError = $error;
+        if (!self::$fallbackReported) {
+            self::$fallbackReported = true;
+            error_log('EverShelf logger failure: ' . $error);
         }
     }
 
@@ -91,7 +120,17 @@ class EverLog {
         $ctxStr = empty($ctx) ? '' : ' ' . json_encode($ctx, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
         $line   = "[{$ts}] [{$labels[$lvl]}] [rid=" . self::$requestId . "] [{$act}] {$msg}{$ctxStr}\n";
 
-        @file_put_contents(self::$logFile, $line, FILE_APPEND | LOCK_EX);
+        $written = @file_put_contents(
+            self::$logFile,
+            $line,
+            FILE_APPEND | LOCK_EX
+        );
+        if ($written === false || $written !== strlen($line)) {
+            self::recordWriteFailure('log_file_write_failed');
+            return;
+        }
+        self::$writeHealthy = true;
+        self::$lastWriteError = null;
     }
 
     // ── Public API ────────────────────────────────────────────────────────
@@ -135,13 +174,50 @@ class EverLog {
      * Automatically sets the current action name so subsequent lines inherit it.
      */
     public static function request(string $action, string $method, array $params = []): void {
+        self::init();
         self::setAction($action);
+        self::$requestStartedAt = microtime(true);
+        if (!self::$requestShutdownRegistered) {
+            self::$requestShutdownRegistered = true;
+            register_shutdown_function(
+                static function (): void {
+                    EverLog::completeRequest();
+                }
+            );
+        }
         // At DEBUG: include all params; at INFO just the action+method
         if (self::$level <= self::DEBUG) {
             self::write(self::DEBUG, "→ {$method} /{$action}", $params, $action);
         } else {
             self::write(self::INFO, "→ {$method} /{$action}", [], $action);
         }
+    }
+
+    public static function completeRequest(): void {
+        if (self::$requestStartedAt === null) {
+            return;
+        }
+        $startedAt = self::$requestStartedAt;
+        self::$requestStartedAt = null;
+        $status = http_response_code();
+        if (!is_int($status) || $status <= 0) {
+            $status = 200;
+        }
+        self::write(
+            $status >= 500 ? self::ERROR : self::INFO,
+            'request complete',
+            [
+                'status' => $status,
+                'elapsed_ms' => (int)round(
+                    (microtime(true) - $startedAt) * 1000
+                ),
+                'peak_memory_mb' => round(
+                    memory_get_peak_usage(true) / 1048576,
+                    1
+                ),
+            ],
+            self::$currentAction
+        );
     }
 
     /**
@@ -263,6 +339,18 @@ class EverLog {
     public static function currentFile(): string {
         self::init();
         return self::$logFile;
+    }
+
+    public static function status(): array {
+        self::init();
+        $writable = is_dir(self::$logDir)
+            && is_writable(self::$logDir);
+        return [
+            'healthy' => self::$writeHealthy && $writable,
+            'writable' => $writable,
+            'file' => basename(self::$logFile),
+            'last_error' => self::$lastWriteError,
+        ];
     }
 }
 

@@ -1309,7 +1309,7 @@ try {
             $cookidooRegistry['capabilities'],
             true
         ),
-        'Cookidoo connector capabilities must expose enabled hydration'
+        'Synthetic Cookidoo tests must expose enabled hydration'
     );
     $policyJobCountBefore = recipeTestCount(
         $db,
@@ -1820,23 +1820,23 @@ try {
             && $leaseExhaustedLocal['finished_at'] !== null
             && $leaseExhaustedCookidoo['status'] === 'skipped'
             && $leaseExhaustedCookidoo['last_error']
-                === 'detail_hydration_disabled'
+                === RECIPE_COOKIDOO_DETAIL_POLICY_REASON
             && $leaseExhaustedCookidoo['finished_at'] !== null
             && $leaseExhaustedCookidoo['started_at'] === null
             && $leaseExhaustedCookidoo['next_retry_at'] === null
             && $leaseExhaustedCookidoo['result']['reason']
-                === 'detail_hydration_disabled'
+                === RECIPE_COOKIDOO_DETAIL_POLICY_REASON
             && $leaseRetryCookidoo['status'] === 'skipped'
             && $leaseRetryCookidoo['last_error']
-                === 'detail_hydration_disabled'
+                === RECIPE_COOKIDOO_DETAIL_POLICY_REASON
             && $leaseRetryCookidoo['finished_at'] !== null
             && $policyPendingCookidoo['status'] === 'skipped'
             && $policyPendingCookidoo['last_error']
-                === 'detail_hydration_disabled'
+                === RECIPE_COOKIDOO_DETAIL_POLICY_REASON
             && $policyPendingCookidoo['finished_at'] !== null
             && $policyRetryCookidoo['status'] === 'skipped'
             && $policyRetryCookidoo['last_error']
-                === 'detail_hydration_disabled'
+                === RECIPE_COOKIDOO_DETAIL_POLICY_REASON
             && $policyRetryCookidoo['next_retry_at'] === null
             && $policyRetryCookidoo['finished_at'] !== null
             && $unrelatedLocalPending['status'] === 'pending'
@@ -1879,7 +1879,7 @@ try {
     recipeTestAssert(
         $policyTrueWorkerCookidoo['status'] === 'skipped'
             && $policyTrueWorkerCookidoo['last_error']
-                === 'detail_hydration_disabled'
+                === RECIPE_COOKIDOO_DETAIL_POLICY_REASON
             && $policyTrueWorkerCookidoo['finished_at'] !== null
             && $policyTrueWorkerCookidoo['started_at'] === null,
         'Global provider policy must terminalize Cookidoo work even when cadence allows it'
@@ -6075,14 +6075,19 @@ try {
     haGetInfo($db);
     $haInfo = json_decode((string)ob_get_clean(), true);
     recipeTestAssert(
-        in_array('recipe_detail_v1', $haInfo['capabilities'] ?? [], true)
+        in_array(
+            'inventory_decrement_v1',
+            $haInfo['capabilities'] ?? [],
+            true
+        )
+        && in_array('recipe_detail_v1', $haInfo['capabilities'] ?? [], true)
         && in_array('recipe_grocery_v1', $haInfo['capabilities'] ?? [], true)
         && in_array(
             'recipe_ingredient_feedback_v1',
             $haInfo['capabilities'] ?? [],
             true
         ),
-        'ha_info must advertise detail, grocery, and ingredient-feedback capabilities'
+        'ha_info must advertise decrement, detail, grocery, and ingredient-feedback capabilities'
     );
 
     $discoveryUpdated = recipeCookidooDiscover($db, [

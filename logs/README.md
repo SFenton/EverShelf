@@ -1,6 +1,8 @@
-# logs/
+# Runtime logs
 
-This directory contains EverShelf runtime log files.
+Runtime logs are written to `data/logs/`, which is part of the persistent,
+writable Docker data volume. This tracked directory now contains documentation
+only.
 
 Files are generated automatically by `api/logger.php` and follow the naming pattern:
 
@@ -8,7 +10,7 @@ Files are generated automatically by `api/logger.php` and follow the naming patt
 evershelf_YYYY-MM-DD_HH.log
 ```
 
-The directory is tracked in git (via this README) but `.log` files are ignored via `.gitignore`.
+`data/logs/` is ignored by git.
 
 ## Configuration (`.env`)
 
@@ -17,6 +19,7 @@ The directory is tracked in git (via this README) but `.log` files are ignored v
 | `LOG_LEVEL` | `INFO` | Minimum log level: `DEBUG`, `INFO`, `WARN`, `ERROR` |
 | `LOG_ROTATE_HOURS` | `24` | Hours per file before rotating |
 | `LOG_MAX_FILES` | `14` | Maximum number of rotated files to keep |
+| `LOG_DIR` | `data/logs` | Optional absolute log-directory override |
 
 ## Format
 

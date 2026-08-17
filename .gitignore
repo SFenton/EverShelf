@@ -18,6 +18,8 @@ data/*.db-journal
 data/*.db-wal
 data/*.db-shm
 data/backups/
+data/logs/
+data/ontology-activation/
 data/cron.log
 data/smart_shopping_cache.json
 data/bring_token.json
@@ -30,6 +32,10 @@ data/shopping_name_cache.json
 data/client_debug.log
 data/rate_limits/
 data/*.lock
+data/.ontology-v3-report-*.json
+data/.ontology-v3-audit-*.json
+data/.ontology-v3-gold-*.json
+data/.ontology-activation-runtime-lock-*
 
 # Optional local production builds
 assets/js/*.min.js

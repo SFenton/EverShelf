@@ -228,6 +228,38 @@ paths:
                     type: object
                     additionalProperties: true
 
+  /index.php?action=processing_status:
+    get:
+      summary: Get bounded recipe and ontology processing health
+      tags: [Products, Recipes]
+      responses:
+        "200":
+          description: >-
+            Compact processing phase, pending recipe/intake/generation/deferred
+            counts, oldest work age, recipe-score freshness, copied-activation
+            state, provider/logging health, and source-ingredient ontology
+            occurrence coverage. The endpoint never returns recipe rows,
+            prompts, credentials, or provider socket paths.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, status]
+                properties:
+                  success:
+                    type: boolean
+                  status:
+                    type: object
+                    required:
+                      - schema_version
+                      - observed_at
+                      - phase
+                      - active
+                      - problem
+                      - pending
+                      - recipe_scores
+                    additionalProperties: true
+
   /index.php?action=inventory_list:
     get:
       summary: List all inventory items
@@ -332,6 +364,14 @@ paths:
                   type: integer
                 quantity:
                   type: number
+                  description: Absolute replacement quantity for a manual correction.
+                decrement_quantity:
+                  type: number
+                  exclusiveMinimum: 0
+                  description: Atomically subtract this amount from the current row quantity.
+                unit:
+                  type: string
+                  description: Optional unit assertion used with decrement_quantity.
                 location:
                   type: string
                 expiry_date:
@@ -340,6 +380,8 @@ paths:
       responses:
         "200":
           description: Inventory entry updated
+        "409":
+          description: Optional decrement unit does not match the stored product unit
 
   /index.php?action=inventory_delete:
     post:

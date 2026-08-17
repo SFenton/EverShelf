@@ -33,6 +33,8 @@ $lockPath = tempnam(sys_get_temp_dir(), 'evershelf-migration-test-');
 if ($lockPath === false) {
     throw new RuntimeException('Could not create migration test lock');
 }
+$reopenPath = $lockPath . '.sqlite';
+$reopenLockPath = $lockPath . '.reopen.lock';
 
 try {
     databaseEnsureMigrated($db, $lockPath);
@@ -75,6 +77,39 @@ try {
         'Current-schema database opens must execute no writes'
     );
     $db->exec('PRAGMA query_only = OFF');
+
+    $fileDb = new PDO('sqlite:' . $reopenPath);
+    $fileDb->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+    $fileDb->setAttribute(PDO::ATTR_DEFAULT_FETCH_MODE, PDO::FETCH_ASSOC);
+    databaseEnsureMigrated($fileDb, $reopenLockPath);
+    $fileDb = null;
+
+    $reopenedDb = new PDO('sqlite:' . $reopenPath);
+    $reopenedDb->setAttribute(
+        PDO::ATTR_ERRMODE,
+        PDO::ERRMODE_EXCEPTION
+    );
+    $reopenedDb->setAttribute(
+        PDO::ATTR_DEFAULT_FETCH_MODE,
+        PDO::FETCH_ASSOC
+    );
+    $reopenedDb->exec('PRAGMA query_only = ON');
+    databaseEnsureMigrated($reopenedDb, $reopenLockPath);
+    $guards = $reopenedDb->query("
+        SELECT
+            ingredient_ontology_prune_guard() AS prune_guard,
+            ingredient_ontology_ready_mutation_guard() AS ready_guard,
+            ingredient_ontology_publication_guard() AS publication_guard
+    ")->fetch(PDO::FETCH_ASSOC);
+    $assert(
+        $guards === [
+            'prune_guard' => 0,
+            'ready_guard' => 0,
+            'publication_guard' => 0,
+        ],
+        'Current-schema reconnects must register ontology guard functions'
+    );
+    $reopenedDb = null;
 
     $assert(
         databaseIsLockError(new PDOException('database is locked')),
@@ -176,6 +211,10 @@ try {
     );
 } finally {
     @unlink($lockPath);
+    @unlink($reopenLockPath);
+    @unlink($reopenPath);
+    @unlink($reopenPath . '-wal');
+    @unlink($reopenPath . '-shm');
 }
 
 echo "Database runtime tests passed: {$assertions} assertions\n";

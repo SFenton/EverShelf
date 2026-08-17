@@ -2515,7 +2515,13 @@ function ingredientOntologyControllerEnqueueJob(
         'controller_policy_hash' =>
             ingredientOntologyControllerPolicyHash(),
     ];
-    if ($jobType !== 'subject_resolution') {
+    $isProvisionalFallback = $jobType === 'subject_resolution'
+        && (string)($input['operation'] ?? '')
+            === 'provisional_fallback';
+    if ($isProvisionalFallback) {
+        $jobKeyBasis['provisional_source_job_id'] =
+            (int)($input['source_job_id'] ?? 0);
+    } elseif ($jobType !== 'subject_resolution') {
         $jobKeyBasis['trigger_event_id'] = $triggerEventId;
         $jobKeyBasis['input_hash'] = $inputHash;
     }
@@ -4787,15 +4793,17 @@ function ingredientOntologyControllerConstraintHash(
         $where .= ' AND constraint_epoch <= ?';
         $params[] = $maximumEpoch;
     }
-    $stmt = $db->prepare("
-        SELECT stream_key, constraint_epoch, subject_fingerprint,
-               constraint_kind, target_owner_fingerprint
-        FROM ontology_constraint_ledger
-        {$where}
-        ORDER BY stream_key, constraint_epoch
-    ");
-    $stmt->execute($params);
-    return ingredientOntologyV3Hash($stmt->fetchAll(PDO::FETCH_ASSOC));
+    return ingredientOntologyV3CanonicalQueryRowsHash(
+        $db,
+        "
+            SELECT stream_key, constraint_epoch, subject_fingerprint,
+                   constraint_kind, target_owner_fingerprint
+            FROM ontology_constraint_ledger
+            {$where}
+            ORDER BY stream_key, constraint_epoch
+        ",
+        $params
+    );
 }
 
 function ingredientOntologyControllerConstraintHeadHash(array $row): string {
@@ -5664,7 +5672,7 @@ function ingredientOntologyControllerStreamEpoch(
                 )"
             : '';
         $token = hash('sha256', random_bytes(32) . ':' . hrtime(true));
-        $db->exec('BEGIN IMMEDIATE');
+        dbBeginImmediateWithRetry($db);
         try {
             ingredientOntologyControllerReclaimExpiredJobs($db);
             $ready = $db->prepare("
@@ -8455,7 +8463,12 @@ function ingredientOntologyControllerStreamEpoch(
             (int)$sourceJob['required_epoch'],
             (int)$sourceJob['priority']
         );
-        $db->prepare("
+        if ((int)$fallback['id'] === $sourceJobId) {
+            throw new RuntimeException(
+                'provisional fallback job collided with its source job'
+            );
+        }
+        $update = $db->prepare("
             UPDATE ontology_controller_jobs
             SET status = 'quarantined',
                 base_ontology_version_id = ?,
@@ -8471,7 +8484,8 @@ function ingredientOntologyControllerStreamEpoch(
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = ?
               AND mutation_plan_id IS NULL
-        ")->execute([
+        ");
+        $update->execute([
             (int)(
                 ingredientOntologyV3Version($db, $versionId)[
                     'parent_version_id'
@@ -8487,6 +8501,11 @@ function ingredientOntologyControllerStreamEpoch(
             mb_substr($reason, 0, 1000, 'UTF-8'),
             (int)$fallback['id'],
         ]);
+        if ($update->rowCount() !== 1) {
+            throw new RuntimeException(
+                'provisional fallback job could not be initialized'
+            );
+        }
         $read = $db->prepare("
             SELECT * FROM ontology_controller_jobs WHERE id = ?
         ");
@@ -9428,39 +9447,39 @@ function ingredientOntologyControllerVersionContentHash(
     PDO $db,
     int $versionId
 ): string {
-    $subjectRows = $db->prepare("
-        SELECT subject.subject_fingerprint,
-               resolution.status,
-               COALESCE(entity.slug, '') AS entity_slug,
-               resolution.confidence,
-               resolution.attributes_json,
-               resolution.evidence_hash,
-               resolution.plan_hash
-        FROM ingredient_ontology_subject_resolutions resolution
-        JOIN ontology_subjects subject
-          ON subject.id = resolution.subject_id
-        LEFT JOIN ingredient_ontology_entities entity
-          ON entity.id = resolution.entity_id
-        WHERE resolution.ontology_version_id = ?
-        ORDER BY subject.subject_fingerprint
-    ");
-    $subjectRows->execute([$versionId]);
-    $constraintRows = $db->prepare("
-        SELECT stream_key, subject.subject_fingerprint,
-               target_owner_fingerprint, constraint_kind,
-               constraint_epoch, evidence_hash
-        FROM ingredient_ontology_pair_constraints pair
-        JOIN ontology_subjects subject
-          ON subject.id = pair.subject_id
-        WHERE pair.ontology_version_id = ?
-        ORDER BY stream_key, constraint_epoch
-    ");
-    $constraintRows->execute([$versionId]);
-    return ingredientOntologyV3Hash([
-        'subject_resolutions' =>
-            $subjectRows->fetchAll(PDO::FETCH_ASSOC),
-        'pair_constraints' =>
-            $constraintRows->fetchAll(PDO::FETCH_ASSOC),
+    return ingredientOntologyV3CanonicalQueryMapHash($db, [
+        'subject_resolutions' => [
+            'sql' => "
+                SELECT subject.subject_fingerprint,
+                       resolution.status,
+                       COALESCE(entity.slug, '') AS entity_slug,
+                       resolution.confidence,
+                       resolution.attributes_json,
+                       resolution.evidence_hash,
+                       resolution.plan_hash
+                FROM ingredient_ontology_subject_resolutions resolution
+                JOIN ontology_subjects subject
+                  ON subject.id = resolution.subject_id
+                LEFT JOIN ingredient_ontology_entities entity
+                  ON entity.id = resolution.entity_id
+                WHERE resolution.ontology_version_id = ?
+                ORDER BY subject.subject_fingerprint
+            ",
+            'params' => [$versionId],
+        ],
+        'pair_constraints' => [
+            'sql' => "
+                SELECT stream_key, subject.subject_fingerprint,
+                       target_owner_fingerprint, constraint_kind,
+                       constraint_epoch, evidence_hash
+                FROM ingredient_ontology_pair_constraints pair
+                JOIN ontology_subjects subject
+                  ON subject.id = pair.subject_id
+                WHERE pair.ontology_version_id = ?
+                ORDER BY stream_key, constraint_epoch
+            ",
+            'params' => [$versionId],
+        ],
     ]);
 }
 
@@ -9468,20 +9487,20 @@ function ingredientOntologyControllerVersionConstraintHash(
     PDO $db,
     int $versionId
 ): string {
-    $stmt = $db->prepare("
-        SELECT pair.stream_key, pair.constraint_epoch,
-               subject.subject_fingerprint,
-               pair.constraint_kind,
-               pair.target_owner_fingerprint
-        FROM ingredient_ontology_pair_constraints pair
-        JOIN ontology_subjects subject
-          ON subject.id = pair.subject_id
-        WHERE pair.ontology_version_id = ?
-        ORDER BY pair.stream_key, pair.constraint_epoch
-    ");
-    $stmt->execute([$versionId]);
-    return ingredientOntologyV3Hash(
-        $stmt->fetchAll(PDO::FETCH_ASSOC)
+    return ingredientOntologyV3CanonicalQueryRowsHash(
+        $db,
+        "
+            SELECT pair.stream_key, pair.constraint_epoch,
+                   subject.subject_fingerprint,
+                   pair.constraint_kind,
+                   pair.target_owner_fingerprint
+            FROM ingredient_ontology_pair_constraints pair
+            JOIN ontology_subjects subject
+              ON subject.id = pair.subject_id
+            WHERE pair.ontology_version_id = ?
+            ORDER BY pair.stream_key, pair.constraint_epoch
+        ",
+        [$versionId]
     );
 }
 

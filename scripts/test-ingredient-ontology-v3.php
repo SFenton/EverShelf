@@ -512,12 +512,33 @@ try {
             $cronFile,
             'scripts/rebuild-recipe-scores.php'
         )
+        && !preg_match(
+            '/flock[^\n]*process-ontology-activation\.php/',
+            $cronFile
+        )
         && is_string($activationScript)
         && str_contains(
             $activationScript,
             'ingredientOntologyActivationRunOnce'
+        )
+        && str_contains(
+            $activationScript,
+            '.background-writer.lock'
+        )
+        && str_contains(
+            $activationScript,
+            "'yield_after_live_reservation' => true"
+        )
+        && str_contains(
+            $activationScript,
+            "'reason' => 'background_writer_locked'"
+        )
+        && str_contains(
+            $activationScript,
+            "'reason' => 'ontology_activation_backoff'"
         ),
-        'Cron must invoke the copied-database ontology activation scheduler'
+        'Cron must run copied activation outside the shared lock while the '
+            . 'worker reports bounded live lock and backoff outcomes'
     );
 
     foreach ([

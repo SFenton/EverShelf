@@ -109,7 +109,7 @@ Connect your pantry to your smart home in minutes — no YAML, no manual sensor 
 - **Local recipe catalog** — Generated and saved recipes accumulate in a durable SQLite catalog with title/ingredient FTS5 search, source provenance, favorites, and offline local lookup
 - **Taxonomy-aware suggestions** — Recipe ingredients match exact pantry terms and progressively broader taxonomy ancestors; suggestions rank pantry coverage and soon-to-expire stock deterministically
 - **Scan-driven discovery** — When a newly stocked product already has taxonomy—or once its queued taxonomy enrichment completes—EverShelf automatically queues both ingredient-filtered and text-only recipe discovery for the canonical ingredient and its full ancestor chain
-- **Cookidoo metadata discovery (experimental)** — The operator-approved `metadata-v2` bridge caches bounded factual General metadata, ordered ingredient names and display-only source amounts, remote image/canonical URLs, locale, and timestamps; official instructions and Guided Cooking data remain on Cookidoo
+- **Cookidoo metadata cache (experimental)** — Existing `metadata-v2` rows retain bounded factual General metadata, ordered ingredient names and display-only source amounts, remote image/canonical URLs, locale, and timestamps; provider hydration is policy-disabled and official instructions and Guided Cooking data remain on Cookidoo
 - **Recipe detail and missing groceries API** — A source-agnostic detail projection uses deterministic source-derived ingredient labels, reports separate grocery capability/state counts, and keeps Cookidoo instructions external-only; an idempotent action adds only revalidated missing ingredients to EverShelf's internal shopping list
 - **Scalable recipe browse and recommendations** — Materialized inventory score revisions power compact 50-card pages, coverage/expiry filtering, independent weights, snapshot cursors, and a deterministic responsive recommendation carousel without loading the full catalog into PHP
 - **Recipe stock hints** — Each pantry ingredient shows how much you have and what remains after use; when the leftover would be less than 5% of the full sealed package (10% for an already-opened partial pack), the recipe automatically uses everything on hand to avoid waste
@@ -533,15 +533,12 @@ suppressed regardless of confidence. `capabilities.grocery_add` means the comple
 nonempty list is supported, while the sibling `grocery` object reports missing,
 uncertain, in-stock, staple, eligible, and blocking state.
 
-Cookidoo search/detail access is default-off and requires matching
-`COOKIDOO_CONNECTOR_ENABLED` and `COOKIDOO_DETAIL_HYDRATION_ENABLED` gates in
-EverShelf plus the bridge detail gate. Scan-triggered discovery remains bounded,
-authenticated, English-filtered, metadata-only, and locally cached. Planner use
-is a separate explicit dual-gate operation.
-
-Full direct-ID catalog backfill remains separately controlled by
-`COOKIDOO_METADATA_BACKFILL_ENABLED`; scan-triggered taxonomy discovery does not
-require or imply full backfill.
+Cookidoo search/detail access is policy-disabled. Changing
+`COOKIDOO_CONNECTOR_ENABLED`, `COOKIDOO_DETAIL_HYDRATION_ENABLED`, or
+`COOKIDOO_METADATA_BACKFILL_ENABLED` cannot enable provider requests.
+Discovery, direct-ID hydration, periodic refresh, and legacy queued jobs fail
+locally without contacting Cookidoo. Existing cached rows remain searchable.
+Planner use is a separate explicit dual-gate operation.
 
 ### Ingredient ontology v3 shadow workflow
 
@@ -784,18 +781,20 @@ needed. Configure it manually only for non-Docker installs:
 # Copied ontology/score activation, every minute
 * * * * * php /path/to/evershelf/scripts/process-ontology-activation.php --write --allow-active-db --allow-network >> /path/to/evershelf/data/cron.log 2>&1
 
-# Local recipe jobs and cadence-limited Cookidoo discovery, every minute
+# Local recipe jobs and policy cleanup, every minute
 * * * * * php /path/to/evershelf/scripts/process-recipe-queue.php --limit=2 --max-attempts=3 --respect-cookidoo-cadence >> /path/to/evershelf/data/cron.log 2>&1
 ```
 
 These jobs are **not optional** when their features are enabled. The first drains canonical
 ingredient/taxonomy work, the second imports copied ontology/score revisions and
 keeps recipe browse scores current, and the third processes local recipe jobs
-plus remote metadata discovery. Without them, new products never receive
+plus terminal cleanup of disabled provider work. Without them, new products never receive
 taxonomy terms, durable ontology intents remain pending, large recipe catalogs
-remain temporarily unavailable, and remote hydration stays queued. Overlapping
-activation and queue runs use the shared background-writer lock; web scans stay
-independent and force a safe rebase if their inputs change.
+remain temporarily unavailable, and stale provider work remains queued. Overlapping
+activation and queue runs share the background-writer lock only during bounded
+live import and publication phases. Copied generation and validation run
+without it; web scans stay independent and force a safe rebase if their inputs
+change.
 
 ### Backup (Optional)
 
