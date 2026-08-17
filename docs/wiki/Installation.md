@@ -206,11 +206,56 @@ The `backup.sh` script copies `data/evershelf.db` to `data/backups/` with a time
 
 ## Updating
 
+### Manual Git upgrade from 1.9.9 or earlier
+
+Manual Git installations upgrading from `1.9.9` or earlier should preserve
+runtime JSON before pulling. Those files were previously tracked, so local
+runtime changes can block the pull; from `1.10.0` onward they are ignored and
+remain instance-local.
+
+```bash
+cd /var/www/html/dispensa
+runtime_state_dir="$HOME/.local/state/evershelf-upgrade-1.10.0"
+install -d -m 700 "$runtime_state_dir"
+cp -a \
+  data/ai_usage.json \
+  data/anomaly_dismissed.json \
+  data/backup_last_ts.json \
+  data/shopping_name_cache.json \
+  data/shopping_total_cache.json \
+  "$runtime_state_dir/"
+git checkout -- \
+  data/ai_usage.json \
+  data/anomaly_dismissed.json \
+  data/backup_last_ts.json \
+  data/shopping_name_cache.json \
+  data/shopping_total_cache.json
+git pull origin main
+cp -a \
+  "$runtime_state_dir/ai_usage.json" \
+  "$runtime_state_dir/anomaly_dismissed.json" \
+  "$runtime_state_dir/backup_last_ts.json" \
+  "$runtime_state_dir/shopping_name_cache.json" \
+  "$runtime_state_dir/shopping_total_cache.json" \
+  data/
+```
+
+If PHP runs as a different operating-system account, ensure the restored files
+have the same ownership as `data/evershelf.db`. After confirming the upgrade,
+remove the temporary directory from `$HOME/.local/state/`.
+
+### Routine manual Git updates
+
 ```bash
 cd /var/www/html/dispensa
 git pull origin main
 # Database migrations run automatically on next page load
 ```
+
+### Docker updates
+
+Docker named volumes already keep runtime state outside the image and require
+no migration step.
 
 With Docker:
 

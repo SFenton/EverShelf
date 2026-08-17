@@ -46,9 +46,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Activation cleanup preserves valid manifest-referenced payloads, validation
   attestations reload under their own integrity hash, and payload generation
   enforces file-backed SQLite temporary storage.
-- Docker builds exclude runtime logs and activation artifacts, and the PWA
-  displays readable server messages for machine-coded API errors while
-  retaining their original error codes.
+- Docker builds exclude runtime JSON state, logs, and activation artifacts.
+  The PWA displays curated messages for machine-coded API errors while
+  retaining their original error codes and suppressing raw request failures.
 - Every SQLite connection registers ontology trigger guard functions, including
   current-schema fast-path connections used by normal web requests.
 

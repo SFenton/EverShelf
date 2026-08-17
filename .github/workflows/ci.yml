@@ -57,9 +57,13 @@ jobs:
       - name: Check JS syntax
         run: |
           node -c assets/js/core/auth.js
+          node -c assets/js/core/api-errors.js
           node -c assets/js/core/startup-health.js
           node -c assets/js/core/category-refinement.js
           node -c assets/js/app.js
+
+      - name: Test public API error client contract
+        run: node scripts/test-api-errors-client.js
 
       - name: Test startup health client contract
         run: node scripts/test-startup-health-client.js
@@ -72,6 +76,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+
+      - name: Check runtime data exclusion
+        run: |
+          test -z "$(git ls-files 'data/*.json')"
+          grep -Fxq 'data/*.json' .dockerignore
 
       - name: Build Docker image
         run: |
@@ -89,6 +98,8 @@ jobs:
 
       - name: Test container starts
         run: |
+          test -z "$(docker run --rm --entrypoint sh evershelf-test -lc \
+            "find /var/www/html/data -maxdepth 1 -type f -name '*.json' -print -quit")"
           docker run -d --name test-evershelf -p 8080:80 evershelf-test
           sleep 5
           curl -f http://localhost:8080/ || exit 1

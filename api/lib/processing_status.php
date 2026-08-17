@@ -3,6 +3,16 @@ declare(strict_types=1);
 
 const EVERSHELF_PROCESSING_STATUS_SCHEMA =
     'evershelf-processing-status-v1';
+const EVERSHELF_PROCESSING_STATUS_PUBLIC_ERROR =
+    'EverShelf processing needs attention. Check the server logs for details.';
+
+function evershelfProcessingStatusPublicError(
+    ?string $error
+): ?string {
+    return trim((string)$error) === ''
+        ? null
+        : EVERSHELF_PROCESSING_STATUS_PUBLIC_ERROR;
+}
 
 function evershelfProcessingStatusTableExists(
     PDO $db,
@@ -399,7 +409,9 @@ function evershelfProcessingStatusActivation(PDO $db): array {
         static fn(array $left, array $right): int =>
             strcmp($right['updated_at'], $left['updated_at'])
     );
-    $lastError = (string)($errors[0]['message'] ?? '');
+    $lastError = evershelfProcessingStatusPublicError(
+        (string)($errors[0]['message'] ?? '')
+    );
     $formatImport = static function (?array $import): ?array {
         if (!is_array($import)) {
             return null;
@@ -427,9 +439,8 @@ function evershelfProcessingStatusActivation(PDO $db): array {
                 isset($import['candidate_score_revision_id'])
                     ? (int)$import['candidate_score_revision_id']
                     : null,
-            'last_error' => $error !== ''
-                ? mb_substr($error, 0, 300, 'UTF-8')
-                : null,
+            'last_error' =>
+                evershelfProcessingStatusPublicError($error),
             'created_at' => $import['created_at'],
             'updated_at' => $import['updated_at'],
             'activated_at' => $import['activated_at'],
@@ -448,9 +459,7 @@ function evershelfProcessingStatusActivation(PDO $db): array {
         ),
         'next_attempt_at' => $state['next_attempt_at'] ?? null,
         'failure_count' => (int)($state['failure_count'] ?? 0),
-        'last_error' => $lastError !== ''
-            ? mb_substr($lastError, 0, 300, 'UTF-8')
-            : null,
+        'last_error' => $lastError,
         'updated_at' => $state['updated_at'] ?? null,
         'current_import' => $formatImport($current),
         'latest_import' => $formatImport($latest),

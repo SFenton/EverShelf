@@ -4242,6 +4242,21 @@ async function api(action, params = {}, method = 'GET', body = null, extraHeader
         const errorCode = data.error;
         remoteLog('API_FAIL', `${action}: ${errorCode}`);
         if (
+            window.EverShelfApiErrors
+            && typeof window.EverShelfApiErrors.normalizeResponse === 'function'
+        ) {
+            window.EverShelfApiErrors.normalizeResponse(
+                data,
+                typeof t === 'function'
+                    ? t('error.generic')
+                    : 'Request failed. Please try again.'
+            );
+        } else if (errorCode === 'request_failed') {
+            data.error_code = errorCode;
+            data.error = typeof t === 'function'
+                ? t('error.generic')
+                : 'Request failed. Please try again.';
+        } else if (
             typeof errorCode === 'string'
             && /^[a-z][a-z0-9_]*$/.test(errorCode)
             && typeof data.message === 'string'

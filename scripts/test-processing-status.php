@@ -208,7 +208,8 @@ try {
         $testDirectory . '/ontology.sqlite',
         hash('sha256', ''),
         'failed',
-        'ontology import failed',
+        'SQLSTATE table ontology_activation_imports at '
+            . '/var/www/html/api/lib/ontology_v3/activation.php',
         '2026-08-16 17:00:00',
         '2026-08-16 18:00:00',
     ]);
@@ -229,7 +230,7 @@ try {
     $db->exec("
         UPDATE ontology_activation_state
         SET failure_count = 1,
-            last_error = 'older activation error',
+            last_error = 'SQLSTATE older activation error at /var/www/html',
             updated_at = '2026-08-16 16:00:00'
         WHERE id = 1
     ");
@@ -238,10 +239,19 @@ try {
         (int)$activation['current_import']['id'] === $ontologyImportId
         && (int)$activation['latest_import']['id'] === $scoreImportId
         && $activation['current_import']['last_error']
-            === 'ontology import failed'
-        && $activation['last_error'] === 'ontology import failed',
+            === EVERSHELF_PROCESSING_STATUS_PUBLIC_ERROR
+        && $activation['last_error']
+            === EVERSHELF_PROCESSING_STATUS_PUBLIC_ERROR
+        && !str_contains(
+            (string)$activation['last_error'],
+            'SQLSTATE'
+        )
+        && !str_contains(
+            (string)$activation['last_error'],
+            '/var/www'
+        ),
         'Activation status must distinguish scheduler-current work from '
-            . 'the latest row and preserve the newest non-empty error'
+            . 'the latest row without exposing persisted diagnostics'
     );
     $problemStatus = evershelfProcessingStatus($db);
     $assert(

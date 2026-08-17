@@ -1397,7 +1397,7 @@ try {
         'error' => $busy ? 'database_busy' : 'request_failed',
         'message' => $busy
             ? 'EverShelf is briefly busy. Retry this request safely.'
-            : $e->getMessage(),
+            : 'EverShelf could not complete this request. Please try again.',
     ]);
     _phpErrorReport($e->getMessage(), $e->getFile(), $e->getLine(), $e->getTraceAsString(), get_class($e));
 }
