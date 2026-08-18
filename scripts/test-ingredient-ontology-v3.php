@@ -343,6 +343,8 @@ try {
             'ontology_resolution_gold_hash',
             'ontology_seal_hash',
             'ontology_source_hash',
+            'catalog_lineage_hash',
+            'ontology_source_lineage_hash',
             'catalog_id_set_hash',
             'ingredient_id_set_hash',
             'requirement_recipe_id_set_hash',
@@ -6585,6 +6587,9 @@ try {
         $retentionChainIds[] = $retentionRevisionId;
         $retentionSourceId = $retentionRevisionId;
     }
+    $db->exec('BEGIN IMMEDIATE');
+    recipeScoreBuildEffectiveProjection($db, $retentionSourceId);
+    $db->exec('COMMIT');
     ingredientOntologyV3SetReadyMutationGuard($db, false);
     $retentionActiveId = $retentionSourceId;
     $retentionImmediateParentId = $retentionChainIds[

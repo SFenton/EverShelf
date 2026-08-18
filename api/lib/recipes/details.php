@@ -572,7 +572,33 @@ function recipeDetailV3MatchMap(
     }
     $overlay = $read['overlay_revision'] ?? null;
     $effective = $active;
-    if ($overlay !== null) {
+    $sourceRevisionId = (int)$active['id'];
+    if (recipeScoreReadUsesEffectiveProjection($db, $read, $active)) {
+        $sourcePlaceholders = implode(
+            ',',
+            array_fill(0, count($ingredientIds), '?')
+        );
+        $source = $db->prepare("
+            SELECT DISTINCT source.score_revision_id
+            FROM recipe_ingredients ingredient
+            JOIN recipe_score_effective_sources source
+              ON source.recipe_id = ingredient.recipe_id
+            WHERE ingredient.id IN ({$sourcePlaceholders})
+        ");
+        $source->execute($ingredientIds);
+        $sourceRevisionIds = array_map(
+            'intval',
+            $source->fetchAll(PDO::FETCH_COLUMN)
+        );
+        if (count($sourceRevisionIds) > 1) {
+            throw new RuntimeException(
+                'recipe score projection source is unavailable'
+            );
+        }
+        if ($sourceRevisionIds) {
+            $sourceRevisionId = $sourceRevisionIds[0];
+        }
+    } elseif ($overlay !== null) {
         $overlayPlaceholders = implode(
             ',',
             array_fill(0, count($ingredientIds), '?')
@@ -592,6 +618,7 @@ function recipeDetailV3MatchMap(
         ));
         if ($affected->fetchColumn()) {
             $effective = $overlay;
+            $sourceRevisionId = (int)$overlay['id'];
         }
     }
     $placeholders = implode(',', array_fill(0, count($ingredientIds), '?'));
@@ -606,7 +633,7 @@ function recipeDetailV3MatchMap(
           AND sm.recipe_ingredient_id IN ({$placeholders})
     ");
     $stmt->execute(array_merge(
-        [(int)$effective['id']],
+        [$sourceRevisionId],
         $ingredientIds
     ));
     $matches = [];

@@ -913,11 +913,28 @@ function recipeJobDispatchInventoryChanged(PDO $db, array $job, array $payload):
 
 function recipeJobDispatchTaxonomyReady(PDO $db, array $job, array $payload): array {
     $productId = (int)($job['product_id'] ?? 0);
-    $remapped = recipeCatalogRefreshUnresolvedMappings($db);
+    $activeScore = recipeScoreActiveRevision($db);
+    $activeUsesOntologyV3 = $activeScore !== null
+        && (string)($activeScore['scoring_model'] ?? '')
+            === 'faceted-ontology-v3'
+        && $activeScore['ontology_version_id'] !== null;
+    $remapped = $activeUsesOntologyV3
+        ? 0
+        : recipeCatalogRefreshUnresolvedMappings($db);
     return [
         'status' => 'done',
         'result' => [
             'remapped_ingredients' => $remapped,
+            'legacy_mapping_backfill' => $activeUsesOntologyV3
+                ? [
+                    'status' => 'skipped',
+                    'reason' =>
+                        'active_v3_uses_sealed_recipe_mappings',
+                ]
+                : [
+                    'status' => 'processed',
+                    'reason' => '',
+                ],
             'ranking' => 'score_rebuild_queued',
             'inventory_revision' => $productId > 0
                 ? recipeScoreMarkProductDirty(

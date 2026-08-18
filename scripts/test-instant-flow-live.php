@@ -49,6 +49,7 @@ $db = new PDO(
 );
 $db->exec('PRAGMA foreign_keys=ON');
 $db->exec('PRAGMA busy_timeout=10000');
+ingredientOntologyV3SchemaMigrate($db);
 recipeSchemaMigrate($db);
 
 $active = recipeScoreActiveRevision($db);
@@ -339,27 +340,32 @@ for ($run = 0; $run < $runs; $run++) {
     $GLOBALS['INGREDIENT_ONTOLOGY_V3_AFTER_OVERLAY_PUBLICATION'] =
         static function (
             PDO $db,
-            int $overlayId,
+            int $revisionId,
             int $parentId,
             array $recipeIds
         ): void {
-            $overlay = recipeScoreActiveOverlay($db);
+            $active = recipeScoreActiveRevision($db);
+            $state = recipeScoreState($db);
             if (
-                $overlay === null
-                || (int)$overlay['id'] !== $overlayId
-                || (int)$overlay['parent_score_revision_id']
+                $active === null
+                || (int)$active['id'] !== $revisionId
+                || (int)$active['parent_score_revision_id']
                     !== $parentId
+                || (int)(
+                    $state['active_score_projection_revision_id']
+                        ?? 0
+                ) !== $revisionId
                 || !$recipeIds
             ) {
                 throw new RuntimeException(
-                    'score overlay was not readable after publication'
+                    'sparse score revision was not readable after publication'
                 );
             }
         };
     $score = ingredientOntologyV3IncrementalRebuild(
         $db,
         true,
-        100
+        500
     );
     unset($GLOBALS['INGREDIENT_ONTOLOGY_V3_AFTER_OVERLAY_PUBLICATION']);
     if (empty($score['rebuilt'])) {

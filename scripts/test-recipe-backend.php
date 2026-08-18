@@ -1091,6 +1091,9 @@ try {
         DROP TABLE recipe_cookidoo_language_assessments;
         DROP TABLE recipe_quantity_parse_proposals;
         DROP TABLE ingredient_ontology_shadow_requirement_matches;
+        DROP TABLE ingredient_ontology_recipe_identity_annex;
+        DROP TABLE recipe_score_contributor_revisions;
+        DROP TABLE recipe_score_match_contributors;
         DROP TABLE ingredient_ontology_shadow_matches;
         DROP TABLE ingredient_ontology_requirement_members;
         DROP TABLE ingredient_ontology_requirement_recipe_states;
@@ -1131,9 +1134,14 @@ try {
         DROP TABLE recipe_search_documents;
         DROP TABLE recipe_clusters;
         DROP TABLE recipe_user_state;
+        DROP TABLE recipe_score_effective_sources;
+        DROP TABLE recipe_score_recipe_ingredients;
+        DROP TABLE recipe_score_recipe_operations;
         DROP TABLE recipe_score_incremental_recipes;
         DROP TABLE recipe_inventory_scores;
         DROP TABLE recipe_score_revisions;
+        DROP TABLE recipe_score_mutations;
+        DROP TABLE recipe_score_pending_recipes;
         DROP TABLE recipe_score_pending_products;
         DROP TABLE recipe_score_state;
         DROP TABLE recipe_grocery_requests;
@@ -1153,6 +1161,14 @@ try {
         'recipe_source_ingredients', 'recipe_grocery_requests', 'recipe_user_state',
         'recipe_clusters', 'recipe_jobs', 'recipe_connector_state',
         'recipe_score_state', 'recipe_score_revisions', 'recipe_inventory_scores',
+        'recipe_score_effective_sources',
+        'recipe_score_recipe_ingredients',
+        'recipe_score_recipe_operations',
+        'recipe_score_match_contributors',
+        'recipe_score_contributor_revisions',
+        'recipe_score_pending_recipes',
+        'recipe_score_mutations',
+        'ingredient_ontology_recipe_identity_annex',
         'recipe_score_pending_products',
         'recipe_score_incremental_recipes',
         'recipe_search_documents', 'recipe_catalog_fts',

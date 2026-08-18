@@ -6575,6 +6575,11 @@ function mergeProducts(PDO $db, int $keepId, int $dropId): void {
 
     $db->beginTransaction();
     try {
+        recipeScoreMarkProductDirty(
+            $db,
+            $dropId,
+            'product_merge_drop'
+        );
         $db->prepare("UPDATE inventory SET product_id = ? WHERE product_id = ?")->execute([$keepId, $dropId]);
         $db->prepare("UPDATE transactions SET product_id = ? WHERE product_id = ?")->execute([$keepId, $dropId]);
         $db->prepare("UPDATE product_location_history SET product_id = ? WHERE product_id = ?")->execute([$keepId, $dropId]);
