@@ -212,6 +212,48 @@ try {
         ),
         'Processing status must expose bounded queue, score, and coverage state'
     );
+    $maintenanceJobId = (int)$db->query("
+        SELECT id FROM ontology_controller_jobs
+        ORDER BY id
+        LIMIT 1
+    ")->fetchColumn();
+    $db->prepare("
+        UPDATE ontology_controller_jobs
+        SET status = 'failed',
+            last_error_kind = 'generation_abandoned',
+            last_error = 'abandoned generation maintenance',
+            finished_at = CURRENT_TIMESTAMP,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+    ")->execute([$maintenanceJobId]);
+    $assert(
+        evershelfProcessingStatusOntologyQueue(
+            $db
+        )['failed_24h_count'] === 0,
+        'Abandoned generation maintenance must not raise a processing problem'
+    );
+    $db->prepare("
+        UPDATE ontology_controller_jobs
+        SET last_error_kind = 'provider_failure',
+            last_error = 'actionable provider failure',
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+    ")->execute([$maintenanceJobId]);
+    $assert(
+        evershelfProcessingStatusOntologyQueue(
+            $db
+        )['failed_24h_count'] >= 1,
+        'Actionable recent ontology failures must remain visible'
+    );
+    $db->prepare("
+        UPDATE ontology_controller_jobs
+        SET status = 'queued',
+            last_error_kind = NULL,
+            last_error = '',
+            finished_at = NULL,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+    ")->execute([$maintenanceJobId]);
     $lineage = (string)$db->query("
         SELECT database_lineage_uuid
         FROM ontology_activation_state

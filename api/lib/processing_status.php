@@ -194,6 +194,8 @@ function evershelfProcessingStatusOntologyQueue(PDO $db): array {
         SELECT COUNT(*)
         FROM ontology_controller_jobs
         WHERE status = 'failed'
+          AND COALESCE(last_error_kind, '')
+              <> 'generation_abandoned'
           AND updated_at >= datetime('now', '-24 hours')
     ")->fetchColumn();
     $provider = function_exists(
