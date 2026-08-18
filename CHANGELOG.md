@@ -5,6 +5,28 @@ All notable changes to EverShelf will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.12.0] - 2026-08-18
+
+### Added
+- Immutable sparse score revisions with effective-source projection, mutation
+  journals, normalized inventory contributors, recipe-local append/edit/delete,
+  bounded background pruning, and full projection compaction.
+- Live scoring progress and pending product/recipe diagnostics for EverShelf
+  and Home Assistant.
+- Deterministic recipe identity annex admission tied to the active ontology
+  seal, with scoped source lineage and copied-refresh fencing.
+
+### Changed
+- Inventory and recipe changes publish only affected score/match rows. Newer
+  mutations remain pending so continuous writes cannot starve visible updates.
+- Copied activation reserves imported ID ranges and uses a bounded import time
+  budget instead of a four-chunk-per-minute ceiling.
+
+### Fixed
+- Product merge invalidation, source-fingerprint fencing, orphan overlay
+  terminalization, historical match ownership, post-compaction rollback
+  ancestry, stale work-state recovery, and unscored recipe detail handling.
+
 ## [1.11.5] - 2026-08-18
 
 ### Fixed

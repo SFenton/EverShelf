@@ -17,6 +17,16 @@ function ingredientOntologyV3IncrementalCoalesceMilliseconds(): int {
     return max(0, min(5000, $value));
 }
 
+function ingredientOntologyV3IncrementalMaximumCoalesceMilliseconds(): int {
+    $value = function_exists('env')
+        ? (int)env(
+            'RECIPE_SCORE_INCREMENTAL_MAX_COALESCE_MS',
+            '2000'
+        )
+        : 2000;
+    return max(100, min(30000, $value));
+}
+
 function ingredientOntologyV3IncrementalProductLimit(): int {
     return function_exists('env')
         ? max(1, min(1000, (int)env(
@@ -56,6 +66,483 @@ function ingredientOntologyV3IncrementalPendingProducts(
     ], $rows);
 }
 
+function ingredientOntologyV3IncrementalPendingRecipes(
+    PDO $db
+): array {
+    if (!ingredientOntologyV3TableExists(
+        $db,
+        'recipe_score_pending_recipes'
+    )) {
+        return [];
+    }
+    $limit = ingredientOntologyV3IncrementalProductLimit();
+    $rows = $db->query("
+        SELECT recipe_id, operation,
+               first_catalog_revision,
+               latest_catalog_revision,
+               latest_ontology_source_revision,
+               reason, created_at, updated_at
+        FROM recipe_score_pending_recipes
+        ORDER BY updated_at, recipe_id
+        LIMIT {$limit}
+    ")->fetchAll(PDO::FETCH_ASSOC);
+    return array_map(static fn(array $row): array => [
+        'recipe_id' => (int)$row['recipe_id'],
+        'operation' => (string)$row['operation'],
+        'first_catalog_revision' =>
+            (int)$row['first_catalog_revision'],
+        'latest_catalog_revision' =>
+            (int)$row['latest_catalog_revision'],
+        'latest_ontology_source_revision' =>
+            (int)$row['latest_ontology_source_revision'],
+        'reason' => (string)$row['reason'],
+        'created_at' => (string)$row['created_at'],
+        'updated_at' => (string)$row['updated_at'],
+    ], $rows);
+}
+
+function ingredientOntologyV3IncrementalPendingRecipeOverflow(
+    PDO $db,
+    int $selectedCount
+): bool {
+    $limit = ingredientOntologyV3IncrementalProductLimit();
+    if ($selectedCount < $limit) {
+        return false;
+    }
+    $stmt = $db->query("
+        SELECT 1
+        FROM recipe_score_pending_recipes
+        ORDER BY updated_at, recipe_id
+        LIMIT 1 OFFSET {$limit}
+    ");
+    return $stmt->fetchColumn() !== false;
+}
+
+function ingredientOntologyV3IncrementalScopedMutationErrors(
+    PDO $db,
+    array $parent,
+    array $state,
+    array $productIds,
+    array $recipeIds
+): array {
+    $productIds = array_fill_keys(
+        array_map('intval', $productIds),
+        true
+    );
+    $recipeIds = array_fill_keys(
+        array_map('intval', $recipeIds),
+        true
+    );
+    $errors = [];
+    foreach ([
+        'catalog' => [
+            (int)$parent['catalog_revision'],
+            (int)$state['catalog_revision'],
+        ],
+        'source' => [
+            (int)$parent['ontology_source_revision'],
+            (int)$state['ontology_source_revision'],
+        ],
+    ] as $domain => [$from, $through]) {
+        if ($through === $from) {
+            continue;
+        }
+        if ($through < $from) {
+            $errors[] = "{$domain}_revision_regressed";
+            continue;
+        }
+        $events = $db->prepare("
+            SELECT revision, owner_type, owner_id
+            FROM recipe_score_mutations
+            WHERE domain = ?
+              AND revision > ?
+              AND revision <= ?
+            ORDER BY revision
+        ");
+        $events->execute([$domain, $from, $through]);
+        $rows = $events->fetchAll(PDO::FETCH_ASSOC);
+        if (count($rows) !== $through - $from) {
+            $errors[] = "{$domain}_mutation_journal_incomplete";
+            continue;
+        }
+        foreach ($rows as $row) {
+            $ownerType = (string)$row['owner_type'];
+            $ownerId = (int)($row['owner_id'] ?? 0);
+            $allowed = $ownerType === 'recipe'
+                ? isset($recipeIds[$ownerId])
+                : (
+                    $domain === 'source'
+                    && $ownerType === 'product'
+                    && isset($productIds[$ownerId])
+                );
+            if (!$allowed) {
+                $errors[] = "{$domain}_mutation_unscoped";
+                break;
+            }
+        }
+    }
+    return array_values(array_unique($errors));
+}
+
+function ingredientOntologyV3IncrementalScopedParentErrors(
+    PDO $db,
+    array $parent,
+    array $state,
+    array $productIds,
+    array $recipeIds
+): array {
+    $scopeErrors =
+        ingredientOntologyV3IncrementalScopedMutationErrors(
+            $db,
+            $parent,
+            $state,
+            $productIds,
+            $recipeIds
+        );
+    $catalogScoped = (int)$parent['catalog_revision']
+            === (int)$state['catalog_revision']
+        || !array_filter(
+            $scopeErrors,
+            static fn(string $error): bool =>
+                str_starts_with($error, 'catalog_')
+        );
+    $sourceScoped = (int)$parent['ontology_source_revision']
+            === (int)$state['ontology_source_revision']
+        || !array_filter(
+            $scopeErrors,
+            static fn(string $error): bool =>
+                str_starts_with($error, 'source_')
+        );
+    $validationState = $state;
+    if ($catalogScoped) {
+        $validationState['catalog_revision'] =
+            (int)$parent['catalog_revision'];
+    }
+    if ($sourceScoped) {
+        $validationState['ontology_source_revision'] =
+            (int)$parent['ontology_source_revision'];
+        $validationState['ontology_source_hash'] =
+            (string)$parent['ontology_source_hash'];
+        $validationState['ontology_source_lineage_hash'] =
+            (string)(
+                $parent['ontology_source_lineage_hash'] ?? ''
+            );
+    }
+    $errors = ingredientOntologyV3IncrementalParentErrors(
+        $db,
+        $parent,
+        $validationState
+    );
+    if ($catalogScoped) {
+        $errors = array_values(array_diff(
+            $errors,
+            ['catalog_revision_changed']
+        ));
+    }
+    if ($sourceScoped) {
+        $errors = array_values(array_diff(
+            $errors,
+            ['ontology_source_changed']
+        ));
+    }
+    return array_values(array_unique(array_merge(
+        $errors,
+        $scopeErrors
+    )));
+}
+
+function ingredientOntologyV3IncrementalScopedInputHash(
+    PDO $db,
+    string $domain,
+    string $parentHash,
+    int $fromRevision,
+    int $throughRevision,
+    array $productIds,
+    array $recipeIds
+): string {
+    if ($fromRevision === $throughRevision) {
+        return $parentHash;
+    }
+    $events = $db->prepare("
+        SELECT revision, owner_type, owner_id,
+               operation, reason
+        FROM recipe_score_mutations
+        WHERE domain = ?
+          AND revision > ?
+          AND revision <= ?
+        ORDER BY revision
+    ");
+    $events->execute([$domain, $fromRevision, $throughRevision]);
+    $rows = $events->fetchAll(PDO::FETCH_ASSOC);
+    $productIds = array_values(array_unique(array_map(
+        'intval',
+        $productIds
+    )));
+    sort($productIds, SORT_NUMERIC);
+    $recipeIds = array_values(array_unique(array_map(
+        'intval',
+        $recipeIds
+    )));
+    sort($recipeIds, SORT_NUMERIC);
+    $productEvidence = [];
+    if ($productIds) {
+        $placeholders = implode(
+            ',',
+            array_fill(0, count($productIds), '?')
+        );
+        $stmt = $db->prepare("
+            SELECT product_id, owner_fingerprint,
+                   status, entity_id, evidence_hash
+            FROM ingredient_ontology_identity_annex
+            WHERE product_id IN ({$placeholders})
+            ORDER BY product_id
+        ");
+        $stmt->execute($productIds);
+        $productEvidence = $stmt->fetchAll(PDO::FETCH_ASSOC);
+    }
+    $recipeEvidence = [];
+    if ($recipeIds) {
+        $placeholders = implode(
+            ',',
+            array_fill(0, count($recipeIds), 'CAST(? AS INTEGER)')
+        );
+        $stmt = $db->prepare("
+            SELECT ingredient.recipe_id,
+                   annex.recipe_ingredient_id,
+                   annex.owner_fingerprint,
+                   annex.status, annex.entity_id,
+                   annex.evidence_hash
+            FROM ingredient_ontology_recipe_identity_annex annex
+            JOIN recipe_ingredients ingredient
+              ON ingredient.id = annex.recipe_ingredient_id
+            WHERE ingredient.recipe_id IN ({$placeholders})
+            ORDER BY ingredient.recipe_id,
+                     annex.recipe_ingredient_id
+        ");
+        $stmt->execute($recipeIds);
+        $recipeEvidence = $stmt->fetchAll(PDO::FETCH_ASSOC);
+    }
+    return ingredientOntologyV3Hash([
+        'algorithm' => 'scoped-input-delta-v1',
+        'domain' => $domain,
+        'parent_hash' => $parentHash,
+        'from_revision' => $fromRevision,
+        'through_revision' => $throughRevision,
+        'events' => $rows,
+        'product_ids' => $productIds,
+        'recipe_ids' => $recipeIds,
+        'recipe_catalog_hash' =>
+            recipeScoreCatalogRecipeFingerprint($db, $recipeIds),
+        'product_evidence' => $productEvidence,
+        'recipe_evidence' => $recipeEvidence,
+    ]);
+}
+
+function ingredientOntologyV3IncrementalRecipeIngredientRows(
+    PDO $db,
+    array $operations
+): array {
+    $recipeIds = array_map('intval', array_keys($operations));
+    if ($recipeIds) {
+        $placeholders = implode(
+            ',',
+            array_fill(0, count($recipeIds), '?')
+        );
+        $stmt = $db->prepare("
+            SELECT recipe_id, id
+            FROM recipe_ingredients
+            WHERE recipe_id IN ({$placeholders})
+            ORDER BY recipe_id, id
+        ");
+        $stmt->execute($recipeIds);
+        return array_map(
+            static fn(array $row): array => [
+                'recipe_id' => (int)$row['recipe_id'],
+                'ingredient_id' => (int)$row['id'],
+            ],
+            $stmt->fetchAll(PDO::FETCH_ASSOC)
+        );
+    }
+    return [];
+}
+
+function ingredientOntologyV3IncrementalIdSetHashes(
+    PDO $db,
+    array $parent,
+    array $operations,
+    array $ingredientRows
+): array {
+    ksort($operations, SORT_NUMERIC);
+    $operationRows = [];
+    foreach ($operations as $recipeId => $operation) {
+        $operationRows[] = [
+            'recipe_id' => (int)$recipeId,
+            'operation' => (string)$operation,
+        ];
+    }
+    usort(
+        $ingredientRows,
+        static fn(array $left, array $right): int =>
+            (int)$left['recipe_id'] <=> (int)$right['recipe_id']
+                ?: (int)$left['ingredient_id']
+                    <=> (int)$right['ingredient_id']
+    );
+    $operationHash = ingredientOntologyV3Hash($operationRows);
+    return [
+        'algorithm' => 'parent-delta-v2',
+        'operation_rows_hash' => $operationHash,
+        'catalog_id_set_hash' => ingredientOntologyV3Hash([
+            'algorithm' => 'parent-delta-v2',
+            'parent_catalog_id_set_hash' =>
+                (string)$parent['catalog_id_set_hash'],
+            'operation_rows_hash' => $operationHash,
+        ]),
+        'ingredient_id_set_hash' => ingredientOntologyV3Hash([
+            'algorithm' => 'parent-delta-v2',
+            'parent_ingredient_id_set_hash' =>
+                (string)$parent['ingredient_id_set_hash'],
+            'operation_rows_hash' => $operationHash,
+            'ingredient_rows' => $ingredientRows,
+        ]),
+        'recipe_operation_count' => count($operationRows),
+        'ingredient_row_count' => count($ingredientRows),
+    ];
+}
+
+function ingredientOntologyV3IncrementalIdSetAudit(
+    PDO $db,
+    array $revision
+): array {
+    $parent = recipeScoreRevision(
+        $db,
+        (int)($revision['parent_score_revision_id'] ?? 0)
+    );
+    if ($parent === null || $parent['status'] !== 'ready') {
+        return [
+            'valid' => false,
+            'reason' => 'incremental_parent_unavailable',
+        ];
+    }
+    $operations = $db->prepare("
+        SELECT recipe_id, operation
+        FROM recipe_score_recipe_operations
+        WHERE score_revision_id = ?
+        ORDER BY recipe_id
+    ");
+    $operations->execute([(int)$revision['id']]);
+    $operationMap = [];
+    foreach ($operations->fetchAll(PDO::FETCH_ASSOC) as $row) {
+        $operationMap[(int)$row['recipe_id']] =
+            (string)$row['operation'];
+    }
+    $ingredients = $db->prepare("
+        SELECT recipe_id, recipe_ingredient_id
+        FROM recipe_score_recipe_ingredients
+        WHERE score_revision_id = ?
+        ORDER BY recipe_id, recipe_ingredient_id
+    ");
+    $ingredients->execute([(int)$revision['id']]);
+    $ingredientRows = array_map(
+        static fn(array $row): array => [
+            'recipe_id' => (int)$row['recipe_id'],
+            'ingredient_id' => (int)$row['recipe_ingredient_id'],
+        ],
+        $ingredients->fetchAll(PDO::FETCH_ASSOC)
+    );
+    $current = ingredientOntologyV3IncrementalIdSetHashes(
+        $db,
+        $parent,
+        $operationMap,
+        $ingredientRows
+    );
+    $parentAudit = ingredientOntologyV3RetainedIdSetAudit(
+        $db,
+        $parent
+    );
+    $matches = [
+        'catalog_id_set_hash' => is_string(
+            $revision['catalog_id_set_hash'] ?? null
+        ) && hash_equals(
+            (string)$revision['catalog_id_set_hash'],
+            (string)$current['catalog_id_set_hash']
+        ),
+        'ingredient_id_set_hash' => is_string(
+            $revision['ingredient_id_set_hash'] ?? null
+        ) && hash_equals(
+            (string)$revision['ingredient_id_set_hash'],
+            (string)$current['ingredient_id_set_hash']
+        ),
+    ];
+    return [
+        'valid' => !in_array(false, $matches, true)
+            && !empty($parentAudit['valid']),
+        'algorithm' => 'parent-delta-v2',
+        'current_hashes' => $current,
+        'hash_matches' => $matches,
+        'parent' => [
+            'revision_id' => (int)$parent['id'],
+            'valid' => !empty($parentAudit['valid']),
+        ],
+    ];
+}
+
+function ingredientOntologyV3RetainedIdSetAudit(
+    PDO $db,
+    array $revision
+): array {
+    if (recipeScoreRevisionIsSparseDelta($revision)) {
+        return ingredientOntologyV3IncrementalIdSetAudit(
+            $db,
+            $revision
+        );
+    }
+    $catalogHash = ingredientOntologyV3OrderedIdSetHash(
+        $db,
+        "SELECT recipe_id
+         FROM recipe_inventory_scores
+         WHERE score_revision_id = ?
+         ORDER BY recipe_id",
+        [(int)$revision['id']]
+    );
+    $ingredientHash = ingredientOntologyV3OrderedIdSetHash(
+        $db,
+        "SELECT recipe_ingredient_id
+         FROM ingredient_ontology_shadow_matches
+         WHERE score_revision_id = ?
+         ORDER BY recipe_ingredient_id",
+        [(int)$revision['id']]
+    );
+    $matches = [
+        'catalog_id_set_hash' => is_string(
+            $revision['catalog_id_set_hash'] ?? null
+        ) && hash_equals(
+            (string)$revision['catalog_id_set_hash'],
+            $catalogHash
+        ),
+        'ingredient_id_set_hash' => is_string(
+            $revision['ingredient_id_set_hash'] ?? null
+        ) && hash_equals(
+            (string)$revision['ingredient_id_set_hash'],
+            $ingredientHash
+        ),
+    ];
+    return [
+        'valid' => !in_array(false, $matches, true)
+            && (int)$revision['recipe_count']
+                === (int)$db->query("
+                    SELECT COUNT(*)
+                    FROM recipe_inventory_scores
+                    WHERE score_revision_id = "
+                    . (int)$revision['id']
+                )->fetchColumn(),
+        'current_hashes' => [
+            'catalog_id_set_hash' => $catalogHash,
+            'ingredient_id_set_hash' => $ingredientHash,
+        ],
+        'hash_matches' => $matches,
+    ];
+}
+
 function ingredientOntologyV3IncrementalPendingOverflow(
     PDO $db,
     int $selectedCount
@@ -89,13 +576,40 @@ function ingredientOntologyV3IncrementalPendingAgeMs(
     return max(0, (int)round((microtime(true) - $latest) * 1000));
 }
 
+function ingredientOntologyV3IncrementalOldestPendingAgeMs(
+    array $pending
+): int {
+    $oldest = PHP_INT_MAX;
+    foreach ($pending as $row) {
+        $timestamp = strtotime(
+            (string)($row['created_at'] ?? '') . ' UTC'
+        );
+        if ($timestamp !== false && $timestamp > 0) {
+            $oldest = min($oldest, $timestamp);
+        }
+    }
+    if ($oldest === PHP_INT_MAX) {
+        return PHP_INT_MAX;
+    }
+    return max(
+        0,
+        (int)round((microtime(true) - $oldest) * 1000)
+    );
+}
+
 function ingredientOntologyV3IncrementalChainPolicy(
     mixed $parentReport
 ): array {
-    $parentUsesDelta = is_array($parentReport)
-        && (string)(
+    $parentAlgorithm = is_array($parentReport)
+        ? (string)(
             $parentReport['materialized_hash_algorithm'] ?? ''
-        ) === 'parent-delta-v1';
+        )
+        : '';
+    $parentUsesDelta = in_array(
+        $parentAlgorithm,
+        ['parent-delta-v1', 'parent-delta-v2'],
+        true
+    );
     $parentDepth = $parentUsesDelta
         ? (int)(
             $parentReport['incremental_chain_depth']
@@ -105,8 +619,9 @@ function ingredientOntologyV3IncrementalChainPolicy(
     $depth = $parentDepth + 1;
     return [
         'depth' => $depth,
-        'compact' => $depth
-            >= INGREDIENT_ONTOLOGY_V3_INCREMENTAL_FULL_HASH_INTERVAL,
+        'compact' => $parentAlgorithm === 'parent-delta-v1'
+            && $depth
+                >= INGREDIENT_ONTOLOGY_V3_INCREMENTAL_FULL_HASH_INTERVAL,
     ];
 }
 
@@ -141,6 +656,37 @@ function ingredientOntologyV3IncrementalParentErrors(
             !== (int)$state['catalog_revision']
     ) {
         $errors[] = 'catalog_revision_changed';
+    }
+    if (
+        (int)$parent['ontology_source_revision']
+            !== (int)$state['ontology_source_revision']
+    ) {
+        $currentSourceHash = strlen(
+            (string)$state['ontology_source_hash']
+        ) === 64
+            ? (string)$state['ontology_source_hash']
+            : ingredientOntologyV3CorpusHash($db);
+        if (
+            !is_string($parent['ontology_source_hash'] ?? null)
+            || !hash_equals(
+                (string)$parent['ontology_source_hash'],
+                $currentSourceHash
+            )
+        ) {
+            $errors[] = 'ontology_source_changed';
+        }
+    }
+    if (
+        !hash_equals(
+            (string)(
+                $parent['ontology_source_lineage_hash'] ?? ''
+            ),
+            (string)(
+                $state['ontology_source_lineage_hash'] ?? ''
+            )
+        )
+    ) {
+        $errors[] = 'ontology_source_lineage_changed';
     }
     if (
         !hash_equals(
@@ -247,46 +793,125 @@ function ingredientOntologyV3IncrementalPreviousRecipeIds(
         ',',
         array_fill(0, count($productIds), '?')
     );
-    $selected = $db->prepare("
-        SELECT DISTINCT ingredient.recipe_id
-        FROM ingredient_ontology_shadow_matches match
-        JOIN recipe_ingredients ingredient
-          ON ingredient.id = match.recipe_ingredient_id
-        WHERE match.score_revision_id = ?
-          AND match.inventory_product_id IN ({$placeholders})
+    $useProjection = recipeScoreEffectiveProjectionReady(
+        $db,
+        $parentRevisionId
+    );
+    $projectionJoin = $useProjection ? "
+        JOIN recipe_score_effective_sources source
+          ON source.recipe_id =
+             COALESCE(match.recipe_id, ingredient.recipe_id)
+         AND source.score_revision_id = match.score_revision_id
+    " : '';
+    $revisionWhere = $useProjection
+        ? ''
+        : 'match.score_revision_id = ? AND';
+    $matchParams = $useProjection
+        ? $productIds
+        : array_merge([$parentRevisionId], $productIds);
+    $contributorsComplete = $useProjection
+        ? !(bool)$db->query("
+            SELECT 1
+            FROM (
+                SELECT DISTINCT score_revision_id
+                FROM recipe_score_effective_sources
+            ) source
+            LEFT JOIN recipe_score_contributor_revisions complete
+              ON complete.score_revision_id = source.score_revision_id
+            WHERE complete.score_revision_id IS NULL
+            LIMIT 1
+        ")->fetchColumn()
+        : recipeScoreContributorRevisionComplete(
+            $db,
+            $parentRevisionId
+        );
+    if (!$contributorsComplete) {
+        $selected = $db->prepare("
+            SELECT DISTINCT
+                   COALESCE(match.recipe_id, ingredient.recipe_id)
+            FROM ingredient_ontology_shadow_matches match
+            LEFT JOIN recipe_ingredients ingredient
+              ON ingredient.id = match.recipe_ingredient_id
+            {$projectionJoin}
+            WHERE {$revisionWhere}
+                  COALESCE(match.recipe_id, ingredient.recipe_id)
+                      IS NOT NULL
+              AND match.inventory_product_id
+                  IN ({$placeholders})
+        ");
+        $selected->execute($matchParams);
+        foreach (
+            $selected->fetchAll(PDO::FETCH_COLUMN) as $recipeId
+        ) {
+            $recipeIds[(int)$recipeId] = true;
+        }
+    }
+
+    $contributorProjectionJoin = $useProjection ? "
+        JOIN recipe_score_effective_sources source
+          ON source.recipe_id =
+             COALESCE(contributor.recipe_id, ingredient.recipe_id)
+         AND source.score_revision_id =
+             contributor.score_revision_id
+    " : '';
+    $contributorRevisionWhere = $useProjection
+        ? ''
+        : 'contributor.score_revision_id = ? AND';
+    $contributorParams = $useProjection
+        ? $productIds
+        : array_merge([$parentRevisionId], $productIds);
+    $normalizedContributors = $db->prepare("
+        SELECT DISTINCT
+               COALESCE(contributor.recipe_id, ingredient.recipe_id)
+        FROM recipe_score_match_contributors contributor
+        LEFT JOIN recipe_ingredients ingredient
+          ON ingredient.id = contributor.recipe_ingredient_id
+        {$contributorProjectionJoin}
+        WHERE {$contributorRevisionWhere}
+              COALESCE(contributor.recipe_id, ingredient.recipe_id)
+                  IS NOT NULL
+          AND
+              contributor.product_id IN ({$placeholders})
     ");
-    $selected->execute(array_merge(
-        [$parentRevisionId],
-        $productIds
-    ));
-    foreach ($selected->fetchAll(PDO::FETCH_COLUMN) as $recipeId) {
+    $normalizedContributors->execute($contributorParams);
+    foreach (
+        $normalizedContributors->fetchAll(PDO::FETCH_COLUMN)
+        as $recipeId
+    ) {
         $recipeIds[(int)$recipeId] = true;
     }
 
-    $contributors = $db->prepare("
-        SELECT DISTINCT ingredient.recipe_id
-        FROM ingredient_ontology_shadow_matches match
-        JOIN recipe_ingredients ingredient
-          ON ingredient.id = match.recipe_ingredient_id
-        JOIN json_each(
-            CASE
-                WHEN json_valid(match.explanation_json)
-                THEN match.explanation_json
-                ELSE '{}'
-            END,
-            '$.inventory_aggregate.product_ids'
-        ) contributor
-        WHERE match.score_revision_id = ?
-          AND contributor.type = 'integer'
-          AND CAST(contributor.value AS INTEGER)
-              IN ({$placeholders})
-    ");
-    $contributors->execute(array_merge(
-        [$parentRevisionId],
-        $productIds
-    ));
-    foreach ($contributors->fetchAll(PDO::FETCH_COLUMN) as $recipeId) {
-        $recipeIds[(int)$recipeId] = true;
+    if (!$contributorsComplete) {
+        $contributors = $db->prepare("
+            SELECT DISTINCT
+                   COALESCE(match.recipe_id, ingredient.recipe_id)
+            FROM ingredient_ontology_shadow_matches match
+            LEFT JOIN recipe_ingredients ingredient
+              ON ingredient.id = match.recipe_ingredient_id
+            {$projectionJoin}
+            JOIN json_each(
+                CASE
+                    WHEN json_valid(match.explanation_json)
+                    THEN match.explanation_json
+                    ELSE '{}'
+                END,
+                '$.inventory_aggregate.product_ids'
+            ) contributor
+            WHERE {$revisionWhere}
+                  COALESCE(match.recipe_id, ingredient.recipe_id)
+                      IS NOT NULL
+              AND
+                  contributor.type = 'integer'
+              AND CAST(contributor.value AS INTEGER)
+                  IN ({$placeholders})
+        ");
+        $contributors->execute($matchParams);
+        foreach (
+            $contributors->fetchAll(PDO::FETCH_COLUMN)
+            as $recipeId
+        ) {
+            $recipeIds[(int)$recipeId] = true;
+        }
     }
 
     $ids = array_map('intval', array_keys($recipeIds));
@@ -385,6 +1010,25 @@ function ingredientOntologyV3IncrementalAffectedRecipeIds(
         foreach ($current->fetchAll(PDO::FETCH_COLUMN) as $recipeId) {
             $recipeIds[(int)$recipeId] = true;
         }
+        $annex = $db->prepare("
+            SELECT DISTINCT ingredient.recipe_id
+            FROM ingredient_ontology_recipe_identity_annex annex
+            JOIN recipe_ingredients ingredient
+              ON ingredient.id = annex.recipe_ingredient_id
+            JOIN recipe_catalog recipe
+              ON recipe.id = ingredient.recipe_id
+             AND recipe.deleted_at IS NULL
+            WHERE annex.ontology_version_id = ?
+              AND annex.status = 'accepted'
+              AND annex.entity_id IN ({$entityPlaceholders})
+        ");
+        $annex->execute(array_merge(
+            [$versionId],
+            $relatedEntityIds
+        ));
+        foreach ($annex->fetchAll(PDO::FETCH_COLUMN) as $recipeId) {
+            $recipeIds[(int)$recipeId] = true;
+        }
     }
     $ids = array_map('intval', array_keys($recipeIds));
     sort($ids, SORT_NUMERIC);
@@ -450,213 +1094,12 @@ function ingredientOntologyV3IncrementalInsertRevision(
     return (int)$db->lastInsertId();
 }
 
-function ingredientOntologyV3IncrementalCopyParentRows(
-    PDO $db,
-    int $parentRevisionId,
-    int $revisionId
-): array {
-    $scoreBatchSize = max(
-        100,
-        min(
-            10000,
-            (int)(function_exists('env')
-                ? env('RECIPE_SCORE_INCREMENTAL_SCORE_COPY_BATCH', '2000')
-                : 2000)
-        )
-    );
-    $matchBatchSize = max(
-        500,
-        min(
-            50000,
-            (int)(function_exists('env')
-                ? env('RECIPE_SCORE_INCREMENTAL_MATCH_COPY_BATCH', '10000')
-                : 10000)
-        )
-    );
-    $scoreRows = 0;
-    $matchRows = 0;
-    $lastRecipeId = 0;
-    while (true) {
-        $ids = $db->prepare("
-            SELECT recipe_id
-            FROM recipe_inventory_scores
-            WHERE score_revision_id = ? AND recipe_id > ?
-              AND NOT EXISTS (
-                  SELECT 1
-                  FROM recipe_score_incremental_recipes affected
-                  WHERE affected.score_revision_id = ?
-                    AND affected.recipe_id =
-                        recipe_inventory_scores.recipe_id
-              )
-            ORDER BY recipe_id
-            LIMIT {$scoreBatchSize}
-        ");
-        $ids->execute([
-            $parentRevisionId,
-            $lastRecipeId,
-            $revisionId,
-        ]);
-        $batchIds = array_map(
-            'intval',
-            $ids->fetchAll(PDO::FETCH_COLUMN)
-        );
-        if (!$batchIds) {
-            break;
-        }
-        $batchMax = max($batchIds);
-        recipeScoreWithWriteRetry(static function () use (
-            $db,
-            $parentRevisionId,
-            $revisionId,
-            $lastRecipeId,
-            $batchMax
-        ): void {
-            $db->beginTransaction();
-            try {
-                $copy = $db->prepare("
-                    INSERT INTO recipe_inventory_scores (
-                        score_revision_id, recipe_id, coverage,
-                        directness, expiry_score, source_user_score,
-                        availability_score, required_count,
-                        matched_required_count, missing_required_count,
-                        uncertain_required_count, cookable,
-                        soonest_expiry_days, created_at, updated_at
-                    )
-                    SELECT ?, recipe_id, coverage, directness,
-                           expiry_score, source_user_score,
-                           availability_score, required_count,
-                           matched_required_count,
-                           missing_required_count,
-                           uncertain_required_count, cookable,
-                           soonest_expiry_days,
-                           CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
-                    FROM recipe_inventory_scores
-                    WHERE score_revision_id = ?
-                      AND recipe_id > ? AND recipe_id <= ?
-                      AND NOT EXISTS (
-                          SELECT 1
-                          FROM recipe_score_incremental_recipes affected
-                          WHERE affected.score_revision_id = ?
-                            AND affected.recipe_id =
-                                recipe_inventory_scores.recipe_id
-                      )
-                    ORDER BY recipe_id
-                ");
-                $copy->execute([
-                    $revisionId,
-                    $parentRevisionId,
-                    $lastRecipeId,
-                    $batchMax,
-                    $revisionId,
-                ]);
-                $db->commit();
-            } catch (Throwable $error) {
-                if ($db->inTransaction()) {
-                    $db->rollBack();
-                }
-                throw $error;
-            }
-        });
-        $scoreRows += count($batchIds);
-        $lastRecipeId = $batchMax;
-    }
-
-    $lastIngredientId = 0;
-    while (true) {
-        $ids = $db->prepare("
-            SELECT match.recipe_ingredient_id
-            FROM ingredient_ontology_shadow_matches match
-            JOIN recipe_ingredients ingredient
-              ON ingredient.id = match.recipe_ingredient_id
-            WHERE match.score_revision_id = ?
-              AND match.recipe_ingredient_id > ?
-              AND NOT EXISTS (
-                  SELECT 1
-                  FROM recipe_score_incremental_recipes affected
-                  WHERE affected.score_revision_id = ?
-                    AND affected.recipe_id = ingredient.recipe_id
-              )
-            ORDER BY match.recipe_ingredient_id
-            LIMIT {$matchBatchSize}
-        ");
-        $ids->execute([
-            $parentRevisionId,
-            $lastIngredientId,
-            $revisionId,
-        ]);
-        $batchIds = array_map(
-            'intval',
-            $ids->fetchAll(PDO::FETCH_COLUMN)
-        );
-        if (!$batchIds) {
-            break;
-        }
-        $batchMax = max($batchIds);
-        recipeScoreWithWriteRetry(static function () use (
-            $db,
-            $parentRevisionId,
-            $revisionId,
-            $lastIngredientId,
-            $batchMax
-        ): void {
-            $db->beginTransaction();
-            try {
-                $copy = $db->prepare("
-                    INSERT INTO ingredient_ontology_shadow_matches (
-                        score_revision_id, recipe_ingredient_id,
-                        recipe_mapping_id, inventory_product_id,
-                        inventory_mapping_id, outcome,
-                        satisfies_required, confidence, relationship,
-                        explanation_json, created_at
-                    )
-                    SELECT ?, recipe_ingredient_id,
-                           recipe_mapping_id, inventory_product_id,
-                           inventory_mapping_id, outcome,
-                           satisfies_required, confidence, relationship,
-                           explanation_json, CURRENT_TIMESTAMP
-                    FROM ingredient_ontology_shadow_matches match
-                    JOIN recipe_ingredients ingredient
-                      ON ingredient.id = match.recipe_ingredient_id
-                    WHERE match.score_revision_id = ?
-                      AND match.recipe_ingredient_id > ?
-                      AND match.recipe_ingredient_id <= ?
-                      AND NOT EXISTS (
-                          SELECT 1
-                          FROM recipe_score_incremental_recipes affected
-                          WHERE affected.score_revision_id = ?
-                            AND affected.recipe_id =
-                                ingredient.recipe_id
-                      )
-                    ORDER BY match.recipe_ingredient_id
-                ");
-                $copy->execute([
-                    $revisionId,
-                    $parentRevisionId,
-                    $lastIngredientId,
-                    $batchMax,
-                    $revisionId,
-                ]);
-                $db->commit();
-            } catch (Throwable $error) {
-                if ($db->inTransaction()) {
-                    $db->rollBack();
-                }
-                throw $error;
-            }
-        });
-        $matchRows += count($batchIds);
-        $lastIngredientId = $batchMax;
-    }
-    return [
-        'score_rows' => $scoreRows,
-        'match_rows' => $matchRows,
-    ];
-}
-
 function ingredientOntologyV3IncrementalRecordAffectedRecipes(
     PDO $db,
     int $revisionId,
-    array $recipeIds
+    array $recipeIds,
+    array $operations = [],
+    array $ingredientRows = []
 ): void {
     if (!$recipeIds) {
         return;
@@ -664,7 +1107,9 @@ function ingredientOntologyV3IncrementalRecordAffectedRecipes(
     recipeScoreWithWriteRetry(static function () use (
         $db,
         $revisionId,
-        $recipeIds
+        $recipeIds,
+        $operations,
+        $ingredientRows
     ): void {
         $db->beginTransaction();
         try {
@@ -673,14 +1118,62 @@ function ingredientOntologyV3IncrementalRecordAffectedRecipes(
                     ',',
                     array_fill(0, count($chunk), '(?, ?)')
                 );
+                $operationValues = implode(
+                    ',',
+                    array_fill(0, count($chunk), '(?, ?, ?)')
+                );
                 $params = [];
+                $operationParams = [];
                 foreach ($chunk as $recipeId) {
+                    $operation = (string)(
+                        $operations[(int)$recipeId] ?? 'replace'
+                    );
+                    if (!in_array(
+                        $operation,
+                        ['replace', 'delete'],
+                        true
+                    )) {
+                        throw new InvalidArgumentException(
+                            'incremental recipe operation is invalid'
+                        );
+                    }
                     $params[] = $revisionId;
                     $params[] = (int)$recipeId;
+                    $operationParams[] = $revisionId;
+                    $operationParams[] = (int)$recipeId;
+                    $operationParams[] = $operation;
                 }
                 $db->prepare("
                     INSERT INTO recipe_score_incremental_recipes (
                         score_revision_id, recipe_id
+                    )
+                    VALUES {$values}
+                ")->execute($params);
+                $db->prepare("
+                    INSERT INTO recipe_score_recipe_operations (
+                        score_revision_id, recipe_id, operation
+                    )
+                    VALUES {$operationValues}
+                ")->execute($operationParams);
+            }
+            foreach (array_chunk($ingredientRows, 500) as $chunk) {
+                if (!$chunk) {
+                    continue;
+                }
+                $values = implode(
+                    ',',
+                    array_fill(0, count($chunk), '(?, ?, ?)')
+                );
+                $params = [];
+                foreach ($chunk as $row) {
+                    $params[] = $revisionId;
+                    $params[] = (int)$row['recipe_id'];
+                    $params[] = (int)$row['ingredient_id'];
+                }
+                $db->prepare("
+                    INSERT INTO recipe_score_recipe_ingredients (
+                        score_revision_id, recipe_id,
+                        recipe_ingredient_id
                     )
                     VALUES {$values}
                 ")->execute($params);
@@ -700,10 +1193,22 @@ function ingredientOntologyV3IncrementalValueHashes(
     int $revisionId,
     array $parent
 ): array {
+    $operations = ingredientOntologyV3HashMaterializedRows(
+        $db,
+        "SELECT recipe_id, operation
+         FROM recipe_score_recipe_operations
+         WHERE score_revision_id = ?
+         ORDER BY recipe_id",
+        [$revisionId],
+        static fn(array $row): array => [
+            'recipe_id' => (int)$row['recipe_id'],
+            'operation' => (string)$row['operation'],
+        ]
+    );
     $affectedIdSetHash = ingredientOntologyV3OrderedIdSetHash(
         $db,
         "SELECT recipe_id
-         FROM recipe_score_incremental_recipes
+         FROM recipe_score_recipe_operations
          WHERE score_revision_id = ?
          ORDER BY recipe_id",
         [$revisionId]
@@ -771,11 +1276,12 @@ function ingredientOntologyV3IncrementalValueHashes(
                 match.confidence, match.relationship,
                 match.explanation_json
          FROM ingredient_ontology_shadow_matches match
-         JOIN recipe_ingredients ingredient
+         LEFT JOIN recipe_ingredients ingredient
            ON ingredient.id = match.recipe_ingredient_id
          JOIN recipe_score_incremental_recipes affected
            ON affected.score_revision_id = match.score_revision_id
-          AND affected.recipe_id = ingredient.recipe_id
+          AND affected.recipe_id =
+              COALESCE(match.recipe_id, ingredient.recipe_id)
          WHERE match.score_revision_id = ?
          ORDER BY match.recipe_ingredient_id",
         [$revisionId],
@@ -809,25 +1315,29 @@ function ingredientOntologyV3IncrementalValueHashes(
         ]
     );
     $scoreRowsHash = ingredientOntologyV3Hash([
-        'algorithm' => 'parent-delta-v1',
+        'algorithm' => 'parent-delta-v2',
         'parent_score_rows_hash' =>
             (string)$parent['score_rows_hash'],
         'affected_recipe_id_set_hash' => $affectedIdSetHash,
+        'operation_rows_hash' => $operations['hash'],
         'changed_score_rows_hash' => $scores['hash'],
         'changed_score_row_count' => $scores['count'],
     ]);
     $matchRowsHash = ingredientOntologyV3Hash([
-        'algorithm' => 'parent-delta-v1',
+        'algorithm' => 'parent-delta-v2',
         'parent_match_rows_hash' =>
             (string)$parent['match_rows_hash'],
         'affected_recipe_id_set_hash' => $affectedIdSetHash,
+        'operation_rows_hash' => $operations['hash'],
         'changed_match_rows_hash' => $matches['hash'],
         'changed_match_row_count' => $matches['count'],
     ]);
     return [
-        'algorithm' => 'parent-delta-v1',
+        'algorithm' => 'parent-delta-v2',
         'affected_recipe_id_set_hash' => $affectedIdSetHash,
-        'affected_recipe_count' => $scores['count'],
+        'affected_recipe_count' => $operations['count'],
+        'operation_rows_hash' => $operations['hash'],
+        'operation_row_count' => $operations['count'],
         'changed_score_rows_hash' => $scores['hash'],
         'changed_score_row_count' => $scores['count'],
         'changed_match_rows_hash' => $matches['hash'],
@@ -835,11 +1345,12 @@ function ingredientOntologyV3IncrementalValueHashes(
         'score_rows_hash' => $scoreRowsHash,
         'match_rows_hash' => $matchRowsHash,
         'materialization_hash' => ingredientOntologyV3Hash([
-            'algorithm' => 'parent-delta-v1',
+            'algorithm' => 'parent-delta-v2',
             'parent_revision_id' => (int)$parent['id'],
             'score_rows_hash' => $scoreRowsHash,
             'match_rows_hash' => $matchRowsHash,
             'affected_recipe_id_set_hash' => $affectedIdSetHash,
+            'operation_rows_hash' => $operations['hash'],
         ]),
     ];
 }
@@ -1051,6 +1562,9 @@ function ingredientOntologyV3IncrementalValueAudit(
         (string)($revision['validation_report_json'] ?? '{}'),
         true
     );
+    $algorithm = is_array($report)
+        ? (string)($report['materialized_hash_algorithm'] ?? '')
+        : '';
     $expectedMatchCount = is_array($report)
         ? (int)($report['ingredient_match_count'] ?? -1)
         : -1;
@@ -1066,16 +1580,77 @@ function ingredientOntologyV3IncrementalValueAudit(
         WHERE score_revision_id = ?
     ");
     $matchCount->execute([(int)$revision['id']]);
+    $parentAudit = ingredientOntologyV3MaterializedValueAudit(
+        $db,
+        $parent
+    );
+    if ($algorithm === 'parent-delta-v2') {
+        $operations = $db->prepare("
+            SELECT operation, COUNT(*) AS operation_count
+            FROM recipe_score_recipe_operations
+            WHERE score_revision_id = ?
+            GROUP BY operation
+        ");
+        $operations->execute([(int)$revision['id']]);
+        $operationCounts = ['replace' => 0, 'delete' => 0];
+        foreach ($operations->fetchAll(PDO::FETCH_ASSOC) as $row) {
+            $operationCounts[(string)$row['operation']] =
+                (int)$row['operation_count'];
+        }
+        $physicalScoreCount = (int)$scoreCount->fetchColumn();
+        $physicalMatchCount = (int)$matchCount->fetchColumn();
+        $expectedChangedMatchCount = (int)(
+            $report['materialized_values']['current'][
+                'changed_match_row_count'
+            ] ?? -1
+        );
+        $activeProjectionValid = true;
+        $state = recipeScoreState($db);
+        if (
+            (int)($state['active_score_revision_id'] ?? 0)
+                === (int)$revision['id']
+        ) {
+            $activeProjectionValid =
+                recipeScoreEffectiveProjectionReady(
+                    $db,
+                    (int)$revision['id'],
+                    $state
+                )
+                && (int)$db->query("
+                    SELECT COUNT(*)
+                    FROM recipe_score_effective_sources
+                ")->fetchColumn() === (int)$revision['recipe_count'];
+        }
+        return [
+            'valid' => !in_array(false, $hashMatches, true)
+                && $physicalScoreCount
+                    === $operationCounts['replace']
+                && $expectedChangedMatchCount >= 0
+                && $physicalMatchCount
+                    === $expectedChangedMatchCount
+                && $expectedMatchCount >= 0
+                && !empty($parentAudit['valid'])
+                && $activeProjectionValid,
+            'algorithm' => 'parent-delta-v2',
+            'current' => $current,
+            'hash_matches' => $hashMatches,
+            'operation_counts' => $operationCounts,
+            'physical_score_count' => $physicalScoreCount,
+            'physical_match_count' => $physicalMatchCount,
+            'effective_match_count' => $expectedMatchCount,
+            'projection_valid' => $activeProjectionValid,
+            'parent' => [
+                'revision_id' => $parentId,
+                'valid' => !empty($parentAudit['valid']),
+            ],
+        ];
+    }
     $copyMismatches =
         ingredientOntologyV3IncrementalCopyMismatchCount(
             $db,
             (int)$revision['id'],
             $parentId
         );
-    $parentAudit = ingredientOntologyV3MaterializedValueAudit(
-        $db,
-        $parent
-    );
     return [
         'valid' => !in_array(false, $hashMatches, true)
             && (int)$scoreCount->fetchColumn()
@@ -1096,23 +1671,131 @@ function ingredientOntologyV3IncrementalValueAudit(
     ];
 }
 
+function ingredientOntologyV3IncrementalEffectiveMatchCount(
+    PDO $db,
+    array $recipeIds
+): int {
+    $recipeIds = array_values(array_unique(array_filter(
+        array_map('intval', $recipeIds),
+        static fn(int $id): bool => $id > 0
+    )));
+    if (!$recipeIds) {
+        return 0;
+    }
+    $placeholders = implode(
+        ',',
+        array_fill(0, count($recipeIds), '?')
+    );
+    $count = $db->prepare("
+        SELECT COUNT(*)
+        FROM ingredient_ontology_shadow_matches match
+        JOIN recipe_score_effective_sources source
+          ON source.recipe_id = match.recipe_id
+         AND source.score_revision_id = match.score_revision_id
+        WHERE match.recipe_id IN ({$placeholders})
+    ");
+    $count->execute($recipeIds);
+    $total = (int)$count->fetchColumn();
+    $legacyRequired = (bool)$db->query("
+        SELECT 1
+        FROM (
+            SELECT DISTINCT score_revision_id
+            FROM recipe_score_effective_sources
+        ) source
+        JOIN ingredient_ontology_shadow_matches match
+          ON match.score_revision_id = source.score_revision_id
+         AND match.recipe_id IS NULL
+        LIMIT 1
+    ")->fetchColumn();
+    if (!$legacyRequired) {
+        return $total;
+    }
+    $legacyPlaceholders = implode(
+        ',',
+        array_fill(
+            0,
+            count($recipeIds),
+            'CAST(? AS INTEGER)'
+        )
+    );
+    $legacy = $db->prepare("
+        SELECT COUNT(*)
+        FROM ingredient_ontology_shadow_matches match
+        JOIN recipe_ingredients ingredient
+          ON ingredient.id = match.recipe_ingredient_id
+        JOIN recipe_score_effective_sources source
+          ON source.recipe_id = ingredient.recipe_id
+         AND source.score_revision_id = match.score_revision_id
+        WHERE match.recipe_id IS NULL
+          AND CAST(ingredient.recipe_id AS INTEGER)
+              IN ({$legacyPlaceholders})
+    ");
+    $legacy->execute($recipeIds);
+    return $total + (int)$legacy->fetchColumn();
+}
+
+function ingredientOntologyV3EffectiveProjectionMatchCount(
+    PDO $db
+): int {
+    $count = (int)$db->query("
+        SELECT COUNT(*)
+        FROM ingredient_ontology_shadow_matches match
+        JOIN recipe_score_effective_sources source
+          ON source.recipe_id = match.recipe_id
+         AND source.score_revision_id = match.score_revision_id
+        WHERE match.recipe_id IS NOT NULL
+    ")->fetchColumn();
+    $legacy = (int)$db->query("
+        SELECT COUNT(*)
+        FROM ingredient_ontology_shadow_matches match
+        JOIN recipe_ingredients ingredient
+          ON ingredient.id = match.recipe_ingredient_id
+        JOIN recipe_score_effective_sources source
+          ON source.recipe_id = ingredient.recipe_id
+         AND source.score_revision_id = match.score_revision_id
+        WHERE match.recipe_id IS NULL
+    ")->fetchColumn();
+    return $count + $legacy;
+}
+
 function ingredientOntologyV3IncrementalRebuild(
     PDO $db,
     bool $force = false,
-    int $batchSize = 100
+    int $batchSize = 1000
 ): array {
     $started = hrtime(true);
-    $pending = ingredientOntologyV3IncrementalPendingProducts($db);
+    $pendingProducts =
+        ingredientOntologyV3IncrementalPendingProducts($db);
+    $pendingRecipes =
+        ingredientOntologyV3IncrementalPendingRecipes($db);
+    $pending = array_merge($pendingProducts, $pendingRecipes);
     if (!$pending) {
-        return ['rebuilt' => false, 'reason' => 'no_pending_products'];
+        recipeScoreReconcileWorkState($db);
+        return ['rebuilt' => false, 'reason' => 'no_pending_changes'];
     }
-    $ageMs = ingredientOntologyV3IncrementalPendingAgeMs($pending);
+    $quietAgeMs = ingredientOntologyV3IncrementalPendingAgeMs(
+        $pending
+    );
+    $oldestAgeMs =
+        ingredientOntologyV3IncrementalOldestPendingAgeMs($pending);
     $coalesceMs = ingredientOntologyV3IncrementalCoalesceMilliseconds();
-    if (!$force && $ageMs < $coalesceMs) {
+    $maximumCoalesceMs =
+        ingredientOntologyV3IncrementalMaximumCoalesceMilliseconds();
+    if (
+        !$force
+        && $quietAgeMs < $coalesceMs
+        && $oldestAgeMs < $maximumCoalesceMs
+    ) {
         return [
             'rebuilt' => false,
             'reason' => 'coalescing',
-            'retry_after_ms' => $coalesceMs - $ageMs,
+            'retry_after_ms' => max(
+                1,
+                min(
+                    $coalesceMs - $quietAgeMs,
+                    $maximumCoalesceMs - $oldestAgeMs
+                )
+            ),
         ];
     }
     $lock = recipeScoreAcquireLock($db);
@@ -1121,35 +1804,47 @@ function ingredientOntologyV3IncrementalRebuild(
     }
     $revisionId = 0;
     try {
-        $pending = ingredientOntologyV3IncrementalPendingProducts($db);
-        if (!$pending) {
+        $pendingProducts =
+            ingredientOntologyV3IncrementalPendingProducts($db);
+        $pendingRecipes =
+            ingredientOntologyV3IncrementalPendingRecipes($db);
+        if (!$pendingProducts && !$pendingRecipes) {
+            recipeScoreReconcileWorkState($db);
             return [
                 'rebuilt' => false,
-                'reason' => 'no_pending_products',
+                'reason' => 'no_pending_changes',
             ];
         }
-        if (
+        $productOverflow =
             ingredientOntologyV3IncrementalPendingOverflow(
                 $db,
-                count($pending)
-            )
-        ) {
+                count($pendingProducts)
+            );
+        $recipeOverflow =
+            ingredientOntologyV3IncrementalPendingRecipeOverflow(
+                $db,
+                count($pendingRecipes)
+            );
+        if ($productOverflow || $recipeOverflow) {
             $limit = ingredientOntologyV3IncrementalProductLimit();
             return [
                 'rebuilt' => false,
                 'reason' => 'full_rebuild_required',
                 'errors' => [
-                    'incremental pending product limit exceeded',
+                    $productOverflow
+                        ? 'incremental pending product limit exceeded'
+                        : 'incremental pending recipe limit exceeded',
                 ],
                 'pending_product_count_at_least' => $limit + 1,
             ];
         }
+
         $state = recipeScoreState($db);
         $staleOverlayId = (int)(
             $state['active_score_overlay_revision_id'] ?? 0
         );
         if ($staleOverlayId > 0) {
-            $db->beginTransaction();
+            $db->exec('BEGIN IMMEDIATE');
             try {
                 $db->prepare("
                     UPDATE recipe_score_state
@@ -1167,15 +1862,17 @@ function ingredientOntologyV3IncrementalRebuild(
                         completed_at = CURRENT_TIMESTAMP
                     WHERE id = ? AND status = 'building'
                 ")->execute([$staleOverlayId]);
-                $db->commit();
+                $db->exec('COMMIT');
             } catch (Throwable $error) {
-                if ($db->inTransaction()) {
-                    $db->rollBack();
+                try {
+                    $db->exec('ROLLBACK');
+                } catch (Throwable $ignored) {
                 }
                 throw $error;
             }
             $state = recipeScoreState($db);
         }
+
         $parent = recipeScoreActiveRevision($db);
         if ($parent === null) {
             return [
@@ -1183,10 +1880,42 @@ function ingredientOntologyV3IncrementalRebuild(
                 'reason' => 'active_revision_missing',
             ];
         }
-        $parentErrors = ingredientOntologyV3IncrementalParentErrors(
-            $db,
-            $parent,
-            $state
+        $parentReport = recipeScoreRevisionReport($parent);
+        if (
+            recipeScoreRevisionIsSparseDelta($parent)
+            && (int)(
+                $parentReport['incremental_chain_depth'] ?? 0
+            ) >= 240
+        ) {
+            return [
+                'rebuilt' => false,
+                'reason' => 'compaction_required',
+                'depth' => (int)(
+                    $parentReport['incremental_chain_depth'] ?? 0
+                ),
+            ];
+        }
+        $productIds = array_map(
+            static fn(array $row): int => (int)$row['product_id'],
+            $pendingProducts
+        );
+        $recipeOperations = [];
+        foreach ($pendingRecipes as $pendingRecipe) {
+            $recipeOperations[
+                (int)$pendingRecipe['recipe_id']
+            ] = (string)$pendingRecipe['operation'];
+        }
+        $pendingRecipeIds = array_map(
+            'intval',
+            array_keys($recipeOperations)
+        );
+        $parentErrors =
+            ingredientOntologyV3IncrementalScopedParentErrors(
+                $db,
+                $parent,
+                $state,
+                $productIds,
+                $pendingRecipeIds
         );
         if ($parentErrors) {
             return [
@@ -1195,60 +1924,267 @@ function ingredientOntologyV3IncrementalRebuild(
                 'errors' => $parentErrors,
             ];
         }
-        $versionId = (int)$parent['ontology_version_id'];
-        $productIds = array_map(
-            static fn(array $row): int => (int)$row['product_id'],
-            $pending
+        recipeScoreEnsureEffectiveProjection($db, $parent);
+        $contributorStarted = hrtime(true);
+        $contributorState = recipeScoreEnsureEffectiveContributors(
+            $db,
+            (int)$parent['id']
         );
+        $contributorMs =
+            (hrtime(true) - $contributorStarted) / 1000000;
+
+        $versionId = (int)$parent['ontology_version_id'];
         $identityEntityIds = [];
-        foreach ($productIds as $productId) {
-            $productExists = $db->prepare("
-                SELECT 1 FROM products WHERE id = ?
-            ");
-            $productExists->execute([$productId]);
-            if ($productExists->fetchColumn()) {
-                $identity = ingredientOntologyV3IdentityAnnexRefreshProduct(
+        $recipeAnnex = [];
+        if (
+            defined('RECIPE_BACKEND_TEST_MODE')
+            && RECIPE_BACKEND_TEST_MODE
+            && is_callable(
+                $GLOBALS[
+                    'INGREDIENT_ONTOLOGY_V3_BEFORE_INCREMENTAL_SNAPSHOT'
+                ] ?? null
+            )
+        ) {
+            ($GLOBALS[
+                'INGREDIENT_ONTOLOGY_V3_BEFORE_INCREMENTAL_SNAPSHOT'
+            ])($db, (int)$parent['id']);
+        }
+        $snapshotStarted = hrtime(true);
+        dbBeginImmediateWithRetry($db);
+        try {
+            $pendingProducts =
+                ingredientOntologyV3IncrementalPendingProducts($db);
+            $pendingRecipes =
+                ingredientOntologyV3IncrementalPendingRecipes($db);
+            if (
+                ingredientOntologyV3IncrementalPendingOverflow(
                     $db,
-                    $productId,
-                    $versionId
+                    count($pendingProducts)
+                )
+                || ingredientOntologyV3IncrementalPendingRecipeOverflow(
+                    $db,
+                    count($pendingRecipes)
+                )
+            ) {
+                throw new RuntimeException(
+                    'incremental pending change limit exceeded'
                 );
-                foreach (['entity_id', 'previous_entity_id'] as $key) {
+            }
+            $productIds = array_map(
+                static fn(array $row): int =>
+                    (int)$row['product_id'],
+                $pendingProducts
+            );
+            $recipeOperations = [];
+            foreach ($pendingRecipes as $pendingRecipe) {
+                $recipeOperations[
+                    (int)$pendingRecipe['recipe_id']
+                ] = (string)$pendingRecipe['operation'];
+            }
+            $pendingRecipeIds = array_map(
+                'intval',
+                array_keys($recipeOperations)
+            );
+            recipeScoreSetWorkState(
+                $db,
+                'preparing',
+                null,
+                (int)$parent['id'],
+                0,
+                0,
+                count($productIds),
+                count($pendingRecipeIds)
+            );
+            $state = recipeScoreState($db);
+            $snapshotParent = recipeScoreActiveRevision($db);
+            if (
+                $snapshotParent === null
+                || (int)$snapshotParent['id'] !== (int)$parent['id']
+            ) {
+                throw new RuntimeException(
+                    'incremental score parent changed before snapshot'
+                );
+            }
+            $snapshotErrors =
+                ingredientOntologyV3IncrementalScopedParentErrors(
+                    $db,
+                    $snapshotParent,
+                    $state,
+                    $productIds,
+                    $pendingRecipeIds
+                );
+            if ($snapshotErrors) {
+                throw new RuntimeException(
+                    'incremental score snapshot is incompatible: '
+                    . implode('; ', $snapshotErrors)
+                );
+            }
+            foreach ($productIds as $productId) {
+                $productExists = $db->prepare("
+                    SELECT 1 FROM products WHERE id = ?
+                ");
+                $productExists->execute([$productId]);
+                if (!$productExists->fetchColumn()) {
+                    continue;
+                }
+                $identity =
+                    ingredientOntologyV3IdentityAnnexRefreshProduct(
+                        $db,
+                        $productId,
+                        $versionId
+                    );
+                foreach (
+                    ['entity_id', 'previous_entity_id'] as $key
+                ) {
                     if ((int)($identity[$key] ?? 0) > 0) {
-                        $identityEntityIds[] = (int)$identity[$key];
+                        $identityEntityIds[] =
+                            (int)$identity[$key];
                     }
                 }
             }
-        }
-        $scoreDate = (string)$parent['score_date'];
-        $inventory = ingredientOntologyV3Inventory(
-            $db,
-            $versionId,
-            $scoreDate
-        );
-        $inventoryFingerprint =
-            ingredientOntologyV3InventoryFingerprint(
-                $inventory,
-                $versionId
-            );
-        $ontologySourceHash = strlen(
-            (string)$state['ontology_source_hash']
-        ) === 64
-            ? (string)$state['ontology_source_hash']
-            : ingredientOntologyV3CorpusHash($db);
-        $context = new IngredientOntologyV3MatcherContext(
-            $db,
-            $versionId
-        );
-        $affectedRecipeIds =
-            ingredientOntologyV3IncrementalAffectedRecipeIds(
+            foreach ($recipeOperations as $recipeId => $operation) {
+                if ($operation === 'delete') {
+                    continue;
+                }
+                $activeRecipe = $db->prepare("
+                    SELECT 1
+                    FROM recipe_catalog
+                    WHERE id = ? AND deleted_at IS NULL
+                ");
+                $activeRecipe->execute([$recipeId]);
+                if (!$activeRecipe->fetchColumn()) {
+                    $recipeOperations[$recipeId] = 'delete';
+                    continue;
+                }
+                $recipeAnnex[$recipeId] =
+                    ingredientOntologyV3RecipeAnnexRefreshRecipe(
+                        $db,
+                        $recipeId,
+                        $versionId
+                    );
+                if (empty($recipeAnnex[$recipeId]['ready'])) {
+                    throw new RuntimeException(
+                        "recipe mappings are pending: {$recipeId}"
+                    );
+                }
+            }
+            $scoreDate = (string)$parent['score_date'];
+            $inventory = ingredientOntologyV3Inventory(
                 $db,
                 $versionId,
-                (int)$parent['id'],
-                $productIds,
-                $inventory,
-                $context,
-                $identityEntityIds
+                $scoreDate
             );
+            $inventoryFingerprint =
+                ingredientOntologyV3InventoryFingerprint(
+                    $inventory,
+                    $versionId
+                );
+            $ontologySourceLineageHash =
+                (int)$parent['ontology_source_revision']
+                    === (int)$state['ontology_source_revision']
+                ? (string)(
+                    $parent['ontology_source_lineage_hash'] ?? ''
+                )
+                : ingredientOntologyV3IncrementalScopedInputHash(
+                    $db,
+                    'source',
+                    (string)(
+                        $parent['ontology_source_lineage_hash']
+                            ?: $parent['ontology_source_hash']
+                    ),
+                    (int)$parent['ontology_source_revision'],
+                    (int)$state['ontology_source_revision'],
+                    $productIds,
+                    $pendingRecipeIds
+                );
+            $catalogLineageHash =
+                (int)$parent['catalog_revision']
+                    === (int)$state['catalog_revision']
+                ? (string)($parent['catalog_lineage_hash'] ?? '')
+                : ingredientOntologyV3IncrementalScopedInputHash(
+                    $db,
+                    'catalog',
+                    (string)(
+                        $parent['catalog_lineage_hash']
+                            ?: $parent['catalog_fingerprint']
+                    ),
+                    (int)$parent['catalog_revision'],
+                    (int)$state['catalog_revision'],
+                    $productIds,
+                    $pendingRecipeIds
+                );
+            $ontologySourceHash =
+                (string)$parent['ontology_source_hash'];
+            $catalogFingerprint =
+                (string)$parent['catalog_fingerprint'];
+            $catalogMaxId = recipeScoreCatalogMaxId($db);
+            $context = new IngredientOntologyV3MatcherContext(
+                $db,
+                $versionId
+            );
+            $inventoryAffectedRecipeIds =
+                ingredientOntologyV3IncrementalAffectedRecipeIds(
+                    $db,
+                    $versionId,
+                    (int)$parent['id'],
+                    $productIds,
+                    $inventory,
+                    $context,
+                    $identityEntityIds
+                );
+            $affectedRecipeIds = array_values(array_unique(array_merge(
+                $inventoryAffectedRecipeIds,
+                $pendingRecipeIds
+            )));
+            sort($affectedRecipeIds, SORT_NUMERIC);
+            $operations = [];
+            foreach ($affectedRecipeIds as $recipeId) {
+                $operations[$recipeId] =
+                    $recipeOperations[$recipeId] ?? 'replace';
+            }
+            $operationIngredientRows =
+                ingredientOntologyV3IncrementalRecipeIngredientRows(
+                    $db,
+                    $operations
+                );
+            $idSetHashes =
+                ingredientOntologyV3IncrementalIdSetHashes(
+                    $db,
+                    $parent,
+                    $operations,
+                    $operationIngredientRows
+                );
+            $db->exec('COMMIT');
+        } catch (Throwable $error) {
+            try {
+                $db->exec('ROLLBACK');
+            } catch (Throwable $ignored) {
+            }
+            throw $error;
+        }
+        $snapshotMs = (hrtime(true) - $snapshotStarted) / 1000000;
+
+        if (
+            defined('RECIPE_BACKEND_TEST_MODE')
+            && RECIPE_BACKEND_TEST_MODE
+            && is_callable(
+                $GLOBALS[
+                    'INGREDIENT_ONTOLOGY_V3_AFTER_INCREMENTAL_SNAPSHOT'
+                ] ?? null
+            )
+        ) {
+            ($GLOBALS[
+                'INGREDIENT_ONTOLOGY_V3_AFTER_INCREMENTAL_SNAPSHOT'
+            ])(
+                $db,
+                (int)$parent['id'],
+                (int)$state['inventory_revision'],
+                $productIds,
+                $affectedRecipeIds,
+                $pendingRecipeIds
+            );
+        }
+
         $revisionId =
             ingredientOntologyV3IncrementalInsertRevision(
                 $db,
@@ -1257,28 +2193,57 @@ function ingredientOntologyV3IncrementalRebuild(
                 $inventoryFingerprint,
                 $ontologySourceHash
             );
-        $prepareMs = (hrtime(true) - $started) / 1000000;
+        $db->prepare("
+            UPDATE recipe_score_revisions
+            SET catalog_max_id = ?,
+                catalog_fingerprint = ?,
+                catalog_lineage_hash = ?,
+                ontology_source_lineage_hash = ?,
+                catalog_id_set_hash = ?,
+                ingredient_id_set_hash = ?
+            WHERE id = ? AND status = 'building'
+        ")->execute([
+            $catalogMaxId,
+            $catalogFingerprint,
+            $catalogLineageHash,
+            $ontologySourceLineageHash,
+            (string)$idSetHashes['catalog_id_set_hash'],
+            (string)$idSetHashes['ingredient_id_set_hash'],
+            $revisionId,
+        ]);
         ingredientOntologyV3IncrementalRecordAffectedRecipes(
             $db,
             $revisionId,
-            $affectedRecipeIds
+            $affectedRecipeIds,
+            $operations,
+            $operationIngredientRows
         );
-        $copied = ['score_rows' => 0, 'match_rows' => 0];
-        $copyMs = 0.0;
+        $replaceRecipeIds = array_values(array_filter(
+            $affectedRecipeIds,
+            static fn(int $recipeId): bool =>
+                ($operations[$recipeId] ?? 'replace') === 'replace'
+        ));
+        $prepareMs = (hrtime(true) - $started) / 1000000;
 
-        $batchSize = max(1, min(500, $batchSize));
+        $batchSize = max(1, min(1000, $batchSize));
         $candidateCache = [];
         $recomputed = 0;
         $scoreStarted = hrtime(true);
         foreach (
-            array_chunk($affectedRecipeIds, $batchSize)
+            array_chunk($replaceRecipeIds, $batchSize)
             as $recipeIds
         ) {
             $recipes = ingredientOntologyV3LoadRecipeBatch(
                 $db,
                 $versionId,
-                $recipeIds
+                $recipeIds,
+                true
             );
+            if (count($recipes) !== count($recipeIds)) {
+                throw new RuntimeException(
+                    'incremental score recipe batch is incomplete'
+                );
+            }
             $scores = [];
             $matches = [];
             foreach ($recipes as $recipe) {
@@ -1291,11 +2256,17 @@ function ingredientOntologyV3IncrementalRebuild(
                 $scores[] = $result['score'];
                 array_push($matches, ...$result['matches']);
             }
+            $nextRecomputed = $recomputed + count($scores);
             recipeScoreWithWriteRetry(static function () use (
                 $db,
                 $revisionId,
                 $scores,
-                $matches
+                $matches,
+                $parent,
+                $replaceRecipeIds,
+                $nextRecomputed,
+                $productIds,
+                $pendingRecipeIds
             ): void {
                 $db->beginTransaction();
                 try {
@@ -1305,6 +2276,16 @@ function ingredientOntologyV3IncrementalRebuild(
                         $scores,
                         $matches
                     );
+                    recipeScoreSetWorkState(
+                        $db,
+                        'scoring',
+                        $revisionId,
+                        (int)$parent['id'],
+                        count($replaceRecipeIds),
+                        $nextRecomputed,
+                        count($productIds),
+                        count($pendingRecipeIds)
+                    );
                     $db->commit();
                 } catch (Throwable $error) {
                     if ($db->inTransaction()) {
@@ -1313,100 +2294,175 @@ function ingredientOntologyV3IncrementalRebuild(
                     throw $error;
                 }
             });
-            $recomputed += count($scores);
+            $recomputed = $nextRecomputed;
+            if (
+                defined('RECIPE_BACKEND_TEST_MODE')
+                && RECIPE_BACKEND_TEST_MODE
+                && is_callable(
+                    $GLOBALS[
+                        'INGREDIENT_ONTOLOGY_V3_AFTER_SCORE_BATCH'
+                    ] ?? null
+                )
+            ) {
+                ($GLOBALS[
+                    'INGREDIENT_ONTOLOGY_V3_AFTER_SCORE_BATCH'
+                ])(
+                    $db,
+                    $revisionId,
+                    $recomputed,
+                    count($replaceRecipeIds)
+                );
+            }
         }
         $scoreMs = (hrtime(true) - $scoreStarted) / 1000000;
 
-        $currentState = recipeScoreState($db);
-        if (
-            (int)$currentState['active_score_revision_id']
-                !== (int)$parent['id']
-            || (int)$currentState['inventory_revision']
-                !== (int)$state['inventory_revision']
-            || (int)$currentState['catalog_revision']
-                !== (int)$state['catalog_revision']
-            || (int)$currentState['ontology_source_revision']
-                !== (int)$state['ontology_source_revision']
-        ) {
-            throw new RuntimeException(
-                'incremental score inputs changed during build'
-            );
-        }
         $scoreCountStmt = $db->prepare("
             SELECT COUNT(*)
             FROM recipe_inventory_scores
             WHERE score_revision_id = ?
         ");
         $scoreCountStmt->execute([$revisionId]);
-        $overlayScoreCount = (int)$scoreCountStmt->fetchColumn();
+        $changedScoreCount = (int)$scoreCountStmt->fetchColumn();
         $matchCountStmt = $db->prepare("
             SELECT COUNT(*)
             FROM ingredient_ontology_shadow_matches
             WHERE score_revision_id = ?
         ");
         $matchCountStmt->execute([$revisionId]);
-        $overlayMatchCount = (int)$matchCountStmt->fetchColumn();
-        $parentReport = json_decode(
-            (string)($parent['validation_report_json'] ?? '{}'),
-            true
-        );
-        $expectedMatchCount = is_array($parentReport)
-            ? (int)($parentReport['ingredient_match_count'] ?? -1)
-            : -1;
-        $chainPolicy =
-            ingredientOntologyV3IncrementalChainPolicy($parentReport);
-        $incrementalChainDepth = (int)$chainPolicy['depth'];
-        $compactFullHashes = !empty($chainPolicy['compact']);
-        $scoreCount = (int)$parent['recipe_count'];
-        $matchCount = $expectedMatchCount;
-        if (
-            $expectedMatchCount < 0
-            || $overlayScoreCount !== count($affectedRecipeIds)
-        ) {
+        $changedMatchCount = (int)$matchCountStmt->fetchColumn();
+        if ($changedScoreCount !== count($replaceRecipeIds)) {
             throw new RuntimeException(
-                'incremental score overlay is incomplete'
+                'incremental score delta is incomplete'
             );
         }
-        $overlayHashStarted = hrtime(true);
-        $overlayScoreHash =
-            ingredientOntologyV3IncrementalOverlayScoreHash(
+        $changedContributorCounts =
+            recipeScoreMarkContributorRevisionComplete(
                 $db,
                 $revisionId
             );
-        $overlayHashMs =
-            (hrtime(true) - $overlayHashStarted) / 1000000;
         if (
-            (int)$overlayScoreHash['score_row_count']
-                !== count($affectedRecipeIds)
+            (int)$changedContributorCounts['match_count']
+                !== $changedMatchCount
         ) {
             throw new RuntimeException(
-                'incremental score overlay hash is incomplete'
+                'incremental score contributors are incomplete'
             );
         }
-        $hashMs = 0.0;
-        $valueHashes = [];
+
+        if (
+            !recipeScoreEffectiveProjectionReady(
+                $db,
+                (int)$parent['id']
+            )
+        ) {
+            throw new RuntimeException(
+                'incremental score parent projection changed'
+            );
+        }
+        $oldAffectedMatchCount =
+            ingredientOntologyV3IncrementalEffectiveMatchCount(
+                $db,
+                $affectedRecipeIds
+            );
+        $parentMatchCount =
+            (int)($parentReport['ingredient_match_count'] ?? -1);
+        if ($parentMatchCount < $oldAffectedMatchCount) {
+            throw new RuntimeException(
+                'incremental parent match count is invalid'
+            );
+        }
+        $previouslyPresent = [];
+        if ($affectedRecipeIds) {
+            $placeholders = implode(
+                ',',
+                array_fill(0, count($affectedRecipeIds), '?')
+            );
+            $present = $db->prepare("
+                SELECT recipe_id
+                FROM recipe_score_effective_sources
+                WHERE recipe_id IN ({$placeholders})
+            ");
+            $present->execute($affectedRecipeIds);
+            $previouslyPresent = array_fill_keys(
+                array_map(
+                    'intval',
+                    $present->fetchAll(PDO::FETCH_COLUMN)
+                ),
+                true
+            );
+        }
+        $addedRecipeCount = 0;
+        $deletedRecipeCount = 0;
+        foreach ($operations as $recipeId => $operation) {
+            if (
+                $operation === 'replace'
+                && !isset($previouslyPresent[$recipeId])
+            ) {
+                $addedRecipeCount++;
+            } elseif (
+                $operation === 'delete'
+                && isset($previouslyPresent[$recipeId])
+            ) {
+                $deletedRecipeCount++;
+            }
+        }
+        $recipeCount = (int)$parent['recipe_count']
+            + $addedRecipeCount
+            - $deletedRecipeCount;
+        $matchCount = $parentMatchCount
+            - $oldAffectedMatchCount
+            + $changedMatchCount;
+
+        $hashStarted = hrtime(true);
+        $valueHashes = ingredientOntologyV3IncrementalValueHashes(
+            $db,
+            $revisionId,
+            $parent
+        );
+        $hashMs = (hrtime(true) - $hashStarted) / 1000000;
+        if (
+            (int)$valueHashes['affected_recipe_count']
+                !== count($affectedRecipeIds)
+            || (int)$valueHashes['changed_score_row_count']
+                !== $changedScoreCount
+            || (int)$valueHashes['changed_match_row_count']
+                !== $changedMatchCount
+        ) {
+            throw new RuntimeException(
+                'incremental score delta hashes are incomplete'
+            );
+        }
+        $chainPolicy =
+            ingredientOntologyV3IncrementalChainPolicy($parentReport);
         $report = [
             'version' =>
                 INGREDIENT_ONTOLOGY_V3_INCREMENTAL_REPORT_VERSION,
             'shadow_only' => false,
             'incremental' => true,
-            'overlay_ready' => true,
-            'materialized_hash_algorithm' => 'parent-delta-v1',
-            'incremental_chain_depth' => $incrementalChainDepth,
-            'activated' => false,
+            'overlay_ready' => false,
+            'materialized_hash_algorithm' => 'parent-delta-v2',
+            'materialized_id_set_algorithm' => 'parent-delta-v2',
+            'incremental_chain_depth' =>
+                (int)$chainPolicy['depth'],
+            'compaction_recommended' =>
+                (int)$chainPolicy['depth'] >= 64,
+            'activated' => true,
             'ontology_version_id' => $versionId,
-            'recipe_count' => $scoreCount,
+            'recipe_count' => $recipeCount,
             'ingredient_match_count' => $matchCount,
             'inventory_revision' =>
                 (int)$state['inventory_revision'],
             'catalog_revision' => (int)$state['catalog_revision'],
             'catalog_fingerprint' =>
                 (string)$parent['catalog_fingerprint'],
+            'catalog_lineage_hash' => $catalogLineageHash,
             'inventory_fingerprint' => $inventoryFingerprint,
             'score_date' => $scoreDate,
             'ontology_source_revision' =>
                 (int)$state['ontology_source_revision'],
             'ontology_source_hash' => $ontologySourceHash,
+            'ontology_source_lineage_hash' =>
+                $ontologySourceLineageHash,
             'active_score_revision_id_before' =>
                 (int)$parent['id'],
             'scoring_configuration' => array_merge(
@@ -1422,85 +2478,191 @@ function ingredientOntologyV3IncrementalRebuild(
                 'affected_recipe_count' =>
                     count($affectedRecipeIds),
             ],
+            'snapshot' => [
+                'inventory_revision' =>
+                    (int)$state['inventory_revision'],
+                'pending_product_ids' => $productIds,
+                'pending_recipe_ids' => $pendingRecipeIds,
+                'old_affected_match_count' =>
+                    $oldAffectedMatchCount,
+            ],
+            'physical_rows' => [
+                'score' => $changedScoreCount,
+                'match' => $changedMatchCount,
+                'operations' => count($affectedRecipeIds),
+            ],
+            'contributors' => $contributorState,
             'materialized_id_sets' => [
                 'valid' => true,
-                'copied_from_revision_id' => (int)$parent['id'],
+                'copied_from_revision_id' =>
+                    (int)$state['catalog_revision']
+                        === (int)$parent['catalog_revision']
+                        ? (int)$parent['id']
+                        : null,
                 'current_hashes' => [
                     'catalog_id_set_hash' =>
-                        (string)$parent['catalog_id_set_hash'],
+                        (string)$idSetHashes['catalog_id_set_hash'],
                     'ingredient_id_set_hash' =>
-                        (string)$parent['ingredient_id_set_hash'],
+                        (string)$idSetHashes['ingredient_id_set_hash'],
                     'requirement_recipe_id_set_hash' => null,
                     'requirement_id_set_hash' => null,
                 ],
             ],
             'materialized_values' => [
                 'valid' => true,
-                'overlay' => $overlayScoreHash,
+                'current' => $valueHashes,
             ],
             'timing_ms' => [
-                'copy' => round($copyMs, 3),
+                'snapshot' => round($snapshotMs, 3),
+                'contributors' => round($contributorMs, 3),
                 'score' => round($scoreMs, 3),
-                'overlay_hash' => round($overlayHashMs, 3),
+                'hash' => round($hashMs, 3),
+                'copy' => 0.0,
             ],
         ];
 
-        $overlayPublishStarted = hrtime(true);
+        $publishStarted = hrtime(true);
         $db->exec('BEGIN IMMEDIATE');
+        $guardWasEnabled =
+            ingredientOntologyV3PublicationGuardEnabled($db);
+        ingredientOntologyV3SetPublicationGuard($db, true);
         try {
+            recipeScoreSetWorkState(
+                $db,
+                'publishing',
+                $revisionId,
+                (int)$parent['id'],
+                count($replaceRecipeIds),
+                count($replaceRecipeIds),
+                count($productIds),
+                count($pendingRecipeIds)
+            );
             $lockedState = recipeScoreState($db);
             if (
                 (int)$lockedState['active_score_revision_id']
                     !== (int)$parent['id']
                 || (int)$lockedState['inventory_revision']
-                    !== (int)$state['inventory_revision']
+                    < (int)$state['inventory_revision']
                 || (int)$lockedState['catalog_revision']
                     !== (int)$state['catalog_revision']
                 || (int)$lockedState['ontology_source_revision']
                     !== (int)$state['ontology_source_revision']
+                || !hash_equals(
+                    (string)(
+                        $lockedState[
+                            'ontology_source_lineage_hash'
+                        ] ?? ''
+                    ),
+                    (string)(
+                        $parent[
+                            'ontology_source_lineage_hash'
+                        ] ?? ''
+                    )
+                )
+                || (int)(
+                    $lockedState[
+                        'active_score_projection_revision_id'
+                    ] ?? 0
+                ) !== (int)$parent['id']
                 || recipeScoreCurrentDate() !== $scoreDate
             ) {
                 throw new RuntimeException(
-                    'incremental score overlay fence changed'
+                    'incremental score publication fence changed'
                 );
             }
-            $db->prepare("
+            $ready = $db->prepare("
                 UPDATE recipe_score_revisions
-                SET recipe_count = ?,
+                SET status = 'ready',
+                    recipe_count = ?,
+                    score_rows_hash = ?,
+                    match_rows_hash = ?,
+                    materialization_hash = ?,
                     validation_report_json = ?,
+                    completed_at = CURRENT_TIMESTAMP,
                     last_error = ''
                 WHERE id = ? AND status = 'building'
-            ")->execute([
-                $scoreCount,
+            ");
+            $ready->execute([
+                $recipeCount,
+                (string)$valueHashes['score_rows_hash'],
+                (string)$valueHashes['match_rows_hash'],
+                (string)$valueHashes['materialization_hash'],
                 ingredientOntologyV3Json($report),
                 $revisionId,
             ]);
-            $overlay = $db->prepare("
+            if ($ready->rowCount() !== 1) {
+                throw new RuntimeException(
+                    'incremental score revision publication was lost'
+                );
+            }
+            recipeScoreApplyDeltaProjection(
+                $db,
+                (int)$parent['id'],
+                $revisionId
+            );
+            $activate = $db->prepare("
                 UPDATE recipe_score_state
-                SET active_score_overlay_revision_id = ?,
+                SET active_score_revision_id = ?,
+                    active_score_overlay_revision_id = NULL,
                     cursor_revision = cursor_revision + 1,
                     ontology_source_hash = ?,
+                    ontology_source_lineage_hash = ?,
+                    last_built_at = CURRENT_TIMESTAMP,
                     updated_at = CURRENT_TIMESTAMP
                 WHERE id = 1
                   AND active_score_revision_id = ?
-                  AND inventory_revision = ?
+                  AND active_score_projection_revision_id = ?
+                  AND inventory_revision >= ?
                   AND catalog_revision = ?
                   AND ontology_source_revision = ?
-                  AND active_score_overlay_revision_id IS NULL
             ");
-            $overlay->execute([
+            $activate->execute([
                 $revisionId,
                 $ontologySourceHash,
+                $ontologySourceLineageHash,
                 (int)$parent['id'],
+                $revisionId,
                 (int)$state['inventory_revision'],
                 (int)$state['catalog_revision'],
                 (int)$state['ontology_source_revision'],
             ]);
-            if ($overlay->rowCount() !== 1) {
+            if ($activate->rowCount() !== 1) {
                 throw new RuntimeException(
-                    'incremental score overlay CAS failed'
+                    'incremental score publication CAS failed'
                 );
             }
+            recipeScoreClearPendingProducts(
+                $db,
+                (int)$state['inventory_revision'],
+                $productIds
+            );
+            recipeScoreClearPendingRecipes(
+                $db,
+                (int)$state['catalog_revision'],
+                (int)$state['ontology_source_revision'],
+                $pendingRecipeIds
+            );
+            $db->prepare("
+                DELETE FROM recipe_score_mutations
+                WHERE (
+                    domain = 'catalog' AND revision <= ?
+                ) OR (
+                    domain = 'source' AND revision <= ?
+                )
+            ")->execute([
+                (int)$state['catalog_revision'],
+                (int)$state['ontology_source_revision'],
+            ]);
+            recipeScoreSetWorkState(
+                $db,
+                'idle',
+                $revisionId,
+                (int)$parent['id'],
+                count($replaceRecipeIds),
+                count($replaceRecipeIds),
+                0,
+                0
+            );
             $db->exec('COMMIT');
         } catch (Throwable $error) {
             try {
@@ -1508,11 +2670,16 @@ function ingredientOntologyV3IncrementalRebuild(
             } catch (Throwable $ignored) {
             }
             throw $error;
+        } finally {
+            ingredientOntologyV3SetPublicationGuard(
+                $db,
+                $guardWasEnabled
+            );
         }
         recipeScoreReadRevisionCacheClear();
+        $publishMs = (hrtime(true) - $publishStarted) / 1000000;
         $visibleMs = (hrtime(true) - $started) / 1000000;
-        $overlayPublishMs =
-            (hrtime(true) - $overlayPublishStarted) / 1000000;
+
         if (
             defined('RECIPE_BACKEND_TEST_MODE')
             && RECIPE_BACKEND_TEST_MODE
@@ -1532,187 +2699,6 @@ function ingredientOntologyV3IncrementalRebuild(
             );
         }
 
-        $copyStarted = hrtime(true);
-        $copied = ingredientOntologyV3IncrementalCopyParentRows(
-            $db,
-            (int)$parent['id'],
-            $revisionId
-        );
-        $copyMs = (hrtime(true) - $copyStarted) / 1000000;
-        $scoreCountStmt->execute([$revisionId]);
-        $materializedScoreCount =
-            (int)$scoreCountStmt->fetchColumn();
-        $matchCountStmt->execute([$revisionId]);
-        $materializedMatchCount =
-            (int)$matchCountStmt->fetchColumn();
-        if (
-            $materializedScoreCount !== $scoreCount
-            || $materializedMatchCount !== $matchCount
-            || $copied['score_rows']
-                !== $scoreCount - $overlayScoreCount
-            || $copied['match_rows']
-                !== $matchCount - $overlayMatchCount
-        ) {
-            throw new RuntimeException(
-                'incremental score materialization is incomplete'
-            );
-        }
-        $hashStarted = hrtime(true);
-        $valueHashes = ingredientOntologyV3IncrementalValueHashes(
-            $db,
-            $revisionId,
-            $parent
-        );
-        $hashMs = (hrtime(true) - $hashStarted) / 1000000;
-        if (
-            (int)$valueHashes['affected_recipe_count']
-                !== count($affectedRecipeIds)
-            || (int)$valueHashes['changed_match_row_count']
-                !== $overlayMatchCount
-        ) {
-            throw new RuntimeException(
-                'incremental score value hashes are incomplete'
-            );
-        }
-        $report['overlay_ready'] = false;
-        $report['activated'] = true;
-        $report['materialized_values'] = [
-            'valid' => true,
-            'current' => $valueHashes,
-        ];
-        $report['timing_ms']['copy'] = round($copyMs, 3);
-        $report['timing_ms']['hash'] = round($hashMs, 3);
-        $report['timing_ms']['overlay_publish'] =
-            round($overlayPublishMs, 3);
-        $finalValueHashes = $valueHashes;
-        if ($compactFullHashes) {
-            $fullHashStarted = hrtime(true);
-            $finalValueHashes =
-                ingredientOntologyV3MaterializedValueHashes(
-                    $db,
-                    $revisionId,
-                    null
-                );
-            if (
-                (int)$finalValueHashes['score_row_count']
-                    !== $scoreCount
-                || (int)$finalValueHashes['match_row_count']
-                    !== $matchCount
-            ) {
-                throw new RuntimeException(
-                    'incremental score full hash compaction is incomplete'
-                );
-            }
-            $report['materialized_hash_algorithm'] = 'full-v1';
-            $report['incremental_chain_depth'] = 0;
-            $report['materialized_values'] = [
-                'valid' => true,
-                'current' => $finalValueHashes,
-            ];
-            $report['timing_ms']['full_hash'] = round(
-                (hrtime(true) - $fullHashStarted) / 1000000,
-                3
-            );
-        }
-
-        $db->exec('BEGIN IMMEDIATE');
-        $finalizeStarted = hrtime(true);
-        $guardWasEnabled =
-            ingredientOntologyV3PublicationGuardEnabled($db);
-        ingredientOntologyV3SetPublicationGuard($db, true);
-        try {
-            $lockedState = recipeScoreState($db);
-            if (
-                (int)$lockedState['active_score_revision_id']
-                    !== (int)$parent['id']
-                || (int)$lockedState['inventory_revision']
-                    !== (int)$state['inventory_revision']
-                || (int)$lockedState['catalog_revision']
-                    !== (int)$state['catalog_revision']
-                || (int)$lockedState['ontology_source_revision']
-                    !== (int)$state['ontology_source_revision']
-                || recipeScoreCurrentDate() !== $scoreDate
-                || (int)(
-                    $lockedState[
-                        'active_score_overlay_revision_id'
-                    ] ?? 0
-                ) !== $revisionId
-            ) {
-                throw new RuntimeException(
-                    'incremental score publication fence changed'
-                );
-            }
-            $db->prepare("
-                UPDATE recipe_score_revisions
-                SET status = 'ready',
-                    recipe_count = ?,
-                    score_rows_hash = ?,
-                    match_rows_hash = ?,
-                    materialization_hash = ?,
-                    validation_report_json = ?,
-                    completed_at = CURRENT_TIMESTAMP,
-                    last_error = ''
-                WHERE id = ? AND status = 'building'
-            ")->execute([
-                $scoreCount,
-                (string)$finalValueHashes['score_rows_hash'],
-                (string)$finalValueHashes['match_rows_hash'],
-                (string)$finalValueHashes['materialization_hash'],
-                ingredientOntologyV3Json($report),
-                $revisionId,
-            ]);
-            $activate = $db->prepare("
-                UPDATE recipe_score_state
-                SET active_score_revision_id = ?,
-                    active_score_overlay_revision_id = NULL,
-                    cursor_revision = cursor_revision + 1,
-                    ontology_source_hash = ?,
-                    last_built_at = CURRENT_TIMESTAMP,
-                    updated_at = CURRENT_TIMESTAMP
-                WHERE id = 1
-                  AND active_score_revision_id = ?
-                  AND inventory_revision = ?
-                  AND catalog_revision = ?
-                  AND ontology_source_revision = ?
-                  AND active_score_overlay_revision_id = ?
-            ");
-            $activate->execute([
-                $revisionId,
-                $ontologySourceHash,
-                (int)$parent['id'],
-                (int)$state['inventory_revision'],
-                (int)$state['catalog_revision'],
-                (int)$state['ontology_source_revision'],
-                $revisionId,
-            ]);
-            if ($activate->rowCount() !== 1) {
-                throw new RuntimeException(
-                    'incremental score publication CAS failed'
-                );
-            }
-            recipeScoreClearPendingProducts(
-                $db,
-                (int)$state['inventory_revision'],
-                $productIds
-            );
-            $db->exec('COMMIT');
-        } catch (Throwable $error) {
-            try {
-                $db->exec('ROLLBACK');
-            } catch (Throwable $ignored) {
-            }
-            throw $error;
-        } finally {
-            ingredientOntologyV3SetPublicationGuard(
-                $db,
-                $guardWasEnabled
-            );
-        }
-        recipeScoreReadRevisionCacheClear();
-        $finalizeMs = (hrtime(true) - $finalizeStarted) / 1000000;
-        $cleanupStarted = hrtime(true);
-        $cleanupWarning = ingredientOntologyV3PostActivationCleanup($db);
-        $cleanupMs = (hrtime(true) - $cleanupStarted) / 1000000;
         return [
             'rebuilt' => true,
             'revision_id' => $revisionId,
@@ -1720,10 +2706,16 @@ function ingredientOntologyV3IncrementalRebuild(
             'ontology_version_id' => $versionId,
             'inventory_revision' =>
                 (int)$state['inventory_revision'],
+            'current_inventory_revision' =>
+                (int)recipeScoreState($db)['inventory_revision'],
             'product_ids' => $productIds,
+            'recipe_ids' => $pendingRecipeIds,
+            'recipe_operations' => $recipeOperations,
             'affected_recipe_count' => count($affectedRecipeIds),
-            'recipe_count' => $scoreCount,
+            'recipe_count' => $recipeCount,
             'match_count' => $matchCount,
+            'physical_score_rows' => $changedScoreCount,
+            'physical_match_rows' => $changedMatchCount,
             'elapsed_ms' => round(
                 (hrtime(true) - $started) / 1000000,
                 3
@@ -1731,12 +2723,39 @@ function ingredientOntologyV3IncrementalRebuild(
             'visible_ms' => round($visibleMs, 3),
             'timing_ms' => $report['timing_ms'] + [
                 'prepare' => round($prepareMs, 3),
-                'finalize' => round($finalizeMs, 3),
-                'cleanup' => round($cleanupMs, 3),
+                'publish' => round($publishMs, 3),
+                'cleanup' => 0.0,
             ],
-            'cleanup_warning' => $cleanupWarning,
+            'pending_product_count' => (int)$db->query("
+                SELECT COUNT(*)
+                FROM recipe_score_pending_products
+            ")->fetchColumn(),
+            'pending_recipe_count' => (int)$db->query("
+                SELECT COUNT(*)
+                FROM recipe_score_pending_recipes
+            ")->fetchColumn(),
+            'cleanup_deferred' => true,
+            'cleanup_warning' => null,
         ];
     } catch (Throwable $error) {
+        try {
+            recipeScoreSetWorkState(
+                $db,
+                'failed',
+                $revisionId ?: null,
+                isset($parent) ? (int)$parent['id'] : null,
+                isset($replaceRecipeIds)
+                    ? count($replaceRecipeIds)
+                    : 0,
+                isset($recomputed) ? (int)$recomputed : 0,
+                isset($productIds) ? count($productIds) : 0,
+                isset($pendingRecipeIds)
+                    ? count($pendingRecipeIds)
+                    : 0,
+                $error->getMessage()
+            );
+        } catch (Throwable $ignored) {
+        }
         if ($revisionId > 0) {
             $db->prepare("
                 UPDATE recipe_score_state
@@ -1771,6 +2790,473 @@ function ingredientOntologyV3IncrementalRebuild(
                 (hrtime(true) - $started) / 1000000,
                 3
             ),
+        ];
+    } finally {
+        recipeScoreReleaseLock($lock);
+    }
+}
+
+function ingredientOntologyV3CompactActiveScores(
+    PDO $db,
+    bool $force = false
+): array {
+    $started = hrtime(true);
+    $lock = recipeScoreAcquireLock($db);
+    if ($lock === false) {
+        return ['compacted' => false, 'reason' => 'locked'];
+    }
+    $revisionId = 0;
+    try {
+        $state = recipeScoreState($db);
+        $parent = recipeScoreActiveRevision($db);
+        if ($parent === null || !recipeScoreRevisionIsSparseDelta($parent)) {
+            recipeScoreReconcileWorkState($db);
+            return [
+                'compacted' => false,
+                'reason' => 'active_revision_is_full',
+            ];
+        }
+        $parentReport = recipeScoreRevisionReport($parent);
+        $depth = (int)(
+            $parentReport['incremental_chain_depth'] ?? 0
+        );
+        if (!$force && $depth < 64) {
+            return [
+                'compacted' => false,
+                'reason' => 'not_due',
+                'depth' => $depth,
+            ];
+        }
+        if (
+            (int)$db->query("
+                SELECT COUNT(*) FROM recipe_score_pending_recipes
+            ")->fetchColumn() > 0
+            || (int)$state['catalog_revision']
+                !== (int)$parent['catalog_revision']
+            || (int)$state['ontology_source_revision']
+                !== (int)$parent['ontology_source_revision']
+        ) {
+            return [
+                'compacted' => false,
+                'reason' => 'pending_catalog_or_source_changes',
+            ];
+        }
+        recipeScoreEnsureEffectiveProjection($db, $parent);
+        $effectiveMatchCount =
+            ingredientOntologyV3EffectiveProjectionMatchCount($db);
+        recipeScoreSetWorkState(
+            $db,
+            'compacting',
+            null,
+            (int)$parent['id'],
+            (int)$parent['recipe_count'],
+            0,
+            0,
+            0
+        );
+
+        $versionId = (int)$parent['ontology_version_id'];
+        $inventoryFingerprint =
+            (string)$parent['inventory_fingerprint'];
+        $catalogFingerprint = recipeScoreCatalogFingerprint($db);
+        $sourceLineageHash = (string)(
+            $parent['ontology_source_lineage_hash'] ?? ''
+        );
+        $sourceHash = $sourceLineageHash !== ''
+            ? (string)$parent['ontology_source_hash']
+            : ingredientOntologyV3CorpusHash($db);
+        $idSetHashes =
+            ingredientOntologyV3MaterializedIdSetHashes(
+                $db,
+                (int)$parent['id'],
+                null
+            );
+        $insert = $db->prepare("
+            INSERT INTO recipe_score_revisions (
+                inventory_revision, catalog_revision,
+                inventory_fingerprint, score_date, catalog_max_id,
+                status, recipe_count, ontology_version_id,
+                scoring_model, scoring_config_hash,
+                parent_score_revision_id, catalog_fingerprint,
+                ontology_schema_hash, ontology_prompt_hash,
+                ontology_model_hash, ontology_corpus_hash,
+                ontology_content_hash,
+                ontology_portable_content_hash,
+                ontology_review_manifest_hash,
+                ontology_resolution_gold_hash, ontology_seal_hash,
+                ontology_source_revision, ontology_source_hash,
+                ontology_source_lineage_hash,
+                catalog_id_set_hash, ingredient_id_set_hash
+            )
+            VALUES (
+                ?, ?, ?, ?, ?, 'building', ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+            )
+        ");
+        $insert->execute([
+            (int)$parent['inventory_revision'],
+            (int)$parent['catalog_revision'],
+            $inventoryFingerprint,
+            (string)$parent['score_date'],
+            recipeScoreCatalogMaxId($db),
+            (int)$parent['recipe_count'],
+            $versionId,
+            (string)$parent['scoring_model'],
+            (string)$parent['scoring_config_hash'],
+            (int)$parent['id'],
+            $catalogFingerprint,
+            (string)$parent['ontology_schema_hash'],
+            (string)$parent['ontology_prompt_hash'],
+            (string)$parent['ontology_model_hash'],
+            (string)$parent['ontology_corpus_hash'],
+            (string)$parent['ontology_content_hash'],
+            (string)$parent['ontology_portable_content_hash'],
+            (string)$parent['ontology_review_manifest_hash'],
+            (string)$parent['ontology_resolution_gold_hash'],
+            (string)$parent['ontology_seal_hash'],
+            (int)$parent['ontology_source_revision'],
+            $sourceHash,
+            $sourceLineageHash,
+            (string)$idSetHashes['catalog_id_set_hash'],
+            (string)$idSetHashes['ingredient_id_set_hash'],
+        ]);
+        $revisionId = (int)$db->lastInsertId();
+
+        $copyStarted = hrtime(true);
+        $db->beginTransaction();
+        try {
+            $db->prepare("
+                INSERT INTO recipe_inventory_scores (
+                    score_revision_id, recipe_id, coverage,
+                    directness, expiry_score, source_user_score,
+                    availability_score, required_count,
+                    matched_required_count, missing_required_count,
+                    uncertain_required_count, cookable,
+                    soonest_expiry_days, created_at, updated_at
+                )
+                SELECT ?, score.recipe_id, score.coverage,
+                       score.directness, score.expiry_score,
+                       score.source_user_score,
+                       score.availability_score,
+                       score.required_count,
+                       score.matched_required_count,
+                       score.missing_required_count,
+                       score.uncertain_required_count,
+                       score.cookable, score.soonest_expiry_days,
+                       CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                FROM recipe_score_effective_sources source
+                JOIN recipe_inventory_scores score
+                  ON score.score_revision_id = source.score_revision_id
+                 AND score.recipe_id = source.recipe_id
+                ORDER BY score.recipe_id
+            ")->execute([$revisionId]);
+            $db->commit();
+        } catch (Throwable $error) {
+            if ($db->inTransaction()) {
+                $db->rollBack();
+            }
+            throw $error;
+        }
+        $db->beginTransaction();
+        try {
+            $db->prepare("
+                INSERT INTO ingredient_ontology_shadow_matches (
+                    score_revision_id, recipe_ingredient_id,
+                    recipe_id,
+                    recipe_mapping_id, inventory_product_id,
+                    inventory_mapping_id, outcome,
+                    satisfies_required, confidence, relationship,
+                    explanation_json, created_at
+                )
+                SELECT ?, match.recipe_ingredient_id,
+                       COALESCE(
+                           match.recipe_id,
+                           ingredient.recipe_id
+                       ),
+                       match.recipe_mapping_id,
+                       match.inventory_product_id,
+                       match.inventory_mapping_id,
+                       match.outcome, match.satisfies_required,
+                       match.confidence, match.relationship,
+                       match.explanation_json, CURRENT_TIMESTAMP
+                FROM ingredient_ontology_shadow_matches match
+                LEFT JOIN recipe_ingredients ingredient
+                  ON ingredient.id = match.recipe_ingredient_id
+                JOIN recipe_score_effective_sources source
+                  ON source.recipe_id =
+                     COALESCE(match.recipe_id, ingredient.recipe_id)
+                 AND source.score_revision_id =
+                     match.score_revision_id
+                ORDER BY match.recipe_ingredient_id
+            ")->execute([$revisionId]);
+            $db->prepare("
+                INSERT INTO recipe_score_match_contributors (
+                    score_revision_id, recipe_ingredient_id,
+                    recipe_id, product_id, created_at
+                )
+                SELECT ?, contributor.recipe_ingredient_id,
+                       COALESCE(
+                           contributor.recipe_id,
+                           ingredient.recipe_id
+                       ),
+                       contributor.product_id, CURRENT_TIMESTAMP
+                FROM recipe_score_match_contributors contributor
+                LEFT JOIN recipe_ingredients ingredient
+                  ON ingredient.id =
+                     contributor.recipe_ingredient_id
+                JOIN recipe_score_effective_sources source
+                  ON source.recipe_id = COALESCE(
+                      contributor.recipe_id,
+                      ingredient.recipe_id
+                  )
+                 AND source.score_revision_id =
+                     contributor.score_revision_id
+                ORDER BY contributor.recipe_ingredient_id,
+                         contributor.product_id
+            ")->execute([$revisionId]);
+            $db->commit();
+        } catch (Throwable $error) {
+            if ($db->inTransaction()) {
+                $db->rollBack();
+            }
+            throw $error;
+        }
+        $copyMs = (hrtime(true) - $copyStarted) / 1000000;
+        recipeScoreSetWorkState(
+            $db,
+            'compacting',
+            $revisionId,
+            (int)$parent['id'],
+            (int)$parent['recipe_count'],
+            (int)$parent['recipe_count'],
+            0,
+            0
+        );
+
+        $scoreCount = $db->prepare("
+            SELECT COUNT(*) FROM recipe_inventory_scores
+            WHERE score_revision_id = ?
+        ");
+        $scoreCount->execute([$revisionId]);
+        $matchCount = $db->prepare("
+            SELECT COUNT(*)
+            FROM ingredient_ontology_shadow_matches
+            WHERE score_revision_id = ?
+        ");
+        $matchCount->execute([$revisionId]);
+        $physicalScoreCount = (int)$scoreCount->fetchColumn();
+        $physicalMatchCount = (int)$matchCount->fetchColumn();
+        if (
+            $physicalScoreCount !== (int)$parent['recipe_count']
+            || $physicalMatchCount !== $effectiveMatchCount
+        ) {
+            throw new RuntimeException(
+                'score compaction materialization is incomplete'
+            );
+        }
+        recipeScoreMarkContributorRevisionComplete($db, $revisionId);
+        $valueHashes = ingredientOntologyV3MaterializedValueHashes(
+            $db,
+            $revisionId,
+            null
+        );
+        $report = $parentReport;
+        $report['version'] =
+            INGREDIENT_ONTOLOGY_V3_INCREMENTAL_REPORT_VERSION;
+        $report['incremental'] = false;
+        $report['overlay_ready'] = false;
+        $report['materialized_hash_algorithm'] = 'full-v1';
+        unset($report['materialized_id_set_algorithm']);
+        unset($report['catalog_lineage_hash']);
+        if ($sourceLineageHash === '') {
+            unset($report['ontology_source_lineage_hash']);
+        } else {
+            $report['ontology_source_lineage_hash'] =
+                $sourceLineageHash;
+        }
+        $report['incremental_chain_depth'] = 0;
+        $report['ingredient_match_count'] = $physicalMatchCount;
+        $report['compaction_recommended'] = false;
+        $report['compaction'] = [
+            'parent_revision_id' => (int)$parent['id'],
+            'parent_depth' => $depth,
+            'physical_score_rows' => $physicalScoreCount,
+            'physical_match_rows' => $physicalMatchCount,
+        ];
+        $report['catalog_fingerprint'] = $catalogFingerprint;
+        $report['ontology_source_hash'] = $sourceHash;
+        $report['materialized_id_sets'] = [
+            'valid' => true,
+            'current_hashes' => $idSetHashes + [
+                'requirement_recipe_id_set_hash' => null,
+                'requirement_id_set_hash' => null,
+            ],
+        ];
+        $report['materialized_values'] = [
+            'valid' => true,
+            'current' => $valueHashes,
+        ];
+        $report['timing_ms']['compaction_copy'] =
+            round($copyMs, 3);
+
+        $publishStarted = hrtime(true);
+        $db->exec('BEGIN IMMEDIATE');
+        $guardWasEnabled =
+            ingredientOntologyV3PublicationGuardEnabled($db);
+        ingredientOntologyV3SetPublicationGuard($db, true);
+        try {
+            $lockedState = recipeScoreState($db);
+            if (
+                (int)$lockedState['active_score_revision_id']
+                    !== (int)$parent['id']
+                || (int)$lockedState['inventory_revision']
+                    < (int)$parent['inventory_revision']
+                || (int)$lockedState['catalog_revision']
+                    !== (int)$parent['catalog_revision']
+                || (int)$lockedState['ontology_source_revision']
+                    !== (int)$parent['ontology_source_revision']
+            ) {
+                throw new RuntimeException(
+                    'score compaction publication fence changed'
+                );
+            }
+            $ready = $db->prepare("
+                UPDATE recipe_score_revisions
+                SET status = 'ready',
+                    score_rows_hash = ?,
+                    match_rows_hash = ?,
+                    materialization_hash = ?,
+                    validation_report_json = ?,
+                    completed_at = CURRENT_TIMESTAMP,
+                    last_error = ''
+                WHERE id = ? AND status = 'building'
+            ");
+            $ready->execute([
+                (string)$valueHashes['score_rows_hash'],
+                (string)$valueHashes['match_rows_hash'],
+                (string)$valueHashes['materialization_hash'],
+                ingredientOntologyV3Json($report),
+                $revisionId,
+            ]);
+            if ($ready->rowCount() !== 1) {
+                throw new RuntimeException(
+                    'score compaction revision publication was lost'
+                );
+            }
+            recipeScoreBuildEffectiveProjection($db, $revisionId);
+            $pointer = $db->prepare("
+                UPDATE recipe_score_state
+                SET active_score_revision_id = ?,
+                    active_score_overlay_revision_id = NULL,
+                    ontology_source_hash = ?,
+                    ontology_source_lineage_hash = ?,
+                    cursor_revision = cursor_revision + 1,
+                    last_built_at = CURRENT_TIMESTAMP,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = 1
+                  AND active_score_revision_id = ?
+                  AND active_score_projection_revision_id = ?
+                  AND inventory_revision >= ?
+                  AND catalog_revision = ?
+                  AND ontology_source_revision = ?
+            ");
+            $pointer->execute([
+                $revisionId,
+                $sourceHash,
+                $sourceLineageHash,
+                (int)$parent['id'],
+                $revisionId,
+                (int)$parent['inventory_revision'],
+                (int)$parent['catalog_revision'],
+                (int)$parent['ontology_source_revision'],
+            ]);
+            if ($pointer->rowCount() !== 1) {
+                throw new RuntimeException(
+                    'score compaction pointer CAS failed'
+                );
+            }
+            recipeScoreSetWorkState(
+                $db,
+                'idle',
+                $revisionId,
+                (int)$parent['id'],
+                $physicalScoreCount,
+                $physicalScoreCount,
+                0,
+                0
+            );
+            $db->exec('COMMIT');
+        } catch (Throwable $error) {
+            try {
+                $db->exec('ROLLBACK');
+            } catch (Throwable $ignored) {
+            }
+            throw $error;
+        } finally {
+            ingredientOntologyV3SetPublicationGuard(
+                $db,
+                $guardWasEnabled
+            );
+        }
+        recipeScoreReadRevisionCacheClear();
+        return [
+            'compacted' => true,
+            'revision_id' => $revisionId,
+            'parent_revision_id' => (int)$parent['id'],
+            'parent_depth' => $depth,
+            'recipe_count' => $physicalScoreCount,
+            'match_count' => $physicalMatchCount,
+            'elapsed_ms' => round(
+                (hrtime(true) - $started) / 1000000,
+                3
+            ),
+            'timing_ms' => [
+                'copy' => round($copyMs, 3),
+                'publish' => round(
+                    (hrtime(true) - $publishStarted) / 1000000,
+                    3
+                ),
+            ],
+        ];
+    } catch (Throwable $error) {
+        try {
+            recipeScoreSetWorkState(
+                $db,
+                'failed',
+                $revisionId ?: null,
+                isset($parent) ? (int)$parent['id'] : null,
+                isset($parent)
+                    ? (int)$parent['recipe_count']
+                    : 0,
+                0,
+                0,
+                0,
+                $error->getMessage()
+            );
+        } catch (Throwable $ignored) {
+        }
+        if ($revisionId > 0) {
+            $db->prepare("
+                UPDATE recipe_score_revisions
+                SET status = 'failed',
+                    last_error = ?,
+                    completed_at = CURRENT_TIMESTAMP
+                WHERE id = ? AND status = 'building'
+            ")->execute([
+                mb_substr($error->getMessage(), 0, 1000, 'UTF-8'),
+                $revisionId,
+            ]);
+        }
+        return [
+            'compacted' => false,
+            'reason' => 'failed',
+            'error' => mb_substr(
+                $error->getMessage(),
+                0,
+                1000,
+                'UTF-8'
+            ),
+            'revision_id' => $revisionId ?: null,
         ];
     } finally {
         recipeScoreReleaseLock($lock);

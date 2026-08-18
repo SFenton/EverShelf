@@ -36,6 +36,296 @@ function ingredientOntologyV3IdentityAnnexReviewManifestHash(): string {
     ]);
 }
 
+function ingredientOntologyV3RecipeAnnexResolution(
+    PDO $db,
+    array $version,
+    string $sourceLabel,
+    string $language
+): array {
+    $normalizedLabel = ingredientOntologyV3NormalizeLabel(
+        $sourceLabel
+    );
+    $language = ingredientOntologyV3NormalizeLanguage($language);
+    if ($normalizedLabel === '') {
+        return [
+            'status' => 'unresolved',
+            'reason' => 'empty_label',
+            'admission_source' => 'none',
+            'label_id' => null,
+            'entity_id' => null,
+            'attributes' => [],
+            'normalized_label' => '',
+            'language' => $language,
+        ];
+    }
+    $candidates = ingredientOntologyV3IdentityAnnexLabelCandidates(
+        $db,
+        (int)$version['id'],
+        $normalizedLabel,
+        $language
+    );
+    $admissionSource = 'accepted_label';
+    $review = null;
+    if (!$candidates) {
+        $review = ingredientOntologyV3IdentityAnnexReviewedAliases()[
+            $normalizedLabel
+        ] ?? null;
+        if ($review !== null) {
+            $candidates = ingredientOntologyV3IdentityAnnexLabelCandidates(
+                $db,
+                (int)$version['id'],
+                (string)$review['target_normalized_label'],
+                (string)$review['target_language']
+            );
+            $candidates = array_values(array_filter(
+                $candidates,
+                static fn(array $candidate): bool =>
+                    (string)$candidate['entity_slug']
+                        === (string)$review['target_entity_slug']
+                    && (string)$candidate['kind']
+                        === (string)$review['target_kind']
+            ));
+            $admissionSource = 'reviewed_alias';
+        }
+    }
+    $entities = [];
+    foreach ($candidates as $candidate) {
+        $entities[(int)$candidate['entity_id']] = true;
+    }
+    if (!$candidates) {
+        return [
+            'status' => 'unresolved',
+            'reason' => 'no_reviewed_exact_alias',
+            'admission_source' => 'none',
+            'label_id' => null,
+            'entity_id' => null,
+            'attributes' => [],
+            'normalized_label' => $normalizedLabel,
+            'language' => $language,
+        ];
+    }
+    if (count($entities) !== 1) {
+        return [
+            'status' => 'rejected',
+            'reason' => 'reviewed_alias_collision',
+            'admission_source' => 'none',
+            'label_id' => null,
+            'entity_id' => null,
+            'attributes' => [],
+            'normalized_label' => $normalizedLabel,
+            'language' => $language,
+        ];
+    }
+    $candidate = $candidates[0];
+    return [
+        'status' => 'accepted',
+        'reason' => $admissionSource,
+        'admission_source' => $admissionSource,
+        'label_id' => (int)$candidate['label_id'],
+        'entity_id' => (int)$candidate['entity_id'],
+        'attributes' => (array)$candidate['attributes'],
+        'normalized_label' => $normalizedLabel,
+        'language' => $language,
+        'review' => $review,
+    ];
+}
+
+function ingredientOntologyV3RecipeAnnexSourceRows(
+    PDO $db,
+    int $recipeId
+): array {
+    $stmt = $db->prepare("
+        SELECT ingredient.*,
+               COALESCE(
+                   NULLIF(ingredient.raw_text, ''),
+                   ingredient.normalized_name
+               ) AS source_label,
+               recipe.language, recipe.primary_connector,
+               COALESCE(origin.external_id, '') AS origin_external_id,
+               COALESCE(origin.locale, '') AS origin_locale
+        FROM recipe_ingredients ingredient
+        JOIN recipe_catalog recipe
+          ON recipe.id = ingredient.recipe_id
+        LEFT JOIN recipe_origins origin
+          ON origin.id = (
+              SELECT candidate.id
+              FROM recipe_origins candidate
+              WHERE candidate.recipe_id = ingredient.recipe_id
+                AND candidate.connector = recipe.primary_connector
+              ORDER BY candidate.id
+              LIMIT 1
+          )
+        WHERE ingredient.recipe_id = ?
+          AND recipe.deleted_at IS NULL
+        ORDER BY ingredient.position
+    ");
+    $stmt->execute([$recipeId]);
+    return $stmt->fetchAll(PDO::FETCH_ASSOC);
+}
+
+function ingredientOntologyV3RecipeAnnexRefreshRecipe(
+    PDO $db,
+    int $recipeId,
+    int $versionId
+): array {
+    $version = ingredientOntologyV3Version($db, $versionId);
+    if (
+        $version === null
+        || (string)$version['status'] !== 'ready'
+    ) {
+        throw new RuntimeException(
+            'recipe annex requires a ready ontology version'
+        );
+    }
+    $rows = ingredientOntologyV3RecipeAnnexSourceRows(
+        $db,
+        $recipeId
+    );
+    $mapping = $db->prepare("
+        SELECT owner_fingerprint, status
+        FROM ingredient_ontology_mappings
+        WHERE ontology_version_id = ?
+          AND owner_type = 'recipe_ingredient'
+          AND owner_id = ?
+    ");
+    $delete = $db->prepare("
+        DELETE FROM ingredient_ontology_recipe_identity_annex
+        WHERE recipe_ingredient_id = ?
+    ");
+    $upsert = $db->prepare("
+        INSERT INTO ingredient_ontology_recipe_identity_annex (
+            recipe_ingredient_id, ontology_version_id,
+            ontology_content_hash, ontology_seal_hash,
+            owner_fingerprint, source_label, normalized_label,
+            language, label_id, entity_id, status, confidence,
+            admission_source, attributes_json, resolver_version,
+            review_manifest_hash, evidence_hash, reason,
+            created_at, updated_at
+        )
+        VALUES (
+            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+            CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+        )
+        ON CONFLICT(recipe_ingredient_id) DO UPDATE SET
+            ontology_version_id = excluded.ontology_version_id,
+            ontology_content_hash = excluded.ontology_content_hash,
+            ontology_seal_hash = excluded.ontology_seal_hash,
+            owner_fingerprint = excluded.owner_fingerprint,
+            source_label = excluded.source_label,
+            normalized_label = excluded.normalized_label,
+            language = excluded.language,
+            label_id = excluded.label_id,
+            entity_id = excluded.entity_id,
+            status = excluded.status,
+            confidence = excluded.confidence,
+            admission_source = excluded.admission_source,
+            attributes_json = excluded.attributes_json,
+            resolver_version = excluded.resolver_version,
+            review_manifest_hash = excluded.review_manifest_hash,
+            evidence_hash = excluded.evidence_hash,
+            reason = excluded.reason,
+            updated_at = CURRENT_TIMESTAMP
+    ");
+    $accepted = 0;
+    $terminal = 0;
+    foreach ($rows as $row) {
+        $ingredientId = (int)$row['id'];
+        $ownerFingerprint =
+            ingredientOntologyV3RecipeOwnerFingerprint(
+                'recipe_ingredient',
+                $row
+            );
+        $mapping->execute([$versionId, $ingredientId]);
+        $sealed = $mapping->fetch(PDO::FETCH_ASSOC) ?: null;
+        if (
+            $sealed !== null
+            && hash_equals(
+                (string)$sealed['owner_fingerprint'],
+                $ownerFingerprint
+            )
+            && in_array(
+                (string)$sealed['status'],
+                ['accepted', 'unresolved', 'rejected'],
+                true
+            )
+        ) {
+            $delete->execute([$ingredientId]);
+            $terminal++;
+            if ((string)$sealed['status'] === 'accepted') {
+                $accepted++;
+            }
+            continue;
+        }
+        $resolution = ingredientOntologyV3RecipeAnnexResolution(
+            $db,
+            $version,
+            (string)$row['source_label'],
+            (string)$row['language']
+        );
+        $attributes = (array)$resolution['attributes'];
+        ksort($attributes, SORT_STRING);
+        $evidence = [
+            'resolver_version' =>
+                INGREDIENT_ONTOLOGY_IDENTITY_ANNEX_RESOLVER_VERSION,
+            'review_manifest_hash' =>
+                ingredientOntologyV3IdentityAnnexReviewManifestHash(),
+            'ontology_version_id' => $versionId,
+            'ontology_content_hash' =>
+                (string)$version['content_hash'],
+            'ontology_seal_hash' => (string)$version['seal_hash'],
+            'recipe_ingredient_id' => $ingredientId,
+            'owner_fingerprint' => $ownerFingerprint,
+            'source_label' => (string)$row['source_label'],
+            'normalized_label' =>
+                (string)$resolution['normalized_label'],
+            'language' => (string)$resolution['language'],
+            'status' => (string)$resolution['status'],
+            'admission_source' =>
+                (string)$resolution['admission_source'],
+            'label_id' => $resolution['label_id'],
+            'entity_id' => $resolution['entity_id'],
+            'attributes' => $attributes,
+            'review' => $resolution['review'] ?? null,
+        ];
+        $upsert->execute([
+            $ingredientId,
+            $versionId,
+            (string)$version['content_hash'],
+            (string)$version['seal_hash'],
+            $ownerFingerprint,
+            mb_substr((string)$row['source_label'], 0, 200, 'UTF-8'),
+            mb_substr(
+                (string)$resolution['normalized_label'],
+                0,
+                200,
+                'UTF-8'
+            ),
+            (string)$resolution['language'],
+            $resolution['label_id'],
+            $resolution['entity_id'],
+            (string)$resolution['status'],
+            (string)$resolution['status'] === 'accepted' ? 1.0 : 0.0,
+            (string)$resolution['admission_source'],
+            ingredientOntologyV3Json($attributes),
+            INGREDIENT_ONTOLOGY_IDENTITY_ANNEX_RESOLVER_VERSION,
+            ingredientOntologyV3IdentityAnnexReviewManifestHash(),
+            ingredientOntologyV3Hash($evidence),
+            (string)$resolution['reason'],
+        ]);
+        $terminal++;
+        if ((string)$resolution['status'] === 'accepted') {
+            $accepted++;
+        }
+    }
+    return [
+        'recipe_id' => $recipeId,
+        'ingredient_count' => count($rows),
+        'terminal_count' => $terminal,
+        'accepted_count' => $accepted,
+        'ready' => $terminal === count($rows),
+    ];
+}
+
 function ingredientOntologyV3IdentityAnnexTableExists(PDO $db): bool {
     return ingredientOntologyV3TableExists(
         $db,

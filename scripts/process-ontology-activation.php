@@ -164,7 +164,14 @@ try {
                 ),
                 'maximum_chunks' => max(
                     1,
-                    min(10000, (int)($options['maximum-chunks'] ?? 4))
+                    min(10000, (int)($options['maximum-chunks'] ?? 64))
+                ),
+                'maximum_import_ms' => max(
+                    100,
+                    min(
+                        10000,
+                        (int)($options['maximum-import-ms'] ?? 1500)
+                    )
                 ),
                 'intent_limit' => max(
                     1,

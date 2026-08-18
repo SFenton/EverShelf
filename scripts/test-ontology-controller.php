@@ -2109,6 +2109,7 @@ try {
         $baseScoreId,
         ingredientOntologyV3CorpusHash($db),
     ]);
+    $db->exec("DELETE FROM recipe_score_mutations");
 
     $chunkedGenerationKey = ingredientOntologyV3Hash([
         'test' => 'chunked-copied-fork-resume',
@@ -8332,7 +8333,7 @@ try {
         $bundleSet['schema_version']
             === 'ontology-activation-bundle-set-v2'
         && count($bundleSet['ontology']['tables']) === 32
-        && count($bundleSet['score']['tables']) === 3
+        && count($bundleSet['score']['tables']) === 5
         && $bundleSet['ontology']['database_lineage_uuid']
             === ingredientOntologyActivationLineageUuid($db)
         && $bundleSet['ontology']['candidate']['ontology_version_id']

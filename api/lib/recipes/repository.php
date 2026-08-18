@@ -1265,8 +1265,14 @@ function recipeCatalogSaveVariant(PDO $db, array $recipe, array $metadata = []):
         recipeCatalogRebuildCluster($db, $recipeId);
 
         recipeSearchRebuildDocument($db, $recipeId);
-        if (function_exists('recipeScoreMarkCatalogDirty')) {
-            recipeScoreMarkCatalogDirty($db, !$isNewRecipe);
+        if (function_exists('recipeScoreMarkRecipeDirty')) {
+            recipeScoreMarkRecipeDirty(
+                $db,
+                $recipeId,
+                'replace',
+                $isNewRecipe ? 'recipe_insert' : 'recipe_update',
+                !$isNewRecipe
+            );
         }
         if ($ownsTransaction) {
             $db->commit();
@@ -1469,8 +1475,14 @@ function recipeCatalogDelete(PDO $db, int $recipeId): bool {
                 SET catalog_recipe_id = NULL
                 WHERE catalog_recipe_id = ?
             ")->execute([$recipeId]);
-            if (function_exists('recipeScoreMarkCatalogDirty')) {
-                recipeScoreMarkCatalogDirty($db, true);
+            if (function_exists('recipeScoreMarkRecipeDirty')) {
+                recipeScoreMarkRecipeDirty(
+                    $db,
+                    $recipeId,
+                    'delete',
+                    'recipe_delete',
+                    true
+                );
             }
             if ($ownsTransaction) {
                 $db->commit();
@@ -1507,8 +1519,14 @@ function recipeCatalogSetFavorite(PDO $db, int $recipeId, ?bool $favorite = null
             WHERE recipe_id = ?
         ")->execute([$favorite ? 1 : 0, $recipeId]);
     }
-    if (function_exists('recipeScoreMarkCatalogDirty')) {
-        recipeScoreMarkCatalogDirty($db, true);
+    if (function_exists('recipeScoreMarkRecipeDirty')) {
+        recipeScoreMarkRecipeDirty(
+            $db,
+            $recipeId,
+            'replace',
+            'recipe_favorite',
+            true
+        );
     }
     $read = $db->prepare("SELECT favorite FROM recipe_user_state WHERE recipe_id = ?");
     $read->execute([$recipeId]);

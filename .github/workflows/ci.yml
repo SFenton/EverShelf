@@ -45,6 +45,15 @@ jobs:
       - name: Test processing status and contention contract
         run: php scripts/test-processing-status.php
 
+      - name: Test sparse score invalidation contract
+        run: php scripts/test-score-invalidation-phase0.php
+
+      - name: Test sparse score projection contract
+        run: |
+          php scripts/test-incremental-score-overlay.php
+          php scripts/test-sparse-score-projection.php
+          php scripts/test-recipe-score-deltas.php
+
       - name: Test activation runtime and bounded-memory contract
         run: php scripts/test-ontology-activation-runtime.php
 

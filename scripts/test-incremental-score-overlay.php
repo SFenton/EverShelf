@@ -236,6 +236,7 @@ $db->prepare("
     $overlayRevisionId,
     $hash,
 ]);
+$db->exec("DELETE FROM recipe_score_mutations");
 
 $state = recipeScoreState($db);
 $active = recipeScoreActiveRevision($db);
@@ -349,6 +350,13 @@ $assert(
     && $dirtyState['cursor_revision'] === $cursorBeforeDirty + 1,
     'A newer inventory mutation must invalidate the overlay and every cursor that observed it'
 );
+$assert(
+    (string)$db->query("
+        SELECT status FROM recipe_score_revisions
+        WHERE id = {$overlayRevisionId}
+    ")->fetchColumn() === 'failed',
+    'Inventory invalidation must terminalize the displaced building overlay'
+);
 $db->exec("
     INSERT INTO products (name, brand, category)
     VALUES ('Deleted score product', '', '')
@@ -416,6 +424,13 @@ $assert(
     'An over-limit pending set must require a full rebuild before publishing any falsely fresh partial revision'
 );
 $db->prepare("
+    UPDATE recipe_score_revisions
+    SET status = 'building',
+        last_error = '',
+        completed_at = NULL
+    WHERE id = ?
+")->execute([$overlayRevisionId]);
+$db->prepare("
     UPDATE recipe_score_state
     SET active_score_overlay_revision_id = ?
     WHERE id = 1
@@ -430,6 +445,13 @@ $assert(
     && $catalogStateAfter['cursor_revision']
         === $catalogStateBefore['cursor_revision'] + 1,
     'Catalog mutations must invalidate an active overlay and every cursor that observed it'
+);
+$assert(
+    (string)$db->query("
+        SELECT status FROM recipe_score_revisions
+        WHERE id = {$overlayRevisionId}
+    ")->fetchColumn() === 'failed',
+    'Catalog invalidation must terminalize the displaced building overlay'
 );
 
 $db = null;

@@ -5,6 +5,7 @@ final class RecipeScoreUnavailableException extends RuntimeException {
 
 const RECIPE_SCORE_LEGACY_READY_RETENTION = 2;
 const RECIPE_SCORE_V3_ROLLBACK_ANCESTOR_LIMIT = 8;
+const RECIPE_SCORE_V3_SPARSE_ANCESTOR_LIMIT = 256;
 const RECIPE_SCORE_V3_READY_HISTORY_LIMIT = 4;
 const RECIPE_SCORE_REQUIREMENT_SHADOW_RETENTION = 2;
 
@@ -69,6 +70,9 @@ function recipeScoreState(PDO $db): array {
     $row['ontology_source_hash'] = (string)(
         $row['ontology_source_hash'] ?? ''
     );
+    $row['ontology_source_lineage_hash'] = (string)(
+        $row['ontology_source_lineage_hash'] ?? ''
+    );
     $row['active_score_revision_id'] = $row['active_score_revision_id'] !== null
         ? (int)$row['active_score_revision_id']
         : null;
@@ -77,7 +81,607 @@ function recipeScoreState(PDO $db): array {
         && $row['active_score_overlay_revision_id'] !== null
             ? (int)$row['active_score_overlay_revision_id']
             : null;
+    $row['active_score_projection_revision_id'] =
+        isset($row['active_score_projection_revision_id'])
+        && $row['active_score_projection_revision_id'] !== null
+            ? (int)$row['active_score_projection_revision_id']
+            : null;
     return $row;
+}
+
+function recipeScoreSetWorkState(
+    PDO $db,
+    string $phase,
+    ?int $revisionId = null,
+    ?int $parentRevisionId = null,
+    int $totalRecipeCount = 0,
+    int $processedRecipeCount = 0,
+    int $pendingProductCount = 0,
+    int $pendingRecipeCount = 0,
+    string $lastError = ''
+): void {
+    if (!in_array($phase, [
+        'idle', 'preparing', 'scoring',
+        'publishing', 'compacting', 'failed',
+    ], true)) {
+        throw new InvalidArgumentException(
+            'recipe score work phase is invalid'
+        );
+    }
+    $totalRecipeCount = max(0, $totalRecipeCount);
+    $processedRecipeCount = max(
+        0,
+        min($totalRecipeCount, $processedRecipeCount)
+    );
+    $db->prepare("
+        INSERT INTO recipe_score_work_state (
+            id, phase, revision_id, parent_revision_id,
+            total_recipe_count, processed_recipe_count,
+            pending_product_count, pending_recipe_count,
+            last_error, started_at, updated_at
+        )
+        VALUES (
+            1, ?, ?, ?, ?, ?, ?, ?, ?,
+            CASE WHEN ? = 'idle' THEN NULL ELSE CURRENT_TIMESTAMP END,
+            CURRENT_TIMESTAMP
+        )
+        ON CONFLICT(id) DO UPDATE SET
+            phase = excluded.phase,
+            revision_id = excluded.revision_id,
+            parent_revision_id = excluded.parent_revision_id,
+            total_recipe_count = excluded.total_recipe_count,
+            processed_recipe_count = excluded.processed_recipe_count,
+            pending_product_count = excluded.pending_product_count,
+            pending_recipe_count = excluded.pending_recipe_count,
+            last_error = excluded.last_error,
+            started_at = CASE
+                WHEN recipe_score_work_state.phase = 'idle'
+                 AND excluded.phase <> 'idle'
+                THEN CURRENT_TIMESTAMP
+                WHEN excluded.phase = 'idle' THEN NULL
+                ELSE recipe_score_work_state.started_at
+            END,
+            updated_at = CURRENT_TIMESTAMP
+    ")->execute([
+        $phase,
+        $revisionId,
+        $parentRevisionId,
+        $totalRecipeCount,
+        $processedRecipeCount,
+        max(0, $pendingProductCount),
+        max(0, $pendingRecipeCount),
+        mb_substr($lastError, 0, 1000, 'UTF-8'),
+        $phase,
+    ]);
+}
+
+function recipeScoreReconcileWorkState(PDO $db): void {
+    $work = $db->query("
+        SELECT phase
+        FROM recipe_score_work_state
+        WHERE id = 1
+    ")->fetch(PDO::FETCH_ASSOC) ?: [];
+    if ((string)($work['phase'] ?? 'idle') === 'idle') {
+        return;
+    }
+    $pendingProducts = (int)$db->query("
+        SELECT COUNT(*) FROM recipe_score_pending_products
+    ")->fetchColumn();
+    $pendingRecipes = (int)$db->query("
+        SELECT COUNT(*) FROM recipe_score_pending_recipes
+    ")->fetchColumn();
+    $active = recipeScoreActiveRevision($db);
+    if (
+        $pendingProducts === 0
+        && $pendingRecipes === 0
+        && $active !== null
+        && recipeScoreRevisionStatus($db, $active) === 'fresh'
+    ) {
+        recipeScoreSetWorkState(
+            $db,
+            'idle',
+            (int)$active['id'],
+            $active['parent_score_revision_id'] !== null
+                ? (int)$active['parent_score_revision_id']
+                : null,
+            (int)$active['recipe_count'],
+            (int)$active['recipe_count'],
+            0,
+            0
+        );
+    }
+}
+
+function recipeScoreRevisionReport(array $revision): array {
+    $report = json_decode(
+        (string)($revision['validation_report_json'] ?? '{}'),
+        true
+    );
+    return is_array($report) ? $report : [];
+}
+
+function recipeScoreRevisionIsSparseDelta(array $revision): bool {
+    return (string)(
+        recipeScoreRevisionReport($revision)[
+            'materialized_hash_algorithm'
+        ] ?? ''
+    ) === 'parent-delta-v2';
+}
+
+function recipeScoreEffectiveProjectionReady(
+    PDO $db,
+    int $revisionId,
+    ?array $state = null
+): bool {
+    if ($revisionId <= 0) {
+        return false;
+    }
+    $state ??= recipeScoreState($db);
+    return (int)(
+        $state['active_score_projection_revision_id'] ?? 0
+    ) === $revisionId;
+}
+
+function recipeScoreBuildEffectiveProjection(
+    PDO $db,
+    int $revisionId
+): int {
+    $target = recipeScoreRevision($db, $revisionId);
+    if ($target === null) {
+        throw new RuntimeException(
+            'score projection target revision is unavailable'
+        );
+    }
+    $chain = [];
+    $base = $target;
+    $seen = [];
+    while (recipeScoreRevisionIsSparseDelta($base)) {
+        $baseId = (int)$base['id'];
+        if (isset($seen[$baseId]) || count($chain) >= 256) {
+            throw new RuntimeException(
+                'score projection delta ancestry is invalid'
+            );
+        }
+        $seen[$baseId] = true;
+        $chain[] = $base;
+        $parentId = (int)($base['parent_score_revision_id'] ?? 0);
+        $base = recipeScoreRevision($db, $parentId);
+        if ($base === null) {
+            throw new RuntimeException(
+                'score projection delta parent is unavailable'
+            );
+        }
+    }
+    $baseCount = $db->prepare("
+        SELECT COUNT(*)
+        FROM recipe_inventory_scores
+        WHERE score_revision_id = ?
+    ");
+    $baseCount->execute([(int)$base['id']]);
+    if ((int)$baseCount->fetchColumn() !== (int)$base['recipe_count']) {
+        throw new RuntimeException(
+            'score projection base materialization is incomplete'
+        );
+    }
+    $db->exec("DELETE FROM recipe_score_effective_sources");
+    $insertBase = $db->prepare("
+        INSERT INTO recipe_score_effective_sources (
+            recipe_id, score_revision_id, updated_at
+        )
+        SELECT recipe_id, ?, CURRENT_TIMESTAMP
+        FROM recipe_inventory_scores
+        WHERE score_revision_id = ?
+        ORDER BY recipe_id
+    ");
+    $insertBase->execute([(int)$base['id'], (int)$base['id']]);
+
+    foreach (array_reverse($chain) as $delta) {
+        $deltaId = (int)$delta['id'];
+        $delete = $db->prepare("
+            DELETE FROM recipe_score_effective_sources
+            WHERE recipe_id IN (
+                SELECT recipe_id
+                FROM recipe_score_recipe_operations
+                WHERE score_revision_id = ?
+                  AND operation = 'delete'
+            )
+        ");
+        $delete->execute([$deltaId]);
+        $replace = $db->prepare("
+            INSERT INTO recipe_score_effective_sources (
+                recipe_id, score_revision_id, updated_at
+            )
+            SELECT operation.recipe_id, ?, CURRENT_TIMESTAMP
+            FROM recipe_score_recipe_operations operation
+            JOIN recipe_inventory_scores score
+              ON score.score_revision_id = operation.score_revision_id
+             AND score.recipe_id = operation.recipe_id
+            WHERE operation.score_revision_id = ?
+              AND operation.operation = 'replace'
+            ON CONFLICT(recipe_id) DO UPDATE SET
+                score_revision_id = excluded.score_revision_id,
+                updated_at = CURRENT_TIMESTAMP
+        ");
+        $replace->execute([$deltaId, $deltaId]);
+        $missing = $db->prepare("
+            SELECT COUNT(*)
+            FROM recipe_score_recipe_operations operation
+            LEFT JOIN recipe_inventory_scores score
+              ON score.score_revision_id = operation.score_revision_id
+             AND score.recipe_id = operation.recipe_id
+            WHERE operation.score_revision_id = ?
+              AND operation.operation = 'replace'
+              AND score.recipe_id IS NULL
+        ");
+        $missing->execute([$deltaId]);
+        if ((int)$missing->fetchColumn() !== 0) {
+            throw new RuntimeException(
+                'score projection delta replacement is incomplete'
+            );
+        }
+    }
+    $projectionCount = (int)$db->query("
+        SELECT COUNT(*) FROM recipe_score_effective_sources
+    ")->fetchColumn();
+    if ($projectionCount !== (int)$target['recipe_count']) {
+        throw new RuntimeException(
+            'score projection recipe count is incomplete'
+        );
+    }
+    $missingSources = (int)$db->query("
+        SELECT COUNT(*)
+        FROM recipe_score_effective_sources source
+        LEFT JOIN recipe_inventory_scores score
+          ON score.score_revision_id = source.score_revision_id
+         AND score.recipe_id = source.recipe_id
+        WHERE score.recipe_id IS NULL
+    ")->fetchColumn();
+    if ($missingSources !== 0) {
+        throw new RuntimeException(
+            'score projection contains a missing score source'
+        );
+    }
+    $db->prepare("
+        UPDATE recipe_score_state
+        SET active_score_projection_revision_id = ?
+        WHERE id = 1
+    ")->execute([$revisionId]);
+    return $projectionCount;
+}
+
+function recipeScoreApplyDeltaProjection(
+    PDO $db,
+    int $parentRevisionId,
+    int $revisionId
+): int {
+    $state = recipeScoreState($db);
+    if (
+        (int)($state['active_score_projection_revision_id'] ?? 0)
+            !== $parentRevisionId
+    ) {
+        throw new RuntimeException(
+            'active score projection parent changed'
+        );
+    }
+    $revision = recipeScoreRevision($db, $revisionId);
+    if ($revision === null || !recipeScoreRevisionIsSparseDelta($revision)) {
+        throw new RuntimeException(
+            'score projection child is not a sparse delta'
+        );
+    }
+    $missing = $db->prepare("
+        SELECT COUNT(*)
+        FROM recipe_score_recipe_operations operation
+        LEFT JOIN recipe_inventory_scores score
+          ON score.score_revision_id = operation.score_revision_id
+         AND score.recipe_id = operation.recipe_id
+        WHERE operation.score_revision_id = ?
+          AND operation.operation = 'replace'
+          AND score.recipe_id IS NULL
+    ");
+    $missing->execute([$revisionId]);
+    if ((int)$missing->fetchColumn() !== 0) {
+        throw new RuntimeException(
+            'score delta contains an incomplete replacement'
+        );
+    }
+    $unexpected = $db->prepare("
+        SELECT COUNT(*)
+        FROM recipe_inventory_scores score
+        LEFT JOIN recipe_score_recipe_operations operation
+          ON operation.score_revision_id = score.score_revision_id
+         AND operation.recipe_id = score.recipe_id
+         AND operation.operation = 'replace'
+        WHERE score.score_revision_id = ?
+          AND operation.recipe_id IS NULL
+    ");
+    $unexpected->execute([$revisionId]);
+    if ((int)$unexpected->fetchColumn() !== 0) {
+        throw new RuntimeException(
+            'score delta contains an untracked replacement'
+        );
+    }
+    $delete = $db->prepare("
+        DELETE FROM recipe_score_effective_sources
+        WHERE recipe_id IN (
+            SELECT recipe_id
+            FROM recipe_score_recipe_operations
+            WHERE score_revision_id = ?
+              AND operation = 'delete'
+        )
+    ");
+    $delete->execute([$revisionId]);
+    $replace = $db->prepare("
+        INSERT INTO recipe_score_effective_sources (
+            recipe_id, score_revision_id, updated_at
+        )
+        SELECT recipe_id, ?, CURRENT_TIMESTAMP
+        FROM recipe_score_recipe_operations
+        WHERE score_revision_id = ?
+          AND operation = 'replace'
+        ON CONFLICT(recipe_id) DO UPDATE SET
+            score_revision_id = excluded.score_revision_id,
+            updated_at = CURRENT_TIMESTAMP
+    ");
+    $replace->execute([$revisionId, $revisionId]);
+    $projectionCount = (int)$db->query("
+        SELECT COUNT(*) FROM recipe_score_effective_sources
+    ")->fetchColumn();
+    if ($projectionCount !== (int)$revision['recipe_count']) {
+        throw new RuntimeException(
+            'score delta projection recipe count is incomplete'
+        );
+    }
+    $db->prepare("
+        UPDATE recipe_score_state
+        SET active_score_projection_revision_id = ?
+        WHERE id = 1
+          AND active_score_projection_revision_id = ?
+    ")->execute([$revisionId, $parentRevisionId]);
+    if (
+        !recipeScoreEffectiveProjectionReady(
+            $db,
+            $revisionId
+        )
+    ) {
+        throw new RuntimeException(
+            'score delta projection publication fence was lost'
+        );
+    }
+    return $projectionCount;
+}
+
+function recipeScoreEnsureEffectiveProjection(
+    PDO $db,
+    array $active
+): void {
+    $activeId = (int)$active['id'];
+    if (recipeScoreEffectiveProjectionReady($db, $activeId)) {
+        return;
+    }
+    $db->exec('BEGIN IMMEDIATE');
+    try {
+        $state = recipeScoreState($db);
+        if ((int)($state['active_score_revision_id'] ?? 0) !== $activeId) {
+            throw new RuntimeException(
+                'active score changed before projection initialization'
+            );
+        }
+        recipeScoreBuildEffectiveProjection($db, $activeId);
+        $db->exec('COMMIT');
+    } catch (Throwable $error) {
+        try {
+            $db->exec('ROLLBACK');
+        } catch (Throwable $ignored) {
+        }
+        throw $error;
+    }
+}
+
+function recipeScoreReadUsesEffectiveProjection(
+    PDO $db,
+    array $read,
+    array $revision
+): bool {
+    return empty($read['preview'])
+        && (int)($read['active_revision']['id'] ?? 0)
+            === (int)$revision['id']
+        && recipeScoreEffectiveProjectionReady(
+            $db,
+            (int)$revision['id'],
+            $read['state'] ?? null
+        );
+}
+
+function recipeScoreEffectiveSourceRevisionId(
+    PDO $db,
+    int $recipeId,
+    int $logicalRevisionId
+): int {
+    $state = recipeScoreState($db);
+    if (
+        !recipeScoreEffectiveProjectionReady(
+            $db,
+            $logicalRevisionId,
+            $state
+        )
+        || (int)($state['active_score_revision_id'] ?? 0)
+            !== $logicalRevisionId
+    ) {
+        return $logicalRevisionId;
+    }
+    $source = $db->prepare("
+        SELECT score_revision_id
+        FROM recipe_score_effective_sources
+        WHERE recipe_id = ?
+    ");
+    $source->execute([$recipeId]);
+    $sourceRevisionId = (int)($source->fetchColumn() ?: 0);
+    if ($sourceRevisionId <= 0) {
+        return $logicalRevisionId;
+    }
+    return $sourceRevisionId;
+}
+
+function recipeScoreMarkContributorRevisionComplete(
+    PDO $db,
+    int $revisionId
+): array {
+    $matchCount = $db->prepare("
+        SELECT COUNT(*)
+        FROM ingredient_ontology_shadow_matches
+        WHERE score_revision_id = ?
+    ");
+    $matchCount->execute([$revisionId]);
+    $contributorCount = $db->prepare("
+        SELECT COUNT(*)
+        FROM recipe_score_match_contributors
+        WHERE score_revision_id = ?
+    ");
+    $contributorCount->execute([$revisionId]);
+    $counts = [
+        'match_count' => (int)$matchCount->fetchColumn(),
+        'contributor_count' =>
+            (int)$contributorCount->fetchColumn(),
+    ];
+    $db->prepare("
+        INSERT INTO recipe_score_contributor_revisions (
+            score_revision_id, match_count,
+            contributor_count, completed_at
+        )
+        VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(score_revision_id) DO UPDATE SET
+            match_count = excluded.match_count,
+            contributor_count = excluded.contributor_count,
+            completed_at = CURRENT_TIMESTAMP
+    ")->execute([
+        $revisionId,
+        $counts['match_count'],
+        $counts['contributor_count'],
+    ]);
+    return $counts;
+}
+
+function recipeScoreContributorRevisionComplete(
+    PDO $db,
+    int $revisionId
+): bool {
+    $complete = $db->prepare("
+        SELECT 1
+        FROM recipe_score_contributor_revisions
+        WHERE score_revision_id = ?
+    ");
+    $complete->execute([$revisionId]);
+    return (bool)$complete->fetchColumn();
+}
+
+function recipeScoreBackfillContributorRevision(
+    PDO $db,
+    int $revisionId
+): array {
+    if (recipeScoreContributorRevisionComplete($db, $revisionId)) {
+        $counts = $db->prepare("
+            SELECT match_count, contributor_count
+            FROM recipe_score_contributor_revisions
+            WHERE score_revision_id = ?
+        ");
+        $counts->execute([$revisionId]);
+        $row = $counts->fetch(PDO::FETCH_ASSOC) ?: [];
+        return [
+            'backfilled' => false,
+            'match_count' => (int)($row['match_count'] ?? 0),
+            'contributor_count' =>
+                (int)($row['contributor_count'] ?? 0),
+        ];
+    }
+    $db->beginTransaction();
+    try {
+        $direct = $db->prepare("
+            INSERT OR IGNORE INTO recipe_score_match_contributors (
+                score_revision_id, recipe_ingredient_id,
+                recipe_id, product_id
+            )
+            SELECT score_revision_id, recipe_ingredient_id,
+                   recipe_id, inventory_product_id
+            FROM ingredient_ontology_shadow_matches
+            WHERE score_revision_id = ?
+              AND inventory_product_id IS NOT NULL
+              AND inventory_product_id > 0
+        ");
+        $direct->execute([$revisionId]);
+        $aggregate = $db->prepare("
+            INSERT OR IGNORE INTO recipe_score_match_contributors (
+                score_revision_id, recipe_ingredient_id,
+                recipe_id, product_id
+            )
+            SELECT match.score_revision_id,
+                   match.recipe_ingredient_id,
+                   match.recipe_id,
+                   CAST(contributor.value AS INTEGER)
+            FROM ingredient_ontology_shadow_matches match
+            JOIN json_each(
+                CASE
+                    WHEN json_valid(match.explanation_json)
+                    THEN match.explanation_json
+                    ELSE '{}'
+                END,
+                '$.inventory_aggregate.product_ids'
+            ) contributor
+            WHERE match.score_revision_id = ?
+              AND contributor.type IN ('integer', 'text')
+              AND CAST(contributor.value AS INTEGER) > 0
+        ");
+        $aggregate->execute([$revisionId]);
+        $counts = recipeScoreMarkContributorRevisionComplete(
+            $db,
+            $revisionId
+        );
+        $db->commit();
+        return ['backfilled' => true] + $counts;
+    } catch (Throwable $error) {
+        if ($db->inTransaction()) {
+            $db->rollBack();
+        }
+        throw $error;
+    }
+}
+
+function recipeScoreEnsureEffectiveContributors(
+    PDO $db,
+    int $activeRevisionId
+): array {
+    if (
+        !recipeScoreEffectiveProjectionReady(
+            $db,
+            $activeRevisionId
+        )
+    ) {
+        throw new RuntimeException(
+            'effective score projection is unavailable for contributors'
+        );
+    }
+    $revisionIds = array_map('intval', $db->query("
+        SELECT DISTINCT score_revision_id
+        FROM recipe_score_effective_sources
+        ORDER BY score_revision_id
+    ")->fetchAll(PDO::FETCH_COLUMN));
+    $backfilled = 0;
+    $contributors = 0;
+    foreach ($revisionIds as $revisionId) {
+        $result = recipeScoreBackfillContributorRevision(
+            $db,
+            $revisionId
+        );
+        if (!empty($result['backfilled'])) {
+            $backfilled++;
+        }
+        $contributors += (int)$result['contributor_count'];
+    }
+    return [
+        'revision_count' => count($revisionIds),
+        'backfilled_revision_count' => $backfilled,
+        'contributor_count' => $contributors,
+    ];
 }
 
 function recipeScoreMarkDirty(PDO $db): int {
@@ -174,6 +778,116 @@ function recipeScoreClearPendingProducts(
     return $delete->rowCount();
 }
 
+function recipeScoreMarkRecipeDirty(
+    PDO $db,
+    int $recipeId,
+    string $operation,
+    string $reason,
+    bool $cursorUnsafe = true
+): int {
+    if ($recipeId <= 0) {
+        throw new InvalidArgumentException(
+            'recipe score dirty recipe is invalid'
+        );
+    }
+    if (!in_array($operation, ['replace', 'delete'], true)) {
+        throw new InvalidArgumentException(
+            'recipe score dirty operation is invalid'
+        );
+    }
+    recipeScoreState($db);
+    $db->prepare("
+        UPDATE recipe_score_state SET
+            catalog_revision = catalog_revision + 1,
+            cursor_revision = cursor_revision + ?,
+            active_score_overlay_revision_id = NULL,
+            dirty_at = CURRENT_TIMESTAMP,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = 1
+    ")->execute([$cursorUnsafe ? 1 : 0]);
+    $state = recipeScoreState($db);
+    $catalogRevision = (int)$state['catalog_revision'];
+    $db->prepare("
+        INSERT INTO recipe_score_mutations (
+            domain, revision, owner_type, owner_id,
+            operation, reason
+        )
+        VALUES ('catalog', ?, 'recipe', ?, ?, ?)
+    ")->execute([
+        $catalogRevision,
+        $recipeId,
+        $operation,
+        mb_substr(trim($reason), 0, 160, 'UTF-8'),
+    ]);
+    $active = recipeScoreActiveRevision($db);
+    if (
+        $active === null
+        || (string)($active['scoring_model'] ?? '')
+            !== 'faceted-ontology-v3'
+        || $active['ontology_version_id'] === null
+    ) {
+        return $catalogRevision;
+    }
+    $db->prepare("
+        INSERT INTO recipe_score_pending_recipes (
+            recipe_id, operation, first_catalog_revision,
+            latest_catalog_revision,
+            latest_ontology_source_revision,
+            reason, created_at, updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+        ON CONFLICT(recipe_id) DO UPDATE SET
+            operation = excluded.operation,
+            latest_catalog_revision = MAX(
+                recipe_score_pending_recipes.latest_catalog_revision,
+                excluded.latest_catalog_revision
+            ),
+            latest_ontology_source_revision = MAX(
+                recipe_score_pending_recipes
+                    .latest_ontology_source_revision,
+                excluded.latest_ontology_source_revision
+            ),
+            reason = excluded.reason,
+            updated_at = CURRENT_TIMESTAMP
+    ")->execute([
+        $recipeId,
+        $operation,
+        $catalogRevision,
+        $catalogRevision,
+        (int)$state['ontology_source_revision'],
+        mb_substr(trim($reason), 0, 160, 'UTF-8'),
+    ]);
+    return $catalogRevision;
+}
+
+function recipeScoreClearPendingRecipes(
+    PDO $db,
+    int $catalogRevision,
+    int $ontologySourceRevision,
+    array $recipeIds = []
+): int {
+    $recipeIds = array_values(array_unique(array_filter(
+        array_map('intval', $recipeIds),
+        static fn(int $id): bool => $id > 0
+    )));
+    $recipeWhere = '';
+    $params = [$catalogRevision, $ontologySourceRevision];
+    if ($recipeIds) {
+        $recipeWhere = ' AND recipe_id IN ('
+            . implode(',', array_fill(0, count($recipeIds), '?'))
+            . ')';
+        array_push($params, ...$recipeIds);
+    }
+    $delete = $db->prepare("
+        DELETE FROM recipe_score_pending_recipes
+        WHERE latest_catalog_revision <= ?
+          AND latest_ontology_source_revision <= ?
+          {$recipeWhere}
+    ");
+    $delete->execute($params);
+    return $delete->rowCount();
+}
+
 function recipeScoreMarkCatalogDirty(PDO $db, bool $cursorUnsafe = false): int {
     recipeScoreState($db);
     $db->prepare("
@@ -187,7 +901,18 @@ function recipeScoreMarkCatalogDirty(PDO $db, bool $cursorUnsafe = false): int {
             updated_at = CURRENT_TIMESTAMP
         WHERE id = 1
     ")->execute([$cursorUnsafe ? 1 : 0]);
-    return recipeScoreState($db)['catalog_revision'];
+    $revision = recipeScoreState($db)['catalog_revision'];
+    $db->prepare("
+        INSERT INTO recipe_score_mutations (
+            domain, revision, owner_type, owner_id,
+            operation, reason
+        )
+        VALUES (
+            'catalog', ?, 'global', NULL, 'global',
+            'unscoped_catalog_mutation'
+        )
+    ")->execute([$revision]);
+    return $revision;
 }
 
 function recipeScoreInvalidateCursors(PDO $db): int {
@@ -244,6 +969,63 @@ function recipeScoreCatalogFingerprint(PDO $db): string {
             hash_update(
                 $hash,
                 recipeCatalogJsonEncode(recipeCatalogStableValue($row)) . "\n"
+            );
+        }
+    }
+    return hash_final($hash);
+}
+
+function recipeScoreCatalogRecipeFingerprint(
+    PDO $db,
+    array $recipeIds
+): string {
+    $recipeIds = array_values(array_unique(array_filter(
+        array_map('intval', $recipeIds),
+        static fn(int $id): bool => $id > 0
+    )));
+    if (!$recipeIds) {
+        return hash('sha256', '');
+    }
+    $placeholders = implode(
+        ',',
+        array_fill(0, count($recipeIds), '?')
+    );
+    $hash = hash_init('sha256');
+    foreach ([
+        'recipe_catalog' => "
+            SELECT id, primary_connector, deleted_at
+            FROM recipe_catalog
+            WHERE id IN ({$placeholders})
+            ORDER BY id
+        ",
+        'recipe_ingredients' => "
+            SELECT id, recipe_id, position, raw_text,
+                   normalized_name, quantity, quantity_text, unit,
+                   is_required, is_optional, is_staple,
+                   source_is_required, source_is_optional,
+                   requiredness_source,
+                   canonical_ingredient_id, taxonomy_node_id,
+                   mapping_confidence, mapping_source
+            FROM recipe_ingredients
+            WHERE recipe_id IN ({$placeholders})
+            ORDER BY id
+        ",
+        'recipe_user_state' => "
+            SELECT recipe_id, favorite, rating
+            FROM recipe_user_state
+            WHERE recipe_id IN ({$placeholders})
+            ORDER BY recipe_id
+        ",
+    ] as $name => $sql) {
+        hash_update($hash, $name . "\n");
+        $stmt = $db->prepare($sql);
+        $stmt->execute($recipeIds);
+        while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
+            hash_update(
+                $hash,
+                recipeCatalogJsonEncode(
+                    recipeCatalogStableValue($row)
+                ) . "\n"
             );
         }
     }
@@ -314,6 +1096,7 @@ function recipeScoreRevision(PDO $db, int $revisionId): ?array {
     }
     foreach ([
         'catalog_fingerprint',
+        'catalog_lineage_hash',
         'scoring_config_hash',
         'ontology_schema_hash',
         'ontology_prompt_hash',
@@ -321,6 +1104,7 @@ function recipeScoreRevision(PDO $db, int $revisionId): ?array {
         'ontology_corpus_hash',
         'ontology_content_hash',
         'ontology_source_hash',
+        'ontology_source_lineage_hash',
     ] as $key) {
         $row[$key] = array_key_exists($key, $row)
             && $row[$key] !== null
@@ -777,6 +1561,7 @@ function recipeScoreReadRevision(PDO $db): array {
         recipeScoreRuntimeEnvironment(),
         $state['active_score_revision_id'] ?? 0,
         $state['active_score_overlay_revision_id'] ?? 0,
+        $state['active_score_projection_revision_id'] ?? 0,
         $state['inventory_revision'],
         $state['catalog_revision'],
         $state['cursor_revision'],
@@ -956,6 +1741,14 @@ function recipeScoreRevisionStatus(PDO $db, array $revision): string {
             || !hash_equals(
                 (string)($revision['ontology_source_hash'] ?? ''),
                 (string)$state['ontology_source_hash']
+            )
+            || !hash_equals(
+                (string)(
+                    $revision['ontology_source_lineage_hash'] ?? ''
+                ),
+                (string)(
+                    $state['ontology_source_lineage_hash'] ?? ''
+                )
             )
         )
     ) {
@@ -1210,9 +2003,38 @@ function recipeScorePruneRevisions(PDO $db): array {
         $keep[] = $activeRevisionId;
         $cursor = $active;
         $seen = [$activeRevisionId => true];
+        $sparseClosure = recipeScoreRevisionIsSparseDelta($active);
+        $probe = $active;
+        $probeSeen = [(int)$active['id'] => true];
+        for (
+            $probeDepth = 0;
+            !$sparseClosure
+                && $probeDepth < RECIPE_SCORE_V3_SPARSE_ANCESTOR_LIMIT;
+            $probeDepth++
+        ) {
+            $probeParentId = (int)(
+                $probe['parent_score_revision_id'] ?? 0
+            );
+            if (
+                $probeParentId <= 0
+                || isset($probeSeen[$probeParentId])
+            ) {
+                break;
+            }
+            $probe = recipeScoreRevision($db, $probeParentId);
+            if ($probe === null) {
+                break;
+            }
+            $probeSeen[$probeParentId] = true;
+            $sparseClosure =
+                recipeScoreRevisionIsSparseDelta($probe);
+        }
+        $ancestorLimit = $sparseClosure
+            ? RECIPE_SCORE_V3_SPARSE_ANCESTOR_LIMIT
+            : RECIPE_SCORE_V3_ROLLBACK_ANCESTOR_LIMIT;
         for (
             $depth = 0;
-            $depth < RECIPE_SCORE_V3_ROLLBACK_ANCESTOR_LIMIT;
+            $depth < $ancestorLimit;
             $depth++
         ) {
             $parentId = (int)($cursor['parent_score_revision_id'] ?? 0);
@@ -1226,6 +2048,23 @@ function recipeScorePruneRevisions(PDO $db): array {
             $keep[] = $parentId;
             $seen[$parentId] = true;
             $cursor = $parent;
+            if (
+                $sparseClosure
+                && !recipeScoreRevisionIsSparseDelta($cursor)
+            ) {
+                $nextParent = recipeScoreRevision(
+                    $db,
+                    (int)(
+                        $cursor['parent_score_revision_id'] ?? 0
+                    )
+                );
+                if (
+                    $nextParent === null
+                    || !recipeScoreRevisionIsSparseDelta($nextParent)
+                ) {
+                    break;
+                }
+            }
         }
 
         $sameParent = $db->prepare("
@@ -1280,7 +2119,7 @@ function recipeScorePruneRevisions(PDO $db): array {
     sort($keep, SORT_NUMERIC);
     $maximumKeepCount = RECIPE_SCORE_LEGACY_READY_RETENTION
         + 1
-        + RECIPE_SCORE_V3_ROLLBACK_ANCESTOR_LIMIT
+        + RECIPE_SCORE_V3_SPARSE_ANCESTOR_LIMIT
         + 1
         + RECIPE_SCORE_V3_READY_HISTORY_LIMIT
         + RECIPE_SCORE_REQUIREMENT_SHADOW_RETENTION
@@ -1292,7 +2131,11 @@ function recipeScorePruneRevisions(PDO $db): array {
     }
     $keep = array_values(array_unique(array_merge(
         $keep,
-        recipeScoreImportOwnedRevisionIds($db)
+        recipeScoreImportOwnedRevisionIds($db),
+        array_map('intval', $db->query("
+            SELECT DISTINCT score_revision_id
+            FROM recipe_score_effective_sources
+        ")->fetchAll(PDO::FETCH_COLUMN))
     )));
     sort($keep, SORT_NUMERIC);
     if (
@@ -1408,8 +2251,12 @@ function recipeScorePruneRevisions(PDO $db): array {
 
     $childTables = [
         'ingredient_ontology_shadow_requirement_matches',
+        'recipe_score_contributor_revisions',
+        'recipe_score_match_contributors',
         'ingredient_ontology_shadow_matches',
         'recipe_inventory_scores',
+        'recipe_score_recipe_ingredients',
+        'recipe_score_recipe_operations',
         'recipe_score_incremental_recipes',
     ];
     $chunks = 0;
@@ -1802,10 +2649,15 @@ function recipeScoreRebuild(
                                 === $state['inventory_revision']
                         )
                     ) {
+                        recipeScoreBuildEffectiveProjection(
+                            $db,
+                            $revisionId
+                        );
                         $db->prepare("
                             UPDATE recipe_score_state SET
                                 active_score_revision_id = ?,
                                 active_score_overlay_revision_id = NULL,
+                                ontology_source_lineage_hash = '',
                                 last_built_at = CURRENT_TIMESTAMP,
                                 updated_at = CURRENT_TIMESTAMP
                             WHERE id = 1
@@ -2057,14 +2909,79 @@ function recipeCatalogBrowseCte(
     array $criteria,
     int $revisionId,
     int $catalogMaxId,
-    ?int $overlayRevisionId = null
+    ?int $overlayRevisionId = null,
+    bool $useEffectiveProjection = false
 ): array {
     $params = [
-        ':revision_id' => $revisionId,
-        ':overlay_revision_id' => $overlayRevisionId ?? 0,
         ':catalog_max_id' => $catalogMaxId,
         ':minimum_coverage' => $criteria['minimum_coverage'] / 100,
     ];
+    if ($useEffectiveProjection) {
+        $effectiveScoresSql = "
+            SELECT score.recipe_id, score.coverage,
+                   score.directness, score.expiry_score,
+                   score.source_user_score,
+                   score.availability_score,
+                   score.required_count,
+                   score.matched_required_count,
+                   score.missing_required_count,
+                   score.uncertain_required_count,
+                   score.cookable, score.soonest_expiry_days
+            FROM recipe_score_effective_sources source
+            JOIN recipe_inventory_scores score
+              ON score.score_revision_id = source.score_revision_id
+             AND score.recipe_id = source.recipe_id
+        ";
+    } else {
+        $params[':revision_id'] = $revisionId;
+        $params[':overlay_revision_id'] =
+            $overlayRevisionId ?? 0;
+        $effectiveScoresSql = "
+            SELECT parent.recipe_id,
+                   COALESCE(overlay.coverage, parent.coverage)
+                       AS coverage,
+                   COALESCE(overlay.directness, parent.directness)
+                       AS directness,
+                   COALESCE(overlay.expiry_score, parent.expiry_score)
+                       AS expiry_score,
+                   COALESCE(
+                       overlay.source_user_score,
+                       parent.source_user_score
+                   ) AS source_user_score,
+                   COALESCE(
+                       overlay.availability_score,
+                       parent.availability_score
+                   ) AS availability_score,
+                   COALESCE(
+                       overlay.required_count,
+                       parent.required_count
+                   ) AS required_count,
+                   COALESCE(
+                       overlay.matched_required_count,
+                       parent.matched_required_count
+                   ) AS matched_required_count,
+                   COALESCE(
+                       overlay.missing_required_count,
+                       parent.missing_required_count
+                   ) AS missing_required_count,
+                   COALESCE(
+                       overlay.uncertain_required_count,
+                       parent.uncertain_required_count
+                   ) AS uncertain_required_count,
+                   COALESCE(overlay.cookable, parent.cookable)
+                       AS cookable,
+                   CASE
+                       WHEN overlay.recipe_id IS NOT NULL
+                       THEN overlay.soonest_expiry_days
+                       ELSE parent.soonest_expiry_days
+                   END AS soonest_expiry_days
+            FROM recipe_inventory_scores parent
+            LEFT JOIN recipe_inventory_scores overlay
+              ON overlay.score_revision_id = :overlay_revision_id
+             AND overlay.recipe_id = parent.recipe_id
+            WHERE parent.score_revision_id = :revision_id
+        ";
+    }
     $sourceWhere = '';
     if ($criteria['source'] === 'non_cookidoo') {
         $sourceWhere = "
@@ -2148,49 +3065,7 @@ function recipeCatalogBrowseCte(
     $orderSql = recipeCatalogSortSql($criteria);
     $cte = "
         WITH effective_scores AS (
-            SELECT parent.recipe_id,
-                   COALESCE(overlay.coverage, parent.coverage)
-                       AS coverage,
-                   COALESCE(overlay.directness, parent.directness)
-                       AS directness,
-                   COALESCE(overlay.expiry_score, parent.expiry_score)
-                       AS expiry_score,
-                   COALESCE(
-                       overlay.source_user_score,
-                       parent.source_user_score
-                   ) AS source_user_score,
-                   COALESCE(
-                       overlay.availability_score,
-                       parent.availability_score
-                   ) AS availability_score,
-                   COALESCE(
-                       overlay.required_count,
-                       parent.required_count
-                   ) AS required_count,
-                   COALESCE(
-                       overlay.matched_required_count,
-                       parent.matched_required_count
-                   ) AS matched_required_count,
-                   COALESCE(
-                       overlay.missing_required_count,
-                       parent.missing_required_count
-                   ) AS missing_required_count,
-                   COALESCE(
-                       overlay.uncertain_required_count,
-                       parent.uncertain_required_count
-                   ) AS uncertain_required_count,
-                   COALESCE(overlay.cookable, parent.cookable)
-                       AS cookable,
-                   CASE
-                       WHEN overlay.recipe_id IS NOT NULL
-                       THEN overlay.soonest_expiry_days
-                       ELSE parent.soonest_expiry_days
-                   END AS soonest_expiry_days
-            FROM recipe_inventory_scores parent
-            LEFT JOIN recipe_inventory_scores overlay
-              ON overlay.score_revision_id = :overlay_revision_id
-             AND overlay.recipe_id = parent.recipe_id
-            WHERE parent.score_revision_id = :revision_id
+            {$effectiveScoresSql}
         ),
         base AS (
             SELECT c.id,
@@ -2351,6 +3226,12 @@ function recipeCatalogBrowseResult(PDO $db, array $options = []): array {
     $overlayRevision = $resolved['overlay_revision'] ?? null;
     $effectiveRevision = $overlayRevision ?? $revision;
     $readMetadata = $resolved['read_metadata'];
+    $useEffectiveProjection = $overlayRevision === null
+        && recipeScoreReadUsesEffectiveProjection(
+            $db,
+            $resolved['read'],
+            $revision
+        );
     $catalogMaxId = $cursor !== null
         ? $cursor['catalog_max_id']
         : (int)$revision['catalog_max_id'];
@@ -2360,7 +3241,8 @@ function recipeCatalogBrowseResult(PDO $db, array $options = []): array {
         $catalogMaxId,
         $overlayRevision !== null
             ? (int)$overlayRevision['id']
-            : null
+            : null,
+        $useEffectiveProjection
     );
     if ($built['empty']) {
         $assertCursorStable();
@@ -2504,7 +3386,15 @@ function recipeCatalogBrowseResult(PDO $db, array $options = []): array {
                                 ]
                             )
                                 ? (int)$overlayRevision['id']
-                                : (int)$revision['id'],
+                                : (
+                                    $useEffectiveProjection
+                                        ? recipeScoreEffectiveSourceRevisionId(
+                                            $db,
+                                            (int)$row['id'],
+                                            (int)$revision['id']
+                                        )
+                                        : (int)$revision['id']
+                                ),
                             (int)$row['id']
                         );
                 } else {

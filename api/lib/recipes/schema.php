@@ -8,7 +8,7 @@
 require_once __DIR__ . '/../ontology_v3/schema.php';
 
 const RECIPE_MAX_FACTUAL_DURATION_SECONDS = 366 * 24 * 60 * 60;
-const RECIPE_ONTOLOGY_SOURCE_TRIGGER_VERSION = 31501;
+const RECIPE_ONTOLOGY_SOURCE_TRIGGER_VERSION = 31502;
 
 function recipeArrayIsList(array $value): bool {
     $expected = 0;
@@ -671,6 +671,11 @@ function recipeSchemaMigrate(PDO $db): void {
             cursor_revision INTEGER NOT NULL DEFAULT 1,
             ontology_source_revision INTEGER NOT NULL DEFAULT 1,
             ontology_source_hash TEXT NOT NULL DEFAULT '',
+            ontology_source_lineage_hash TEXT NOT NULL DEFAULT ''
+                CHECK(
+                    ontology_source_lineage_hash = ''
+                    OR length(ontology_source_lineage_hash) = 64
+                ),
             ontology_source_trigger_version INTEGER NOT NULL DEFAULT 0,
             ontology_source_trigger_hash TEXT NOT NULL DEFAULT ''
                 CHECK(
@@ -678,8 +683,9 @@ function recipeSchemaMigrate(PDO $db): void {
                     OR length(ontology_source_trigger_hash) = 64
                 ),
             active_score_revision_id INTEGER DEFAULT NULL,
-                active_score_overlay_revision_id INTEGER DEFAULT NULL,
-                dirty_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            active_score_overlay_revision_id INTEGER DEFAULT NULL,
+            active_score_projection_revision_id INTEGER DEFAULT NULL,
+            dirty_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
             last_built_at DATETIME DEFAULT NULL,
             updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
@@ -697,6 +703,111 @@ function recipeSchemaMigrate(PDO $db): void {
             CHECK(latest_inventory_revision >= first_inventory_revision)
         );
 
+        CREATE TABLE IF NOT EXISTS recipe_score_pending_recipes (
+            recipe_id INTEGER PRIMARY KEY,
+            operation TEXT NOT NULL
+                CHECK(operation IN ('replace', 'delete')),
+            first_catalog_revision INTEGER NOT NULL
+                CHECK(first_catalog_revision > 0),
+            latest_catalog_revision INTEGER NOT NULL
+                CHECK(latest_catalog_revision > 0),
+            latest_ontology_source_revision INTEGER NOT NULL
+                CHECK(latest_ontology_source_revision > 0),
+            reason TEXT NOT NULL DEFAULT ''
+                CHECK(length(reason) <= 160),
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            CHECK(latest_catalog_revision >= first_catalog_revision)
+        );
+
+        CREATE TABLE IF NOT EXISTS recipe_score_mutations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            domain TEXT NOT NULL
+                CHECK(domain IN ('catalog', 'source')),
+            revision INTEGER NOT NULL CHECK(revision > 0),
+            owner_type TEXT NOT NULL
+                CHECK(owner_type IN ('recipe', 'product', 'global')),
+            owner_id INTEGER DEFAULT NULL,
+            operation TEXT NOT NULL
+                CHECK(operation IN (
+                    'insert', 'update', 'delete', 'replace', 'global'
+                )),
+            reason TEXT NOT NULL DEFAULT ''
+                CHECK(length(reason) <= 160),
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(domain, revision)
+        );
+
+        CREATE TABLE IF NOT EXISTS recipe_score_work_state (
+            id INTEGER PRIMARY KEY CHECK(id = 1),
+            phase TEXT NOT NULL DEFAULT 'idle'
+                CHECK(phase IN (
+                    'idle', 'preparing', 'scoring',
+                    'publishing', 'compacting', 'failed'
+                )),
+            revision_id INTEGER DEFAULT NULL,
+            parent_revision_id INTEGER DEFAULT NULL,
+            total_recipe_count INTEGER NOT NULL DEFAULT 0
+                CHECK(total_recipe_count >= 0),
+            processed_recipe_count INTEGER NOT NULL DEFAULT 0
+                CHECK(processed_recipe_count >= 0),
+            pending_product_count INTEGER NOT NULL DEFAULT 0
+                CHECK(pending_product_count >= 0),
+            pending_recipe_count INTEGER NOT NULL DEFAULT 0
+                CHECK(pending_recipe_count >= 0),
+            last_error TEXT NOT NULL DEFAULT ''
+                CHECK(length(last_error) <= 1000),
+            started_at DATETIME DEFAULT NULL,
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            CHECK(processed_recipe_count <= total_recipe_count)
+        );
+
+        CREATE TABLE IF NOT EXISTS
+            ingredient_ontology_recipe_identity_annex (
+            recipe_ingredient_id INTEGER PRIMARY KEY,
+            ontology_version_id INTEGER NOT NULL,
+            ontology_content_hash TEXT NOT NULL
+                CHECK(length(ontology_content_hash) = 64),
+            ontology_seal_hash TEXT NOT NULL
+                CHECK(length(ontology_seal_hash) = 64),
+            owner_fingerprint TEXT NOT NULL
+                CHECK(length(owner_fingerprint) = 64),
+            source_label TEXT NOT NULL DEFAULT ''
+                CHECK(length(source_label) <= 200),
+            normalized_label TEXT NOT NULL DEFAULT ''
+                CHECK(length(normalized_label) <= 200),
+            language TEXT NOT NULL DEFAULT 'und'
+                CHECK(length(language) BETWEEN 2 AND 35),
+            label_id INTEGER DEFAULT NULL,
+            entity_id INTEGER DEFAULT NULL,
+            status TEXT NOT NULL
+                CHECK(status IN ('accepted', 'unresolved', 'rejected')),
+            confidence REAL NOT NULL DEFAULT 0
+                CHECK(confidence BETWEEN 0 AND 1),
+            admission_source TEXT NOT NULL DEFAULT 'none'
+                CHECK(length(admission_source) <= 80),
+            attributes_json TEXT NOT NULL DEFAULT '{}'
+                CHECK(length(attributes_json) <= 16384),
+            resolver_version TEXT NOT NULL
+                CHECK(length(resolver_version) <= 80),
+            review_manifest_hash TEXT NOT NULL
+                CHECK(length(review_manifest_hash) = 64),
+            evidence_hash TEXT NOT NULL
+                CHECK(length(evidence_hash) = 64),
+            reason TEXT NOT NULL
+                CHECK(length(reason) BETWEEN 1 AND 80),
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (recipe_ingredient_id)
+                REFERENCES recipe_ingredients(id) ON DELETE CASCADE,
+            FOREIGN KEY (ontology_version_id)
+                REFERENCES ingredient_ontology_versions(id)
+                    ON DELETE CASCADE,
+            FOREIGN KEY (entity_id)
+                REFERENCES ingredient_ontology_entities(id)
+                    ON DELETE SET NULL
+        );
+
         CREATE TABLE IF NOT EXISTS recipe_score_incremental_recipes (
             score_revision_id INTEGER NOT NULL,
             recipe_id INTEGER NOT NULL,
@@ -706,6 +817,66 @@ function recipeSchemaMigrate(PDO $db): void {
                 REFERENCES recipe_score_revisions(id) ON DELETE CASCADE,
             FOREIGN KEY (recipe_id)
                 REFERENCES recipe_catalog(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS recipe_score_recipe_operations (
+            score_revision_id INTEGER NOT NULL,
+            recipe_id INTEGER NOT NULL,
+            operation TEXT NOT NULL
+                CHECK(operation IN ('replace', 'delete')),
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (score_revision_id, recipe_id),
+            FOREIGN KEY (score_revision_id)
+                REFERENCES recipe_score_revisions(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS recipe_score_recipe_ingredients (
+            score_revision_id INTEGER NOT NULL,
+            recipe_id INTEGER NOT NULL,
+            recipe_ingredient_id INTEGER NOT NULL,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (
+                score_revision_id,
+                recipe_id,
+                recipe_ingredient_id
+            ),
+            FOREIGN KEY (score_revision_id)
+                REFERENCES recipe_score_revisions(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS recipe_score_effective_sources (
+            recipe_id INTEGER PRIMARY KEY,
+            score_revision_id INTEGER NOT NULL,
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (recipe_id)
+                REFERENCES recipe_catalog(id) ON DELETE CASCADE,
+            FOREIGN KEY (score_revision_id)
+                REFERENCES recipe_score_revisions(id) ON DELETE RESTRICT
+        );
+
+        CREATE TABLE IF NOT EXISTS recipe_score_match_contributors (
+            score_revision_id INTEGER NOT NULL,
+            recipe_ingredient_id INTEGER NOT NULL,
+            recipe_id INTEGER DEFAULT NULL,
+            product_id INTEGER NOT NULL,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (
+                score_revision_id,
+                recipe_ingredient_id,
+                product_id
+            ),
+            FOREIGN KEY (score_revision_id)
+                REFERENCES recipe_score_revisions(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS recipe_score_contributor_revisions (
+            score_revision_id INTEGER PRIMARY KEY,
+            match_count INTEGER NOT NULL CHECK(match_count >= 0),
+            contributor_count INTEGER NOT NULL
+                CHECK(contributor_count >= 0),
+            completed_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (score_revision_id)
+                REFERENCES recipe_score_revisions(id) ON DELETE CASCADE
         );
 
         CREATE TABLE IF NOT EXISTS recipe_score_revisions (
@@ -727,6 +898,11 @@ function recipeSchemaMigrate(PDO $db): void {
                 ),
             parent_score_revision_id INTEGER DEFAULT NULL,
             catalog_fingerprint TEXT NOT NULL DEFAULT '',
+            catalog_lineage_hash TEXT NOT NULL DEFAULT ''
+                CHECK(
+                    catalog_lineage_hash = ''
+                    OR length(catalog_lineage_hash) = 64
+                ),
             ontology_schema_hash TEXT DEFAULT NULL,
             ontology_prompt_hash TEXT DEFAULT NULL,
             ontology_model_hash TEXT DEFAULT NULL,
@@ -734,6 +910,11 @@ function recipeSchemaMigrate(PDO $db): void {
             ontology_content_hash TEXT DEFAULT NULL,
             ontology_source_revision INTEGER NOT NULL DEFAULT 1,
             ontology_source_hash TEXT NOT NULL DEFAULT '',
+            ontology_source_lineage_hash TEXT NOT NULL DEFAULT ''
+                CHECK(
+                    ontology_source_lineage_hash = ''
+                    OR length(ontology_source_lineage_hash) = 64
+                ),
             requirement_revision_id INTEGER DEFAULT NULL,
             requirement_model TEXT DEFAULT NULL
                 CHECK(
@@ -847,9 +1028,36 @@ function recipeSchemaMigrate(PDO $db): void {
             ON recipe_score_pending_products(
                 latest_inventory_revision, updated_at, product_id
             );
+        CREATE INDEX IF NOT EXISTS idx_recipe_score_pending_recipe_revision
+            ON recipe_score_pending_recipes(
+                latest_catalog_revision, updated_at, recipe_id
+            );
+        CREATE INDEX IF NOT EXISTS idx_recipe_score_mutations_revision
+            ON recipe_score_mutations(domain, revision, owner_type, owner_id);
+        CREATE INDEX IF NOT EXISTS idx_recipe_annex_version_status
+            ON ingredient_ontology_recipe_identity_annex(
+                ontology_version_id, status, recipe_ingredient_id
+            );
         CREATE INDEX IF NOT EXISTS idx_recipe_score_incremental_recipe
             ON recipe_score_incremental_recipes(
                 recipe_id, score_revision_id
+            );
+        CREATE INDEX IF NOT EXISTS idx_recipe_score_operations_recipe
+            ON recipe_score_recipe_operations(
+                recipe_id, score_revision_id
+            );
+        CREATE INDEX IF NOT EXISTS idx_recipe_score_recipe_ingredients
+            ON recipe_score_recipe_ingredients(
+                score_revision_id, recipe_id,
+                recipe_ingredient_id
+            );
+        CREATE INDEX IF NOT EXISTS idx_recipe_score_effective_revision
+            ON recipe_score_effective_sources(
+                score_revision_id, recipe_id
+            );
+        CREATE INDEX IF NOT EXISTS idx_recipe_score_contributors_product
+            ON recipe_score_match_contributors(
+                product_id, score_revision_id, recipe_ingredient_id
             );
         CREATE INDEX IF NOT EXISTS idx_recipe_score_revisions_ready
             ON recipe_score_revisions(status, completed_at DESC, id DESC);
@@ -862,6 +1070,92 @@ function recipeSchemaMigrate(PDO $db): void {
             ON recipe_inventory_scores(
                 score_revision_id, expiry_score DESC, coverage DESC, recipe_id ASC
             );
+        CREATE TRIGGER IF NOT EXISTS recipe_score_overlay_clear_terminalize
+        AFTER UPDATE OF active_score_overlay_revision_id
+        ON recipe_score_state
+        WHEN OLD.active_score_overlay_revision_id IS NOT NULL
+         AND NEW.active_score_overlay_revision_id IS NULL
+        BEGIN
+            UPDATE recipe_score_revisions
+            SET status = 'failed',
+                last_error = 'superseded score overlay',
+                completed_at = CURRENT_TIMESTAMP
+            WHERE id = OLD.active_score_overlay_revision_id
+              AND status = 'building';
+        END;
+    ");
+
+    $contributorColumns = array_column(
+        $db->query("
+            PRAGMA table_info(recipe_score_match_contributors)
+        ")->fetchAll(PDO::FETCH_ASSOC),
+        'name'
+    );
+    $contributorSql = (string)($db->query("
+        SELECT sql
+        FROM sqlite_master
+        WHERE type = 'table'
+          AND name = 'recipe_score_match_contributors'
+    ")->fetchColumn() ?: '');
+    if (
+        !in_array('recipe_id', $contributorColumns, true)
+        || str_contains(
+            strtolower($contributorSql),
+            'references recipe_ingredients'
+        )
+    ) {
+        $db->exec("
+            DROP TABLE IF EXISTS recipe_score_match_contributors_next;
+            CREATE TABLE recipe_score_match_contributors_next (
+                score_revision_id INTEGER NOT NULL,
+                recipe_ingredient_id INTEGER NOT NULL,
+                recipe_id INTEGER DEFAULT NULL,
+                product_id INTEGER NOT NULL,
+                created_at DATETIME NOT NULL
+                    DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (
+                    score_revision_id,
+                    recipe_ingredient_id,
+                    product_id
+                ),
+                FOREIGN KEY (score_revision_id)
+                    REFERENCES recipe_score_revisions(id)
+                        ON DELETE CASCADE
+            );
+            INSERT INTO recipe_score_match_contributors_next (
+                score_revision_id, recipe_ingredient_id,
+                recipe_id, product_id, created_at
+            )
+            SELECT contributor.score_revision_id,
+                   contributor.recipe_ingredient_id,
+                   ingredient.recipe_id,
+                   contributor.product_id,
+                   contributor.created_at
+            FROM recipe_score_match_contributors contributor
+            LEFT JOIN recipe_ingredients ingredient
+              ON ingredient.id =
+                 contributor.recipe_ingredient_id;
+            DROP TABLE recipe_score_match_contributors;
+            ALTER TABLE recipe_score_match_contributors_next
+                RENAME TO recipe_score_match_contributors;
+            CREATE INDEX idx_recipe_score_contributors_product
+                ON recipe_score_match_contributors(
+                    product_id, score_revision_id,
+                    recipe_ingredient_id
+                );
+            CREATE INDEX idx_recipe_score_contributors_recipe
+                ON recipe_score_match_contributors(
+                    score_revision_id, recipe_id,
+                    recipe_ingredient_id
+                );
+        ");
+    }
+    $db->exec("
+        CREATE INDEX IF NOT EXISTS idx_recipe_score_contributors_recipe
+            ON recipe_score_match_contributors(
+                score_revision_id, recipe_id,
+                recipe_ingredient_id
+            )
     ");
 
     $scoreStateColumns = array_column(
@@ -874,11 +1168,15 @@ function recipeSchemaMigrate(PDO $db): void {
         'cursor_revision' => 'INTEGER NOT NULL DEFAULT 1',
         'ontology_source_revision' => 'INTEGER NOT NULL DEFAULT 1',
         'ontology_source_hash' => "TEXT NOT NULL DEFAULT ''",
+        'ontology_source_lineage_hash' =>
+            "TEXT NOT NULL DEFAULT ''",
         'ontology_source_trigger_version' =>
             'INTEGER NOT NULL DEFAULT 0',
         'ontology_source_trigger_hash' =>
             "TEXT NOT NULL DEFAULT ''",
         'active_score_overlay_revision_id' =>
+            'INTEGER DEFAULT NULL',
+        'active_score_projection_revision_id' =>
             'INTEGER DEFAULT NULL',
     ] as $column => $definition) {
         if (in_array($column, $scoreStateColumns, true)) {
@@ -1330,6 +1628,9 @@ function recipeSchemaMigrate(PDO $db): void {
         'ontology_source_revision' =>
             'INTEGER NOT NULL DEFAULT 1',
         'ontology_source_hash' => "TEXT NOT NULL DEFAULT ''",
+        'catalog_lineage_hash' => "TEXT NOT NULL DEFAULT ''",
+        'ontology_source_lineage_hash' =>
+            "TEXT NOT NULL DEFAULT ''",
     ] as $column => $definition) {
         if (in_array($column, $scoreRevisionColumns, true)) {
             continue;
@@ -1350,6 +1651,70 @@ function recipeSchemaMigrate(PDO $db): void {
     ")->fetchColumn();
     if ($scoreStateExists === 0) {
         $db->exec("INSERT OR IGNORE INTO recipe_score_state (id) VALUES (1)");
+    }
+    $db->exec("
+        INSERT OR IGNORE INTO recipe_score_work_state (id)
+        VALUES (1)
+    ");
+    $projectionState = $db->query("
+        SELECT active_score_revision_id,
+               active_score_projection_revision_id
+        FROM recipe_score_state
+        WHERE id = 1
+    ")->fetch(PDO::FETCH_ASSOC) ?: [];
+    $projectionActiveId = (int)(
+        $projectionState['active_score_revision_id'] ?? 0
+    );
+    if (
+        $projectionActiveId > 0
+        && (int)(
+            $projectionState[
+                'active_score_projection_revision_id'
+            ] ?? 0
+        ) === 0
+    ) {
+        $projectionRevision = $db->prepare("
+            SELECT recipe_count
+            FROM recipe_score_revisions
+            WHERE id = ? AND status = 'ready'
+        ");
+        $projectionRevision->execute([$projectionActiveId]);
+        $expectedProjectionCount =
+            $projectionRevision->fetchColumn();
+        if ($expectedProjectionCount !== false) {
+            $db->exec("DELETE FROM recipe_score_effective_sources");
+            $projectionInsert = $db->prepare("
+                INSERT INTO recipe_score_effective_sources (
+                    recipe_id, score_revision_id, updated_at
+                )
+                SELECT recipe_id, ?, CURRENT_TIMESTAMP
+                FROM recipe_inventory_scores
+                WHERE score_revision_id = ?
+                ORDER BY recipe_id
+            ");
+            $projectionInsert->execute([
+                $projectionActiveId,
+                $projectionActiveId,
+            ]);
+            if (
+                $projectionInsert->rowCount()
+                    === (int)$expectedProjectionCount
+            ) {
+                $db->prepare("
+                    UPDATE recipe_score_state
+                    SET active_score_projection_revision_id = ?
+                    WHERE id = 1
+                      AND active_score_revision_id = ?
+                ")->execute([
+                    $projectionActiveId,
+                    $projectionActiveId,
+                ]);
+            } else {
+                $db->exec(
+                    "DELETE FROM recipe_score_effective_sources"
+                );
+            }
+        }
     }
     $ontologySourceTableCount = (int)$db->query("
         SELECT COUNT(*)
@@ -1470,6 +1835,13 @@ function recipeSchemaMigrate(PDO $db): void {
                 ontology_source_hash = '',
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = 1;
+            INSERT INTO recipe_score_mutations (
+                domain, revision, owner_type, owner_id,
+                operation, reason
+            )
+            SELECT 'source', ontology_source_revision,
+                   'product', NEW.id, 'insert', 'products'
+            FROM recipe_score_state WHERE id = 1;
         END;
         CREATE TRIGGER recipe_ontology_source_products_update
         AFTER UPDATE OF name, brand, category, prepared_food ON products
@@ -1484,6 +1856,13 @@ function recipeSchemaMigrate(PDO $db): void {
                 ontology_source_hash = '',
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = 1;
+            INSERT INTO recipe_score_mutations (
+                domain, revision, owner_type, owner_id,
+                operation, reason
+            )
+            SELECT 'source', ontology_source_revision,
+                   'product', NEW.id, 'update', 'products'
+            FROM recipe_score_state WHERE id = 1;
         END;
         CREATE TRIGGER recipe_ontology_source_products_delete
         AFTER DELETE ON products
@@ -1494,6 +1873,13 @@ function recipeSchemaMigrate(PDO $db): void {
                 ontology_source_hash = '',
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = 1;
+            INSERT INTO recipe_score_mutations (
+                domain, revision, owner_type, owner_id,
+                operation, reason
+            )
+            SELECT 'source', ontology_source_revision,
+                   'product', OLD.id, 'delete', 'products'
+            FROM recipe_score_state WHERE id = 1;
         END;
 
         CREATE TRIGGER recipe_ontology_source_catalog_insert
@@ -1505,6 +1891,13 @@ function recipeSchemaMigrate(PDO $db): void {
                 ontology_source_hash = '',
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = 1;
+            INSERT INTO recipe_score_mutations (
+                domain, revision, owner_type, owner_id,
+                operation, reason
+            )
+            SELECT 'source', ontology_source_revision,
+                   'recipe', NEW.id, 'insert', 'recipe_catalog'
+            FROM recipe_score_state WHERE id = 1;
         END;
         CREATE TRIGGER recipe_ontology_source_catalog_update
         AFTER UPDATE OF primary_connector, language ON recipe_catalog
@@ -1517,6 +1910,13 @@ function recipeSchemaMigrate(PDO $db): void {
                 ontology_source_hash = '',
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = 1;
+            INSERT INTO recipe_score_mutations (
+                domain, revision, owner_type, owner_id,
+                operation, reason
+            )
+            SELECT 'source', ontology_source_revision,
+                   'recipe', NEW.id, 'update', 'recipe_catalog'
+            FROM recipe_score_state WHERE id = 1;
         END;
         CREATE TRIGGER recipe_ontology_source_catalog_delete
         AFTER DELETE ON recipe_catalog
@@ -1527,6 +1927,13 @@ function recipeSchemaMigrate(PDO $db): void {
                 ontology_source_hash = '',
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = 1;
+            INSERT INTO recipe_score_mutations (
+                domain, revision, owner_type, owner_id,
+                operation, reason
+            )
+            SELECT 'source', ontology_source_revision,
+                   'recipe', OLD.id, 'delete', 'recipe_catalog'
+            FROM recipe_score_state WHERE id = 1;
         END;
 
         CREATE TRIGGER recipe_ontology_source_origins_insert
@@ -1538,6 +1945,13 @@ function recipeSchemaMigrate(PDO $db): void {
                 ontology_source_hash = '',
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = 1;
+            INSERT INTO recipe_score_mutations (
+                domain, revision, owner_type, owner_id,
+                operation, reason
+            )
+            SELECT 'source', ontology_source_revision,
+                   'recipe', NEW.recipe_id, 'insert', 'recipe_origins'
+            FROM recipe_score_state WHERE id = 1;
         END;
         CREATE TRIGGER recipe_ontology_source_origins_update
         AFTER UPDATE OF recipe_id, connector, external_id, locale,
@@ -1557,6 +1971,21 @@ function recipeSchemaMigrate(PDO $db): void {
                 ontology_source_hash = '',
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = 1;
+            INSERT INTO recipe_score_mutations (
+                domain, revision, owner_type, owner_id,
+                operation, reason
+            )
+            SELECT 'source', ontology_source_revision,
+                   CASE
+                       WHEN OLD.recipe_id IS NOT NEW.recipe_id
+                       THEN 'global' ELSE 'recipe'
+                   END,
+                   CASE
+                       WHEN OLD.recipe_id IS NOT NEW.recipe_id
+                       THEN NULL ELSE NEW.recipe_id
+                   END,
+                   'update', 'recipe_origins'
+            FROM recipe_score_state WHERE id = 1;
         END;
         CREATE TRIGGER recipe_ontology_source_origins_delete
         AFTER DELETE ON recipe_origins
@@ -1567,6 +1996,13 @@ function recipeSchemaMigrate(PDO $db): void {
                 ontology_source_hash = '',
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = 1;
+            INSERT INTO recipe_score_mutations (
+                domain, revision, owner_type, owner_id,
+                operation, reason
+            )
+            SELECT 'source', ontology_source_revision,
+                   'recipe', OLD.recipe_id, 'delete', 'recipe_origins'
+            FROM recipe_score_state WHERE id = 1;
         END;
 
         CREATE TRIGGER recipe_ontology_source_ingredients_insert
@@ -1578,6 +2014,14 @@ function recipeSchemaMigrate(PDO $db): void {
                 ontology_source_hash = '',
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = 1;
+            INSERT INTO recipe_score_mutations (
+                domain, revision, owner_type, owner_id,
+                operation, reason
+            )
+            SELECT 'source', ontology_source_revision,
+                   'recipe', NEW.recipe_id, 'insert',
+                   'recipe_ingredients'
+            FROM recipe_score_state WHERE id = 1;
         END;
         CREATE TRIGGER recipe_ontology_source_ingredients_update
         AFTER UPDATE OF recipe_id, position, raw_text, normalized_name,
@@ -1605,6 +2049,21 @@ function recipeSchemaMigrate(PDO $db): void {
                 ontology_source_hash = '',
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = 1;
+            INSERT INTO recipe_score_mutations (
+                domain, revision, owner_type, owner_id,
+                operation, reason
+            )
+            SELECT 'source', ontology_source_revision,
+                   CASE
+                       WHEN OLD.recipe_id IS NOT NEW.recipe_id
+                       THEN 'global' ELSE 'recipe'
+                   END,
+                   CASE
+                       WHEN OLD.recipe_id IS NOT NEW.recipe_id
+                       THEN NULL ELSE NEW.recipe_id
+                   END,
+                   'update', 'recipe_ingredients'
+            FROM recipe_score_state WHERE id = 1;
         END;
         CREATE TRIGGER recipe_ontology_source_ingredients_delete
         AFTER DELETE ON recipe_ingredients
@@ -1615,6 +2074,14 @@ function recipeSchemaMigrate(PDO $db): void {
                 ontology_source_hash = '',
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = 1;
+            INSERT INTO recipe_score_mutations (
+                domain, revision, owner_type, owner_id,
+                operation, reason
+            )
+            SELECT 'source', ontology_source_revision,
+                   'recipe', OLD.recipe_id, 'delete',
+                   'recipe_ingredients'
+            FROM recipe_score_state WHERE id = 1;
         END;
 
         CREATE TRIGGER recipe_ontology_source_rows_insert
@@ -1626,6 +2093,14 @@ function recipeSchemaMigrate(PDO $db): void {
                 ontology_source_hash = '',
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = 1;
+            INSERT INTO recipe_score_mutations (
+                domain, revision, owner_type, owner_id,
+                operation, reason
+            )
+            SELECT 'source', ontology_source_revision,
+                   'recipe', NEW.recipe_id, 'insert',
+                   'recipe_source_ingredients'
+            FROM recipe_score_state WHERE id = 1;
         END;
         CREATE TRIGGER recipe_ontology_source_rows_update
         AFTER UPDATE OF recipe_id, position, name, normalized_name,
@@ -1655,6 +2130,21 @@ function recipeSchemaMigrate(PDO $db): void {
                 ontology_source_hash = '',
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = 1;
+            INSERT INTO recipe_score_mutations (
+                domain, revision, owner_type, owner_id,
+                operation, reason
+            )
+            SELECT 'source', ontology_source_revision,
+                   CASE
+                       WHEN OLD.recipe_id IS NOT NEW.recipe_id
+                       THEN 'global' ELSE 'recipe'
+                   END,
+                   CASE
+                       WHEN OLD.recipe_id IS NOT NEW.recipe_id
+                       THEN NULL ELSE NEW.recipe_id
+                   END,
+                   'update', 'recipe_source_ingredients'
+            FROM recipe_score_state WHERE id = 1;
         END;
         CREATE TRIGGER recipe_ontology_source_rows_delete
         AFTER DELETE ON recipe_source_ingredients
@@ -1665,6 +2155,14 @@ function recipeSchemaMigrate(PDO $db): void {
                 ontology_source_hash = '',
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = 1;
+            INSERT INTO recipe_score_mutations (
+                domain, revision, owner_type, owner_id,
+                operation, reason
+            )
+            SELECT 'source', ontology_source_revision,
+                   'recipe', OLD.recipe_id, 'delete',
+                   'recipe_source_ingredients'
+            FROM recipe_score_state WHERE id = 1;
         END;
         ");
                 $installedTriggerHash =
@@ -1691,6 +2189,17 @@ function recipeSchemaMigrate(PDO $db): void {
                     RECIPE_ONTOLOGY_SOURCE_TRIGGER_VERSION,
                     $installedTriggerHash,
                 ]);
+                $db->exec("
+                    INSERT OR IGNORE INTO recipe_score_mutations (
+                        domain, revision, owner_type, owner_id,
+                        operation, reason
+                    )
+                    SELECT 'source', ontology_source_revision,
+                           'global', NULL, 'global',
+                           'ontology_source_trigger_upgrade'
+                    FROM recipe_score_state
+                    WHERE id = 1
+                ");
             }
             if ($ownsOntologySourceTransaction) {
                 $db->exec('COMMIT');

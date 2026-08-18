@@ -1539,6 +1539,7 @@ function ingredientOntologyV3EnsureHistoricalShadowMatchOwners(
             CREATE TABLE {$replacement} (
                 score_revision_id INTEGER NOT NULL,
                 recipe_ingredient_id INTEGER NOT NULL,
+                recipe_id INTEGER DEFAULT NULL,
                 recipe_mapping_id INTEGER DEFAULT NULL,
                 inventory_product_id INTEGER DEFAULT NULL,
                 inventory_mapping_id INTEGER DEFAULT NULL,
@@ -1565,11 +1566,13 @@ function ingredientOntologyV3EnsureHistoricalShadowMatchOwners(
             );
             INSERT INTO {$replacement} (
                 score_revision_id, recipe_ingredient_id,
+                recipe_id,
                 recipe_mapping_id, inventory_product_id,
                 inventory_mapping_id, outcome, satisfies_required,
                 confidence, relationship, explanation_json, created_at
             )
             SELECT score_revision_id, recipe_ingredient_id,
+                   recipe_id,
                    recipe_mapping_id, inventory_product_id,
                    inventory_mapping_id, outcome, satisfies_required,
                    confidence, relationship, explanation_json, created_at
@@ -1595,7 +1598,18 @@ function ingredientOntologyV3EnsureHistoricalShadowMatchOwners(
             CREATE INDEX idx_ontology_shadow_mapping
                 ON ingredient_ontology_shadow_matches(
                     score_revision_id, recipe_mapping_id
+                );
+            CREATE INDEX idx_ontology_shadow_recipe
+                ON ingredient_ontology_shadow_matches(
+                    score_revision_id, recipe_id,
+                    recipe_ingredient_id
+                );
+            CREATE INDEX idx_ontology_shadow_inventory_product
+                ON ingredient_ontology_shadow_matches(
+                    score_revision_id, inventory_product_id,
+                    recipe_ingredient_id
                 )
+                WHERE inventory_product_id IS NOT NULL;
         ");
         $db->exec('COMMIT');
         $transactionStarted = false;
@@ -2587,6 +2601,7 @@ function ingredientOntologyV3SchemaMigrate(PDO $db): void {
         CREATE TABLE IF NOT EXISTS ingredient_ontology_shadow_matches (
             score_revision_id INTEGER NOT NULL,
             recipe_ingredient_id INTEGER NOT NULL,
+            recipe_id INTEGER DEFAULT NULL,
             recipe_mapping_id INTEGER DEFAULT NULL,
             inventory_product_id INTEGER DEFAULT NULL,
             inventory_mapping_id INTEGER DEFAULT NULL,
@@ -3081,6 +3096,12 @@ function ingredientOntologyV3SchemaMigrate(PDO $db): void {
             ON ingredient_ontology_shadow_matches(
                 score_revision_id, recipe_mapping_id
             );
+        CREATE INDEX IF NOT EXISTS idx_ontology_shadow_inventory_product
+            ON ingredient_ontology_shadow_matches(
+                score_revision_id, inventory_product_id,
+                recipe_ingredient_id
+            )
+            WHERE inventory_product_id IS NOT NULL;
         CREATE INDEX IF NOT EXISTS idx_ontology_shadow_recipe_mapping
             ON ingredient_ontology_shadow_matches(recipe_mapping_id)
             WHERE recipe_mapping_id IS NOT NULL;
@@ -3326,6 +3347,48 @@ function ingredientOntologyV3SchemaMigrate(PDO $db): void {
     ");
 
     ingredientOntologyV3MigrateImmutableTriggers($db);
+
+    ingredientOntologyV3AddColumn(
+        $db,
+        'ingredient_ontology_shadow_matches',
+        'recipe_id',
+        'INTEGER DEFAULT NULL'
+    );
+    $readyGuardWasEnabled =
+        ingredientOntologyV3ReadyMutationGuardEnabled($db);
+    ingredientOntologyV3SetReadyMutationGuard($db, true);
+    try {
+        $db->exec("
+            UPDATE ingredient_ontology_shadow_matches
+            SET recipe_id = (
+                SELECT ingredient.recipe_id
+                FROM recipe_ingredients ingredient
+                WHERE ingredient.id =
+                    ingredient_ontology_shadow_matches
+                        .recipe_ingredient_id
+            )
+            WHERE recipe_id IS NULL
+              AND EXISTS (
+                  SELECT 1
+                  FROM recipe_ingredients ingredient
+                  WHERE ingredient.id =
+                      ingredient_ontology_shadow_matches
+                          .recipe_ingredient_id
+              )
+        ");
+    } finally {
+        ingredientOntologyV3SetReadyMutationGuard(
+            $db,
+            $readyGuardWasEnabled
+        );
+    }
+    $db->exec("
+        CREATE INDEX IF NOT EXISTS idx_ontology_shadow_recipe
+            ON ingredient_ontology_shadow_matches(
+                score_revision_id, recipe_id,
+                recipe_ingredient_id
+            )
+    ");
 
     ingredientOntologyV3AddColumn(
         $db,

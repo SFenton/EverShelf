@@ -731,6 +731,100 @@ function ingredientOntologyActivationQuoteIdentifier(
         return $sequence === false ? 0 : (int)$sequence;
     }
 
+    function ingredientOntologyActivationReserveManifestSequences(
+        PDO $db,
+        array $tables
+    ): void {
+        foreach ($tables as $table) {
+            $baseline = $table['baseline_sequence'] ?? null;
+            if ($baseline === null) {
+                continue;
+            }
+            $tableName = (string)($table['table'] ?? '');
+            $current = ingredientOntologyActivationSequence(
+                $db,
+                $tableName
+            );
+            if ($current === null || $current !== (int)$baseline) {
+                throw new RuntimeException(
+                    "ontology activation sequence fence changed: {$tableName}"
+                );
+            }
+            if ((int)($table['row_count'] ?? 0) > 0) {
+                $minimum = $table['minimum_cursor'] ?? null;
+                $maximum = $table['maximum_cursor'] ?? null;
+                if ($minimum === null || $maximum === null) {
+                    throw new RuntimeException(
+                        "ontology activation ID range is incomplete: {$tableName}"
+                    );
+                }
+                $cursor = ingredientOntologyActivationQuoteIdentifier(
+                    (string)$table['cursor']
+                );
+                $target = ingredientOntologyActivationQuoteIdentifier(
+                    $tableName
+                );
+                $collision = $db->prepare("
+                    SELECT 1 FROM {$target}
+                    WHERE {$cursor} BETWEEN ? AND ?
+                    LIMIT 1
+                ");
+                $collision->execute([
+                    (int)$minimum,
+                    (int)$maximum,
+                ]);
+                if ($collision->fetchColumn()) {
+                    throw new RuntimeException(
+                        "ontology activation ID range collided: {$tableName}"
+                    );
+                }
+            }
+            $reservedThrough = $table['expected_post_sequence'] ?? null;
+            if (
+                $reservedThrough === null
+                || (int)$reservedThrough < (int)$baseline
+            ) {
+                throw new RuntimeException(
+                    "ontology activation sequence reservation is invalid: {$tableName}"
+                );
+            }
+            if ((int)$reservedThrough === (int)$baseline) {
+                continue;
+            }
+            $update = $db->prepare("
+                UPDATE sqlite_sequence
+                SET seq = ?
+                WHERE name = ?
+            ");
+            $update->execute([
+                (int)$reservedThrough,
+                $tableName,
+            ]);
+            if ($update->rowCount() === 0 && (int)$baseline === 0) {
+                $insert = $db->prepare("
+                    INSERT INTO sqlite_sequence (name, seq)
+                    SELECT ?, ?
+                    WHERE NOT EXISTS (
+                        SELECT 1 FROM sqlite_sequence WHERE name = ?
+                    )
+                ");
+                $insert->execute([
+                    $tableName,
+                    (int)$reservedThrough,
+                    $tableName,
+                ]);
+            }
+            if (
+                ingredientOntologyActivationSequence($db, $tableName)
+                    !== (int)$reservedThrough
+            ) {
+                throw new RuntimeException(
+                    "ontology activation sequence reservation was lost: {$tableName}"
+                );
+            }
+        }
+    }
+
     function ingredientOntologyActivationRuntimeHash(): string {
         $files = [
             __FILE__,
@@ -877,6 +971,22 @@ function ingredientOntologyActivationQuoteIdentifier(
                 'phase' => 2,
                 'table' => 'ingredient_ontology_shadow_matches',
                 'cursor' => 'recipe_ingredient_id',
+                'selector' => 'score_revision_id = ?',
+                'selector_kind' => 'score_revision',
+                'root' => false,
+            ],
+            [
+                'phase' => 3,
+                'table' => 'recipe_score_match_contributors',
+                'cursor' => 'recipe_ingredient_id',
+                'selector' => 'score_revision_id = ?',
+                'selector_kind' => 'score_revision',
+                'root' => false,
+            ],
+            [
+                'phase' => 4,
+                'table' => 'recipe_score_contributor_revisions',
+                'cursor' => 'score_revision_id',
                 'selector' => 'score_revision_id = ?',
                 'selector_kind' => 'score_revision',
                 'root' => false,
@@ -2867,41 +2977,6 @@ function ingredientOntologyActivationAssertActiveDatabase(PDO $db): void {
                     "ontology activation target schema changed: {$tableName}"
                 );
             }
-            $baseline = $table['baseline_sequence'] ?? null;
-            if (
-                $baseline !== null
-                && ingredientOntologyActivationSequence($db, $tableName)
-                    !== (int)$baseline
-            ) {
-                throw new RuntimeException(
-                    "ontology activation sequence fence changed: {$tableName}"
-                );
-            }
-            if (
-                $baseline !== null
-                && (int)($table['row_count'] ?? 0) > 0
-            ) {
-                $cursor = ingredientOntologyActivationQuoteIdentifier(
-                    (string)$table['cursor']
-                );
-                $target = ingredientOntologyActivationQuoteIdentifier(
-                    $tableName
-                );
-                $collision = $db->prepare("
-                    SELECT 1 FROM {$target}
-                    WHERE {$cursor} BETWEEN ? AND ?
-                    LIMIT 1
-                ");
-                $collision->execute([
-                    (int)$table['minimum_cursor'],
-                    (int)$table['maximum_cursor'],
-                ]);
-                if ($collision->fetchColumn()) {
-                    throw new RuntimeException(
-                        "ontology activation ID range collided: {$tableName}"
-                    );
-                }
-            }
         }
         $manifestJson = ingredientOntologyActivationStableJson($bundle);
         if (strlen($manifestJson) > 1048576) {
@@ -2911,6 +2986,10 @@ function ingredientOntologyActivationAssertActiveDatabase(PDO $db): void {
         }
         dbBeginImmediateWithRetry($db);
         try {
+            ingredientOntologyActivationReserveManifestSequences(
+                $db,
+                $tables
+            );
             $insert = $db->prepare("
                 INSERT INTO ontology_activation_imports (
                     bundle_hash, bundle_kind, database_lineage_uuid,
@@ -3148,11 +3227,17 @@ function ingredientOntologyActivationAssertActiveDatabase(PDO $db): void {
         PDO $db,
         int $importId,
         int $maximumChunks = 100,
-        ?string $verifiedPayloadPath = null
+        ?string $verifiedPayloadPath = null,
+        int $maximumMilliseconds = 1500
     ): array {
         ingredientOntologyActivationAssertActiveDatabase($db);
         $callerDb = $db;
         $maximumChunks = max(1, min(10000, $maximumChunks));
+        $maximumMilliseconds = max(
+            100,
+            min(10000, $maximumMilliseconds)
+        );
+        $runStarted = hrtime(true);
         $lease = ingredientOntologyActivationClaimImport($db, $importId);
         $row = $lease['row'];
         $bundle = ingredientOntologyActivationImportBundle($row);
@@ -3201,6 +3286,13 @@ function ingredientOntologyActivationAssertActiveDatabase(PDO $db): void {
         try {
             $candidateId = ingredientOntologyActivationCandidateId($bundle);
             while ($chunks < $maximumChunks) {
+                if (
+                    $chunks > 0
+                    && (hrtime(true) - $runStarted) / 1000000
+                        >= $maximumMilliseconds
+                ) {
+                    break;
+                }
                 $progress = $db->prepare("
                     SELECT * FROM ontology_activation_import_tables
                     WHERE import_id = ? AND status <> 'complete'
@@ -3413,7 +3505,11 @@ function ingredientOntologyActivationAssertActiveDatabase(PDO $db): void {
                 }
                 $chunks++;
             }
-            if ($chunks >= $maximumChunks) {
+            if (
+                $chunks >= $maximumChunks
+                || (hrtime(true) - $runStarted) / 1000000
+                    >= $maximumMilliseconds
+            ) {
                 $db->prepare("
                     UPDATE ontology_activation_imports
                     SET lease_token = NULL,
@@ -3637,6 +3733,19 @@ function ingredientOntologyActivationAssertActiveDatabase(PDO $db): void {
         array $root
     ): array {
         $state = recipeScoreState($db);
+        $active = recipeScoreActiveRevision($db);
+        if (
+            (string)(
+                $state['ontology_source_lineage_hash'] ?? ''
+            ) !== ''
+            && $active !== null
+            && (int)($root['ontology_version_id'] ?? 0)
+                === (int)($active['ontology_version_id'] ?? 0)
+        ) {
+            throw new RuntimeException(
+                'score refresh requires ontology refresh for scoped source lineage'
+            );
+        }
         $corpusHash = ingredientOntologyV3CorpusHash($db);
         $report = json_decode(
             (string)($root['validation_report_json'] ?? '{}'),
@@ -3657,6 +3766,12 @@ function ingredientOntologyActivationAssertActiveDatabase(PDO $db): void {
         $root['ontology_source_revision'] =
             (int)$state['ontology_source_revision'];
         $root['ontology_source_hash'] = $corpusHash;
+        $root['catalog_lineage_hash'] = '';
+        $root['ontology_source_lineage_hash'] = '';
+        unset(
+            $report['catalog_lineage_hash'],
+            $report['ontology_source_lineage_hash']
+        );
         $root['validation_report_json'] =
             ingredientOntologyActivationStableJson($report);
         return $root;
@@ -3790,12 +3905,16 @@ function ingredientOntologyActivationAssertActiveDatabase(PDO $db): void {
             $source = $db->prepare("
                 UPDATE recipe_score_state
                 SET ontology_source_hash = ?,
+                    ontology_source_lineage_hash = ?,
                     updated_at = CURRENT_TIMESTAMP
                 WHERE id = 1
                   AND ontology_source_revision = ?
             ");
             $source->execute([
                 $sourceHash,
+                (string)(
+                    $root['ontology_source_lineage_hash'] ?? ''
+                ),
                 (int)$state['ontology_source_revision'],
             ]);
             if ($source->rowCount() !== 1) {
@@ -4229,11 +4348,16 @@ function ingredientOntologyActivationAssertActiveDatabase(PDO $db): void {
             if ($kind === 'score') {
                 $root = (array)$attestation['root_row'];
                 $state = recipeScoreState($db);
+                recipeScoreBuildEffectiveProjection(
+                    $db,
+                    (int)$root['id']
+                );
                 $pointer = $db->prepare("
                     UPDATE recipe_score_state
                     SET active_score_revision_id = ?,
                         active_score_overlay_revision_id = NULL,
                         ontology_source_hash = ?,
+                        ontology_source_lineage_hash = ?,
                         cursor_revision = cursor_revision + 1,
                         updated_at = CURRENT_TIMESTAMP
                     WHERE id = 1
@@ -4245,6 +4369,9 @@ function ingredientOntologyActivationAssertActiveDatabase(PDO $db): void {
                 $pointer->execute([
                     (int)$root['id'],
                     (string)$root['ontology_source_hash'],
+                    (string)(
+                        $root['ontology_source_lineage_hash'] ?? ''
+                    ),
                     (int)$root['parent_score_revision_id'],
                     (int)$state['inventory_revision'],
                     (int)$state['catalog_revision'],
@@ -4258,6 +4385,32 @@ function ingredientOntologyActivationAssertActiveDatabase(PDO $db): void {
                 recipeScoreClearPendingProducts(
                     $db,
                     (int)$root['inventory_revision']
+                );
+                recipeScoreClearPendingRecipes(
+                    $db,
+                    (int)$root['catalog_revision'],
+                    (int)$root['ontology_source_revision']
+                );
+                $db->prepare("
+                    DELETE FROM recipe_score_mutations
+                    WHERE (
+                        domain = 'catalog' AND revision <= ?
+                    ) OR (
+                        domain = 'source' AND revision <= ?
+                    )
+                ")->execute([
+                    (int)$root['catalog_revision'],
+                    (int)$root['ontology_source_revision'],
+                ]);
+                recipeScoreSetWorkState(
+                    $db,
+                    'idle',
+                    (int)$root['id'],
+                    (int)$root['parent_score_revision_id'],
+                    (int)$root['recipe_count'],
+                    (int)$root['recipe_count'],
+                    0,
+                    0
                 );
                 $intents = $db->prepare("
                     SELECT source_job_id, activation_action
@@ -5447,6 +5600,13 @@ function ingredientOntologyActivationAssertActiveDatabase(PDO $db): void {
             1,
             min(10000, (int)($options['maximum_chunks'] ?? 500))
         );
+        $maximumImportMs = max(
+            100,
+            min(
+                10000,
+                (int)($options['maximum_import_ms'] ?? 1500)
+            )
+        );
         $lockRetries = 0;
         $yieldAfterReservation =
             !empty($options['yield_after_live_reservation']);
@@ -5470,7 +5630,8 @@ function ingredientOntologyActivationAssertActiveDatabase(PDO $db): void {
                                 $db,
                                 $importId,
                                 $maximumChunks,
-                                $verifiedPayloadPath
+                                $verifiedPayloadPath,
+                                $maximumImportMs
                             )
                     );
                     if ($yieldAfterReservation) {
@@ -5761,6 +5922,16 @@ function ingredientOntologyActivationAssertActiveDatabase(PDO $db): void {
             return false;
         }
         $state = recipeScoreState($db);
+        if (
+            (string)(
+                $active['ontology_source_lineage_hash'] ?? ''
+            ) !== ''
+            || (string)(
+                $state['ontology_source_lineage_hash'] ?? ''
+            ) !== ''
+        ) {
+            return true;
+        }
         if (
             (int)($active['ontology_source_revision'] ?? -1)
                 !== (int)$state['ontology_source_revision']
