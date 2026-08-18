@@ -7,6 +7,32 @@
 # the container keeps the image self-sufficient.
 set -e
 
+runtime_timezone="${TZ:-UTC}"
+case "$runtime_timezone" in
+    ""|/*|*".."*|*[!A-Za-z0-9_+./-]*)
+        echo "Invalid TZ value: $runtime_timezone" >&2
+        exit 1
+        ;;
+esac
+zoneinfo_path="/usr/share/zoneinfo/$runtime_timezone"
+if [ ! -f "$zoneinfo_path" ]; then
+    echo "TZ does not resolve to a zoneinfo file: $runtime_timezone" >&2
+    exit 1
+fi
+ln -snf "$zoneinfo_path" /etc/localtime
+printf '%s\n' "$runtime_timezone" > /etc/timezone
+cron_file=/etc/cron.d/evershelf
+cron_tmp="$(mktemp)"
+{
+    printf 'TZ=%s\nCRON_TZ=%s\n' \
+        "$runtime_timezone" \
+        "$runtime_timezone"
+    grep -v -E '^(TZ|CRON_TZ)=' "$cron_file" || true
+} > "$cron_tmp"
+chown root:root "$cron_tmp"
+chmod 0644 "$cron_tmp"
+mv "$cron_tmp" "$cron_file"
+
 install -d -o www-data -g www-data -m 0775 \
     /var/www/html/data \
     /var/www/html/data/backups \
