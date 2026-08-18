@@ -71,9 +71,14 @@ function ingredientOntologyV3MappingFromRow(array $row): ?array {
 
 function ingredientOntologyV3Inventory(
     PDO $db,
-    int $versionId
+    int $versionId,
+    ?string $scoreDate = null
 ): array {
-    $inventory = recipeInventoryCandidates($db, ['exclude_expired' => true]);
+    $inventoryOptions = ['exclude_expired' => true];
+    if ($scoreDate !== null) {
+        $inventoryOptions['score_date'] = $scoreDate;
+    }
+    $inventory = recipeInventoryCandidates($db, $inventoryOptions);
     $productStmt = $db->prepare("
         SELECT id, name, brand, category, prepared_food
         FROM products
@@ -1383,7 +1388,12 @@ function ingredientOntologyV3BuildShadow(
         $catalogMaxId = recipeScoreCatalogMaxId($db);
         $catalogFingerprint = recipeScoreCatalogFingerprint($db);
         $ontologySourceHash = ingredientOntologyV3CorpusHash($db);
-        $inventory = ingredientOntologyV3Inventory($db, $versionId);
+        $scoreDate = recipeScoreCurrentDate();
+        $inventory = ingredientOntologyV3Inventory(
+            $db,
+            $versionId,
+            $scoreDate
+        );
         $fingerprint = ingredientOntologyV3InventoryFingerprint(
             $inventory,
             $versionId
@@ -1408,7 +1418,7 @@ function ingredientOntologyV3BuildShadow(
             $state['inventory_revision'],
             $state['catalog_revision'],
             $fingerprint,
-            date('Y-m-d'),
+            $scoreDate,
             $catalogMaxId,
             $versionId,
             INGREDIENT_ONTOLOGY_V3_SCORING_MODEL,
@@ -1860,7 +1870,7 @@ function ingredientOntologyV3ScheduledRebuild(
         $state = recipeScoreState($db);
         $versionId = (int)$active['ontology_version_id'];
         $scoringConfigHash = ingredientOntologyV3ScoringConfigHash();
-        $today = date('Y-m-d');
+        $today = recipeScoreCurrentDate();
         $abandoned = $db->prepare("
             SELECT id, inventory_fingerprint, catalog_fingerprint,
                    scoring_config_hash
@@ -1911,7 +1921,11 @@ function ingredientOntologyV3ScheduledRebuild(
             return $result;
         }
         if ($abandonedRow !== null) {
-            $inventory = ingredientOntologyV3Inventory($db, $versionId);
+            $inventory = ingredientOntologyV3Inventory(
+                $db,
+                $versionId,
+                $today
+            );
             $inventoryFingerprint =
                 ingredientOntologyV3InventoryFingerprint(
                     $inventory,
@@ -1952,7 +1966,11 @@ function ingredientOntologyV3ScheduledRebuild(
             return $result;
         }
         if ($inventory === null) {
-            $inventory = ingredientOntologyV3Inventory($db, $versionId);
+            $inventory = ingredientOntologyV3Inventory(
+                $db,
+                $versionId,
+                recipeScoreCurrentDate()
+            );
             $inventoryFingerprint =
                 ingredientOntologyV3InventoryFingerprint(
                     $inventory,
@@ -2850,7 +2868,11 @@ function ingredientOntologyV3ActivationSnapshot(
         WHERE score_revision_id = ?
     ");
     $matchCountStmt->execute([$revisionId]);
-    $inventory = ingredientOntologyV3Inventory($db, $versionId);
+    $inventory = ingredientOntologyV3Inventory(
+        $db,
+        $versionId,
+        (string)$revision['score_date']
+    );
     $pending = $db->prepare("
         SELECT COUNT(*)
         FROM ingredient_ontology_change_sets
@@ -2882,7 +2904,7 @@ function ingredientOntologyV3ActivationSnapshot(
         'revision' => $revision,
         'version' => $version,
         'state' => $state,
-        'score_date' => date('Y-m-d'),
+        'score_date' => recipeScoreCurrentDate(),
         'catalog_count' => $catalogCount,
         'catalog_max_id' => recipeScoreCatalogMaxId($db),
         'catalog_fingerprint' => recipeScoreCatalogFingerprint($db),

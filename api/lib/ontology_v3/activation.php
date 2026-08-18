@@ -948,8 +948,8 @@ function ingredientOntologyActivationQuoteIdentifier(
                     FROM ontology_controller_jobs
                 ")->fetchColumn(),
             ],
-            'score_date' => date('Y-m-d'),
-            'timezone' => date_default_timezone_get(),
+            'score_date' => recipeScoreCurrentDate(),
+            'timezone' => recipeScoreTimezone()->getName(),
         ];
     }
 
@@ -3854,7 +3854,8 @@ function ingredientOntologyActivationAssertActiveDatabase(PDO $db): void {
             'ontology_source_hash' => $kind === 'score'
                 ? (string)$root['ontology_source_hash']
                 : (string)$root['corpus_hash'],
-            'score_date' => date('Y-m-d'),
+            'score_date' => recipeScoreCurrentDate(),
+            'score_timezone' => recipeScoreTimezone()->getName(),
             'cdc' => ingredientOntologyActivationCdcSnapshot($db),
             'controller_state' =>
                 ingredientOntologyActivationControllerState($db),
@@ -4048,8 +4049,13 @@ function ingredientOntologyActivationAssertActiveDatabase(PDO $db): void {
                     $errors[] = "activation {$field} changed";
                 }
             }
-            if ((string)($fence['score_date'] ?? '') !== date('Y-m-d')) {
+            if ((string)($fence['score_date'] ?? '')
+                !== recipeScoreCurrentDate()) {
                 $errors[] = 'activation score date changed';
+            }
+            if ((string)($fence['score_timezone'] ?? '')
+                !== recipeScoreTimezone()->getName()) {
+                $errors[] = 'activation score timezone changed';
             }
         } else {
             $activeVersionId = (int)(

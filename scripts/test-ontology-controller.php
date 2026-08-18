@@ -2045,7 +2045,7 @@ try {
             catalog_fingerprint, ontology_source_revision,
             ontology_source_hash, validation_report_json
         )
-        VALUES (1, 1, ?, date('now'), ?, 'ready', 0, ?,
+        VALUES (1, 1, ?, date('now', 'localtime'), ?, 'ready', 0, ?,
                 'faceted-ontology-v3', ?, ?, 1, ?, ?)
     ");
     $scoreParams = [
@@ -3291,7 +3291,7 @@ try {
             ontology_source_revision, ontology_source_hash,
             validation_report_json
         )
-        VALUES (1, 1, ?, date('now'), ?, 'ready', 0, ?,
+        VALUES (1, 1, ?, date('now', 'localtime'), ?, 'ready', 0, ?,
                 'faceted-ontology-v3', ?, ?, ?, 1, ?, ?)
     ");
     $negativeScoreParams = [
@@ -5758,7 +5758,7 @@ try {
             SELECT next_attempt_at
             FROM ontology_controller_jobs
             WHERE id = " . (int)$deferredPolicyJob['id']
-        )->fetchColumn()) <= time()
+        )->fetchColumn() . ' UTC') <= time()
         && $r1ConflictRejected,
         'Immutable benchmark policy import must activate measured R1 evidence and reject key reuse with changed content'
     );
@@ -8784,7 +8784,7 @@ try {
                 (int)$ontologyFenceState['ontology_source_revision'],
             'ontology_source_hash' =>
                 (string)$ontologyFenceState['ontology_source_hash'],
-            'score_date' => date('Y-m-d'),
+            'score_date' => recipeScoreCurrentDate(),
             'cdc' =>
                 ingredientOntologyActivationCdcSnapshot(
                     $activationTarget

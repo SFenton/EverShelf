@@ -8,6 +8,40 @@ const RECIPE_SCORE_V3_ROLLBACK_ANCESTOR_LIMIT = 8;
 const RECIPE_SCORE_V3_READY_HISTORY_LIMIT = 4;
 const RECIPE_SCORE_REQUIREMENT_SHADOW_RETENTION = 2;
 
+function recipeScoreTimezone(
+    ?string $timezone = null
+): DateTimeZone {
+    $timezone = trim($timezone ?? (
+        function_exists('env')
+            ? env('TZ', 'UTC')
+            : (string)(getenv('TZ') ?: 'UTC')
+    ));
+    if ($timezone === '') {
+        $timezone = 'UTC';
+    }
+    try {
+        $zone = new DateTimeZone($timezone);
+    } catch (Throwable $error) {
+        throw new RuntimeException(
+            'Invalid recipe score timezone: ' . $timezone,
+            0,
+            $error
+        );
+    }
+    return $zone;
+}
+
+function recipeScoreCurrentDate(
+    ?DateTimeInterface $instant = null,
+    ?string $timezone = null
+): string {
+    $zone = recipeScoreTimezone($timezone);
+    $date = $instant !== null
+        ? DateTimeImmutable::createFromInterface($instant)
+        : new DateTimeImmutable('now', $zone);
+    return $date->setTimezone($zone)->format('Y-m-d');
+}
+
 function recipeScoreWithWriteRetry(callable $callback): mixed {
     return function_exists('dbWithRetry') ? dbWithRetry($callback) : $callback();
 }
@@ -337,7 +371,7 @@ function recipeScoreActiveOverlay(
             !== (int)$state['catalog_revision']
         || (int)$overlay['ontology_source_revision']
             !== (int)$state['ontology_source_revision']
-        || (string)$overlay['score_date'] !== date('Y-m-d')
+        || (string)$overlay['score_date'] !== recipeScoreCurrentDate()
     ) {
         return null;
     }
@@ -482,7 +516,8 @@ function recipeScorePreviewRevisionDiagnostics(
     ) {
         $add('preview_source_owner_hash_stale');
     }
-    if ((string)($revision['score_date'] ?? '') !== date('Y-m-d')) {
+    if ((string)($revision['score_date'] ?? '')
+        !== recipeScoreCurrentDate()) {
         $add('preview_score_date_stale');
     }
     if (
@@ -748,7 +783,7 @@ function recipeScoreReadRevision(PDO $db): array {
         $state['ontology_source_revision'],
         hash('sha256', $state['ontology_source_hash']),
         (int)($GLOBALS['RECIPE_SCORE_READ_CACHE_GENERATION'] ?? 0),
-        date('Y-m-d'),
+        recipeScoreCurrentDate(),
     ]);
     if (isset($cache[$cacheKey])) {
         return $cache[$cacheKey];
@@ -929,7 +964,7 @@ function recipeScoreRevisionStatus(PDO $db, array $revision): string {
     if (
         (int)$revision['inventory_revision'] === $state['inventory_revision']
         && (int)$revision['catalog_revision'] === $state['catalog_revision']
-        && (string)$revision['score_date'] === date('Y-m-d')
+        && (string)$revision['score_date'] === recipeScoreCurrentDate()
     ) {
         return 'fresh';
     }
@@ -1506,7 +1541,11 @@ function recipeScoreRebuild(
             return $result;
         }
 
-        $inventory = recipeInventoryCandidates($db, ['exclude_expired' => true]);
+        $scoreDate = recipeScoreCurrentDate();
+        $inventory = recipeInventoryCandidates($db, [
+            'exclude_expired' => true,
+            'score_date' => $scoreDate,
+        ]);
         $fingerprint = recipeScoreInventoryFingerprint($inventory);
         $catalogMaxId = recipeScoreCatalogMaxId($db);
         $catalogFingerprint = recipeScoreCatalogFingerprint($db);
@@ -1522,13 +1561,14 @@ function recipeScoreRebuild(
             $state,
             $fingerprint,
             $catalogMaxId,
-            $catalogFingerprint
+            $catalogFingerprint,
+            $scoreDate
         ): void {
             $insert->execute([
                 $state['inventory_revision'],
                 $state['catalog_revision'],
                 $fingerprint,
-                date('Y-m-d'),
+                $scoreDate,
                 $catalogMaxId,
                 $catalogFingerprint,
             ]);
@@ -2393,7 +2433,10 @@ function recipeCatalogBrowseResult(PDO $db, array $options = []): array {
         $resultRows = $items;
     } else {
         $inventory = $criteria['explain']
-            ? recipeInventoryCandidates($db, ['exclude_expired' => true])
+            ? recipeInventoryCandidates($db, [
+                'exclude_expired' => true,
+                'score_date' => (string)$revision['score_date'],
+            ])
             : [];
         $overlayExplanationRecipes = [];
         if ($criteria['explain'] && $overlayRevision !== null && $rows) {
@@ -2592,7 +2635,8 @@ function recipeCatalogRecommendationResult(PDO $db, array $options = []): array 
     $expiry = recipeCatalogBrowseResult($db, $common + ['sort' => 'expiry']);
     $fallback = recipeCatalogBrowseResult($db, $common + ['sort' => 'alphabetical']);
     $inventoryRevision = (int)$availability['inventory_revision'];
-    $seed = date('Y-m-d') . ':' . $inventoryRevision . ':' . strtolower((string)($options['locale'] ?? ''));
+    $seed = recipeScoreCurrentDate() . ':' . $inventoryRevision
+        . ':' . strtolower((string)($options['locale'] ?? ''));
 
     $seen = [];
     $pick = static function (array $pool, int $count) use (&$seen): array {

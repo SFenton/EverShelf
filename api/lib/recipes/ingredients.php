@@ -1207,6 +1207,34 @@ function recipeInventoryVacuumExtensionDays(): int {
  */
 function recipeInventoryCandidateResult(PDO $db, array $options = []): array {
     $excludeExpired = !array_key_exists('exclude_expired', $options) || (bool)$options['exclude_expired'];
+    $scoreDate = trim((string)(
+        $options['score_date'] ?? recipeScoreCurrentDate()
+    ));
+    $scoreTimezone = recipeScoreTimezone(
+        isset($options['score_timezone'])
+            ? (string)$options['score_timezone']
+            : null
+    );
+    try {
+        $parsedScoreDate = new DateTimeImmutable(
+            $scoreDate,
+            $scoreTimezone
+        );
+    } catch (Throwable $error) {
+        throw new InvalidArgumentException(
+            'inventory score_date is invalid',
+            0,
+            $error
+        );
+    }
+    if (
+        !preg_match('/^\d{4}-\d{2}-\d{2}$/D', $scoreDate)
+        || $parsedScoreDate->format('Y-m-d') !== $scoreDate
+    ) {
+        throw new InvalidArgumentException(
+            'inventory score_date is invalid'
+        );
+    }
     $vacuumExtensionDays = max(
         0,
         (int)($options['vacuum_extension_days'] ?? recipeInventoryVacuumExtensionDays())
@@ -1228,20 +1256,23 @@ function recipeInventoryCandidateResult(PDO $db, array $options = []): array {
                 AND (
                     (
                         COALESCE(i.vacuum_sealed, 0) = 0
-                        AND date(i.expiry_date) >= date('now', 'localtime')
+                        AND date(i.expiry_date) >= date(?)
                     )
                     OR (
                         COALESCE(i.vacuum_sealed, 0) <> 0
-                        AND date(i.expiry_date, ?) >= date('now', 'localtime')
+                        AND date(i.expiry_date, ?) >= date(?)
                     )
                 )
             )
             OR (
                 i.opened_at IS NOT NULL
-                AND date(i.expiry_date) >= date('now', 'localtime')
+                AND date(i.expiry_date) >= date(?)
             )
         )";
+        $params[] = $scoreDate;
         $params[] = '+' . $vacuumExtensionDays . ' days';
+        $params[] = $scoreDate;
+        $params[] = $scoreDate;
     }
 
     $limit = isset($options['limit'])
@@ -1276,13 +1307,19 @@ function recipeInventoryCandidateResult(PDO $db, array $options = []): array {
     $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
     $sourceTruncated = $limit !== null && count($rows) > $limit;
-    $today = new DateTimeImmutable('today');
+    $today = new DateTimeImmutable(
+        $scoreDate,
+        $scoreTimezone
+    );
     $candidates = [];
     foreach ($rows as $row) {
         $effectiveExpiry = recipeInventoryEffectiveExpiry($row, $vacuumExtensionDays);
         $daysRemaining = null;
         if ($effectiveExpiry !== null) {
-            $expiryDate = new DateTimeImmutable($effectiveExpiry);
+            $expiryDate = new DateTimeImmutable(
+                $effectiveExpiry,
+                $scoreTimezone
+            );
             $daysRemaining = (int)$today->diff($expiryDate)->format('%r%a');
             if ($excludeExpired && $daysRemaining < 0) {
                 continue;

@@ -130,7 +130,7 @@ function ingredientOntologyV3IncrementalParentErrors(
         $errors[] = 'active_v3_parent_unavailable';
         return $errors;
     }
-    if ((string)$parent['score_date'] !== date('Y-m-d')) {
+    if ((string)$parent['score_date'] !== recipeScoreCurrentDate()) {
         $errors[] = 'parent_score_date_stale';
     }
     if ($parent['requirement_revision_id'] !== null) {
@@ -426,7 +426,7 @@ function ingredientOntologyV3IncrementalInsertRevision(
         (int)$state['inventory_revision'],
         (int)$state['catalog_revision'],
         $inventoryFingerprint,
-        date('Y-m-d'),
+        (string)$parent['score_date'],
         (int)$parent['catalog_max_id'],
         (int)$parent['ontology_version_id'],
         INGREDIENT_ONTOLOGY_V3_INCREMENTAL_MODEL,
@@ -1219,7 +1219,12 @@ function ingredientOntologyV3IncrementalRebuild(
                 }
             }
         }
-        $inventory = ingredientOntologyV3Inventory($db, $versionId);
+        $scoreDate = (string)$parent['score_date'];
+        $inventory = ingredientOntologyV3Inventory(
+            $db,
+            $versionId,
+            $scoreDate
+        );
         $inventoryFingerprint =
             ingredientOntologyV3InventoryFingerprint(
                 $inventory,
@@ -1398,6 +1403,7 @@ function ingredientOntologyV3IncrementalRebuild(
             'catalog_fingerprint' =>
                 (string)$parent['catalog_fingerprint'],
             'inventory_fingerprint' => $inventoryFingerprint,
+            'score_date' => $scoreDate,
             'ontology_source_revision' =>
                 (int)$state['ontology_source_revision'],
             'ontology_source_hash' => $ontologySourceHash,
@@ -1452,6 +1458,7 @@ function ingredientOntologyV3IncrementalRebuild(
                     !== (int)$state['catalog_revision']
                 || (int)$lockedState['ontology_source_revision']
                     !== (int)$state['ontology_source_revision']
+                || recipeScoreCurrentDate() !== $scoreDate
             ) {
                 throw new RuntimeException(
                     'incremental score overlay fence changed'
@@ -1624,6 +1631,7 @@ function ingredientOntologyV3IncrementalRebuild(
                     !== (int)$state['catalog_revision']
                 || (int)$lockedState['ontology_source_revision']
                     !== (int)$state['ontology_source_revision']
+                || recipeScoreCurrentDate() !== $scoreDate
                 || (int)(
                     $lockedState[
                         'active_score_overlay_revision_id'

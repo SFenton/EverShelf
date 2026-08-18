@@ -11089,20 +11089,22 @@ function ingredientOntologyControllerCreateGenerationContinue(
                 ORDER BY id DESC
                 LIMIT 1
             ");
+            $scoreDate = recipeScoreCurrentDate();
             $existing->execute([
                 $baselineVersionId,
                 $parentScoreRevisionId,
                 (int)$state['inventory_revision'],
                 (int)$state['catalog_revision'],
                 (int)$state['ontology_source_revision'],
-                date('Y-m-d'),
+                $scoreDate,
             ]);
             $existingId = (int)($existing->fetchColumn() ?: 0);
             if ($existingId > 0) {
                 $revision = recipeScoreRevision($db, $existingId);
                 $inventory = ingredientOntologyV3Inventory(
                     $db,
-                    $baselineVersionId
+                    $baselineVersionId,
+                    $scoreDate
                 );
                 if (
                     $revision !== null

@@ -305,7 +305,8 @@ function evershelfProcessingStatusScores(PDO $db): array {
     }
     if (
         isset($effectiveRevision['score_date'])
-        && (string)$effectiveRevision['score_date'] !== date('Y-m-d')
+        && (string)$effectiveRevision['score_date']
+            !== recipeScoreCurrentDate()
     ) {
         $reasons[] = 'score_date';
     }

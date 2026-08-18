@@ -28,6 +28,32 @@ $assert = static function (
     }
 };
 
+$scoreDateInstant = new DateTimeImmutable(
+    '2026-08-18T02:30:00+00:00'
+);
+$assert(
+    recipeScoreCurrentDate(
+        $scoreDateInstant,
+        'America/Los_Angeles'
+    ) === '2026-08-17'
+    && recipeScoreCurrentDate($scoreDateInstant, 'UTC')
+        === '2026-08-18',
+    'Recipe score dates must follow the configured business timezone'
+);
+$invalidScoreTimezoneRejected = false;
+try {
+    recipeScoreCurrentDate($scoreDateInstant, 'Not/A-Timezone');
+} catch (RuntimeException $error) {
+    $invalidScoreTimezoneRejected = str_contains(
+        $error->getMessage(),
+        'Invalid recipe score timezone'
+    );
+}
+$assert(
+    $invalidScoreTimezoneRejected,
+    'Invalid recipe score timezones must fail closed'
+);
+
 $metadataItem = static function (
     string $externalId,
     string $ingredient

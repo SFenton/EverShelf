@@ -48,6 +48,8 @@ services:
       - ${EVERSHELF_ONTOLOGY_SOCKET_DIR:-/run/evershelf-ontology-disabled}:/run/evershelf-ontology:ro
     env_file:
       - ./.env
+    environment:
+      - TZ=Europe/Rome
     group_add:
       - "${EVERSHELF_ONTOLOGY_SOCKET_GID:-1000}"
     depends_on:

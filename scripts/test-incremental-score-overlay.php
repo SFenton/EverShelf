@@ -74,7 +74,7 @@ $revision = $db->prepare("
         ontology_source_hash, validation_report_json
     )
     VALUES (
-        ?, 1, ?, date('now'), ?, ?, 2, 1,
+        ?, 1, ?, date('now', 'localtime'), ?, ?, 2, 1,
         'faceted-ontology-v3', ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?
     )
 ");

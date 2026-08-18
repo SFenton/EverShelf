@@ -299,7 +299,7 @@ try {
             inventory_revision, catalog_revision,
             inventory_fingerprint, score_date, status, recipe_count
         )
-        VALUES (1, 1, 'legacy', date('now'), 'ready', 0);
+        VALUES (1, 1, 'legacy', date('now', 'localtime'), 'ready', 0);
         CREATE TABLE recipe_score_state (
             id INTEGER PRIMARY KEY CHECK(id = 1),
             inventory_revision INTEGER NOT NULL DEFAULT 1,
@@ -464,7 +464,7 @@ try {
             score_date, status, recipe_count, ontology_version_id,
             scoring_model, requirement_revision_id, requirement_model
         )
-        VALUES (1, 1, 'empty', date('now'), 'failed', 1, ?, ?, ?, ?)
+        VALUES (1, 1, 'empty', date('now', 'localtime'), 'failed', 1, ?, ?, ?, ?)
     ")->execute([
         $emptyVersionId,
         INGREDIENT_ONTOLOGY_V3_REQUIREMENT_SCORING_MODEL,
@@ -2410,9 +2410,15 @@ try {
     try {
         $db->prepare("
             UPDATE recipe_score_revisions
-            SET score_date = date('now', '-1 day')
+            SET score_date = ?
             WHERE id = ?
-        ")->execute([$regularShadowId]);
+        ")->execute([
+            (new DateTimeImmutable(
+                recipeScoreCurrentDate(),
+                recipeScoreTimezone()
+            ))->modify('-1 day')->format('Y-m-d'),
+            $regularShadowId,
+        ]);
         $yesterdayParity =
             ingredientOntologyV3RequirementLegacyParity(
                 $db,
@@ -2931,7 +2937,7 @@ try {
             requirement_revision_id, requirement_model,
             created_at
         )
-        VALUES (1, 1, 'abandoned', date('now'), ?, 'building', 1,
+        VALUES (1, 1, 'abandoned', date('now', 'localtime'), ?, 'building', 1,
                 ?, ?, NULL, 'abandoned', ?, ?,
                 datetime('now', '-2 hours'))
     ")->execute([

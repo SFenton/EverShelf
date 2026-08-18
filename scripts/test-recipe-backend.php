@@ -1557,11 +1557,34 @@ try {
         )
         VALUES (?, 'frigo', 1, ?, ?, 0)
     ");
-    $inventoryInsert->execute([$tomatoProduct, date('Y-m-d', strtotime('+1 day')), 0]);
+    $businessToday = new DateTimeImmutable(
+        recipeScoreCurrentDate(),
+        recipeScoreTimezone()
+    );
+    $businessDateOffset = static function (
+        int $days
+    ) use ($businessToday): string {
+        return $businessToday
+            ->modify(($days >= 0 ? '+' : '') . $days . ' days')
+            ->format('Y-m-d');
+    };
+    $inventoryInsert->execute([
+        $tomatoProduct,
+        $businessDateOffset(1),
+        0,
+    ]);
     $rawInventoryId = (int)$db->lastInsertId();
-    $inventoryInsert->execute([$preparedProduct, date('Y-m-d', strtotime('+2 days')), 1]);
+    $inventoryInsert->execute([
+        $preparedProduct,
+        $businessDateOffset(2),
+        1,
+    ]);
     $preparedInventoryId = (int)$db->lastInsertId();
-    $inventoryInsert->execute([$expiredProduct, date('Y-m-d', strtotime('-1 day')), 0]);
+    $inventoryInsert->execute([
+        $expiredProduct,
+        $businessDateOffset(-1),
+        0,
+    ]);
     $expiredInventoryId = (int)$db->lastInsertId();
     $db->prepare("UPDATE inventory SET expiry_user_set = 1 WHERE id = ?")
        ->execute([$expiredInventoryId]);
@@ -1570,7 +1593,7 @@ try {
             product_id, location, quantity, expiry_date, prepared_food, vacuum_sealed
         )
         VALUES (?, 'frigo', 1, ?, 0, 1)
-    ")->execute([$vacuumProduct, date('Y-m-d', strtotime('-1 day'))]);
+    ")->execute([$vacuumProduct, $businessDateOffset(-1)]);
     $vacuumInventoryId = (int)$db->lastInsertId();
     $db->prepare("
         INSERT INTO inventory (
@@ -1579,13 +1602,49 @@ try {
         VALUES (?, 'frigo', 1, ?, 0, 0, ?)
     ")->execute([
         $openedProduct,
-        date('Y-m-d', strtotime('+100 days')),
+        $businessDateOffset(100),
         date('Y-m-d H:i:s', strtotime('-10 days')),
     ]);
     $openedInventoryId = (int)$db->lastInsertId();
-    $inventoryInsert->execute([$mixedProduct, date('Y-m-d', strtotime('+4 days')), 0]);
+    $inventoryInsert->execute([
+        $mixedProduct,
+        $businessDateOffset(4),
+        0,
+    ]);
     $mixedRawId = (int)$db->lastInsertId();
-    $inventoryInsert->execute([$mixedProduct, date('Y-m-d', strtotime('+5 days')), 1]);
+    $inventoryInsert->execute([
+        $mixedProduct,
+        $businessDateOffset(5),
+        1,
+    ]);
+    $productInsert->execute(['Business Date Boundary', 0]);
+    $businessDateProduct = (int)$db->lastInsertId();
+    $inventoryInsert->execute([
+        $businessDateProduct,
+        '2026-08-17',
+        0,
+    ]);
+    $businessDateInventoryId = (int)$db->lastInsertId();
+    $productInsert->execute(['Business Date Future', 0]);
+    $businessDateFutureProduct = (int)$db->lastInsertId();
+    $inventoryInsert->execute([
+        $businessDateFutureProduct,
+        '2026-08-18',
+        0,
+    ]);
+    $businessDateNextId = (int)$db->lastInsertId();
+    $inventoryInsert->execute([
+        $businessDateFutureProduct,
+        '2026-08-20',
+        0,
+    ]);
+    $businessDateThreeDaysId = (int)$db->lastInsertId();
+    $inventoryInsert->execute([
+        $businessDateFutureProduct,
+        '2026-08-16',
+        0,
+    ]);
+    $businessDatePriorId = (int)$db->lastInsertId();
 
     $candidateIds = array_column(recipeInventoryCandidates($db), 'inventory_id');
     recipeTestAssert(in_array($rawInventoryId, $candidateIds, true), 'Raw stock must be eligible');
@@ -1593,6 +1652,65 @@ try {
     recipeTestAssert(!in_array($expiredInventoryId, $candidateIds, true), 'Expired stock must be excluded');
     recipeTestAssert(in_array($vacuumInventoryId, $candidateIds, true), 'Vacuum extension must affect effective expiry');
     recipeTestAssert(!in_array($openedInventoryId, $candidateIds, true), 'Opened effective expiry must exclude stale stock');
+    $boundaryCandidates = recipeInventoryCandidates($db, [
+        'score_date' => '2026-08-17',
+        'score_timezone' => 'America/Los_Angeles',
+    ]);
+    $boundaryCandidate = array_values(array_filter(
+        $boundaryCandidates,
+        static fn(array $candidate): bool =>
+            (int)$candidate['inventory_id']
+                === $businessDateInventoryId
+    ));
+    recipeTestAssert(
+        count($boundaryCandidate) === 1
+        && (int)$boundaryCandidate[0]['days_remaining'] === 0
+        && !in_array(
+            $businessDateInventoryId,
+            array_column(
+                recipeInventoryCandidates($db, [
+                    'score_date' => '2026-08-18',
+                    'score_timezone' => 'America/Los_Angeles',
+                ]),
+                'inventory_id'
+            ),
+            true
+        ),
+        'Inventory expiry eligibility and days remaining must use the supplied score date'
+    );
+    $boundaryById = [];
+    foreach (recipeInventoryCandidates($db, [
+        'exclude_expired' => false,
+        'score_date' => '2026-08-17',
+        'score_timezone' => 'America/Los_Angeles',
+    ]) as $candidate) {
+        $boundaryById[(int)$candidate['inventory_id']] = $candidate;
+    }
+    recipeTestAssert(
+        (int)$boundaryById[$businessDateNextId]['days_remaining'] === 1
+        && (int)$boundaryById[$businessDateThreeDaysId][
+            'days_remaining'
+        ] === 3
+        && (int)$boundaryById[$businessDatePriorId][
+            'days_remaining'
+        ] === -1,
+        'Calendar-day expiry distance must use one explicit negative-offset timezone'
+    );
+    $positiveOffsetById = [];
+    foreach (recipeInventoryCandidates($db, [
+        'exclude_expired' => false,
+        'score_date' => '2026-08-17',
+        'score_timezone' => 'Europe/Rome',
+    ]) as $candidate) {
+        $positiveOffsetById[(int)$candidate['inventory_id']] =
+            $candidate;
+    }
+    recipeTestAssert(
+        (int)$positiveOffsetById[$businessDatePriorId][
+            'days_remaining'
+        ] === -1,
+        'Calendar-day expiry distance must remain exact in positive-offset timezones'
+    );
 
     $autoInventoryDiscovery = recipeJobDispatchInventoryChanged(
         $db,
@@ -8694,13 +8812,13 @@ try {
     $fakeRevisionInsert->execute([
         $scoreState['inventory_revision'],
         $scoreState['catalog_revision'],
-        date('Y-m-d'),
+        recipeScoreCurrentDate(),
         recipeScoreCatalogMaxId($db),
     ]);
     $fakeRevisionInsert->execute([
         $scoreState['inventory_revision'],
         $scoreState['catalog_revision'],
-        date('Y-m-d'),
+        recipeScoreCurrentDate(),
         recipeScoreCatalogMaxId($db),
     ]);
     ingredientOntologyV3SetReadyMutationGuard($db, false);
@@ -9167,7 +9285,7 @@ try {
             date, meal, recipe_json, catalog_recipe_id, is_favorite
         )
         VALUES (?, 'favorite-sync', '{}', ?, 0)
-    ")->execute([date('Y-m-d'), $generated['id']]);
+    ")->execute([recipeScoreCurrentDate(), $generated['id']]);
     $legacyFavoriteSyncId = (int)$db->lastInsertId();
     $_SERVER['REQUEST_METHOD'] = 'POST';
     $GLOBALS['RECIPE_API_JSON_INPUT'] = [

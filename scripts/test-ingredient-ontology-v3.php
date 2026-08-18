@@ -962,7 +962,7 @@ try {
                 'legacy-v2', CURRENT_TIMESTAMP)
     ")->execute([
         $baselineInventoryFingerprint,
-        date('Y-m-d'),
+        recipeScoreCurrentDate(),
         max($recipeIds),
         $baselineCatalogFingerprint,
         count($recipeIds),
@@ -3921,7 +3921,7 @@ try {
             inventory_fingerprint, score_date, status,
             scoring_model, catalog_fingerprint
         )
-        VALUES (0, 1, ?, date('now'), 'building',
+        VALUES (0, 1, ?, date('now', 'localtime'), 'building',
                 'forged-publication', ?)
     ")->execute([
         hash('sha256', 'forged-score-inventory'),
@@ -5030,9 +5030,15 @@ try {
     ingredientOntologyV3SetReadyMutationGuard($db, true);
     $db->prepare("
         UPDATE recipe_score_revisions
-        SET score_date = date('now', '-1 day')
+        SET score_date = ?
         WHERE id = ?
-    ")->execute([$shadowRevisionId]);
+    ")->execute([
+        (new DateTimeImmutable(
+            recipeScoreCurrentDate(),
+            recipeScoreTimezone()
+        ))->modify('-1 day')->format('Y-m-d'),
+        $shadowRevisionId,
+    ]);
     $staleDateRejected = false;
     try {
         ingredientOntologyV3Activate($db, $shadowRevisionId);
@@ -5048,7 +5054,7 @@ try {
         UPDATE recipe_score_revisions
         SET score_date = ?
         WHERE id = ?
-    ")->execute([date('Y-m-d'), $shadowRevisionId]);
+    ")->execute([recipeScoreCurrentDate(), $shadowRevisionId]);
     ingredientOntologyV3SetReadyMutationGuard($db, false);
     $raceCursor = recipeScoreState($db)['cursor_revision'];
     $GLOBALS['INGREDIENT_ONTOLOGY_V3_BEFORE_ACTIVATION_RESERVATION'] =
@@ -6361,9 +6367,15 @@ try {
     ingredientOntologyV3SetReadyMutationGuard($db, true);
     $db->prepare("
         UPDATE recipe_score_revisions
-        SET score_date = date('now', '-1 day')
+        SET score_date = ?
         WHERE id = ?
-    ")->execute([$catalogScheduledId]);
+    ")->execute([
+        (new DateTimeImmutable(
+            recipeScoreCurrentDate(),
+            recipeScoreTimezone()
+        ))->modify('-1 day')->format('Y-m-d'),
+        $catalogScheduledId,
+    ]);
     ingredientOntologyV3SetReadyMutationGuard($db, false);
     $dateScheduled = ingredientOntologyV3ScheduledRebuild(
         $db,
@@ -6380,7 +6392,7 @@ try {
         && recipeScoreRevision(
             $db,
             $scheduledActiveId
-        )['score_date'] === date('Y-m-d'),
+        )['score_date'] === recipeScoreCurrentDate(),
         'Scheduled date staleness must build and activate a current v3 revision'
     );
     $cliOutput = [];

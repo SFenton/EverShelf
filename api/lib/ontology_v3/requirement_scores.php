@@ -95,7 +95,7 @@ function ingredientOntologyV3SelectRequirementParityBaseline(
         $catalogFingerprint,
         $catalogMaxId,
         $catalogCount,
-        date('Y-m-d'),
+        recipeScoreCurrentDate(),
         ingredientOntologyV3ScoringConfigHash(),
     ]);
     $scoreCount = $db->prepare("
@@ -563,7 +563,7 @@ function ingredientOntologyV3RequirementLegacyParity(
             !== (int)$revision['catalog_max_id']
         || (string)$baseline['score_date']
             !== (string)$revision['score_date']
-        || (string)$revision['score_date'] !== date('Y-m-d')
+        || (string)$revision['score_date'] !== recipeScoreCurrentDate()
         || !hash_equals(
             ingredientOntologyV3ScoringConfigHash(),
             (string)$baseline['scoring_config_hash']
@@ -826,7 +826,12 @@ function ingredientOntologyV3BuildRequirementShadow(
                 'requirement shadow source or ontology integrity failed'
             );
         }
-        $inventory = ingredientOntologyV3Inventory($db, $versionId);
+        $scoreDate = recipeScoreCurrentDate();
+        $inventory = ingredientOntologyV3Inventory(
+            $db,
+            $versionId,
+            $scoreDate
+        );
         $inventoryFingerprint =
             ingredientOntologyV3InventoryFingerprint(
                 $inventory,
@@ -867,7 +872,7 @@ function ingredientOntologyV3BuildRequirementShadow(
             $state['inventory_revision'],
             $state['catalog_revision'],
             $inventoryFingerprint,
-            date('Y-m-d'),
+            $scoreDate,
             $catalogMaxId,
             $versionId,
             INGREDIENT_ONTOLOGY_V3_REQUIREMENT_SCORING_MODEL,
@@ -995,7 +1000,11 @@ function ingredientOntologyV3BuildRequirementShadow(
         $currentVersion = ingredientOntologyV3Version($db, $versionId);
         $currentOwnerFingerprintAudit =
             ingredientOntologyV3OwnerFingerprintAudit($db, $versionId);
-        $currentInventory = ingredientOntologyV3Inventory($db, $versionId);
+        $currentInventory = ingredientOntologyV3Inventory(
+            $db,
+            $versionId,
+            $scoreDate
+        );
         $currentInventoryFingerprint =
             ingredientOntologyV3InventoryFingerprint(
                 $currentInventory,
