@@ -6004,9 +6004,33 @@ function ingredientOntologyControllerStreamEpoch(
         $tokens = array_slice(array_values(array_unique($tokens)), 0, 16);
         $candidateExpression =
             "lower(trim(replace(replace("
-            . "canonical_name || ' ' || slug, '-', ' '), '_', ' ')))";
+            . "entity.canonical_name || ' ' || entity.slug, "
+            . "'-', ' '), '_', ' ')))";
         $scoreParts = [
+            "CASE WHEN EXISTS (
+                SELECT 1
+                FROM ingredient_ontology_labels label
+                WHERE label.ontology_version_id =
+                        entity.ontology_version_id
+                  AND label.entity_id = entity.id
+                  AND label.review_state = 'accepted'
+                  AND label.kind IN ('exact_alias', 'attribute_alias')
+                  AND label.normalized_label = ?
+            ) THEN 1500 ELSE 0 END",
             "CASE WHEN {$candidateExpression} = ? THEN 1000 ELSE 0 END",
+            "CASE WHEN ? <> '' AND EXISTS (
+                SELECT 1
+                FROM ingredient_ontology_labels label
+                WHERE label.ontology_version_id =
+                        entity.ontology_version_id
+                  AND label.entity_id = entity.id
+                  AND label.review_state = 'accepted'
+                  AND label.kind IN ('exact_alias', 'attribute_alias')
+                  AND (
+                      instr(label.normalized_label, ?) > 0
+                      OR instr(?, label.normalized_label) > 0
+                  )
+            ) THEN 300 ELSE 0 END",
             "CASE WHEN ? <> '' AND (
                 instr({$candidateExpression}, ?) > 0
                 OR instr(?, {$candidateExpression}) > 0
@@ -6017,12 +6041,34 @@ function ingredientOntologyControllerStreamEpoch(
             $normalized,
             $normalized,
             $normalized,
+            $normalized,
+            $normalized,
+            $normalized,
+            $normalized,
         ];
         foreach ($tokens as $token) {
             $scoreParts[] =
-                "CASE WHEN instr({$candidateExpression}, ?) > 0 "
-                . "THEN 20 ELSE 0 END";
-            $params[] = $token;
+                "CASE WHEN (
+                    instr({$candidateExpression}, ?) > 0
+                    OR instr(?, {$candidateExpression}) > 0
+                ) THEN 20 ELSE 0 END";
+            $scoreParts[] =
+                "CASE WHEN EXISTS (
+                    SELECT 1
+                    FROM ingredient_ontology_labels label
+                    WHERE label.ontology_version_id =
+                            entity.ontology_version_id
+                      AND label.entity_id = entity.id
+                      AND label.review_state = 'accepted'
+                      AND label.kind IN (
+                          'exact_alias', 'attribute_alias'
+                      )
+                      AND (
+                          instr(label.normalized_label, ?) > 0
+                          OR instr(?, label.normalized_label) > 0
+                      )
+                ) THEN 40 ELSE 0 END";
+            array_push($params, $token, $token, $token, $token);
         }
         $requiredEntityIds = array_values(array_unique(array_filter(
             array_map('intval', $requiredEntityIds),
@@ -6034,7 +6080,7 @@ function ingredientOntologyControllerStreamEpoch(
                 array_fill(0, count($requiredEntityIds), '?')
             );
             $scoreParts[] =
-                "CASE WHEN id IN ({$placeholders}) "
+                "CASE WHEN entity.id IN ({$placeholders}) "
                 . "THEN 10000 ELSE 0 END";
             array_push($params, ...$requiredEntityIds);
         }
@@ -6043,11 +6089,16 @@ function ingredientOntologyControllerStreamEpoch(
         $params[] = $offset;
         $scoreSql = implode(' + ', $scoreParts);
         $stmt = $db->prepare("
-            SELECT id, slug, canonical_name, entity_kind,
-                   identity_role, ({$scoreSql}) AS lexical_score
-            FROM ingredient_ontology_entities
-            WHERE ontology_version_id = ? AND active = 1
-            ORDER BY lexical_score DESC, canonical_name, id
+            SELECT entity.id, entity.slug, entity.canonical_name,
+                   entity.entity_kind, entity.identity_role,
+                   ({$scoreSql}) AS lexical_score
+            FROM ingredient_ontology_entities entity
+            WHERE entity.ontology_version_id = ?
+              AND entity.active = 1
+              AND entity.provenance <> 'autonomous_controller'
+              AND entity.slug NOT LIKE 'provisional-subject-%'
+            ORDER BY lexical_score DESC,
+                     entity.canonical_name, entity.id
             LIMIT ? OFFSET ?
         ");
         $stmt->execute($params);
@@ -6946,12 +6997,18 @@ function ingredientOntologyControllerStreamEpoch(
 
     function ingredientOntologyControllerCopilotSocketRequest(
         array $artifact,
-        string $modelId
+        string $modelId,
+        string $priority = 'background'
     ): array {
         $whitelist = ingredientOntologyControllerCopilotModelWhitelist();
         if (!isset($whitelist[$modelId])) {
             throw new RuntimeException(
                 'controller_copilot_model_unauthorized'
+            );
+        }
+        if (!in_array($priority, ['background', 'interactive'], true)) {
+            throw new RuntimeException(
+                'controller_copilot_priority_invalid'
             );
         }
         $role = (string)$artifact['prompt_type'] === 'P7'
@@ -6972,6 +7029,7 @@ function ingredientOntologyControllerStreamEpoch(
             'schema' => $artifact['schema'],
             'schema_hash' => (string)$artifact['schema_hash'],
             'input_hash' => (string)$artifact['input_hash'],
+            'priority' => $priority,
         ];
         if ($whitelist[$modelId]['effort'] !== null) {
             $request['effort'] =
@@ -13806,6 +13864,99 @@ function ingredientOntologyControllerFinishPersistedPlan(
     ];
 }
 
+function ingredientOntologyControllerAdvanceCandidateSearch(
+    PDO $db,
+    array $lease,
+    int $responseArtifactId,
+    array $artifact,
+    string $fromStatus
+): array {
+    if (!in_array($fromStatus, ['leased', 'model_running'], true)) {
+        throw new InvalidArgumentException(
+            'controller candidate search source status is invalid'
+        );
+    }
+    $manifest = (array)($artifact['manifest'] ?? []);
+    $candidateIds = array_values((array)(
+        $manifest['candidate_ids'] ?? []
+    ));
+    $shardOffset = max(0, (int)($manifest['shard_offset'] ?? 0));
+    $candidateLimit = max(
+        1,
+        min(500, (int)($manifest['shard_limit'] ?? 64))
+    );
+    $nextOffset = $shardOffset + $candidateLimit;
+    $moreCandidates = count($candidateIds) === $candidateLimit
+        && $nextOffset < 500;
+    if (!$moreCandidates) {
+        ingredientOntologyControllerTransitionJob(
+            $db,
+            $lease,
+            $fromStatus,
+            'abstained',
+            [
+                'response_artifact_id' => $responseArtifactId,
+                'last_error_kind' => 'candidate_search_exhausted',
+                'last_error' =>
+                    'All benchmark-authorized candidate shards were exhausted.',
+            ]
+        );
+        return [
+            'job_id' => (int)$lease['id'],
+            'status' => 'abstained',
+            'reason' => 'candidate_search_exhausted',
+        ];
+    }
+    $jobInput = json_decode(
+        (string)($lease['input_json'] ?? '{}'),
+        true
+    );
+    $jobInput = is_array($jobInput) ? $jobInput : [];
+    $jobInput['next_shard_offset'] = $nextOffset;
+    $inputJson = ingredientOntologyControllerStableJson($jobInput);
+    $expand = $db->prepare("
+        UPDATE ontology_controller_jobs
+        SET status = 'retry',
+            input_json = ?,
+            input_hash = ?,
+            response_artifact_id = ?,
+            next_attempt_at = CURRENT_TIMESTAMP,
+            lease_token = NULL,
+            leased_until = NULL,
+            finished_at = NULL,
+            last_error_kind = 'expand_search',
+            last_error = ?,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+          AND status = ?
+          AND lease_token = ?
+          AND lease_generation = ?
+          AND required_epoch = ?
+          AND controller_generation = ?
+    ");
+    $expand->execute([
+        $inputJson,
+        hash('sha256', $inputJson),
+        $responseArtifactId,
+        'Continuing with disjoint candidate shard at offset '
+            . $nextOffset . '.',
+        (int)$lease['id'],
+        $fromStatus,
+        (string)$lease['lease_token'],
+        (int)$lease['lease_generation'],
+        (int)$lease['required_epoch'],
+        (int)$lease['controller_generation'],
+    ]);
+    return [
+        'job_id' => (int)$lease['id'],
+        'status' => $expand->rowCount() === 1
+            ? 'retry'
+            : 'superseded',
+        'reason' => 'expand_search',
+        'next_shard_offset' => $nextOffset,
+    ];
+}
+
 function ingredientOntologyControllerResumeDurableJob(
     PDO $db,
     array $lease,
@@ -13878,20 +14029,6 @@ function ingredientOntologyControllerResumeDurableJob(
         ");
         $response->execute([(int)$lease['response_artifact_id']]);
         $responseRow = $response->fetch(PDO::FETCH_ASSOC);
-        if ($responseRow) {
-            $persistedPlan = json_decode(
-                (string)$responseRow['parsed_plan_json'],
-                true,
-                64,
-                JSON_THROW_ON_ERROR
-            );
-            if (
-                (string)($persistedPlan['decision'] ?? '')
-                === 'expand_search'
-            ) {
-                return null;
-            }
-        }
         $prompt = $db->prepare("
             SELECT * FROM ontology_controller_prompts WHERE id = ?
         ");
@@ -13900,6 +14037,41 @@ function ingredientOntologyControllerResumeDurableJob(
         if (!$promptRow || !$responseRow) {
             throw new RuntimeException(
                 'controller durable response artifact is incomplete'
+            );
+        }
+        $persistedPlan = json_decode(
+            (string)$responseRow['parsed_plan_json'],
+            true,
+            64,
+            JSON_THROW_ON_ERROR
+        );
+        if (
+            (string)($persistedPlan['decision'] ?? '')
+            === 'expand_search'
+        ) {
+            $artifact =
+                ingredientOntologyControllerPromptArtifactFromRow(
+                    $promptRow
+                );
+            $jobInput = json_decode(
+                (string)($lease['input_json'] ?? '{}'),
+                true
+            );
+            $jobInput = is_array($jobInput) ? $jobInput : [];
+            if (
+                (int)($jobInput['next_shard_offset'] ?? 0)
+                > (int)(
+                    $artifact['manifest']['shard_offset'] ?? 0
+                )
+            ) {
+                return null;
+            }
+            return ingredientOntologyControllerAdvanceCandidateSearch(
+                $db,
+                $lease,
+                (int)$lease['response_artifact_id'],
+                $artifact,
+                'leased'
             );
         }
         $childVersionId = (int)(
@@ -13961,12 +14133,7 @@ function ingredientOntologyControllerResumeDurableJob(
         $persistedPlan = ingredientOntologyControllerRebindPlanToVersion(
             $db,
             $promptRow,
-            json_decode(
-                (string)$responseRow['parsed_plan_json'],
-                true,
-                64,
-                JSON_THROW_ON_ERROR
-            ),
+            $persistedPlan,
             $childVersionId
         );
         if (!ingredientOntologyControllerTransitionJob(
@@ -15578,6 +15745,21 @@ function ingredientOntologyControllerResumeDurableJob(
                             $lease,
                             $versionId
                         );
+                    $jobInput = json_decode(
+                        (string)($lease['input_json'] ?? '{}'),
+                        true
+                    );
+                    $jobInput = is_array($jobInput) ? $jobInput : [];
+                    $shardOffset = isset($options['shard_offset'])
+                        ? max(0, (int)$options['shard_offset'])
+                        : max(
+                            0,
+                            (int)($jobInput['next_shard_offset'] ?? 0)
+                        );
+                    $candidateLimit = (int)(
+                        $options['candidate_limit']
+                            ?? ingredientOntologyControllerCandidateLimit()
+                    );
                     $artifact = ingredientOntologyControllerBuildPrompt(
                         $db,
                         (string)$context['prompt_type'],
@@ -15589,10 +15771,8 @@ function ingredientOntologyControllerResumeDurableJob(
                         [
                             'required_entity_ids' =>
                                 $context['required_entity_ids'],
-                            'candidate_limit' => (int)(
-                                $options['candidate_limit']
-                                    ?? ingredientOntologyControllerCandidateLimit()
-                            ),
+                            'candidate_limit' => $candidateLimit,
+                            'shard_offset' => $shardOffset,
                         ]
                     );
                     $providerKey = (string)(
@@ -15603,11 +15783,17 @@ function ingredientOntologyControllerResumeDurableJob(
                         $options['model']
                             ?? ingredientOntologyControllerProposerModel()
                     );
+                    $artifactProviderKey = mb_substr(
+                        $providerKey,
+                        0,
+                        60,
+                        'UTF-8'
+                    ) . '.shard' . $shardOffset;
                     $prompt = ingredientOntologyControllerStorePrompt(
                         $db,
                         (int)$lease['id'],
                         $artifact,
-                        $providerKey,
+                        $artifactProviderKey,
                         $modelId
                     );
                     if (!ingredientOntologyControllerTransitionJob(
@@ -15674,6 +15860,19 @@ function ingredientOntologyControllerResumeDurableJob(
                             $plan,
                             $validation
                         );
+                    if (
+                        !empty($validation['valid'])
+                        && (string)($plan['decision'] ?? '')
+                            === 'expand_search'
+                    ) {
+                        return ingredientOntologyControllerAdvanceCandidateSearch(
+                            $db,
+                            $lease,
+                            (int)$response['id'],
+                            $artifact,
+                            'model_running'
+                        );
+                    }
                     $queue =
                         ingredientOntologyControllerQueueProvisionalIntent(
                             $db,
@@ -18447,6 +18646,40 @@ function ingredientOntologyV3ApplyChangeSetContinue(
                 $entityId = $newEntity;
             }
 
+            $assertIdentityTarget = static function (
+                PDO $db,
+                int $versionId,
+                int $entityId,
+                bool $product
+            ): void {
+                $target = $db->prepare("
+                    SELECT active, identity_role, slug
+                    FROM ingredient_ontology_entities
+                    WHERE ontology_version_id = ? AND id = ?
+                ");
+                $target->execute([$versionId, $entityId]);
+                $entity = $target->fetch(PDO::FETCH_ASSOC) ?: null;
+                if (
+                    $entity === null
+                    || empty($entity['active'])
+                    || (string)$entity['identity_role']
+                        === 'structural_category'
+                    || str_starts_with(
+                        (string)$entity['slug'],
+                        'provisional-subject-'
+                    )
+                    || (
+                        $product
+                        && (string)$entity['identity_role']
+                            !== 'identity_leaf'
+                    )
+                ) {
+                    throw new InvalidArgumentException(
+                        'controller mapping target is not identity eligible'
+                    );
+                }
+            };
+
             $sourceRepairs = [
                 'map_source_to_target_entity',
                 'correct_source_facets',
@@ -18463,6 +18696,12 @@ function ingredientOntologyV3ApplyChangeSetContinue(
                         'controller source repair target is incomplete'
                     );
                 }
+                $assertIdentityTarget(
+                    $db,
+                    $versionId,
+                    $entityId,
+                    false
+                );
                 $mappingIds =
                     ingredientOntologyControllerSubjectMappingIds(
                         $db,
@@ -18523,6 +18762,12 @@ function ingredientOntologyV3ApplyChangeSetContinue(
                         'controller product repair target is incomplete'
                     );
                 }
+                $assertIdentityTarget(
+                    $db,
+                    $versionId,
+                    $entityId,
+                    true
+                );
                 $mappingId = ingredientOntologyControllerProductMappingId(
                     $db,
                     $versionId,

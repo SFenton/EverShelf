@@ -143,12 +143,42 @@ jobs:
                   print(f'{f}: complete ✓')
           "
 
+  deep-regression:
+    name: Ontology and Recipe Regression
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.2'
+          extensions: pdo_sqlite, curl, mbstring, gd, intl
+
+      - name: Test scanner and instant identity contracts
+        run: |
+          php scripts/test-location-suggestions.php
+          php scripts/test-instant-identity-annex.php
+          php scripts/test-incremental-score-overlay.php
+
+      - name: Test recipe backend
+        run: php -d memory_limit=512M scripts/test-recipe-backend.php
+
+      - name: Test ontology v3
+        run: php -d memory_limit=512M scripts/test-ingredient-ontology-v3.php
+
+      - name: Test ontology controller
+        run: php -d memory_limit=512M scripts/test-ontology-controller.php
+
+      - name: Test Copilot socket provider
+        run: python3 scripts/test-ontology-copilot-provider.py -q
+
   # ── Auto-merge develop → main ────────────────────────────────────────────
   # Runs automatically after ALL checks pass on develop.
   # You never need to merge manually again — just push to develop.
   auto-merge-to-main:
     name: Auto-merge develop → main
-    needs: [lint-php, lint-js, docker-build, validate-translations]
+    needs: [lint-php, lint-js, docker-build, validate-translations, deep-regression]
     if: github.ref == 'refs/heads/develop'
     runs-on: ubuntu-latest
     permissions:

@@ -66,6 +66,39 @@ services:
     healthcheck:
       disable: true
 
+  recipe-score-worker:
+    build: .
+    container_name: evershelf-recipe-score-worker
+    user: "33:33"
+    entrypoint: ["php", "/var/www/html/scripts/incremental-score-worker.php"]
+    command:
+      - --db=/var/www/html/data/evershelf.db
+      - --allow-active-db
+      - --loop
+      - --sleep-ms=200
+    volumes:
+      - evershelf_data:/var/www/html/data
+      - ./.env:/var/www/html/.env:ro
+    env_file:
+      - ./.env
+    environment:
+      - TZ=Europe/Rome
+    depends_on:
+      - evershelf
+    restart: unless-stopped
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: "none"
+    healthcheck:
+      disable: true
+
   cookidoo-bridge:
     profiles: ["cookidoo"]
     build:

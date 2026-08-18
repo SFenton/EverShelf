@@ -1108,6 +1108,12 @@ function ingredientOntologyV3MigrateMaterializationGuards(PDO $db): void {
             'requirement match',
         ],
         [
+            'recipe_score_incremental_recipes',
+            'score_revision_id',
+            'recipe_score_revisions',
+            'incremental recipe set',
+        ],
+        [
             'ingredient_ontology_requirement_input_recipes',
             'requirement_revision_id',
             'ingredient_ontology_requirement_revisions',
@@ -1171,7 +1177,7 @@ function ingredientOntologyV3MigrateMaterializationGuards(PDO $db): void {
     ingredientOntologyV3MigrateTriggerSet(
         $db,
         'materialization_guard_trigger_version',
-        'materialization-guards-v3.17.1',
+        'materialization-guards-v3.18',
         $triggerNames,
         static function (PDO $db) use (
             $createChildGuards,
@@ -2014,6 +2020,49 @@ function ingredientOntologyV3SchemaMigrate(PDO $db): void {
                 REFERENCES ingredient_ontology_mappings(id) ON DELETE CASCADE,
             FOREIGN KEY (to_entity_id)
                 REFERENCES ingredient_ontology_entities(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS ingredient_ontology_identity_annex (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            product_id INTEGER NOT NULL UNIQUE,
+            ontology_version_id INTEGER NOT NULL,
+            ontology_content_hash TEXT NOT NULL
+                CHECK(length(ontology_content_hash) = 64),
+            ontology_seal_hash TEXT NOT NULL
+                CHECK(length(ontology_seal_hash) = 64),
+            owner_fingerprint TEXT NOT NULL
+                CHECK(length(owner_fingerprint) = 64),
+            source_label TEXT NOT NULL DEFAULT ''
+                CHECK(length(source_label) <= 200),
+            normalized_label TEXT NOT NULL DEFAULT ''
+                CHECK(length(normalized_label) <= 200),
+            language TEXT NOT NULL DEFAULT 'en'
+                CHECK(length(language) BETWEEN 2 AND 35),
+            label_id INTEGER DEFAULT NULL,
+            entity_id INTEGER DEFAULT NULL,
+            status TEXT NOT NULL
+                CHECK(status IN ('accepted', 'rejected', 'unresolved')),
+            admission_source TEXT NOT NULL DEFAULT 'none'
+                CHECK(length(admission_source) <= 80),
+            attributes_json TEXT NOT NULL DEFAULT '{}'
+                CHECK(length(attributes_json) <= 16384),
+            resolver_version TEXT NOT NULL
+                CHECK(length(resolver_version) BETWEEN 1 AND 120),
+            review_manifest_hash TEXT NOT NULL
+                CHECK(length(review_manifest_hash) = 64),
+            evidence_hash TEXT NOT NULL CHECK(length(evidence_hash) = 64),
+            reason TEXT NOT NULL DEFAULT ''
+                CHECK(length(reason) <= 240),
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (product_id)
+                REFERENCES products(id) ON DELETE CASCADE,
+            FOREIGN KEY (ontology_version_id)
+                REFERENCES ingredient_ontology_versions(id) ON DELETE CASCADE,
+            FOREIGN KEY (label_id)
+                REFERENCES ingredient_ontology_labels(id) ON DELETE SET NULL,
+            FOREIGN KEY (entity_id)
+                REFERENCES ingredient_ontology_entities(id) ON DELETE SET NULL
         );
 
         CREATE TABLE IF NOT EXISTS ingredient_ontology_resolution_manifests (
@@ -2954,6 +3003,14 @@ function ingredientOntologyV3SchemaMigrate(PDO $db): void {
             );
         CREATE INDEX IF NOT EXISTS idx_ontology_mapping_attributes_mapping
             ON ingredient_ontology_mapping_attributes(mapping_id, facet_id);
+        CREATE INDEX IF NOT EXISTS idx_ontology_identity_annex_version
+            ON ingredient_ontology_identity_annex(
+                ontology_version_id, status, entity_id
+            );
+        CREATE INDEX IF NOT EXISTS idx_ontology_identity_annex_owner
+            ON ingredient_ontology_identity_annex(
+                product_id, owner_fingerprint, status
+            );
         CREATE INDEX IF NOT EXISTS idx_ontology_disposition_scope
             ON ingredient_ontology_disposition_scopes(
                 ontology_version_id, scope_type, normalized_label, language

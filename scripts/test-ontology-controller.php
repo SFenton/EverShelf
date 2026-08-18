@@ -2569,13 +2569,13 @@ try {
                     SELECT subject_fingerprint
                     FROM ontology_subjects
                     WHERE subject_kind = 'recipe_ingredient'
-                    ORDER BY id LIMIT 1
+                    ORDER BY id LIMIT 1 OFFSET 1
                 ")->fetchColumn(),
         ],
         (int)$db->query("
             SELECT id FROM ontology_subjects
             WHERE subject_kind = 'recipe_ingredient'
-            ORDER BY id LIMIT 1
+            ORDER BY id LIMIT 1 OFFSET 1
         ")->fetchColumn(),
         null,
         null,
@@ -2621,6 +2621,82 @@ try {
                 'second' => $expandSecond['results'][0],
                 'prompts' => $expandPromptCount,
                 'job_id' => (int)$expandJob['id'],
+            ])
+    );
+    $db->prepare("
+        UPDATE ontology_controller_jobs
+        SET status = 'abstained',
+            finished_at = CURRENT_TIMESTAMP,
+            next_attempt_at = NULL,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+    ")->execute([(int)$expandJob['id']]);
+
+    $intakeExpandJob = ingredientOntologyControllerEnqueueJob(
+        $db,
+        'subject_resolution',
+        [
+            'subject_kind' => 'recipe_ingredient',
+            'subject_fingerprint' =>
+                (string)$db->query("
+                    SELECT subject_fingerprint
+                    FROM ontology_subjects
+                    WHERE subject_kind = 'recipe_ingredient'
+                    ORDER BY id LIMIT 1
+                ")->fetchColumn(),
+        ],
+        (int)$db->query("
+            SELECT id FROM ontology_subjects
+            WHERE subject_kind = 'recipe_ingredient'
+            ORDER BY id LIMIT 1
+        ")->fetchColumn(),
+        null,
+        null,
+        0,
+        100,
+        true
+    );
+    $intakeExpandFirst = ingredientOntologyControllerProcessQueue(
+        $db,
+        1,
+        [
+            'provider' => 'fake_expand',
+            'model' => 'fake-expand-model',
+            'job_types' => ['subject_resolution'],
+            'candidate_limit' => 64,
+            'intake_only' => true,
+        ]
+    );
+    $intakeExpandSecond = ingredientOntologyControllerProcessQueue(
+        $db,
+        1,
+        [
+            'provider' => 'fake_expand',
+            'model' => 'fake-expand-model',
+            'job_types' => ['subject_resolution'],
+            'candidate_limit' => 64,
+            'intake_only' => true,
+        ]
+    );
+    $intakeIntentCount = controllerTestCount(
+        $db,
+        "SELECT COUNT(*)
+         FROM ontology_generation_intents
+         WHERE source_job_id = ?",
+        [(int)$intakeExpandJob['id']]
+    );
+    controllerTestAssert(
+        $intakeExpandFirst['results'][0]['status'] === 'retry'
+        && $intakeExpandFirst['results'][0]['next_shard_offset'] === 64
+        && $intakeExpandSecond['results'][0]['status'] === 'retry'
+        && $intakeExpandSecond['results'][0]['next_shard_offset'] === 128
+        && $intakeIntentCount === 0,
+        'Intake-only expand_search must advance disjoint shards instead of stranding a generation intent: '
+            . json_encode([
+                'job_id' => (int)$intakeExpandJob['id'],
+                'first' => $intakeExpandFirst['results'][0] ?? null,
+                'second' => $intakeExpandSecond['results'][0] ?? null,
+                'intent_count' => $intakeIntentCount,
             ])
     );
 
@@ -5190,6 +5266,26 @@ try {
         WHERE ontology_version_id = {$denseVersionId}
           AND slug = 'large-candidate-4999'
     ")->fetchColumn();
+    $db->prepare("
+        INSERT INTO ingredient_ontology_labels (
+            ontology_version_id, entity_id, language,
+            label, normalized_label, kind, review_state,
+            provenance
+        )
+        VALUES (?, ?, 'en', 'Special Alias', 'special alias',
+                'exact_alias', 'accepted', 'semantic_seed')
+    ")->execute([$denseVersionId, $requiredLargeId]);
+    $db->prepare("
+        INSERT INTO ingredient_ontology_entities (
+            ontology_version_id, local_key, slug,
+            canonical_name, entity_kind, identity_role,
+            provenance
+        )
+        VALUES (?, 'candidate:provisional:test',
+                'provisional-subject-test',
+                'Special Alias', 'ingredient',
+                'identity_leaf', 'autonomous_controller')
+    ")->execute([$denseVersionId]);
     $candidateMemoryBefore = memory_get_usage(true);
     $candidateStarted = hrtime(true);
     $largeCandidates = ingredientOntologyControllerCandidateRows(
@@ -5215,6 +5311,22 @@ try {
                 'memory_delta' => $candidateMemoryDelta,
                 'first' => $largeCandidates[0] ?? null,
             ])
+    );
+    $aliasCandidates = ingredientOntologyControllerCandidateRows(
+        $db,
+        $denseVersionId,
+        'Special Alias',
+        0,
+        64
+    );
+    controllerTestAssert(
+        (int)$aliasCandidates[0]['entity_id'] === $requiredLargeId
+        && !in_array(
+            'provisional-subject-test',
+            array_column($aliasCandidates, 'slug'),
+            true
+        ),
+        'Candidate retrieval must rank reviewed aliases and exclude provisional controller entities'
     );
 
     $controllerPrompt = ingredientOntologyControllerBuildPrompt(
@@ -5502,11 +5614,12 @@ try {
         && $copilotNoFallback
         && $parityPrompt === 'alpha beta gamma'
         && !array_key_exists('effort', $parityRequest)
+        && ($parityRequest['priority'] ?? '') === 'background'
         && hash(
             'sha256',
             ingredientOntologyControllerStableJson($parityRequest)
         ) ===
-            'bea291488867757dc9e2d3b9960544f4e9b5060b5f713e000c780cdc69561c2c',
+            '2a53e81370006133fd67f5a52e6973bc926c64446cb1ca8bf5df9c1d10b922fd',
         'Copilot socket adapter must enforce the exact whitelist and never silently fall back'
     );
 
@@ -8175,6 +8288,145 @@ try {
             'Age-based cleanup must preserve payloads referenced by a valid '
                 . 'unregistered bundle manifest'
         );
+        $pointerRaceOriginalScoreId = (int)recipeScoreState(
+            $activationTarget
+        )['active_score_revision_id'];
+        $pointerRaceScoreId = -987654321;
+        ingredientOntologyActivationRegisterGuardFunctions(
+            $activationTarget
+        );
+        $pointerRaceRow = recipeScoreRevision(
+            $activationTarget,
+            $pointerRaceOriginalScoreId
+        );
+        $pointerRaceRow['id'] = $pointerRaceScoreId;
+        $pointerRaceColumns = array_keys($pointerRaceRow);
+        $pointerRaceInsert = $activationTarget->prepare(
+            "INSERT INTO recipe_score_revisions ("
+                . implode(', ', $pointerRaceColumns)
+                . ') VALUES ('
+                . implode(
+                    ', ',
+                    array_fill(0, count($pointerRaceColumns), '?')
+                )
+                . ')'
+        );
+        $pointerRacePublicationGuardWas =
+            ingredientOntologyV3PublicationGuardEnabled(
+                $activationTarget
+            );
+        $pointerRaceReadyGuardWas =
+            ingredientOntologyV3ReadyMutationGuardEnabled(
+                $activationTarget
+            );
+        ingredientOntologyV3SetPublicationGuard(
+            $activationTarget,
+            true
+        );
+        ingredientOntologyV3SetReadyMutationGuard(
+            $activationTarget,
+            true
+        );
+        try {
+            dbBeginImmediateWithRetry($activationTarget);
+            $pointerRaceInsert->execute(
+                array_values($pointerRaceRow)
+            );
+            $activationTarget->prepare("
+                UPDATE recipe_score_state
+                SET active_score_revision_id = ?,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = 1
+                  AND active_score_revision_id = ?
+            ")->execute([
+                $pointerRaceScoreId,
+                $pointerRaceOriginalScoreId,
+            ]);
+            $activationTarget->exec('COMMIT');
+        } catch (Throwable $error) {
+            try {
+                $activationTarget->exec('ROLLBACK');
+            } catch (Throwable $ignored) {
+            }
+            throw $error;
+        } finally {
+            ingredientOntologyV3SetReadyMutationGuard(
+                $activationTarget,
+                $pointerRaceReadyGuardWas
+            );
+            ingredientOntologyV3SetPublicationGuard(
+                $activationTarget,
+                $pointerRacePublicationGuardWas
+            );
+        }
+        recipeScoreReadRevisionCacheClear();
+        try {
+            $pointerRaceOntologyImport =
+                ingredientOntologyActivationRegisterImport(
+                    $activationTarget,
+                    $bundleSet['ontology'],
+                    $payloadDirectory
+                );
+        } finally {
+            $pointerRacePublicationGuardWas =
+                ingredientOntologyV3PublicationGuardEnabled(
+                    $activationTarget
+                );
+            $pointerRaceReadyGuardWas =
+                ingredientOntologyV3ReadyMutationGuardEnabled(
+                    $activationTarget
+                );
+            ingredientOntologyV3SetPublicationGuard(
+                $activationTarget,
+                true
+            );
+            ingredientOntologyV3SetReadyMutationGuard(
+                $activationTarget,
+                true
+            );
+            try {
+                dbBeginImmediateWithRetry($activationTarget);
+                $activationTarget->prepare("
+                    UPDATE recipe_score_state
+                    SET active_score_revision_id = ?,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = 1
+                      AND active_score_revision_id = ?
+                ")->execute([
+                    $pointerRaceOriginalScoreId,
+                    $pointerRaceScoreId,
+                ]);
+                $activationTarget->prepare("
+                    DELETE FROM recipe_score_revisions
+                    WHERE id = ?
+                ")->execute([$pointerRaceScoreId]);
+                $activationTarget->exec('COMMIT');
+            } catch (Throwable $error) {
+                try {
+                    $activationTarget->exec('ROLLBACK');
+                } catch (Throwable $ignored) {
+                }
+                throw $error;
+            } finally {
+                ingredientOntologyV3SetReadyMutationGuard(
+                    $activationTarget,
+                    $pointerRaceReadyGuardWas
+                );
+                ingredientOntologyV3SetPublicationGuard(
+                    $activationTarget,
+                    $pointerRacePublicationGuardWas
+                );
+            }
+            recipeScoreReadRevisionCacheClear();
+        }
+        controllerTestAssert(
+            (string)$pointerRaceOntologyImport['status'] === 'staging'
+            && (int)recipeScoreState(
+                $activationTarget
+            )['active_score_revision_id']
+                === $pointerRaceOriginalScoreId,
+            'First-time ontology registration must tolerate an unrelated active score pointer advance'
+        );
         $resumedArtifacts =
             ingredientOntologyActivationRecoverPendingArtifacts(
                 $activationTarget,
@@ -8510,6 +8762,50 @@ try {
     $GLOBALS['ONTOLOGY_CONTROLLER_ACTIVE_DB_PATH_OVERRIDE'] =
         $activationTargetDbPath;
     try {
+        $ontologyFenceState = recipeScoreState($activationTarget);
+        $ontologyFence = [
+            'database_lineage_uuid' =>
+                ingredientOntologyActivationLineageUuid(
+                    $activationTarget
+                ),
+            'runtime_hash' =>
+                ingredientOntologyActivationRuntimeHash(),
+            'active_score_revision_id' => -1,
+            'active_ontology_version_id' => (int)(
+                ingredientOntologyV3ActiveVersion(
+                    $activationTarget
+                )['id'] ?? 0
+            ),
+            'inventory_revision' =>
+                (int)$ontologyFenceState['inventory_revision'],
+            'catalog_revision' =>
+                (int)$ontologyFenceState['catalog_revision'],
+            'ontology_source_revision' =>
+                (int)$ontologyFenceState['ontology_source_revision'],
+            'ontology_source_hash' =>
+                (string)$ontologyFenceState['ontology_source_hash'],
+            'score_date' => date('Y-m-d'),
+            'cdc' =>
+                ingredientOntologyActivationCdcSnapshot(
+                    $activationTarget
+                ),
+            'controller_state' =>
+                ingredientOntologyActivationControllerState(
+                    $activationTarget
+                ),
+        ];
+        controllerTestAssert(
+            !in_array(
+                'activation active_score_revision_id changed',
+                ingredientOntologyActivationFenceErrors(
+                    $activationTarget,
+                    (array)$ontologyImport,
+                    ['validation_fence' => $ontologyFence]
+                ),
+                true
+            ),
+            'Ontology-only activation fences must tolerate score pointer movement when the active ontology is unchanged'
+        );
         $scoreImport = ingredientOntologyActivationRegisterImport(
             $activationTarget,
             $bundleSet['score'],
@@ -8534,6 +8830,18 @@ try {
         unset($GLOBALS['ONTOLOGY_CONTROLLER_ACTIVE_DB_PATH_OVERRIDE']);
     }
     recipeScoreMarkDirty($activationTarget);
+    $restampedScoreRoot =
+        ingredientOntologyActivationRestampScoreRoot(
+            $activationTarget,
+            (array)$bundleSet['score']['candidate']
+        );
+    controllerTestAssert(
+        (int)$restampedScoreRoot['parent_score_revision_id']
+            === (int)recipeScoreState(
+                $activationTarget
+            )['active_score_revision_id'],
+        'Score activation restamping must rebase rollback lineage onto the current active score'
+    );
     databaseMaintenanceOnlineBackup(
         $activationTargetDbPath,
         $scoreValidationDbPath
@@ -8620,6 +8928,10 @@ try {
         );
         controllerTestAssert(
             $scoreImport['status'] === 'activatable'
+            && (int)$scoreImport['parent_score_revision_id']
+                === (int)$scoreAttestation['root_row'][
+                    'parent_score_revision_id'
+                ]
             && !is_file($scoreAttestationPath),
             'A retained score attestation must resume without rebuilding '
                 . 'the validation copy'

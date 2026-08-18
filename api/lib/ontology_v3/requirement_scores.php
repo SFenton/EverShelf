@@ -396,7 +396,9 @@ function ingredientOntologyV3ScoreRequirementRecipe(
             'inventory_product_id' =>
                 (int)$best['candidate']['product_id'],
             'inventory_mapping_id' =>
-                (int)$best['inventory_mapping']['mapping_id'],
+                $best['inventory_mapping']['mapping_id'] !== null
+                    ? (int)$best['inventory_mapping']['mapping_id']
+                    : null,
             'outcome' => (string)$match['outcome'],
             'satisfies_required' => $satisfied ? 1 : 0,
             'confidence' => (float)$match['confidence'],

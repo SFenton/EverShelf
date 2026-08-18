@@ -55,6 +55,9 @@ $db->exec("
         id INTEGER PRIMARY KEY,
         barcode TEXT,
         name TEXT NOT NULL,
+        brand TEXT NOT NULL DEFAULT '',
+        category TEXT NOT NULL DEFAULT '',
+        prepared_food INTEGER NOT NULL DEFAULT 0,
         last_location TEXT,
         last_location_at DATETIME,
         updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
@@ -115,6 +118,32 @@ $insertProduct->execute([4, '444', 'Soup', 'cabinet', '2025-01-01 10:00:00']);
 $insertProduct->execute([5, '555', 'Bread', null, null]);
 $insertProduct->execute([6, '666', 'Preserved', 'spice_rack', '2024-01-01 10:00:00']);
 $insertProduct->execute([7, '777', 'Moved item', null, null]);
+$insertProduct->execute([8, '888', 'Cached Scan', null, null]);
+$insertProduct->execute([9, '999', 'Fresh Scan Product', null, null]);
+$insertProduct->execute([10, '1010', 'Timeout Scan Product', null, null]);
+$insertProduct->execute([11, '1111', 'Rename Race Product', null, null]);
+$db->exec("
+    UPDATE products
+    SET category = CASE id
+        WHEN 8 THEN 'Shelf stable'
+        WHEN 9 THEN 'Fresh foods'
+        WHEN 10 THEN 'Unknown'
+        WHEN 11 THEN 'Fresh foods'
+        ELSE category
+    END
+    WHERE id IN (8, 9, 10, 11)
+");
+$locationLockDirectory = dirname(__DIR__)
+    . '/data/.location-suggestion-locks-' . getmypid();
+if (
+    !mkdir($locationLockDirectory, 0770, true)
+    && !is_dir($locationLockDirectory)
+) {
+    throw new RuntimeException(
+        'Unable to create location suggestion lock directory'
+    );
+}
+$GLOBALS['LOCATION_SUGGESTION_LOCK_DIR'] = $locationLockDirectory;
 
 assertSameValue('freezer', manualNameLocationHistory($db, ' milk ')['location'], 'Latest exact name wins');
 assertSameValue(2, manualNameLocationHistory($db, 'milk')['product_id'], 'Name tie-break uses latest product');
@@ -155,7 +184,12 @@ assertSameValue(
     'Missing strict reason triggers fallback'
 );
 
-$cacheKey = locationSuggestionCacheKey('Milk', 'Dairy', ['gemini-3.7-flash']);
+$cacheKey = locationSuggestionCacheKey(
+    'Milk',
+    'Dairy',
+    ['gemini-3.7-flash'],
+    str_repeat('a', 64)
+);
 cacheLocationSuggestion($db, $cacheKey, [
     'location' => 'frigo',
     'confidence' => 0.95,
@@ -192,10 +226,30 @@ assertScanTrue(
     'Location history must precede cache and Copilot transport'
 );
 
+$uncommittedResult = callLocationSuggestion($db, [
+    'mode' => 'manual',
+    'name' => 'Must',
+    'category' => 'Condiments',
+]);
+assertScanTrue(
+    $uncommittedResult['success'] === true
+    && $uncommittedResult['location'] === 'unknown'
+    && $uncommittedResult['reason'] === 'committed_product_required'
+    && $locationTransportCalls === 0,
+    'Uncommitted partial names must never call location AI'
+);
+
+$cachedProduct = $db->query("
+    SELECT id, name, brand, category, prepared_food
+    FROM products WHERE id = 8
+")->fetch(PDO::FETCH_ASSOC);
+$cachedProductFingerprint =
+    ingredientOntologyV3ProductOwnerFingerprint($cachedProduct);
 $cachedScanKey = locationSuggestionCacheKey(
     'Cached Scan',
     'Shelf stable',
-    locationSuggestionModels()
+    locationSuggestionModels(),
+    $cachedProductFingerprint
 );
 cacheLocationSuggestion($db, $cachedScanKey, [
     'location' => 'dispensa',
@@ -208,6 +262,8 @@ $cachedScanResult = callLocationSuggestion($db, [
     'mode' => 'manual',
     'name' => 'Cached Scan',
     'category' => 'Shelf stable',
+    'product_id' => 8,
+    'product_fingerprint' => $cachedProductFingerprint,
 ]);
 assertScanTrue(
     $cachedScanResult['location'] === 'dispensa'
@@ -217,6 +273,12 @@ assertScanTrue(
 );
 
 $GLOBALS['LOCATION_AI_ENABLED'] = true;
+$freshProduct = $db->query("
+    SELECT id, name, brand, category, prepared_food
+    FROM products WHERE id = 9
+")->fetch(PDO::FETCH_ASSOC);
+$freshProductFingerprint =
+    ingredientOntologyV3ProductOwnerFingerprint($freshProduct);
 $capturedLocationRequest = null;
 $capturedLocationRemaining = null;
 $GLOBALS['LOCATION_SUGGESTION_TRANSPORT'] =
@@ -244,11 +306,15 @@ $copilotLocation = callLocationSuggestion($db, [
     'mode' => 'manual',
     'name' => 'Fresh Scan Product',
     'category' => 'Fresh foods',
+    'product_id' => 9,
+    'product_fingerprint' => $freshProductFingerprint,
 ]);
 $cachedCopilotLocation = callLocationSuggestion($db, [
     'mode' => 'manual',
     'name' => 'Fresh Scan Product',
     'category' => 'Fresh foods',
+    'product_id' => 9,
+    'product_fingerprint' => $freshProductFingerprint,
 ]);
 assertScanTrue(
     $copilotLocation['location'] === 'frigo'
@@ -260,6 +326,7 @@ assertScanTrue(
     && ($capturedLocationRequest['model'] ?? '')
         === 'gemini-3.7-flash'
     && ($capturedLocationRequest['role'] ?? '') === 'proposer'
+    && ($capturedLocationRequest['priority'] ?? '') === 'interactive'
     && ($capturedLocationRequest['schema']['additionalProperties'] ?? null)
         === false
     && ($capturedLocationRequest['schema']['required'] ?? [])
@@ -270,14 +337,86 @@ assertScanTrue(
     'Location Copilot request must be strict, bounded, cached, and use authorized Gemini 3.7'
 );
 
+$staleCommit = callLocationSuggestion($db, [
+    'mode' => 'manual',
+    'name' => 'Fresh Scan Product',
+    'category' => 'Fresh foods',
+    'product_id' => 9,
+    'product_fingerprint' => str_repeat('0', 64),
+]);
+assertScanTrue(
+    $staleCommit['success'] === true
+    && $staleCommit['location'] === 'unknown'
+    && $staleCommit['reason'] === 'stale_product_commit'
+    && $locationTransportCalls === 1,
+    'Stale product fingerprints must not call location AI'
+);
+
+$renameRaceProduct = $db->query("
+    SELECT id, name, brand, category, prepared_food
+    FROM products WHERE id = 11
+")->fetch(PDO::FETCH_ASSOC);
+$renameRaceFingerprint =
+    ingredientOntologyV3ProductOwnerFingerprint($renameRaceProduct);
+$renameRaceCacheKey = locationSuggestionCacheKey(
+    'Rename Race Product',
+    'Fresh foods',
+    locationSuggestionModels(),
+    $renameRaceFingerprint
+);
+$GLOBALS['LOCATION_SUGGESTION_TRANSPORT'] =
+    static function () use ($db): array {
+        $db->exec("
+            UPDATE products
+            SET name = 'Renamed During Location AI'
+            WHERE id = 11
+        ");
+        return [
+            'source' => 'copilot_socket',
+            'envelope' => [
+                'location' => 'frigo',
+                'confidence' => 0.95,
+                'reason' => 'Fresh refrigerated product',
+            ],
+        ];
+    };
+$renameRaceResult = callLocationSuggestion($db, [
+    'mode' => 'manual',
+    'name' => 'Rename Race Product',
+    'category' => 'Fresh foods',
+    'product_id' => 11,
+    'product_fingerprint' => $renameRaceFingerprint,
+]);
+$renameRaceCache = $db->prepare("
+    SELECT COUNT(*)
+    FROM location_suggestion_cache
+    WHERE cache_key = ?
+");
+$renameRaceCache->execute([$renameRaceCacheKey]);
+assertScanTrue(
+    $renameRaceResult['success'] === true
+    && $renameRaceResult['location'] === 'unknown'
+    && $renameRaceResult['reason'] === 'stale_product_commit'
+    && (int)$renameRaceCache->fetchColumn() === 0,
+    'A rename during location AI must suppress both the stale response and its cache write'
+);
+
 $GLOBALS['LOCATION_SUGGESTION_TRANSPORT'] =
     static function (): array {
         throw new RuntimeException('controller_copilot_socket_timeout');
     };
+$timeoutProduct = $db->query("
+    SELECT id, name, brand, category, prepared_food
+    FROM products WHERE id = 10
+")->fetch(PDO::FETCH_ASSOC);
+$timeoutProductFingerprint =
+    ingredientOntologyV3ProductOwnerFingerprint($timeoutProduct);
 $locationUnavailable = callLocationSuggestion($db, [
     'mode' => 'manual',
     'name' => 'Timeout Scan Product',
     'category' => 'Unknown',
+    'product_id' => 10,
+    'product_fingerprint' => $timeoutProductFingerprint,
 ]);
 assertScanTrue(
     $locationUnavailable['success'] === true
@@ -457,6 +596,8 @@ assertScanTrue(
     && $processOrder === ['vision']
     && ($capturedExpiryRequest['model'] ?? '')
         === 'gemini-3.6-flash'
+    && ($capturedExpiryRequest['priority'] ?? '')
+        === 'interactive'
     && ($capturedExpiryRequest['schema']['additionalProperties'] ?? null)
         === false
     && ($capturedExpiryRequest['schema']['required'] ?? [])
@@ -467,6 +608,7 @@ assertScanTrue(
         $imageBase64
     )
     && ($textRequest['model'] ?? '') === 'gemini-3.7-flash'
+    && ($textRequest['priority'] ?? '') === 'interactive'
     && str_contains(
         (string)$textRequest['prompt'],
         'BEST BEFORE code unclear near cap'
@@ -710,6 +852,7 @@ unset(
     $GLOBALS['LOCATION_AI_ENABLED'],
     $GLOBALS['LOCATION_SUGGESTION_INPUT'],
     $GLOBALS['LOCATION_SUGGESTION_TRANSPORT'],
+    $GLOBALS['LOCATION_SUGGESTION_LOCK_DIR'],
     $GLOBALS['EXPIRY_TESSERACT_BINARY'],
     $GLOBALS['EXPIRY_OCR_PROCESS_TRANSPORT'],
     $GLOBALS['EXPIRY_COPILOT_TRANSPORT'],
@@ -721,6 +864,15 @@ unset(
 );
 if (is_dir($expiryAttachmentDirectory)) {
     rmdir($expiryAttachmentDirectory);
+}
+foreach (scandir($locationLockDirectory) ?: [] as $entry) {
+    if ($entry === '.' || $entry === '..') {
+        continue;
+    }
+    unlink($locationLockDirectory . '/' . $entry);
+}
+if (is_dir($locationLockDirectory)) {
+    rmdir($locationLockDirectory);
 }
 
 echo "Scan AI tests passed: {$scanAiAssertions} assertions.\n";

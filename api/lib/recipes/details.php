@@ -570,6 +570,30 @@ function recipeDetailV3MatchMap(
     if (!$ingredientIds) {
         return ['revision' => $active, 'matches' => []];
     }
+    $overlay = $read['overlay_revision'] ?? null;
+    $effective = $active;
+    if ($overlay !== null) {
+        $overlayPlaceholders = implode(
+            ',',
+            array_fill(0, count($ingredientIds), '?')
+        );
+        $affected = $db->prepare("
+            SELECT 1
+            FROM recipe_score_incremental_recipes overlay_recipe
+            JOIN recipe_ingredients ingredient
+              ON ingredient.recipe_id = overlay_recipe.recipe_id
+            WHERE overlay_recipe.score_revision_id = ?
+              AND ingredient.id IN ({$overlayPlaceholders})
+            LIMIT 1
+        ");
+        $affected->execute(array_merge(
+            [(int)$overlay['id']],
+            $ingredientIds
+        ));
+        if ($affected->fetchColumn()) {
+            $effective = $overlay;
+        }
+    }
     $placeholders = implode(',', array_fill(0, count($ingredientIds), '?'));
     $stmt = $db->prepare("
         SELECT sm.recipe_ingredient_id, sm.outcome,
@@ -581,7 +605,10 @@ function recipeDetailV3MatchMap(
         WHERE sm.score_revision_id = ?
           AND sm.recipe_ingredient_id IN ({$placeholders})
     ");
-    $stmt->execute(array_merge([(int)$active['id']], $ingredientIds));
+    $stmt->execute(array_merge(
+        [(int)$effective['id']],
+        $ingredientIds
+    ));
     $matches = [];
     while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
         $explanation = json_decode(
@@ -599,7 +626,7 @@ function recipeDetailV3MatchMap(
         unset($row['explanation_json']);
         $matches[$row['recipe_ingredient_id']] = $row;
     }
-    return ['revision' => $active, 'matches' => $matches];
+    return ['revision' => $effective, 'matches' => $matches];
 }
 
 function recipeDetailBuildIngredientPresence(
@@ -933,6 +960,7 @@ function recipeDetailBuildIngredientPresence(
     return [
         'ingredients' => $out,
         'inventory_truncated' => $inventoryTruncated,
+        'score_revision' => $v3['revision'] ?? null,
     ];
 }
 
@@ -1147,6 +1175,23 @@ function recipeCatalogDetailBuild(
         $loaded['rows'],
         $read
     );
+    $effectiveScoreRevision =
+        $presence['score_revision'] ?? ($read['revision'] ?? null);
+    if (is_array($effectiveScoreRevision)) {
+        $readMetadata['score_revision_id'] =
+            (int)$effectiveScoreRevision['id'];
+        $readMetadata['ontology_version_id'] =
+            $effectiveScoreRevision['ontology_version_id'] !== null
+                ? (int)$effectiveScoreRevision['ontology_version_id']
+                : null;
+        $readMetadata['overlay_score_revision_id'] = (
+            (int)($readMetadata['overlay_score_revision_id'] ?? 0)
+                === (int)$effectiveScoreRevision['id']
+        ) ? (int)$effectiveScoreRevision['id'] : null;
+    }
+    $effectiveInventoryRevision = is_array($effectiveScoreRevision)
+        ? (int)$effectiveScoreRevision['inventory_revision']
+        : (int)($base['inventory_revision'] ?? 0);
     $ingredients = $presence['ingredients'];
     $ingredients = recipeIngredientFeedbackDecorate(
         $db,
@@ -1154,7 +1199,7 @@ function recipeCatalogDetailBuild(
         $ingredients,
         [
             'inventory' =>
-                (int)($base['inventory_revision'] ?? 0),
+                $effectiveInventoryRevision,
             'ranking' => $readMetadata['score_revision_id'],
             'catalog' =>
                 (int)($base['catalog_revision'] ?? 0),
@@ -1411,7 +1456,7 @@ function recipeCatalogDetailBuild(
             'is_stale' => !empty($base['is_stale']),
         ],
         'revision' => [
-            'inventory' => (int)($base['inventory_revision'] ?? 0),
+            'inventory' => $effectiveInventoryRevision,
             'ranking' => $readMetadata['score_revision_id'],
             'catalog' => (int)($base['catalog_revision'] ?? 0),
             'ontology' => $readMetadata['ontology_version_id'],

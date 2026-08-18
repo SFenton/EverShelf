@@ -5,6 +5,65 @@ All notable changes to EverShelf will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.11.0] - 2026-08-17
+
+### Added
+- Manual product commits now receive a seal-bound deterministic identity
+  admission from reviewed exact or attribute aliases without mutating the
+  active ontology. A separately reviewed Russet Potato alias maps to Potato,
+  while unknown, prepared, structural, and provisional identities remain
+  non-satisfying.
+- A dedicated incremental score worker coalesces changed products, publishes a
+  validated affected-recipe overlay, and then materializes an immutable child
+  score revision with atomic rollback lineage.
+- Processing status reports identity admission counts, pending score products,
+  active overlays, and the most recent incremental publication.
+- A live copied-database harness exercises committed Russet Potatoes and Red
+  Onion flows through the logged-in Copilot SDK with key-based Gemini
+  environment variables removed.
+
+### Fixed
+- Location AI now requires a committed product ID plus its current
+  server-derived fingerprint. Partial typing can use exact household history
+  only and cannot read/write AI cache entries or consume Copilot capacity.
+- Location responses are single-flight per committed product, reject stale
+  names/fingerprints, and use bounded versioned cache retention.
+- Controller candidates include reviewed aliases and plural token matches,
+  exclude provisional controller entities, and reject identity-ineligible
+  mapping targets during application.
+- Intake-only `expand_search` responses now advance durable candidate shards
+  instead of becoming stranded generation intents.
+- Sparse scanner product commits preserve omitted metadata, and direct review
+  edits are recommitted before inventory is added.
+- Concurrent sparse commits now resolve duplicate ownership and omitted fields
+  under the write lock; explicit barcode conflicts cannot rewrite the winning
+  product.
+- Scanner-shaped saves omit server-derived shopping names so Copilot and legacy
+  provenance remains intact unless a caller intentionally supplies a name.
+- Rejected annex decisions suppress older sealed mappings, while unresolved
+  decisions preserve a current-fingerprint reviewed mapping; deleted products
+  retain their pending score work until prior matches are removed.
+- Incremental invalidation retains every aggregate inventory contributor, and
+  catalog mutations atomically retire stale score overlays and their cursors.
+- The shipped Compose definition now runs the persistent incremental score
+  worker, and all release-version surfaces resolve consistently to `1.11.0`.
+- Expanded or oversized product labels are bounded before annex persistence,
+  and annex-backed requirement shadows preserve nullable mapping IDs.
+- Overlay-backed recipe detail, grocery presence, feedback lineage, and cursor
+  invalidation now agree with browse ranking during incremental publication.
+- Incremental hash chains compact before pruning, cleanup completes old
+  full-resolution revisions with bounded transactions, and ontology activation
+  fences the active ontology rather than unrelated score-child movement.
+- Pending sets above the incremental product limit cannot publish a partially
+  fresh revision and instead fall through to copied full-score activation.
+- Future product ontology builds resolve English product labels as English
+  rather than `und`.
+- The Copilot provider requires Node 24+, reserves an interactive queue lane,
+  prioritizes interactive requests ahead of waiting background work, and
+  launches the SDK with bounded heap configuration.
+- Canonical ingredient rules distinguish Sweet Potato from Potato and map
+  Russet Potatoes without minting a product-name orphan.
+
 ## [1.10.0] - 2026-08-16
 
 ### Added

@@ -279,34 +279,52 @@ function evershelfProcessingStatusScores(PDO $db): array {
             'last_built_at' => $state['last_built_at'] ?? null,
         ];
     }
-    $status = function_exists('recipeScoreRevisionStatus')
-        ? recipeScoreRevisionStatus($db, $revision)
-        : 'unknown';
+    $overlay = function_exists('recipeScoreActiveOverlay')
+        ? recipeScoreActiveOverlay($db, $state, $revision)
+        : null;
+    $effectiveRevision = $overlay ?? $revision;
+    $status = $overlay !== null
+        ? 'fresh_overlay'
+        : (
+            function_exists('recipeScoreRevisionStatus')
+                ? recipeScoreRevisionStatus($db, $revision)
+                : 'unknown'
+        );
     $reasons = [];
     foreach ([
         'inventory_revision',
         'catalog_revision',
         'ontology_source_revision',
     ] as $field) {
-        if ((int)$revision[$field] !== (int)$state[$field]) {
+        if (
+            (int)$effectiveRevision[$field]
+                !== (int)$state[$field]
+        ) {
             $reasons[] = $field;
         }
     }
     if (
-        isset($revision['score_date'])
-        && (string)$revision['score_date'] !== date('Y-m-d')
+        isset($effectiveRevision['score_date'])
+        && (string)$effectiveRevision['score_date'] !== date('Y-m-d')
     ) {
         $reasons[] = 'score_date';
     }
     return [
         'available' => true,
         'active_revision_id' => $revisionId,
+        'overlay_revision_id' => $overlay !== null
+            ? (int)$overlay['id']
+            : null,
         'ontology_version_id' =>
-            isset($revision['ontology_version_id'])
-                ? (int)$revision['ontology_version_id']
+            isset($effectiveRevision['ontology_version_id'])
+                ? (int)$effectiveRevision['ontology_version_id']
                 : null,
         'status' => $status,
-        'stale' => $status !== 'fresh',
+        'stale' => !in_array(
+            $status,
+            ['fresh', 'fresh_overlay'],
+            true
+        ),
         'reasons' => $reasons,
         'current' => [
             'inventory_revision' => (int)$state['inventory_revision'],
@@ -316,10 +334,11 @@ function evershelfProcessingStatusScores(PDO $db): array {
         ],
         'built' => [
             'inventory_revision' =>
-                (int)$revision['inventory_revision'],
-            'catalog_revision' => (int)$revision['catalog_revision'],
+                (int)$effectiveRevision['inventory_revision'],
+            'catalog_revision' =>
+                (int)$effectiveRevision['catalog_revision'],
             'ontology_source_revision' =>
-                (int)$revision['ontology_source_revision'],
+                (int)$effectiveRevision['ontology_source_revision'],
         ],
         'dirty_at' => $state['dirty_at'] ?? null,
         'last_built_at' => $state['last_built_at'] ?? null,
@@ -618,6 +637,138 @@ function evershelfProcessingStatusWorkPhase(
     return 'idle';
 }
 
+function evershelfProcessingStatusIdentityAnnex(PDO $db): array {
+    if (!evershelfProcessingStatusTableExists(
+        $db,
+        'ingredient_ontology_identity_annex'
+    )) {
+        return [
+            'available' => false,
+            'ontology_version_id' => null,
+            'inventory_product_count' => 0,
+            'accepted_count' => 0,
+            'unresolved_count' => 0,
+            'rejected_count' => 0,
+            'last_updated_at' => null,
+        ];
+    }
+    $active = function_exists('recipeScoreActiveRevision')
+        ? recipeScoreActiveRevision($db)
+        : null;
+    $versionId = is_array($active)
+        && $active['ontology_version_id'] !== null
+            ? (int)$active['ontology_version_id']
+            : 0;
+    $inventoryCount = (int)$db->query("
+        SELECT COUNT(DISTINCT product_id)
+        FROM inventory
+        WHERE quantity > 0
+    ")->fetchColumn();
+    $counts = [
+        'accepted' => 0,
+        'unresolved' => 0,
+        'rejected' => 0,
+    ];
+    $lastUpdatedAt = null;
+    if ($versionId > 0) {
+        $stmt = $db->prepare("
+            SELECT annex.status, COUNT(*) AS product_count,
+                   MAX(annex.updated_at) AS last_updated_at
+            FROM ingredient_ontology_identity_annex annex
+            WHERE annex.ontology_version_id = ?
+              AND EXISTS (
+                  SELECT 1
+                  FROM inventory stock
+                  WHERE stock.product_id = annex.product_id
+                    AND stock.quantity > 0
+              )
+            GROUP BY annex.status
+        ");
+        $stmt->execute([$versionId]);
+        foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
+            $status = (string)$row['status'];
+            if (array_key_exists($status, $counts)) {
+                $counts[$status] = (int)$row['product_count'];
+            }
+            $candidateUpdatedAt = trim(
+                (string)($row['last_updated_at'] ?? '')
+            );
+            if (
+                $candidateUpdatedAt !== ''
+                && (
+                    $lastUpdatedAt === null
+                    || $candidateUpdatedAt > $lastUpdatedAt
+                )
+            ) {
+                $lastUpdatedAt = $candidateUpdatedAt;
+            }
+        }
+    }
+    $admitted = array_sum($counts);
+    $missing = max(0, $inventoryCount - $admitted);
+    return [
+        'available' => true,
+        'ontology_version_id' => $versionId ?: null,
+        'inventory_product_count' => $inventoryCount,
+        'accepted_count' => $counts['accepted'],
+        'unresolved_count' => $counts['unresolved'] + $missing,
+        'rejected_count' => $counts['rejected'],
+        'last_updated_at' => $lastUpdatedAt,
+    ];
+}
+
+function evershelfProcessingStatusIncrementalScores(PDO $db): array {
+    if (!evershelfProcessingStatusTableExists(
+        $db,
+        'recipe_score_pending_products'
+    )) {
+        return [
+            'available' => false,
+            'pending_product_count' => 0,
+            'oldest_at' => null,
+            'oldest_age_seconds' => null,
+            'latest_inventory_revision' => null,
+            'last_revision_id' => null,
+            'last_completed_at' => null,
+        ];
+    }
+    $pending = $db->query("
+        SELECT COUNT(*) AS pending_product_count,
+               MIN(created_at) AS oldest_at,
+               MAX(latest_inventory_revision)
+                   AS latest_inventory_revision
+        FROM recipe_score_pending_products
+    ")->fetch(PDO::FETCH_ASSOC) ?: [];
+    $latest = $db->query("
+        SELECT id, completed_at
+        FROM recipe_score_revisions
+        WHERE status = 'ready'
+          AND json_extract(
+              validation_report_json,
+              '$.version'
+          ) = 'identity-annex-incremental-score-v1'
+        ORDER BY id DESC
+        LIMIT 1
+    ")->fetch(PDO::FETCH_ASSOC) ?: null;
+    $oldestAt = trim((string)($pending['oldest_at'] ?? '')) ?: null;
+    return [
+        'available' => true,
+        'pending_product_count' =>
+            (int)($pending['pending_product_count'] ?? 0),
+        'oldest_at' => $oldestAt,
+        'oldest_age_seconds' =>
+            evershelfProcessingStatusAgeSeconds($oldestAt),
+        'latest_inventory_revision' =>
+            $pending['latest_inventory_revision'] !== null
+                ? (int)$pending['latest_inventory_revision']
+                : null,
+        'last_revision_id' => $latest !== null
+            ? (int)$latest['id']
+            : null,
+        'last_completed_at' => $latest['completed_at'] ?? null,
+    ];
+}
+
 function evershelfProcessingStatus(PDO $db): array {
     $recipeQueue = evershelfProcessingStatusRecipeQueue($db);
     $ontologyQueue = evershelfProcessingStatusOntologyQueue($db);
@@ -625,6 +776,9 @@ function evershelfProcessingStatus(PDO $db): array {
     $activation = evershelfProcessingStatusActivation($db);
     $coverage =
         evershelfProcessingStatusRecipeOntologyCoverage($db);
+    $identity = evershelfProcessingStatusIdentityAnnex($db);
+    $incremental =
+        evershelfProcessingStatusIncrementalScores($db);
     $logging = class_exists('EverLog', false)
         ? EverLog::status()
         : [
@@ -684,6 +838,7 @@ function evershelfProcessingStatus(PDO $db): array {
             + $ontologyQueue['intake_open_count']
             + $ontologyQueue['generation_open_count']
             + ($scores['stale'] ? 1 : 0)
+            + (int)$incremental['pending_product_count']
             + (
                 $ontologyQueue['runtime_enabled']
                     ? (int)$coverage['missing_recipe_count']
@@ -701,6 +856,8 @@ function evershelfProcessingStatus(PDO $db): array {
                 ? (int)$coverage['missing_recipe_count']
                 : 0,
         'score_publication' => $scores['stale'] ? 1 : 0,
+        'score_products' =>
+            (int)$incremental['pending_product_count'],
     ];
     $lastError = $activation['last_error']
         ?? $logging['last_error']
@@ -722,6 +879,8 @@ function evershelfProcessingStatus(PDO $db): array {
         'recipe_queue' => $recipeQueue,
         'ontology_queue' => $ontologyQueue,
         'recipe_scores' => $scores,
+        'incremental_scores' => $incremental,
+        'identity_admission' => $identity,
         'activation' => $activation,
         'recipe_source_ontology' => $coverage,
         'logging' => [

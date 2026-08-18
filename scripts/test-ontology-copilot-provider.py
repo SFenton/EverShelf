@@ -47,6 +47,7 @@ def request(
         "schema": schema,
         "schema_hash": provider.sha256_text(provider.stable_json(schema)),
         "input_hash": "a" * 64,
+        "priority": "background",
     }
     if (
         model in provider.MODEL_WHITELIST
@@ -256,6 +257,78 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(second_usage, {"warm": True})
         self.assertEqual(starts.read_text(encoding="utf-8"), "start\n")
 
+    def test_interactive_waiter_precedes_queued_background_waiter(self):
+        invoker = provider.CopilotInvoker(
+            runner=success_runner,
+            work_dir=str(self.root / "priority-order-work"),
+        )
+        active = threading.Event()
+        release = threading.Event()
+        order = []
+
+        def hold_active():
+            with invoker.bridge_turn("background"):
+                active.set()
+                release.wait(timeout=2)
+
+        def wait_for_turn(priority, label):
+            with invoker.bridge_turn(priority):
+                order.append(label)
+
+        holder = threading.Thread(target=hold_active)
+        background = threading.Thread(
+            target=wait_for_turn,
+            args=("background", "background"),
+        )
+        interactive = threading.Thread(
+            target=wait_for_turn,
+            args=("interactive", "interactive"),
+        )
+        holder.start()
+        self.assertTrue(active.wait(timeout=1))
+        background.start()
+        time.sleep(0.02)
+        interactive.start()
+        time.sleep(0.02)
+        release.set()
+        holder.join(timeout=2)
+        background.join(timeout=2)
+        interactive.join(timeout=2)
+        self.assertEqual(order, ["interactive", "background"])
+
+    def test_node_runtime_preflight_requires_v24(self):
+        node = self.root / "node-unsupported"
+        node.write_text(
+            "#!/bin/sh\nprintf 'v22.22.2\\n'\n",
+            encoding="utf-8",
+        )
+        node.chmod(0o700)
+        invoker = provider.CopilotInvoker(
+            bridge_command=[str(node), "bridge.mjs"],
+            work_dir=str(self.root / "node-unsupported-work"),
+        )
+        with self.assertRaises(provider.ProviderError) as caught:
+            invoker.ensure_bridge()
+        self.assertEqual(
+            caught.exception.code,
+            "node_runtime_unsupported",
+        )
+
+    def test_node_runtime_preflight_accepts_v24(self):
+        node = self.root / "node-supported"
+        node.write_text(
+            "#!/bin/sh\n"
+            "if [ \"$1\" = \"--version\" ]; then\n"
+            "  printf 'v24.4.1\\n'\n"
+            "  exit 0\n"
+            "fi\n"
+            "exit 0\n",
+            encoding="utf-8",
+        )
+        node.chmod(0o700)
+        invoker = provider.CopilotInvoker()
+        invoker.assert_supported_node([str(node), "bridge.mjs"])
+
     def test_attachment_hash_mismatch_fails_closed(self):
         attachments = self.root / "attachments-mismatch"
         attachments.mkdir(mode=0o770)
@@ -299,10 +372,11 @@ class ProviderTests(unittest.TestCase):
                 provider.stable_json(schema)
             ),
             "input_hash": "b" * 64,
+            "priority": "background",
         }
         self.assertEqual(
             provider.sha256_text(provider.stable_json(fixture)),
-            "bea291488867757dc9e2d3b9960544f4e9b5060b5f713e000c780cdc69561c2c",
+            "2a53e81370006133fd67f5a52e6973bc926c64446cb1ca8bf5df9c1d10b922fd",
         )
 
     def test_malformed_request_json(self):
@@ -313,6 +387,48 @@ class ProviderTests(unittest.TestCase):
         response = self.exchange(path, b"{broken")
         self.assertFalse(response["ok"])
         self.assertEqual(response["error"], "request_malformed_json")
+
+    def test_invalid_priority_is_rejected(self):
+        app = provider.ProviderApplication(
+            provider.CopilotInvoker(runner=success_runner)
+        )
+        path = self.start_server(app, "invalid-priority")
+        req = request()
+        req["priority"] = "urgent"
+        response = self.exchange(
+            path,
+            provider.stable_json(req).encode(),
+        )
+        self.assertFalse(response["ok"])
+        self.assertEqual(response["error"], "request_priority_invalid")
+
+    def test_background_rate_exhaustion_does_not_consume_interactive_lane(self):
+        app = provider.ProviderApplication(
+            provider.CopilotInvoker(runner=success_runner),
+            rate_per_minute=1,
+            interactive_rate_per_minute=1,
+        )
+        path = self.start_server(app, "separate-rate-lanes")
+        background = request()
+        first = self.exchange(
+            path,
+            provider.stable_json(background).encode(),
+        )
+        second = self.exchange(
+            path,
+            provider.stable_json(background).encode(),
+        )
+        interactive = request()
+        interactive["request_id"] = "interactive-rate-test"
+        interactive["priority"] = "interactive"
+        third = self.exchange(
+            path,
+            provider.stable_json(interactive).encode(),
+        )
+        self.assertTrue(first["ok"])
+        self.assertFalse(second["ok"])
+        self.assertEqual(second["error"], "rate_limited")
+        self.assertTrue(third["ok"])
 
     def test_sonnet_uses_exact_effort(self):
         captured = {}

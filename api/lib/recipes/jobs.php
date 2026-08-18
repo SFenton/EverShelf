@@ -130,7 +130,11 @@ function recipeJobEnqueueOnce(
 }
 
 function recipeJobEnqueueInventoryChanged(PDO $db, int $productId, string $reason): array {
-    $inventoryRevision = recipeScoreMarkDirty($db);
+    $inventoryRevision = recipeScoreMarkProductDirty(
+        $db,
+        $productId,
+        $reason
+    );
     return recipeJobEnqueue(
         $db,
         'inventory_changed',
@@ -915,7 +919,13 @@ function recipeJobDispatchTaxonomyReady(PDO $db, array $job, array $payload): ar
         'result' => [
             'remapped_ingredients' => $remapped,
             'ranking' => 'score_rebuild_queued',
-            'inventory_revision' => recipeScoreMarkDirty($db),
+            'inventory_revision' => $productId > 0
+                ? recipeScoreMarkProductDirty(
+                    $db,
+                    $productId,
+                    'taxonomy_ready'
+                )
+                : recipeScoreMarkDirty($db),
             'product_id' => $productId,
             'remote_discovery' => $productId > 0
                 ? recipeCookidooAutoDiscoverProduct(

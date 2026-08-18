@@ -3819,7 +3819,7 @@ function ingredientOntologyV3BuildMappings(
             $resolution = ingredientOntologyV3ResolveLabel(
                 $labelIndex,
                 $label,
-                'und'
+                'en'
             );
         }
         if (

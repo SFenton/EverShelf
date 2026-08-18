@@ -11,7 +11,7 @@ require_once __DIR__ . '/lib/recipes/schema.php';
 
 define('DB_PATH', __DIR__ . '/../data/evershelf.db');
 // Bump whenever migrateDB() or a nested schema migration changes.
-const EVERSHELF_DATABASE_SCHEMA_VERSION = 2026081503;
+const EVERSHELF_DATABASE_SCHEMA_VERSION = 2026081701;
 
 /**
  * Ensure the data directory exists and is writable by the web-server user.
@@ -351,6 +351,8 @@ function initializeDB(PDO $db): void {
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
         );
+        CREATE INDEX IF NOT EXISTS idx_location_suggestion_cache_updated
+            ON location_suggestion_cache(updated_at, cache_key);
 
         CREATE TABLE IF NOT EXISTS product_location_history (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -929,6 +931,10 @@ function migrateDB(PDO $db): void {
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )
+    ");
+    $db->exec("
+        CREATE INDEX IF NOT EXISTS idx_location_suggestion_cache_updated
+        ON location_suggestion_cache(updated_at, cache_key)
     ");
     $db->exec("
         CREATE TABLE IF NOT EXISTS product_location_history (

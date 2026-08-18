@@ -678,9 +678,34 @@ function recipeSchemaMigrate(PDO $db): void {
                     OR length(ontology_source_trigger_hash) = 64
                 ),
             active_score_revision_id INTEGER DEFAULT NULL,
-            dirty_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                active_score_overlay_revision_id INTEGER DEFAULT NULL,
+                dirty_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
             last_built_at DATETIME DEFAULT NULL,
             updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE IF NOT EXISTS recipe_score_pending_products (
+            product_id INTEGER PRIMARY KEY,
+            first_inventory_revision INTEGER NOT NULL
+                CHECK(first_inventory_revision > 0),
+            latest_inventory_revision INTEGER NOT NULL
+                CHECK(latest_inventory_revision > 0),
+            reason TEXT NOT NULL DEFAULT ''
+                CHECK(length(reason) <= 160),
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            CHECK(latest_inventory_revision >= first_inventory_revision)
+        );
+
+        CREATE TABLE IF NOT EXISTS recipe_score_incremental_recipes (
+            score_revision_id INTEGER NOT NULL,
+            recipe_id INTEGER NOT NULL,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (score_revision_id, recipe_id),
+            FOREIGN KEY (score_revision_id)
+                REFERENCES recipe_score_revisions(id) ON DELETE CASCADE,
+            FOREIGN KEY (recipe_id)
+                REFERENCES recipe_catalog(id) ON DELETE CASCADE
         );
 
         CREATE TABLE IF NOT EXISTS recipe_score_revisions (
@@ -818,6 +843,14 @@ function recipeSchemaMigrate(PDO $db): void {
             ON recipe_jobs(product_id, status);
         CREATE INDEX IF NOT EXISTS idx_recipe_jobs_connector
             ON recipe_jobs(connector, status);
+        CREATE INDEX IF NOT EXISTS idx_recipe_score_pending_revision
+            ON recipe_score_pending_products(
+                latest_inventory_revision, updated_at, product_id
+            );
+        CREATE INDEX IF NOT EXISTS idx_recipe_score_incremental_recipe
+            ON recipe_score_incremental_recipes(
+                recipe_id, score_revision_id
+            );
         CREATE INDEX IF NOT EXISTS idx_recipe_score_revisions_ready
             ON recipe_score_revisions(status, completed_at DESC, id DESC);
         CREATE INDEX IF NOT EXISTS idx_recipe_inventory_scores_availability
@@ -845,6 +878,8 @@ function recipeSchemaMigrate(PDO $db): void {
             'INTEGER NOT NULL DEFAULT 0',
         'ontology_source_trigger_hash' =>
             "TEXT NOT NULL DEFAULT ''",
+        'active_score_overlay_revision_id' =>
+            'INTEGER DEFAULT NULL',
     ] as $column => $definition) {
         if (in_array($column, $scoreStateColumns, true)) {
             continue;

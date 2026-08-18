@@ -1107,6 +1107,7 @@ try {
         DROP TABLE ingredient_ontology_curated_provider_reviews;
         DROP TABLE ingredient_ontology_mapping_relations;
         DROP TABLE ingredient_ontology_mapping_attributes;
+        DROP TABLE ingredient_ontology_identity_annex;
         DROP TABLE ingredient_ontology_mappings;
         DROP TABLE ingredient_ontology_curated_product_assertions;
         DROP TABLE ingredient_ontology_provider_terms;
@@ -1130,8 +1131,10 @@ try {
         DROP TABLE recipe_search_documents;
         DROP TABLE recipe_clusters;
         DROP TABLE recipe_user_state;
+        DROP TABLE recipe_score_incremental_recipes;
         DROP TABLE recipe_inventory_scores;
         DROP TABLE recipe_score_revisions;
+        DROP TABLE recipe_score_pending_products;
         DROP TABLE recipe_score_state;
         DROP TABLE recipe_grocery_requests;
         DROP TABLE recipe_source_ingredients;
@@ -1150,8 +1153,11 @@ try {
         'recipe_source_ingredients', 'recipe_grocery_requests', 'recipe_user_state',
         'recipe_clusters', 'recipe_jobs', 'recipe_connector_state',
         'recipe_score_state', 'recipe_score_revisions', 'recipe_inventory_scores',
+        'recipe_score_pending_products',
+        'recipe_score_incremental_recipes',
         'recipe_search_documents', 'recipe_catalog_fts',
         'ingredient_ontology_versions', 'ingredient_ontology_entities',
+        'ingredient_ontology_identity_annex',
         'ingredient_ontology_labels', 'ingredient_ontology_relations',
         'ingredient_ontology_facets', 'ingredient_ontology_facet_values',
         'ingredient_ontology_entity_defaults',
@@ -10313,6 +10319,122 @@ try {
         'Explicit structured seconds must take precedence over legacy time strings'
     );
 
+    $db->exec("
+        INSERT INTO products (
+            barcode, name, brand, category, image_url,
+            unit, default_quantity, notes, package_unit,
+            shopping_name, shopping_name_provenance,
+            prepared_food
+        )
+        VALUES (
+            'partial-save-barcode', 'Partial Save Product',
+            'Preserved Brand', 'Preserved Category',
+            'https://example.test/product.jpg', 'kg', 2.5,
+            'Preserved notes', 'bag', 'Preserved shopping',
+            'copilot', 0
+        )
+    ");
+    $partialSaveProductId = (int)$db->lastInsertId();
+    $deleteActiveRevision = recipeScoreActiveRevision($db);
+    $deleteUsesV3 = $deleteActiveRevision !== null
+        && (string)($deleteActiveRevision['scoring_model'] ?? '')
+            === 'faceted-ontology-v3';
+    $GLOBALS['PRODUCT_API_JSON_INPUT'] = [
+        'id' => $partialSaveProductId,
+        'name' => 'Partial Save Product Updated',
+    ];
+    ob_start();
+    saveProduct($db);
+    $partialSaveResponse = json_decode(
+        (string)ob_get_clean(),
+        true
+    );
+    unset($GLOBALS['PRODUCT_API_JSON_INPUT']);
+    $partialSaveRow = $db->query("
+        SELECT barcode, name, brand, category, image_url,
+               unit, default_quantity, notes, package_unit,
+               shopping_name, shopping_name_provenance
+        FROM products
+        WHERE id = {$partialSaveProductId}
+    ")->fetch(PDO::FETCH_ASSOC);
+    recipeTestAssert(
+        !empty($partialSaveResponse['success'])
+        && $partialSaveRow === [
+            'barcode' => 'partial-save-barcode',
+            'name' => 'Partial Save Product Updated',
+            'brand' => 'Preserved Brand',
+            'category' => 'Preserved Category',
+            'image_url' => 'https://example.test/product.jpg',
+            'unit' => 'kg',
+            'default_quantity' => 2.5,
+            'notes' => 'Preserved notes',
+            'package_unit' => 'bag',
+            'shopping_name' => 'Preserved shopping',
+            'shopping_name_provenance' => 'copilot',
+        ],
+        'Partial product commits must preserve every omitted metadata field'
+    );
+
+    $GLOBALS['PRODUCT_API_JSON_INPUT'] = [
+        'id' => $partialSaveProductId,
+        'name' => 'Concurrent Partial Save Product',
+    ];
+    $GLOBALS['PRODUCT_SAVE_TEST_HOOK'] =
+        static function (
+            string $name
+        ) use ($db, $partialSaveProductId): void {
+            if ($name !== 'before_transaction') {
+                return;
+            }
+            $db->prepare("
+                UPDATE products
+                SET barcode = 'concurrent-partial-barcode',
+                    brand = 'Concurrent Brand',
+                    category = 'Concurrent Category',
+                    image_url = 'https://example.test/concurrent.jpg',
+                    unit = 'l',
+                    default_quantity = 4.5,
+                    notes = 'Concurrent notes',
+                    package_unit = 'bottle',
+                    shopping_name = 'Concurrent shopping'
+                WHERE id = ?
+            ")->execute([$partialSaveProductId]);
+        };
+    ob_start();
+    saveProduct($db);
+    $concurrentPartialResponse = json_decode(
+        (string)ob_get_clean(),
+        true
+    );
+    unset(
+        $GLOBALS['PRODUCT_API_JSON_INPUT'],
+        $GLOBALS['PRODUCT_SAVE_TEST_HOOK']
+    );
+    $concurrentPartialRow = $db->query("
+        SELECT barcode, name, brand, category, image_url,
+               unit, default_quantity, notes, package_unit,
+               shopping_name, shopping_name_provenance
+        FROM products
+        WHERE id = {$partialSaveProductId}
+    ")->fetch(PDO::FETCH_ASSOC);
+    recipeTestAssert(
+        !empty($concurrentPartialResponse['success'])
+        && $concurrentPartialRow === [
+            'barcode' => 'concurrent-partial-barcode',
+            'name' => 'Concurrent Partial Save Product',
+            'brand' => 'Concurrent Brand',
+            'category' => 'Concurrent Category',
+            'image_url' => 'https://example.test/concurrent.jpg',
+            'unit' => 'l',
+            'default_quantity' => 4.5,
+            'notes' => 'Concurrent notes',
+            'package_unit' => 'bottle',
+            'shopping_name' => 'Concurrent shopping',
+            'shopping_name_provenance' => 'copilot',
+        ],
+        'Partial product commits must merge omitted fields after acquiring the write lock'
+    );
+
     $duplicateRaceInserted = false;
     $GLOBALS['PRODUCT_API_JSON_INPUT'] = [
         'name' => 'Duplicate Barcode Race Product',
@@ -10367,6 +10489,92 @@ try {
              WHERE barcode = 'duplicate-barcode-race'"
         ) === 1,
         'Duplicate-barcode race recovery must roll back the failed insert and leave the connection transaction-ready'
+    );
+
+    $db->exec("
+        INSERT INTO products (
+            barcode, name, brand, category, notes
+        )
+        VALUES (
+            'explicit-race-source',
+            'Explicit Race Source',
+            'Source Brand',
+            'Source Category',
+            'Source notes'
+        )
+    ");
+    $explicitRaceSourceId = (int)$db->lastInsertId();
+    $explicitRaceOwnerId = 0;
+    $GLOBALS['PRODUCT_API_JSON_INPUT'] = [
+        'id' => $explicitRaceSourceId,
+        'name' => 'Unsafe Explicit Merge',
+        'brand' => 'Requested Brand',
+        'barcode' => 'explicit-race-target',
+    ];
+    $GLOBALS['PRODUCT_SAVE_TEST_HOOK'] =
+        static function (
+            string $name
+        ) use ($db, &$explicitRaceOwnerId): void {
+            if (
+                $name !== 'before_transaction'
+                || $explicitRaceOwnerId > 0
+            ) {
+                return;
+            }
+            $db->exec("
+                INSERT INTO products (
+                    barcode, name, brand, category, notes
+                )
+                VALUES (
+                    'explicit-race-target',
+                    'Competing Barcode Owner',
+                    'Competing Brand',
+                    'Competing Category',
+                    'Competing notes'
+                )
+            ");
+            $explicitRaceOwnerId = (int)$db->lastInsertId();
+        };
+    ob_start();
+    saveProduct($db);
+    $explicitRaceResponse = json_decode(
+        (string)ob_get_clean(),
+        true
+    );
+    unset(
+        $GLOBALS['PRODUCT_API_JSON_INPUT'],
+        $GLOBALS['PRODUCT_SAVE_TEST_HOOK']
+    );
+    $explicitRaceSource = $db->query("
+        SELECT barcode, name, brand, category, notes
+        FROM products
+        WHERE id = {$explicitRaceSourceId}
+    ")->fetch(PDO::FETCH_ASSOC);
+    $explicitRaceOwner = $db->query("
+        SELECT barcode, name, brand, category, notes
+        FROM products
+        WHERE id = {$explicitRaceOwnerId}
+    ")->fetch(PDO::FETCH_ASSOC);
+    recipeTestAssert(
+        ($explicitRaceResponse['error'] ?? '')
+            === 'barcode_already_used'
+        && (int)($explicitRaceResponse['existing_id'] ?? 0)
+            === $explicitRaceOwnerId
+        && $explicitRaceSource === [
+            'barcode' => 'explicit-race-source',
+            'name' => 'Explicit Race Source',
+            'brand' => 'Source Brand',
+            'category' => 'Source Category',
+            'notes' => 'Source notes',
+        ]
+        && $explicitRaceOwner === [
+            'barcode' => 'explicit-race-target',
+            'name' => 'Competing Barcode Owner',
+            'brand' => 'Competing Brand',
+            'category' => 'Competing Category',
+            'notes' => 'Competing notes',
+        ],
+        'Explicit-ID barcode races must return 409 without overwriting either product'
     );
 
     $GLOBALS['PRODUCT_API_JSON_INPUT'] = [
@@ -10460,7 +10668,17 @@ try {
             "SELECT COUNT(*) FROM ontology_controller_jobs
              WHERE subject_id = ? AND finished_at IS NULL",
             [(int)$preparedFlipSubject['id']]
-        ) === 0,
+        ) === 0
+        && (
+            !$deleteUsesV3
+            || recipeTestCount(
+                $db,
+                "SELECT COUNT(*)
+                 FROM recipe_score_pending_products
+                 WHERE product_id = ?",
+                [$preparedFlipProductId]
+            ) === 1
+        ),
         'Inventory aggregation raw-to-prepared must deactivate controller occurrence/jobs'
     );
     $db->prepare("

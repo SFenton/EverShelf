@@ -21,12 +21,15 @@ const EVERSHELF_AI_LOCATIONS = [
     'unknown',
 ];
 
-const LOCATION_SUGGESTION_PROMPT_VERSION = 1;
+const LOCATION_SUGGESTION_PROMPT_VERSION = 2;
 const LOCATION_SUGGESTION_VOCABULARY_VERSION = 1;
+const LOCATION_SUGGESTION_CACHE_VERSION = 2;
 const LOCATION_SUGGESTION_CONFIDENCE_FLOOR = 0.65;
 const LOCATION_SUGGESTION_MODEL = 'gemini-3.7-flash';
 const LOCATION_SUGGESTION_TIMEOUT_SECONDS = 10;
 const LOCATION_SUGGESTION_MAX_ATTEMPTS = 1;
+const LOCATION_SUGGESTION_CACHE_TTL_SECONDS = 2592000;
+const LOCATION_SUGGESTION_CACHE_MAX_ROWS = 2048;
 
 function normalizeLocationSuggestionText(string $value): string {
     $value = trim($value);
@@ -246,14 +249,21 @@ function locationSuggestionAiEnabled(): bool {
     return !in_array($value, ['0', 'false', 'no', 'off'], true);
 }
 
-function locationSuggestionCacheKey(string $name, string $category, array $models): string {
+function locationSuggestionCacheKey(
+    string $name,
+    string $category,
+    array $models,
+    string $productFingerprint = ''
+): string {
     return hash('sha256', json_encode([
+        'cache_version' => LOCATION_SUGGESTION_CACHE_VERSION,
         'prompt_version' => LOCATION_SUGGESTION_PROMPT_VERSION,
         'vocabulary_version' => LOCATION_SUGGESTION_VOCABULARY_VERSION,
         'confidence_floor' => LOCATION_SUGGESTION_CONFIDENCE_FLOOR,
         'models' => array_values($models),
         'name' => normalizeLocationSuggestionText($name),
         'category' => normalizeLocationSuggestionText($category),
+        'product_fingerprint' => $productFingerprint,
     ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES));
 }
 
@@ -262,9 +272,13 @@ function cachedLocationSuggestion(PDO $db, string $cacheKey): ?array {
         SELECT location, confidence, reason, model, updated_at
         FROM location_suggestion_cache
         WHERE cache_key = ?
+          AND updated_at >= datetime('now', ?)
         LIMIT 1
     ");
-    $stmt->execute([$cacheKey]);
+    $stmt->execute([
+        $cacheKey,
+        '-' . LOCATION_SUGGESTION_CACHE_TTL_SECONDS . ' seconds',
+    ]);
     $row = $stmt->fetch(PDO::FETCH_ASSOC);
     if (!$row || !in_array($row['location'], EVERSHELF_AI_LOCATIONS, true)) {
         return null;
@@ -279,6 +293,24 @@ function cachedLocationSuggestion(PDO $db, string $cacheKey): ?array {
         'cached' => true,
         'cached_at' => (string)$row['updated_at'],
     ];
+}
+
+function pruneLocationSuggestionCache(PDO $db): void {
+    $db->prepare("
+        DELETE FROM location_suggestion_cache
+        WHERE updated_at < datetime('now', ?)
+    ")->execute([
+        '-' . LOCATION_SUGGESTION_CACHE_TTL_SECONDS . ' seconds',
+    ]);
+    $db->exec("
+        DELETE FROM location_suggestion_cache
+        WHERE cache_key IN (
+            SELECT cache_key
+            FROM location_suggestion_cache
+            ORDER BY datetime(updated_at) DESC, cache_key DESC
+            LIMIT -1 OFFSET " . LOCATION_SUGGESTION_CACHE_MAX_ROWS . "
+        )
+    ");
 }
 
 function cacheLocationSuggestion(PDO $db, string $cacheKey, array $suggestion): void {
@@ -300,6 +332,143 @@ function cacheLocationSuggestion(PDO $db, string $cacheKey, array $suggestion): 
         $suggestion['confidence'],
         $suggestion['reason'] ?? '',
         $suggestion['model'],
+    ]);
+    pruneLocationSuggestionCache($db);
+}
+
+function locationSuggestionLockDirectory(): string {
+    if (
+        defined('RECIPE_BACKEND_TEST_MODE')
+        && RECIPE_BACKEND_TEST_MODE
+        && is_string($GLOBALS['LOCATION_SUGGESTION_LOCK_DIR'] ?? null)
+        && trim((string)$GLOBALS['LOCATION_SUGGESTION_LOCK_DIR']) !== ''
+    ) {
+        return (string)$GLOBALS['LOCATION_SUGGESTION_LOCK_DIR'];
+    }
+    return defined('DB_PATH')
+        ? dirname(DB_PATH)
+        : sys_get_temp_dir();
+}
+
+function acquireLocationSuggestionLock(
+    string $cacheKey,
+    float $deadline
+): mixed {
+    $directory = locationSuggestionLockDirectory();
+    if (
+        !is_dir($directory)
+        && !mkdir($directory, 0775, true)
+        && !is_dir($directory)
+    ) {
+        throw new RuntimeException(
+            'location_suggestion_lock_directory_unavailable'
+        );
+    }
+    $path = $directory . '/.location-suggestion-'
+        . substr($cacheKey, 0, 2) . '.lock';
+    $handle = fopen($path, 'c');
+    if ($handle === false) {
+        throw new RuntimeException(
+            'location_suggestion_lock_unavailable'
+        );
+    }
+    do {
+        if (flock($handle, LOCK_EX | LOCK_NB)) {
+            return $handle;
+        }
+        usleep(50000);
+    } while (microtime(true) < $deadline);
+    fclose($handle);
+    return null;
+}
+
+function releaseLocationSuggestionLock(mixed $handle): void {
+    if (!is_resource($handle)) {
+        return;
+    }
+    flock($handle, LOCK_UN);
+    fclose($handle);
+}
+
+function committedLocationSuggestionProduct(
+    PDO $db,
+    array $input
+): array {
+    $productId = (int)($input['product_id'] ?? 0);
+    $claimedFingerprint = trim(
+        (string)($input['product_fingerprint'] ?? '')
+    );
+    if (
+        $productId <= 0
+        || !preg_match('/^[a-f0-9]{64}$/D', $claimedFingerprint)
+    ) {
+        return [
+            'valid' => false,
+            'reason' => 'committed_product_required',
+        ];
+    }
+    $stmt = $db->prepare("
+        SELECT id, barcode, name, brand, category, prepared_food,
+               updated_at
+        FROM products
+        WHERE id = ?
+    ");
+    $stmt->execute([$productId]);
+    $product = $stmt->fetch(PDO::FETCH_ASSOC) ?: null;
+    if ($product === null) {
+        return [
+            'valid' => false,
+            'reason' => 'stale_product_commit',
+        ];
+    }
+    $currentFingerprint =
+        ingredientOntologyV3ProductOwnerFingerprint($product);
+    $currentName = normalizeLocationSuggestionText(
+        (string)$product['name']
+    );
+    $requestedName = normalizeLocationSuggestionText(
+        (string)($input['name'] ?? '')
+    );
+    $requestedBarcode = barcodeNormalizeDigits(
+        (string)($input['barcode'] ?? '')
+    );
+    $currentBarcode = barcodeNormalizeDigits(
+        (string)($product['barcode'] ?? '')
+    );
+    if (
+        !hash_equals($currentFingerprint, $claimedFingerprint)
+        || $currentName === ''
+        || $currentName !== $requestedName
+        || (
+            $requestedBarcode !== ''
+            && $requestedBarcode !== $currentBarcode
+        )
+    ) {
+        return [
+            'valid' => false,
+            'reason' => 'stale_product_commit',
+        ];
+    }
+    return [
+        'valid' => true,
+        'reason' => null,
+        'product' => $product,
+        'product_id' => $productId,
+        'product_fingerprint' => $currentFingerprint,
+    ];
+}
+
+function revalidateCommittedLocationSuggestionProduct(
+    PDO $db,
+    array $committed
+): array {
+    $product = (array)($committed['product'] ?? []);
+    return committedLocationSuggestionProduct($db, [
+        'product_id' => (int)($committed['product_id'] ?? 0),
+        'product_fingerprint' =>
+            (string)($committed['product_fingerprint'] ?? ''),
+        'name' => (string)($product['name'] ?? ''),
+        'barcode' => (string)($product['barcode'] ?? ''),
     ]);
 }
 
@@ -411,7 +580,8 @@ function locationSuggestionCopilotRequest(
             'name' => normalizeLocationSuggestionText($name),
             'category' => normalizeLocationSuggestionText($category),
         ],
-        LOCATION_SUGGESTION_MODEL
+        LOCATION_SUGGESTION_MODEL,
+        'interactive'
     );
 }
 

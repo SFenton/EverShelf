@@ -7,7 +7,7 @@
  * while product saves and backfills remain fast and offline-safe.
  */
 
-const CANONICAL_INGREDIENT_RULESET_VERSION = 'evershelf_common_ingredients_v2';
+const CANONICAL_INGREDIENT_RULESET_VERSION = 'evershelf_common_ingredients_v3';
 const FOODON_LOOKUP_CACHE_VERSION = 'foodon_ols4_v6';
 const USDA_FDC_LOOKUP_CACHE_VERSION = 'usda_fdc_v5';
 
@@ -182,6 +182,8 @@ function canonicalIngredientRuleDefinitions(): array {
         ['rx' => '/\bcarrots?\b/u', 'path' => ['Carrot', 'Vegetable'], 'category' => 'vegetables', 'confidence' => 0.99],
         ['rx' => '/\bcauliflower\b/u', 'path' => ['Cauliflower', 'Vegetable'], 'category' => 'vegetables', 'confidence' => 0.99],
         ['rx' => '/\bspinach\b/u', 'path' => ['Spinach', 'Leafy vegetable', 'Vegetable'], 'category' => 'vegetables', 'confidence' => 0.99],
+        ['rx' => '/\bsweet\s+potato(?:es)?\b/u', 'path' => ['Sweet potato', 'Vegetable'], 'category' => 'vegetables', 'confidence' => 0.99],
+        ['rx' => '/\b(?:russet\s+)?potato(?:es)?\b/u', 'path' => ['Potato', 'Vegetable'], 'category' => 'vegetables', 'confidence' => 0.99],
         ['rx' => '/\b(green\s+onions?|scallions?)\b/u', 'path' => ['Green onion', 'Onion', 'Vegetable'], 'category' => 'vegetables', 'confidence' => 0.98],
         ['rx' => '/\bonion\b/u', 'path' => ['Onion', 'Vegetable'], 'category' => 'vegetables', 'confidence' => 0.88],
         ['rx' => '/\bpeeled\s+garlic\b/u', 'path' => ['Garlic cloves', 'Garlic', 'Vegetable'], 'category' => 'vegetables', 'confidence' => 0.99],

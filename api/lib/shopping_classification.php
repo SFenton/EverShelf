@@ -68,7 +68,8 @@ function evershelfCopilotStrictRequest(
     string $prompt,
     array $schema,
     mixed $inputFingerprint,
-    string $model = 'gemini-3.7-flash'
+    string $model = 'gemini-3.7-flash',
+    string $priority = 'background'
 ): array {
     if (
         !preg_match('/^[a-z][a-z0-9_-]{0,31}$/D', $purpose)
@@ -77,6 +78,11 @@ function evershelfCopilotStrictRequest(
     ) {
         throw new InvalidArgumentException(
             'copilot_strict_request_invalid'
+        );
+    }
+    if (!in_array($priority, ['background', 'interactive'], true)) {
+        throw new InvalidArgumentException(
+            'copilot_strict_request_priority_invalid'
         );
     }
     $model = evershelfCopilotGeminiModel($model);
@@ -99,7 +105,8 @@ function evershelfCopilotStrictRequest(
     ];
     return ingredientOntologyControllerCopilotSocketRequest(
         $artifact,
-        $model
+        $model,
+        $priority
     );
 }
 

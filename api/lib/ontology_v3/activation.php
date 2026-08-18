@@ -2803,17 +2803,19 @@ function ingredientOntologyActivationAssertActiveDatabase(PDO $db): void {
                 'ontology activation bundle lineage or runtime changed'
             );
         }
-        $state = recipeScoreState($db);
         $parentScoreId = (int)(
             $bundle['parent']['score_revision_id'] ?? 0
         );
-        if (
-            (int)($state['active_score_revision_id'] ?? 0)
-                !== $parentScoreId
-        ) {
-            throw new RuntimeException(
-                'ontology activation parent score pointer changed'
-            );
+        if ($kind === 'score') {
+            $state = recipeScoreState($db);
+            if (
+                (int)($state['active_score_revision_id'] ?? 0)
+                    !== $parentScoreId
+            ) {
+                throw new RuntimeException(
+                    'ontology activation parent score pointer changed'
+                );
+            }
         }
         $activeVersion = ingredientOntologyV3ActiveVersion($db);
         $parentVersionId = (int)(
@@ -3648,6 +3650,8 @@ function ingredientOntologyActivationAssertActiveDatabase(PDO $db): void {
         $report['ontology_source_hash'] = $corpusHash;
         $report['active_score_revision_id_before'] =
             (int)($state['active_score_revision_id'] ?? 0);
+        $root['parent_score_revision_id'] =
+            (int)($state['active_score_revision_id'] ?? 0);
         $root['inventory_revision'] = (int)$state['inventory_revision'];
         $root['catalog_revision'] = (int)$state['catalog_revision'];
         $root['ontology_source_revision'] =
@@ -3840,6 +3844,9 @@ function ingredientOntologyActivationAssertActiveDatabase(PDO $db): void {
             'runtime_hash' => ingredientOntologyActivationRuntimeHash(),
             'active_score_revision_id' =>
                 (int)($state['active_score_revision_id'] ?? 0),
+            'active_ontology_version_id' => (int)(
+                ingredientOntologyV3ActiveVersion($db)['id'] ?? 0
+            ),
             'inventory_revision' => (int)$state['inventory_revision'],
             'catalog_revision' => (int)$state['catalog_revision'],
             'ontology_source_revision' =>
@@ -3906,6 +3913,10 @@ function ingredientOntologyActivationAssertActiveDatabase(PDO $db): void {
         $update = $db->prepare("
             UPDATE ontology_activation_imports
             SET status = 'activatable',
+                parent_score_revision_id = CASE
+                    WHEN bundle_kind = 'score' THEN ?
+                    ELSE parent_score_revision_id
+                END,
                 validation_fence_json = ?,
                 attestation_json = ?,
                 last_error = '',
@@ -3913,6 +3924,11 @@ function ingredientOntologyActivationAssertActiveDatabase(PDO $db): void {
             WHERE id = ? AND status = 'verifying'
         ");
         $update->execute([
+            (int)(
+                $attestation['root_row'][
+                    'parent_score_revision_id'
+                ] ?? 0
+            ),
             ingredientOntologyActivationStableJson(
                 $attestation['validation_fence']
             ),
@@ -4006,10 +4022,7 @@ function ingredientOntologyActivationAssertActiveDatabase(PDO $db): void {
             $errors[] = 'activation runtime fence changed';
         }
         $state = recipeScoreState($db);
-        foreach ([
-            'active_score_revision_id',
-            'ontology_source_revision',
-        ] as $field) {
+        foreach (['ontology_source_revision'] as $field) {
             if (
                 (int)($state[$field] ?? 0)
                     !== (int)($fence[$field] ?? -1)
@@ -4018,6 +4031,15 @@ function ingredientOntologyActivationAssertActiveDatabase(PDO $db): void {
             }
         }
         if ((string)$row['bundle_kind'] === 'score') {
+            if (
+                (int)($state['active_score_revision_id'] ?? 0)
+                    !== (int)(
+                        $fence['active_score_revision_id'] ?? -1
+                    )
+            ) {
+                $errors[] =
+                    'activation active_score_revision_id changed';
+            }
             foreach (['inventory_revision', 'catalog_revision'] as $field) {
                 if (
                     (int)($state[$field] ?? 0)
@@ -4028,6 +4050,18 @@ function ingredientOntologyActivationAssertActiveDatabase(PDO $db): void {
             }
             if ((string)($fence['score_date'] ?? '') !== date('Y-m-d')) {
                 $errors[] = 'activation score date changed';
+            }
+        } else {
+            $activeVersionId = (int)(
+                ingredientOntologyV3ActiveVersion($db)['id'] ?? 0
+            );
+            if (
+                $activeVersionId !== (int)(
+                    $fence['active_ontology_version_id'] ?? -1
+                )
+            ) {
+                $errors[] =
+                    'activation active_ontology_version_id changed';
             }
         }
         $currentCdc = ingredientOntologyActivationCdcSnapshot($db);
@@ -4192,6 +4226,7 @@ function ingredientOntologyActivationAssertActiveDatabase(PDO $db): void {
                 $pointer = $db->prepare("
                     UPDATE recipe_score_state
                     SET active_score_revision_id = ?,
+                        active_score_overlay_revision_id = NULL,
                         ontology_source_hash = ?,
                         cursor_revision = cursor_revision + 1,
                         updated_at = CURRENT_TIMESTAMP
@@ -4204,7 +4239,7 @@ function ingredientOntologyActivationAssertActiveDatabase(PDO $db): void {
                 $pointer->execute([
                     (int)$root['id'],
                     (string)$root['ontology_source_hash'],
-                    (int)$locked['parent_score_revision_id'],
+                    (int)$root['parent_score_revision_id'],
                     (int)$state['inventory_revision'],
                     (int)$state['catalog_revision'],
                     (int)$state['ontology_source_revision'],
@@ -4214,6 +4249,10 @@ function ingredientOntologyActivationAssertActiveDatabase(PDO $db): void {
                         'ontology activation pointer CAS failed'
                     );
                 }
+                recipeScoreClearPendingProducts(
+                    $db,
+                    (int)$root['inventory_revision']
+                );
                 $intents = $db->prepare("
                     SELECT source_job_id, activation_action
                     FROM ontology_activation_import_intents

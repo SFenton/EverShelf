@@ -206,6 +206,22 @@ The `backup.sh` script copies `data/evershelf.db` to `data/backups/` with a time
 
 ## Updating
 
+### Upgrade ordering for 1.11.0
+
+`1.11.0` adds the `priority` field to the local Copilot socket protocol and
+requires Node.js 24 or newer for the logged-in Copilot SDK bridge. Upgrade and
+restart `evershelf-ontology-copilot.service` before starting the `1.11.0`
+EverShelf containers. Starting the web image first makes interactive AI calls
+fail closed until the host provider is restarted.
+
+After the provider is healthy, deploy the web, ontology-worker, and
+recipe-score-worker services from the same `1.11.0` image.
+
+Pre-release development databases that ran an intermediate `1.11.0` build
+should confirm `PRAGMA foreign_key_list(recipe_score_pending_products)` is
+empty before deployment. Released versions before `1.11.0` never created this
+table.
+
 ### Manual Git upgrade from 1.9.9 or earlier
 
 Manual Git installations upgrading from `1.9.9` or earlier should preserve

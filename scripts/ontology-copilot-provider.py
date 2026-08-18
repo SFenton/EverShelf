@@ -5,7 +5,9 @@ from __future__ import annotations
 
 import argparse
 import collections
+import contextlib
 import errno
+import heapq
 import hashlib
 import json
 import os
@@ -20,7 +22,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 PROTOCOL_VERSION = "evershelf-ontology-copilot-v1"
-WHITELIST_VERSION = "ontology-copilot-models-v2"
+WHITELIST_VERSION = "ontology-copilot-models-v3"
 DEFAULT_SOCKET = "/run/evershelf-ontology/copilot.sock"
 DEFAULT_ATTACHMENTS_DIR = "/run/evershelf-ontology/attachments"
 DEFAULT_COPILOT = "/home/sfenton/.local/bin/copilot"
@@ -32,6 +34,7 @@ MAX_COPILOT_ARGUMENT_BYTES = 100_000
 MAX_USAGE_BYTES = 16_384
 MAX_ATTACHMENT_BYTES = 4 * 1024 * 1024
 SOCKET_IDLE_TIMEOUT = 15.0
+MINIMUM_NODE_MAJOR = 24
 DISABLED_MCP_SERVERS = (
     "github-mcp-server",
     "hass",
@@ -142,7 +145,10 @@ class CopilotInvoker:
         self.runner = runner
         self.bridge_command = bridge_command
         self.bridge_process: subprocess.Popen[str] | None = None
-        self.bridge_lock = threading.Lock()
+        self.bridge_condition = threading.Condition()
+        self.bridge_waiters: list[tuple[int, int, object]] = []
+        self.bridge_active = False
+        self.bridge_waiter_sequence = 0
         self.bridge_stderr = None
         self.bridge_sequence = 0
 
@@ -323,9 +329,86 @@ class CopilotInvoker:
         return plan, usage
 
     def default_bridge_command(self) -> list[str]:
-        node = shutil.which("node") or "/home/sfenton/.local/bin/node"
+        configured = os.environ.get("COPILOT_NODE_PATH", "").strip()
+        candidates = []
+        if configured:
+            candidates.append(Path(configured))
+        candidates.extend(sorted(
+            Path.home().glob(".local/opt/node-v24*/bin/node"),
+            reverse=True,
+        ))
+        discovered = shutil.which("node")
+        if discovered:
+            candidates.append(Path(discovered))
+        candidates.append(Path("/home/sfenton/.local/bin/node"))
+        node = next(
+            (
+                str(candidate)
+                for candidate in candidates
+                if candidate.is_file() and os.access(candidate, os.X_OK)
+            ),
+            str(candidates[-1]),
+        )
         bridge = Path(__file__).with_name("copilot-sdk-bridge.mjs")
         return [node, str(bridge)]
+
+    def assert_supported_node(self, command: list[str]) -> None:
+        executable = Path(command[0])
+        if not executable.name.startswith("node"):
+            return
+        try:
+            completed = subprocess.run(
+                [str(executable), "--version"],
+                text=True,
+                capture_output=True,
+                timeout=5,
+                check=False,
+                shell=False,
+                env={
+                    "HOME": os.environ.get("HOME", "/home/sfenton"),
+                    "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+                },
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise ProviderError("node_runtime_unavailable") from exc
+        version = completed.stdout.strip().lstrip("v")
+        major_text = version.split(".", 1)[0]
+        if (
+            completed.returncode != 0
+            or not major_text.isdigit()
+            or int(major_text) < MINIMUM_NODE_MAJOR
+        ):
+            raise ProviderError(
+                "node_runtime_unsupported",
+                "Copilot SDK bridge requires Node.js v24 or higher",
+            )
+
+    @contextlib.contextmanager
+    def bridge_turn(self, priority: str):
+        ticket = object()
+        priority_rank = 0 if priority == "interactive" else 1
+        with self.bridge_condition:
+            self.bridge_waiter_sequence += 1
+            entry = (
+                priority_rank,
+                self.bridge_waiter_sequence,
+                ticket,
+            )
+            heapq.heappush(self.bridge_waiters, entry)
+            while (
+                self.bridge_active
+                or not self.bridge_waiters
+                or self.bridge_waiters[0][2] is not ticket
+            ):
+                self.bridge_condition.wait()
+            heapq.heappop(self.bridge_waiters)
+            self.bridge_active = True
+        try:
+            yield
+        finally:
+            with self.bridge_condition:
+                self.bridge_active = False
+                self.bridge_condition.notify_all()
 
     def stop_bridge(self) -> None:
         process = self.bridge_process
@@ -361,12 +444,15 @@ class CopilotInvoker:
         work_dir = Path(self.work_dir)
         logs_dir = work_dir / "logs"
         logs_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        command = self.bridge_command or self.default_bridge_command()
+        self.assert_supported_node(command)
         self.bridge_stderr = open(
             logs_dir / "copilot-sdk-bridge.stderr.log",
             "a",
             encoding="utf-8",
         )
-        command = self.bridge_command or self.default_bridge_command()
+        node_directory = str(Path(command[0]).resolve().parent)
+        base_path = os.environ.get("PATH", "/usr/bin:/bin")
         self.bridge_process = subprocess.Popen(
             command,
             stdin=subprocess.PIPE,
@@ -378,7 +464,7 @@ class CopilotInvoker:
             shell=False,
             env={
                 "HOME": os.environ.get("HOME", "/home/sfenton"),
-                "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+                "PATH": node_directory + os.pathsep + base_path,
                 "NO_COLOR": "1",
                 "COPILOT_ALLOW_ALL": "1",
                 "COPILOT_PATH": self.copilot_path,
@@ -387,6 +473,10 @@ class CopilotInvoker:
                     str(Path.home() / ".copilot"),
                 ),
                 "EVERSHELF_COPILOT_WORK_DIR": self.work_dir,
+                "NODE_OPTIONS": os.environ.get(
+                    "EVERSHELF_COPILOT_NODE_OPTIONS",
+                    "--max-old-space-size=2048",
+                ),
             },
         )
         return self.bridge_process
@@ -397,7 +487,9 @@ class CopilotInvoker:
         request_prompt: str,
         attachment_path: Path | None,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
-        with self.bridge_lock:
+        with self.bridge_turn(
+            str(request.get("priority", "background"))
+        ):
             self.bridge_sequence += 1
             bridge_id = (
                 f"{request['request_id']}:{self.bridge_sequence}"
@@ -473,7 +565,7 @@ class CopilotInvoker:
             return plan, usage if isinstance(usage, dict) else {}
 
     def close(self) -> None:
-        with self.bridge_lock:
+        with self.bridge_turn("interactive"):
             self.stop_bridge()
 
 
@@ -492,6 +584,7 @@ def validate_request(request: Any) -> dict[str, Any]:
         "schema_hash",
         "input_hash",
         "attachment",
+        "priority",
     }
     if set(request) - allowed:
         raise ProviderError("request_unknown_fields")
@@ -511,6 +604,11 @@ def validate_request(request: Any) -> dict[str, Any]:
             raise ProviderError("unauthorized_effort")
     elif effort != configured["effort"]:
         raise ProviderError("unauthorized_effort")
+    if request.get("priority", "background") not in {
+        "background",
+        "interactive",
+    }:
+        raise ProviderError("request_priority_invalid")
     prompt_bytes = request["prompt"].encode("utf-8")
     if len(prompt_bytes) > MAX_PROMPT_BYTES:
         raise ProviderError("prompt_oversized")
@@ -558,10 +656,19 @@ class ProviderApplication:
         invoker: CopilotInvoker,
         max_concurrency: int = 2,
         rate_per_minute: int = 30,
+        interactive_rate_per_minute: int | None = None,
     ) -> None:
         self.invoker = invoker
-        self.semaphore = threading.BoundedSemaphore(max(1, max_concurrency))
-        self.rate_limiter = RateLimiter(rate_per_minute)
+        self.background_semaphore = threading.BoundedSemaphore(
+            max(1, max_concurrency)
+        )
+        self.interactive_semaphore = threading.BoundedSemaphore(1)
+        self.background_rate_limiter = RateLimiter(rate_per_minute)
+        self.interactive_rate_limiter = RateLimiter(
+            interactive_rate_per_minute
+            if interactive_rate_per_minute is not None
+            else rate_per_minute
+        )
 
     def handle(self, raw: bytes) -> dict[str, Any]:
         if len(raw) > MAX_REQUEST_BYTES:
@@ -573,14 +680,25 @@ class ProviderApplication:
         request = validate_request(decoded)
         request_json = stable_json(request)
         request_hash = sha256_text(request_json)
-        if not self.rate_limiter.acquire():
+        priority = str(request.get("priority", "background"))
+        rate_limiter = (
+            self.interactive_rate_limiter
+            if priority == "interactive"
+            else self.background_rate_limiter
+        )
+        if not rate_limiter.acquire():
             raise ProviderError("rate_limited")
-        if not self.semaphore.acquire(timeout=1):
+        semaphore = (
+            self.interactive_semaphore
+            if priority == "interactive"
+            else self.background_semaphore
+        )
+        if not semaphore.acquire(timeout=2 if priority == "interactive" else 1):
             raise ProviderError("concurrency_limited")
         try:
             plan, usage = self.invoker.invoke(request)
         finally:
-            self.semaphore.release()
+            semaphore.release()
         plan_json = stable_json(plan)
         response = {
             "protocol_version": PROTOCOL_VERSION,
@@ -670,6 +788,7 @@ def serve(args: argparse.Namespace) -> None:
         invoker,
         max_concurrency=args.concurrency,
         rate_per_minute=args.rate,
+        interactive_rate_per_minute=args.interactive_rate,
     )
     server = ProviderServer(str(socket_path), application)
     os.chown(socket_path, -1, args.socket_gid)
@@ -697,6 +816,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--timeout", type=int, default=90)
     parser.add_argument("--concurrency", type=int, default=2)
     parser.add_argument("--rate", type=int, default=30)
+    parser.add_argument("--interactive-rate", type=int, default=30)
     parser.add_argument(
         "--socket-gid",
         type=int,

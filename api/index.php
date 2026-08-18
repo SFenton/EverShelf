@@ -3038,10 +3038,74 @@ function suggestLocation(PDO $db): void {
         }
     }
 
+    $committed = committedLocationSuggestionProduct($db, $input);
+    if (empty($committed['valid'])) {
+        echo json_encode(
+            unavailableLocationSuggestion(
+                (string)$committed['reason'],
+                $startedAt
+            ),
+            JSON_UNESCAPED_UNICODE
+        );
+        return;
+    }
+    $committedProduct = (array)$committed['product'];
+    $productHistory = productLocationHistory(
+        $db,
+        (int)$committed['product_id'],
+        'history_product'
+    );
+    if ($productHistory) {
+        $revalidated =
+            revalidateCommittedLocationSuggestionProduct(
+                $db,
+                $committed
+            );
+        if (empty($revalidated['valid'])) {
+            echo json_encode(
+                unavailableLocationSuggestion(
+                    (string)$revalidated['reason'],
+                    $startedAt
+                ),
+                JSON_UNESCAPED_UNICODE
+            );
+            return;
+        }
+        $productHistory['elapsed_ms'] = (int)round(
+            (microtime(true) - $startedAt) * 1000
+        );
+        echo json_encode($productHistory, JSON_UNESCAPED_UNICODE);
+        return;
+    }
+    $name = (string)$committedProduct['name'];
+    $category = (string)$committedProduct['category'];
+    $barcode = barcodeNormalizeDigits(
+        (string)($committedProduct['barcode'] ?? '')
+    );
     $models = locationSuggestionModels();
-    $cacheKey = locationSuggestionCacheKey($name, $category, $models);
+    $cacheKey = locationSuggestionCacheKey(
+        $name,
+        $category,
+        $models,
+        (string)$committed['product_fingerprint']
+    );
     $cached = cachedLocationSuggestion($db, $cacheKey);
     if ($cached) {
+        $revalidated =
+            revalidateCommittedLocationSuggestionProduct(
+                $db,
+                $committed
+            );
+        if (empty($revalidated['valid'])) {
+            echo json_encode(
+                unavailableLocationSuggestion(
+                    (string)$revalidated['reason'],
+                    $startedAt
+                ),
+                JSON_UNESCAPED_UNICODE
+            );
+            return;
+        }
         $cached['elapsed_ms'] = (int)round((microtime(true) - $startedAt) * 1000);
         echo json_encode($cached, JSON_UNESCAPED_UNICODE);
         return;
@@ -3058,16 +3122,50 @@ function suggestLocation(PDO $db): void {
         return;
     }
 
-    if (
-        !(
-            defined('RECIPE_BACKEND_TEST_MODE')
-            && RECIPE_BACKEND_TEST_MODE
-        )
-    ) {
-        checkRateLimit('location_suggestion_ai');
-    }
     $deadline = microtime(true) + LOCATION_SUGGESTION_TIMEOUT_SECONDS;
+    $lock = acquireLocationSuggestionLock($cacheKey, $deadline);
+    if ($lock === null) {
+        echo json_encode(
+            unavailableLocationSuggestion(
+                'location_suggestion_busy',
+                $startedAt
+            ),
+            JSON_UNESCAPED_UNICODE
+        );
+        return;
+    }
     try {
+        $cached = cachedLocationSuggestion($db, $cacheKey);
+        if ($cached) {
+            $revalidated =
+                revalidateCommittedLocationSuggestionProduct(
+                    $db,
+                    $committed
+                );
+            if (empty($revalidated['valid'])) {
+                echo json_encode(
+                    unavailableLocationSuggestion(
+                        (string)$revalidated['reason'],
+                        $startedAt
+                    ),
+                    JSON_UNESCAPED_UNICODE
+                );
+                return;
+            }
+            $cached['elapsed_ms'] = (int)round(
+                (microtime(true) - $startedAt) * 1000
+            );
+            echo json_encode($cached, JSON_UNESCAPED_UNICODE);
+            return;
+        }
+        if (
+            !(
+                defined('RECIPE_BACKEND_TEST_MODE')
+                && RECIPE_BACKEND_TEST_MODE
+            )
+        ) {
+            checkRateLimit('location_suggestion_ai');
+        }
         $request = locationSuggestionCopilotRequest($name, $category);
         EverLog::aiCall(
             LOCATION_SUGGESTION_MODEL,
@@ -3086,6 +3184,59 @@ function suggestLocation(PDO $db): void {
                 'location_copilot_invalid_response'
             );
         }
+        $suggestion = [
+            'success' => true,
+            'location' => $parsed['location'],
+            'source' => 'copilot_socket',
+            'confidence' => $parsed['confidence'],
+            'reason' => $parsed['reason'],
+            'model' => LOCATION_SUGGESTION_MODEL,
+            'cached' => false,
+            'available' => true,
+            'elapsed_ms' => (int)round(
+                (microtime(true) - $startedAt) * 1000
+            ),
+        ];
+        $cacheTransactionStarted = false;
+        try {
+            dbBeginImmediateWithRetry($db);
+            $cacheTransactionStarted = true;
+            $revalidated =
+                revalidateCommittedLocationSuggestionProduct(
+                    $db,
+                    $committed
+                );
+            if (empty($revalidated['valid'])) {
+                $db->exec('ROLLBACK');
+                $cacheTransactionStarted = false;
+                echo json_encode(
+                    unavailableLocationSuggestion(
+                        (string)$revalidated['reason'],
+                        $startedAt
+                    ),
+                    JSON_UNESCAPED_UNICODE
+                );
+                return;
+            }
+            cacheLocationSuggestion($db, $cacheKey, $suggestion);
+            $db->exec('COMMIT');
+            $cacheTransactionStarted = false;
+        } catch (Throwable $error) {
+            if ($cacheTransactionStarted) {
+                try {
+                    $db->exec('ROLLBACK');
+                } catch (Throwable $ignored) {
+                }
+            }
+            throw $error;
+        }
+        EverLog::info('location suggestion resolved', [
+            'source' => $suggestion['source'],
+            'location' => $suggestion['location'],
+            'model' => $suggestion['model'],
+            'elapsed_ms' => $suggestion['elapsed_ms'],
+        ]);
+        echo json_encode($suggestion, JSON_UNESCAPED_UNICODE);
     } catch (Throwable $error) {
         $reason = evershelfCopilotFailureReason($error);
         EverLog::aiResponse(
@@ -3111,27 +3262,9 @@ function suggestLocation(PDO $db): void {
             JSON_UNESCAPED_UNICODE
         );
         return;
+    } finally {
+        releaseLocationSuggestionLock($lock);
     }
-
-    $suggestion = [
-        'success' => true,
-        'location' => $parsed['location'],
-        'source' => 'copilot_socket',
-        'confidence' => $parsed['confidence'],
-        'reason' => $parsed['reason'],
-        'model' => LOCATION_SUGGESTION_MODEL,
-        'cached' => false,
-        'available' => true,
-        'elapsed_ms' => (int)round((microtime(true) - $startedAt) * 1000),
-    ];
-    cacheLocationSuggestion($db, $cacheKey, $suggestion);
-    EverLog::info('location suggestion resolved', [
-        'source' => $suggestion['source'],
-        'location' => $suggestion['location'],
-        'model' => $suggestion['model'],
-        'elapsed_ms' => $suggestion['elapsed_ms'],
-    ]);
-    echo json_encode($suggestion, JSON_UNESCAPED_UNICODE);
 }
 
 /**
@@ -3277,6 +3410,66 @@ function productSaveTestHook(string $name, array $context = []): void {
     }
 }
 
+function productSaveRefreshIdentity(
+    PDO $db,
+    int $productId,
+    bool $scoreAlreadyQueued = false
+): array {
+    if (!function_exists(
+        'ingredientOntologyV3IdentityAnnexRefreshProduct'
+    )) {
+        return [
+            'available' => false,
+            'accepted' => false,
+            'changed' => false,
+            'reason' => 'identity_annex_unavailable',
+        ];
+    }
+    $admission = ingredientOntologyV3IdentityAnnexRefreshProduct(
+        $db,
+        $productId
+    );
+    if (!empty($admission['changed']) && !$scoreAlreadyQueued) {
+        $inventory = $db->prepare("
+            SELECT 1
+            FROM inventory
+            WHERE product_id = ? AND quantity > 0
+            LIMIT 1
+        ");
+        $inventory->execute([$productId]);
+        if ($inventory->fetchColumn()) {
+            recipeJobEnqueueInventoryChanged(
+                $db,
+                $productId,
+                'product_identity_changed'
+            );
+            $admission['score_queued'] = true;
+        }
+    }
+    return $admission;
+}
+
+function productSaveRecordShoppingIntent(
+    PDO $db,
+    int $productId,
+    string $provenance
+): array {
+    return in_array(
+        $provenance,
+        ['explicit', 'deterministic'],
+        true
+    )
+        ? shoppingClassificationRecordProductIntent(
+            $db,
+            $productId,
+            $provenance
+        )
+        : shoppingClassificationRefreshPreparedState(
+            $db,
+            $productId
+        );
+}
+
 function productSaveShoppingName(array $input): string {
     if (
         array_key_exists('shopping_name', $input)
@@ -3303,81 +3496,35 @@ function productSaveShoppingNameProvenance(array $input): string {
         : 'deterministic';
 }
 
-function saveProduct(PDO $db): void {
-    $input = (
-        defined('RECIPE_BACKEND_TEST_MODE')
-        && RECIPE_BACKEND_TEST_MODE
-        && is_array($GLOBALS['PRODUCT_API_JSON_INPUT'] ?? null)
-    ) ? $GLOBALS['PRODUCT_API_JSON_INPUT']
-        : json_decode(file_get_contents('php://input'), true);
-    if (!$input || empty($input['name'])) {
-        EverLog::info('saveProduct');
-        http_response_code(400);
-        echo json_encode(['error' => 'Product name is required']);
-        return;
-    }
-    
-    // Auto-compute shopping_name unless the caller explicitly provides one.
-    // A caller may pass shopping_name=null or omit it to always trigger auto-compute.
+function productSaveResolvedInput(
+    array $input,
+    ?array $existing
+): array {
+    $preserve = static function (
+        string $key,
+        mixed $default
+    ) use ($input, $existing): mixed {
+        if (array_key_exists($key, $input)) {
+            return $input[$key];
+        }
+        return $existing !== null
+            ? ($existing[$key] ?? $default)
+            : $default;
+    };
+    $brand = $preserve('brand', '');
+    $category = $preserve('category', '');
     $shoppingNameProvided = (
         array_key_exists('shopping_name', $input)
         && $input['shopping_name'] !== null
         && $input['shopping_name'] !== ''
     );
-    $shoppingName = productSaveShoppingName($input);
-    $shoppingNameProvenance =
-        productSaveShoppingNameProvenance($input);
-
-    $barcode = normalizeProductBarcode($input['barcode'] ?? null);
-
-    $id = !empty($input['id']) ? (int)$input['id'] : 0;
-    $merged = false;
-    $controllerObservation = [
-        'observed' => false,
-        'disabled' => true,
-        'degraded' => false,
-        'surface' => 'product',
-    ];
-
-    if ($barcode !== null) {
-        $barcodeOwner = findDuplicateProductId($db, $input['name'], $input['brand'] ?? '', $barcode, $id ?: null);
-        if ($barcodeOwner && (!$id || $barcodeOwner !== $id)) {
-            if (!$id) {
-                $id = $barcodeOwner;
-                $merged = true;
-            } else {
-                http_response_code(409);
-                echo json_encode([
-                    'success' => false,
-                    'error' => 'barcode_already_used',
-                    'existing_id' => $barcodeOwner,
-                    'message' => 'Barcode already assigned to another product',
-                ]);
-                return;
-            }
-        }
-    }
-
-    if (!$id) {
-        $dupId = findDuplicateProductId($db, $input['name'], $input['brand'] ?? '', $barcode, null);
-        if ($dupId) {
-            $id = $dupId;
-            $merged = true;
-        }
-    }
-
-    $existing = null;
-    if ($id) {
-        $existingStmt = $db->prepare("SELECT * FROM products WHERE id = ?");
-        $existingStmt->execute([$id]);
-        $existing = $existingStmt->fetch(PDO::FETCH_ASSOC) ?: null;
-        if (!$existing) {
-            http_response_code(404);
-            echo json_encode(['success' => false, 'error' => 'Product not found']);
-            return;
-        }
-    }
-    if ($existing !== null && !$shoppingNameProvided) {
+    $shoppingName = $shoppingNameProvided
+        ? (string)$input['shopping_name']
+        : '';
+    $shoppingNameProvenance = $shoppingNameProvided
+        ? 'explicit'
+        : 'deterministic';
+    if (!$shoppingNameProvided && $existing !== null) {
         $existingShoppingName = trim(
             (string)($existing['shopping_name'] ?? '')
         );
@@ -3393,17 +3540,35 @@ function saveProduct(PDO $db): void {
             ) ? $existingProvenance : 'legacy';
         }
     }
+    if ($shoppingName === '') {
+        $shoppingName = computeShoppingName(
+            (string)$input['name'],
+            (string)$category,
+            (string)$brand,
+            false
+        );
+    }
 
+    $barcode = array_key_exists('barcode', $input)
+        ? normalizeProductBarcode($input['barcode'])
+        : normalizeProductBarcode($existing['barcode'] ?? null);
     $ingredientsText = array_key_exists('ingredients_text', $input)
         ? trim((string)$input['ingredients_text'])
         : (array_key_exists('ingredients', $input)
             ? trim((string)$input['ingredients'])
             : (string)($existing['ingredients_text'] ?? ''));
-    $ingredientsTagsProvided = array_key_exists('ingredients_tags_json', $input) || array_key_exists('ingredients_tags', $input);
     $ingredientsTagsJson = $existing['ingredients_tags_json'] ?? null;
-    if ($ingredientsTagsProvided) {
-        $tags = canonicalIngredientDecodeTags($input['ingredients_tags_json'] ?? ($input['ingredients_tags'] ?? []));
-        $ingredientsTagsJson = empty($tags) ? null : json_encode($tags, JSON_UNESCAPED_UNICODE);
+    if (
+        array_key_exists('ingredients_tags_json', $input)
+        || array_key_exists('ingredients_tags', $input)
+    ) {
+        $tags = canonicalIngredientDecodeTags(
+            $input['ingredients_tags_json']
+                ?? ($input['ingredients_tags'] ?? [])
+        );
+        $ingredientsTagsJson = empty($tags)
+            ? null
+            : json_encode($tags, JSON_UNESCAPED_UNICODE);
     }
     $offGenericName = array_key_exists('off_generic_name', $input)
         ? trim((string)$input['off_generic_name'])
@@ -3413,270 +3578,276 @@ function saveProduct(PDO $db): void {
     $nutriJson = isset($input['nutriments'])
         ? json_encode($input['nutriments'], JSON_UNESCAPED_UNICODE)
         : ($existing['nutriments_json'] ?? null);
-    // Sticky flag: only changes when explicitly supplied, so ordinary saves never clear it.
     $preparedFood = array_key_exists('prepared_food', $input)
-        ? (int)filter_var($input['prepared_food'], FILTER_VALIDATE_BOOLEAN)
+        ? (int)filter_var(
+            $input['prepared_food'],
+            FILTER_VALIDATE_BOOLEAN
+        )
         : (int)($existing['prepared_food'] ?? 0);
-    $params = [
-        $input['name'], $input['brand'] ?? '', $input['category'] ?? '',
-        $input['image_url'] ?? '', $input['unit'] ?? 'pz',
-        $input['default_quantity'] ?? 1, $input['notes'] ?? '',
-        $barcode, $input['package_unit'] ?? '',
-        $shoppingName, $nutriJson, $ingredientsText, $ingredientsTagsJson, $offGenericName,
-        $preparedFood,
+
+    return [
+        'barcode' => $barcode,
+        'shopping_name_provenance' => $shoppingNameProvenance,
+        'prepared_food' => $preparedFood,
+        'update_params' => [
+            $input['name'],
+            $brand,
+            $category,
+            $preserve('image_url', ''),
+            $preserve('unit', 'pz'),
+            $preserve('default_quantity', 1),
+            $preserve('notes', ''),
+            $barcode,
+            $preserve('package_unit', ''),
+            $shoppingName,
+            $nutriJson,
+            $ingredientsText,
+            $ingredientsTagsJson,
+            $offGenericName,
+            $preparedFood,
+        ],
+        'insert_params' => [
+            $barcode,
+            $input['name'],
+            $brand,
+            $category,
+            $preserve('image_url', ''),
+            $preserve('unit', 'pz'),
+            $preserve('default_quantity', 1),
+            $preserve('notes', ''),
+            $preserve('package_unit', ''),
+            $shoppingName,
+            $nutriJson,
+            $ingredientsText,
+            $ingredientsTagsJson,
+            $offGenericName,
+            $preparedFood,
+        ],
+    ];
+}
+
+function saveProduct(PDO $db): void {
+    $input = (
+        defined('RECIPE_BACKEND_TEST_MODE')
+        && RECIPE_BACKEND_TEST_MODE
+        && is_array($GLOBALS['PRODUCT_API_JSON_INPUT'] ?? null)
+    ) ? $GLOBALS['PRODUCT_API_JSON_INPUT']
+        : json_decode(file_get_contents('php://input'), true);
+    if (!$input || empty($input['name'])) {
+        EverLog::info('saveProduct');
+        http_response_code(400);
+        echo json_encode(['error' => 'Product name is required']);
+        return;
+    }
+    $requestedId = !empty($input['id']) ? (int)$input['id'] : 0;
+    $requestedBarcode = array_key_exists('barcode', $input)
+        ? normalizeProductBarcode($input['barcode'])
+        : null;
+    $controllerObservation = [
+        'observed' => false,
+        'disabled' => true,
+        'degraded' => false,
+        'surface' => 'product',
+    ];
+    $identityAdmission = [
+        'available' => false,
+        'accepted' => false,
+        'changed' => false,
+        'reason' => 'identity_annex_unavailable',
     ];
     productSaveTestHook('before_transaction', [
-        'id' => $id,
-        'barcode' => $barcode,
-        'merged' => $merged,
+        'id' => $requestedId,
+        'barcode' => $requestedBarcode,
+        'merged' => false,
     ]);
+    $transactionStarted = false;
     try {
+        dbBeginImmediateWithRetry($db);
+        $transactionStarted = true;
+        $id = $requestedId;
+        $merged = false;
+        $existing = null;
+
         if ($id) {
-            $transactionStarted = false;
-            try {
-                dbBeginImmediateWithRetry($db);
-                $transactionStarted = true;
-                $stmt = $db->prepare("
-                    UPDATE products SET name=?, brand=?, category=?, image_url=?, unit=?,
-                    default_quantity=?, notes=?, barcode=?, package_unit=?, shopping_name=?,
-                    nutriments_json=?, ingredients_text=?, ingredients_tags_json=?, off_generic_name=?,
-                    prepared_food=?,
-                    updated_at=CURRENT_TIMESTAMP WHERE id=?
-                ");
-                $stmt->execute([...$params, $id]);
-                if (array_key_exists('prepared_food', $input)) {
-                    _setPositiveInventoryPreparedFood(
-                        $db,
-                        $id,
-                        $preparedFood
-                    );
-                }
-                _syncProductPreparedFood($db, $id, false);
-                shoppingClassificationRecordProductIntent(
+            $existingStmt = $db->prepare(
+                "SELECT * FROM products WHERE id = ?"
+            );
+            $existingStmt->execute([$id]);
+            $existing =
+                $existingStmt->fetch(PDO::FETCH_ASSOC) ?: null;
+            if ($existing === null) {
+                $db->exec('ROLLBACK');
+                $transactionStarted = false;
+                http_response_code(404);
+                echo json_encode([
+                    'success' => false,
+                    'error' => 'Product not found',
+                ]);
+                return;
+            }
+            if ($requestedBarcode !== null) {
+                $barcodeOwner = findProductBarcodeOwner(
                     $db,
-                    $id,
-                    $shoppingNameProvenance
-                );
-                if (array_key_exists('prepared_food', $input)) {
-                    recipeJobEnqueueInventoryChanged(
-                        $db,
-                        $id,
-                        'product_save_prepared_food'
-                    );
-                }
-                $queue = canonicalIngredientEnqueueProduct(
-                    $db,
-                    $id,
-                    $merged
-                        ? 'product_save_merge_update'
-                        : 'product_save_update'
-                );
-                $controllerObservation =
-                    ingredientOntologyControllerObserveProductSafely(
-                    $db,
+                    $requestedBarcode,
                     $id
                 );
-                productSaveTestHook(
-                    'before_commit',
-                    ['id' => $id, 'mode' => 'update']
-                );
-                $db->exec('COMMIT');
-                $transactionStarted = false;
-            } catch (Throwable $e) {
-                if ($transactionStarted) {
-                    try {
-                        $db->exec('ROLLBACK');
-                    } catch (Throwable $ignored) {
-                    }
-                }
-                throw $e;
-            }
-            if (!empty($controllerObservation['observed'])) {
-                if (ingredientOntologyControllerEnabled()) {
-                    ingredientOntologyControllerWake();
+                if ($barcodeOwner !== null) {
+                    $db->exec('ROLLBACK');
+                    $transactionStarted = false;
+                    http_response_code(409);
+                    echo json_encode([
+                        'success' => false,
+                        'error' => 'barcode_already_used',
+                        'existing_id' => $barcodeOwner,
+                        'message' =>
+                            'Barcode already assigned to another product',
+                    ]);
+                    return;
                 }
             }
-            echo json_encode(
-                productSaveResponse(
-                    $db,
-                    $id,
-                    $merged,
-                    $queue,
-                    $controllerObservation
-                ),
-                JSON_UNESCAPED_UNICODE
+        } else {
+            $duplicateId = findDuplicateProductId(
+                $db,
+                (string)$input['name'],
+                (string)($input['brand'] ?? ''),
+                $requestedBarcode,
+                null
             );
-            return;
+            if ($duplicateId !== null) {
+                $id = $duplicateId;
+                $merged = true;
+                $existingStmt = $db->prepare(
+                    "SELECT * FROM products WHERE id = ?"
+                );
+                $existingStmt->execute([$id]);
+                $existing =
+                    $existingStmt->fetch(PDO::FETCH_ASSOC) ?: null;
+                if ($existing === null) {
+                    throw new RuntimeException(
+                        'duplicate product disappeared under write lock'
+                    );
+                }
+            }
         }
 
-        $transactionStarted = false;
-        try {
-            dbBeginImmediateWithRetry($db);
-            $transactionStarted = true;
+        $resolved = productSaveResolvedInput($input, $existing);
+        $preparedFood = (int)$resolved['prepared_food'];
+        $shoppingNameProvenance =
+            (string)$resolved['shopping_name_provenance'];
+        if ($id) {
+            $stmt = $db->prepare("
+                UPDATE products SET name=?, brand=?, category=?,
+                image_url=?, unit=?, default_quantity=?, notes=?,
+                barcode=?, package_unit=?, shopping_name=?,
+                nutriments_json=?, ingredients_text=?,
+                ingredients_tags_json=?, off_generic_name=?,
+                prepared_food=?, updated_at=CURRENT_TIMESTAMP
+                WHERE id=?
+            ");
+            $stmt->execute([
+                ...$resolved['update_params'],
+                $id,
+            ]);
+            if (array_key_exists('prepared_food', $input)) {
+                _setPositiveInventoryPreparedFood(
+                    $db,
+                    $id,
+                    $preparedFood
+                );
+            }
+            _syncProductPreparedFood($db, $id, false);
+        } else {
             $stmt = $db->prepare("
                 INSERT INTO products (
                     barcode, name, brand, category, image_url, unit,
                     default_quantity, notes, package_unit, shopping_name,
                     nutriments_json, ingredients_text,
                     ingredients_tags_json, off_generic_name, prepared_food
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ");
-            $stmt->execute([
-                $barcode, $input['name'], $input['brand'] ?? '',
-                $input['category'] ?? '', $input['image_url'] ?? '',
-                $input['unit'] ?? 'pz',
-                $input['default_quantity'] ?? 1, $input['notes'] ?? '',
-                $input['package_unit'] ?? '', $shoppingName, $nutriJson,
-                $ingredientsText, $ingredientsTagsJson,
-                $offGenericName, $preparedFood,
-            ]);
-            $newId = (int)$db->lastInsertId();
-            shoppingClassificationRecordProductIntent(
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ");
+                $stmt->execute($resolved['insert_params']);
+                $id = (int)$db->lastInsertId();
+        }
+
+        productSaveRecordShoppingIntent(
                 $db,
-                $newId,
+                $id,
                 $shoppingNameProvenance
-            );
-            if (array_key_exists('prepared_food', $input)) {
+        );
+        if (array_key_exists('prepared_food', $input)) {
                 recipeJobEnqueueInventoryChanged(
                     $db,
-                    $newId,
+                    $id,
                     'product_save_prepared_food'
                 );
-            }
-            $queue = canonicalIngredientEnqueueProduct(
+        }
+        $queue = canonicalIngredientEnqueueProduct(
                 $db,
-                $newId,
-                'product_save_create'
-            );
-            $controllerObservation =
+                $id,
+                $existing !== null
+                    ? (
+                        $merged
+                            ? 'product_save_merge_update'
+                            : 'product_save_update'
+                    )
+                    : 'product_save_create'
+        );
+        $controllerObservation =
                 ingredientOntologyControllerObserveProductSafely(
                     $db,
-                    $newId
+                    $id
                 );
-            productSaveTestHook(
+        $identityAdmission = productSaveRefreshIdentity(
+                $db,
+                $id,
+                array_key_exists('prepared_food', $input)
+        );
+        productSaveTestHook(
                 'before_commit',
-                ['id' => $newId, 'mode' => 'create']
-            );
-            $db->exec('COMMIT');
-                $transactionStarted = false;
-        } catch (Throwable $e) {
-                if ($transactionStarted) {
-                    try {
-                        $db->exec('ROLLBACK');
-                    } catch (Throwable $ignored) {
-                    }
-                }
-                throw $e;
-        }
-        if (!empty($controllerObservation['observed'])) {
-            if (ingredientOntologyControllerEnabled()) {
+                [
+                    'id' => $id,
+                    'mode' => $existing !== null ? 'update' : 'create',
+                ]
+        );
+        $db->exec('COMMIT');
+        $transactionStarted = false;
+        if (
+                !empty($controllerObservation['observed'])
+                && ingredientOntologyControllerEnabled()
+        ) {
                 ingredientOntologyControllerWake();
-            }
         }
         echo json_encode(
-            productSaveResponse(
-                $db,
-                $newId,
-                false,
-                $queue,
-                $controllerObservation
+                productSaveResponse(
+                    $db,
+                    $id,
+                    $merged,
+                    $queue,
+                    $controllerObservation,
+                    $identityAdmission
             ),
             JSON_UNESCAPED_UNICODE
         );
     } catch (PDOException $e) {
-        if (str_contains($e->getMessage(), 'UNIQUE constraint failed: products.barcode') && $barcode !== null) {
-            $owner = findDuplicateProductId($db, $input['name'], $input['brand'] ?? '', $barcode, null);
-            if ($owner) {
-                $ownerExistingStmt = $db->prepare("SELECT * FROM products WHERE id = ?");
-                $ownerExistingStmt->execute([$owner]);
-                $ownerExisting = $ownerExistingStmt->fetch(PDO::FETCH_ASSOC) ?: [];
-                if (!$ingredientsTagsProvided) {
-                    $params[12] = $ownerExisting['ingredients_tags_json'] ?? null;
-                }
-                if (!array_key_exists('ingredients_text', $input) && !array_key_exists('ingredients', $input)) {
-                    $params[11] = $ownerExisting['ingredients_text'] ?? '';
-                }
-                if (!array_key_exists('off_generic_name', $input) && !array_key_exists('generic_name', $input)) {
-                    $params[13] = $ownerExisting['off_generic_name'] ?? '';
-                }
-                if (!array_key_exists('prepared_food', $input)) {
-                    $params[14] = (int)($ownerExisting['prepared_food'] ?? 0);
-                }
-                $transactionStarted = false;
-                try {
-                    dbBeginImmediateWithRetry($db);
-                    $transactionStarted = true;
-                    $stmt = $db->prepare("
-                        UPDATE products SET name=?, brand=?, category=?,
-                        image_url=?, unit=?, default_quantity=?, notes=?,
-                        barcode=?, package_unit=?, shopping_name=?,
-                        nutriments_json=?, ingredients_text=?,
-                        ingredients_tags_json=?, off_generic_name=?,
-                        prepared_food=?, updated_at=CURRENT_TIMESTAMP
-                        WHERE id=?
-                    ");
-                    $stmt->execute([...$params, $owner]);
-                    if (array_key_exists('prepared_food', $input)) {
-                        _setPositiveInventoryPreparedFood(
-                            $db,
-                            $owner,
-                            (int)$params[14]
-                        );
-                    }
-                    _syncProductPreparedFood($db, $owner, false);
-                    shoppingClassificationRecordProductIntent(
-                        $db,
-                        $owner,
-                        $shoppingNameProvenance
-                    );
-                    if (array_key_exists('prepared_food', $input)) {
-                        recipeJobEnqueueInventoryChanged(
-                            $db,
-                            $owner,
-                            'product_save_prepared_food'
-                        );
-                    }
-                    $queue = canonicalIngredientEnqueueProduct(
-                        $db,
-                        $owner,
-                        'product_save_barcode_merge'
-                    );
-                    $controllerObservation =
-                        ingredientOntologyControllerObserveProductSafely(
-                        $db,
-                        $owner
-                    );
-                    productSaveTestHook(
-                        'before_commit',
-                        ['id' => $owner, 'mode' => 'barcode_recovery']
-                    );
-                    $db->exec('COMMIT');
-                    $transactionStarted = false;
-                } catch (Throwable $inner) {
-                    if ($transactionStarted) {
-                        try {
-                            $db->exec('ROLLBACK');
-                        } catch (Throwable $ignored) {
-                        }
-                    }
-                    throw $inner;
-                }
-                if (!empty($controllerObservation['observed'])) {
-                    ingredientOntologyControllerWake();
-                }
-                echo json_encode(
-                    productSaveResponse(
-                        $db,
-                        $owner,
-                        true,
-                        $queue,
-                        $controllerObservation
-                    ),
-                    JSON_UNESCAPED_UNICODE
-                );
-                return;
+        if ($transactionStarted) {
+            try {
+                $db->exec('ROLLBACK');
+            } catch (Throwable $ignored) {
             }
+        }
+        if (
+            str_contains(
+                $e->getMessage(),
+                'UNIQUE constraint failed: products.barcode'
+            )
+            && $requestedBarcode !== null
+        ) {
+            $owner = findProductBarcodeOwner(
+                $db,
+                $requestedBarcode,
+                $requestedId ?: null
+            );
             http_response_code(409);
             echo json_encode([
                 'success' => false,
@@ -3687,14 +3858,22 @@ function saveProduct(PDO $db): void {
             return;
         }
         throw $e;
+    } catch (Throwable $e) {
+        if ($transactionStarted) {
+            try {
+                $db->exec('ROLLBACK');
+            } catch (Throwable $ignored) {
+            }
+        }
+        throw $e;
     }
 }
 
 /**
  * Toggle the prepared-food flag on an existing product.
  *
- * Separate from product_save because that endpoint rewrites every column from its input,
- * so a partial payload carrying only the flag would blank out name/brand/category.
+ * Separate from product_save so callers can change this high-impact flag
+ * without also sending or resolving the rest of the product identity.
  * Re-queues the product so its taxonomy is regrouped.
  */
 function setProductPreparedFood(PDO $db): void {
@@ -3718,12 +3897,14 @@ function setProductPreparedFood(PDO $db): void {
         : 1;
     $queue = [];
     $controllerObservation = [];
+    $identityAdmission = [];
     dbWithRetry(function () use (
         $db,
         $prepared,
         $id,
         &$queue,
-        &$controllerObservation
+        &$controllerObservation,
+        &$identityAdmission
     ): void {
         $db->beginTransaction();
         try {
@@ -3747,6 +3928,11 @@ function setProductPreparedFood(PDO $db): void {
                     $db,
                     $id
                 );
+            $identityAdmission =
+                ingredientOntologyV3IdentityAnnexRefreshProduct(
+                    $db,
+                    $id
+                );
             $db->commit();
         } catch (Throwable $e) {
             if ($db->inTransaction()) {
@@ -3765,6 +3951,9 @@ function setProductPreparedFood(PDO $db): void {
         'canonical_queued' => !empty($queue['queued']),
         'canonical_queue_status' => $queue['status'] ?? 'pending',
         'controller_observation' => $controllerObservation,
+        'identity_admission' => $identityAdmission,
+        'product_fingerprint' =>
+            (string)($identityAdmission['owner_fingerprint'] ?? ''),
     ], JSON_UNESCAPED_UNICODE);
 }
 
@@ -3773,20 +3962,31 @@ function productSaveResponse(
     int $id,
     bool $merged,
     array $queue,
-    array $controllerObservation = []
+    array $controllerObservation = [],
+    array $identityAdmission = []
 ): array {
     $canonicalRows = canonicalIngredientRowsForProduct($db, $id);
-    $preparedStmt = $db->prepare("SELECT prepared_food FROM products WHERE id = ?");
-    $preparedStmt->execute([$id]);
+    $productStmt = $db->prepare("
+        SELECT id, name, brand, category, prepared_food, updated_at
+        FROM products
+        WHERE id = ?
+    ");
+    $productStmt->execute([$id]);
+    $product = $productStmt->fetch(PDO::FETCH_ASSOC) ?: [];
     return [
         'success' => true,
         'id' => $id,
         'merged' => $merged,
-        'prepared_food' => (bool)$preparedStmt->fetchColumn(),
+        'prepared_food' => !empty($product['prepared_food']),
+        'product_fingerprint' => $product
+            ? ingredientOntologyV3ProductOwnerFingerprint($product)
+            : null,
+        'product_updated_at' => $product['updated_at'] ?? null,
         'canonical_queued' => !empty($queue['queued']),
         'canonical_queue_id' => (int)($queue['queue_id'] ?? 0),
         'canonical_queue_status' => $queue['status'] ?? 'pending',
         'controller_observation' => $controllerObservation,
+        'identity_admission' => $identityAdmission,
         'canonical_count' => count($canonicalRows),
         'canonical_ingredients' => $canonicalRows,
     ];
@@ -3820,6 +4020,20 @@ function deleteProduct(PDO $db): void {
     try {
         dbBeginImmediateWithRetry($db);
         $transactionStarted = true;
+        $deleteExists = $db->prepare(
+            "SELECT 1 FROM products WHERE id = ?"
+        );
+        $deleteExists->execute([(int)$id]);
+        if (
+            $deleteExists->fetchColumn()
+            && function_exists('recipeScoreMarkProductDirty')
+        ) {
+            recipeScoreMarkProductDirty(
+                $db,
+                (int)$id,
+                'product_delete'
+            );
+        }
         if (function_exists(
             'ingredientOntologyControllerDeactivatePreparedProductSafely'
         )) {
@@ -6234,20 +6448,39 @@ function brandsCompatible(string $a, string $b): bool {
     return $na === $nb || $na === '' || $nb === '';
 }
 
+function findProductBarcodeOwner(
+    PDO $db,
+    string $barcode,
+    ?int $excludeId = null
+): ?int {
+    $sql = "
+        SELECT id
+        FROM products
+        WHERE barcode = ?
+          AND barcode IS NOT NULL
+          AND TRIM(barcode) != ''
+    ";
+    $params = [$barcode];
+    if ($excludeId !== null && $excludeId > 0) {
+        $sql .= " AND id != ?";
+        $params[] = $excludeId;
+    }
+    $sql .= " ORDER BY id ASC LIMIT 1";
+    $stmt = $db->prepare($sql);
+    $stmt->execute($params);
+    $id = $stmt->fetchColumn();
+    return $id === false ? null : (int)$id;
+}
+
 function findDuplicateProductId(PDO $db, string $name, string $brand, ?string $barcode, ?int $excludeId = null): ?int {
     if ($barcode !== null && trim($barcode) !== '') {
-        $sql = "SELECT id FROM products WHERE barcode = ? AND barcode IS NOT NULL AND TRIM(barcode) != ''";
-        $params = [$barcode];
-        if ($excludeId) {
-            $sql .= " AND id != ?";
-            $params[] = $excludeId;
-        }
-        $sql .= " ORDER BY id ASC LIMIT 1";
-        $stmt = $db->prepare($sql);
-        $stmt->execute($params);
-        $id = $stmt->fetchColumn();
-        if ($id) {
-            return (int)$id;
+        $owner = findProductBarcodeOwner(
+            $db,
+            $barcode,
+            $excludeId
+        );
+        if ($owner !== null) {
+            return $owner;
         }
     }
 
@@ -9053,7 +9286,8 @@ PROMPT;
             'today' => $today->format('Y-m-d'),
             'ocr_text' => $ocrText,
         ],
-        'gemini-3.7-flash'
+        'gemini-3.7-flash',
+        'interactive'
     );
 }
 
@@ -9168,7 +9402,8 @@ PROMPT;
             'today' => $today->format('Y-m-d'),
             'attachment_sha256' => $attachment['sha256'] ?? '',
         ],
-        EXPIRY_COPILOT_VISION_MODEL
+        EXPIRY_COPILOT_VISION_MODEL,
+        'interactive'
     );
     $request['attachment'] = $attachment;
     return $request;

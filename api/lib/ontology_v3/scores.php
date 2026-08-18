@@ -74,6 +74,26 @@ function ingredientOntologyV3Inventory(
     int $versionId
 ): array {
     $inventory = recipeInventoryCandidates($db, ['exclude_expired' => true]);
+    $productStmt = $db->prepare("
+        SELECT id, name, brand, category, prepared_food
+        FROM products
+        WHERE id = ?
+    ");
+    $annexDecisionStmt = $db->prepare("
+        SELECT annex.status
+        FROM ingredient_ontology_identity_annex annex
+        JOIN ingredient_ontology_versions version
+          ON version.id = annex.ontology_version_id
+         AND version.status = 'ready'
+         AND version.content_hash = annex.ontology_content_hash
+         AND version.seal_hash = annex.ontology_seal_hash
+        WHERE annex.product_id = ?
+          AND annex.ontology_version_id = ?
+          AND annex.owner_fingerprint = ?
+          AND annex.resolver_version = ?
+          AND annex.review_manifest_hash = ?
+        LIMIT 1
+    ");
     $mappingStmt = $db->prepare("
         SELECT m.id AS mapping_id, m.entity_id, m.status AS mapping_status,
                m.confidence AS mapping_confidence_v3,
@@ -102,14 +122,54 @@ function ingredientOntologyV3Inventory(
     ");
     $byEntity = [];
     $byProduct = [];
+    $ownerFingerprints = [];
     foreach ($inventory as &$candidate) {
-        $mappingStmt->execute([$versionId, (int)$candidate['product_id']]);
-        $row = $mappingStmt->fetch(PDO::FETCH_ASSOC);
-        $mapping = $row
-            ? ingredientOntologyV3MappingFromRow($row)
-            : null;
+        $productId = (int)$candidate['product_id'];
+        if (!isset($ownerFingerprints[$productId])) {
+            $productStmt->execute([$productId]);
+            $product = $productStmt->fetch(PDO::FETCH_ASSOC) ?: null;
+            $ownerFingerprints[$productId] = $product !== null
+                ? ingredientOntologyV3ProductOwnerFingerprint($product)
+                : '';
+        }
+        $mapping = null;
+        $annexAuthoritative = false;
+        if ($ownerFingerprints[$productId] !== '') {
+            $annexDecisionStmt->execute([
+                $productId,
+                $versionId,
+                $ownerFingerprints[$productId],
+                INGREDIENT_ONTOLOGY_IDENTITY_ANNEX_RESOLVER_VERSION,
+                ingredientOntologyV3IdentityAnnexReviewManifestHash(),
+            ]);
+            $annexStatus = $annexDecisionStmt->fetchColumn();
+            $annexAuthoritative = in_array(
+                $annexStatus,
+                ['accepted', 'rejected'],
+                true
+            );
+            if ($annexStatus === 'accepted') {
+                $mapping = ingredientOntologyV3IdentityAnnexMapping(
+                    $db,
+                    $versionId,
+                    $productId,
+                    $ownerFingerprints[$productId]
+                );
+            }
+        }
+        if (!$annexAuthoritative) {
+            $mappingStmt->execute([$versionId, $productId]);
+            $row = $mappingStmt->fetch(PDO::FETCH_ASSOC);
+            $mapping = (
+                $row
+                && hash_equals(
+                    $ownerFingerprints[$productId],
+                    (string)($row['owner_fingerprint'] ?? '')
+                )
+            ) ? ingredientOntologyV3MappingFromRow($row) : null;
+        }
         $candidate['ontology_v3_mapping'] = $mapping;
-        $byProduct[(int)$candidate['product_id']] = $mapping;
+        $byProduct[$productId] = $mapping;
         if (
             $mapping !== null
             && $mapping['status'] === 'accepted'
@@ -796,8 +856,15 @@ function ingredientOntologyV3BestInventoryMatch(
                 ? $days
                 : min($minimumDays, $days);
         }
+        $compatibleProductIds = array_map(
+            'intval',
+            array_keys($productIds)
+        );
+        sort($compatibleProductIds, SORT_NUMERIC);
+        $best['compatible_product_ids'] = $compatibleProductIds;
         $best['compatible_row_count'] = count($best['stock_rows']);
-        $best['compatible_product_count'] = count($productIds);
+        $best['compatible_product_count'] =
+            count($compatibleProductIds);
         $best['minimum_days_remaining'] = $minimumDays;
     }
     return $best;
@@ -1010,6 +1077,13 @@ function ingredientOntologyV3ScoreRecipe(
             ),
             'minimum_days_remaining' =>
                 $best['minimum_days_remaining'] ?? null,
+            'product_ids' => array_values(array_map(
+                'intval',
+                $best['compatible_product_ids'] ?? [
+                    (int)$best['candidate']['product_id'],
+                ]
+            )),
+            'contributors_complete' => true,
         ];
         $explanation['requirement'] = [
             'required' => $isRequired,
@@ -1023,7 +1097,9 @@ function ingredientOntologyV3ScoreRecipe(
             'inventory_product_id' =>
                 (int)$best['candidate']['product_id'],
             'inventory_mapping_id' =>
-                (int)$best['inventory_mapping']['mapping_id'],
+                $best['inventory_mapping']['mapping_id'] !== null
+                    ? (int)$best['inventory_mapping']['mapping_id']
+                    : null,
             'outcome' => $storedOutcome,
             'satisfies_required' => $satisfied ? 1 : 0,
             'confidence' => (float)$match['confidence'],
@@ -1138,6 +1214,16 @@ function ingredientOntologyV3WriteScoreRows(
     foreach ($matches as $row) {
         $json = ingredientOntologyV3Json($row['explanation']);
         if (strlen($json) > 32768) {
+            $aggregate = is_array(
+                $row['explanation']['inventory_aggregate'] ?? null
+            ) ? $row['explanation']['inventory_aggregate'] : [];
+            $productIds = array_values(array_filter(
+                array_map(
+                    'intval',
+                    (array)($aggregate['product_ids'] ?? [])
+                ),
+                static fn(int $id): bool => $id > 0
+            ));
             $json = ingredientOntologyV3Json([
                 'outcome' => $row['outcome'],
                 'reason' => 'explanation_truncated',
@@ -1148,7 +1234,16 @@ function ingredientOntologyV3WriteScoreRows(
                     'optional' => false,
                     'staple' => $row['outcome'] === 'staple',
                 ],
+                'inventory_aggregate' => [
+                    'product_ids' => $productIds,
+                    'contributors_complete' => true,
+                ],
             ]);
+            if (strlen($json) > 32768) {
+                throw new RuntimeException(
+                    'score match contributor set exceeds explanation limit'
+                );
+            }
         }
         $match->execute([
             $revisionId,
@@ -2489,6 +2584,23 @@ function ingredientOntologyV3MaterializedValueAudit(
     PDO $db,
     array $revision
 ): array {
+    $report = json_decode(
+        (string)($revision['validation_report_json'] ?? '{}'),
+        true
+    );
+    if (
+        is_array($report)
+        && (string)($report['materialized_hash_algorithm'] ?? '')
+            === 'parent-delta-v1'
+        && function_exists(
+            'ingredientOntologyV3IncrementalValueAudit'
+        )
+    ) {
+        return ingredientOntologyV3IncrementalValueAudit(
+            $db,
+            $revision
+        );
+    }
     $requirementRevisionId =
         $revision['requirement_revision_id'] !== null
             ? (int)$revision['requirement_revision_id']
@@ -2982,7 +3094,28 @@ function ingredientOntologyV3RecipeExplanation(
     int $recipeId
 ): array {
     $revision = ingredientOntologyV3ShadowRevision($db, $revisionId);
-    if ($revision === null || $revision['status'] !== 'ready') {
+    $overlay = $revision !== null
+        && (string)$revision['status'] === 'building'
+        && function_exists('recipeScoreActiveOverlay')
+            ? recipeScoreActiveOverlay($db)
+            : null;
+    $overlayRecipe = false;
+    if ($overlay !== null && (int)$overlay['id'] === $revisionId) {
+        $affected = $db->prepare("
+            SELECT 1
+            FROM recipe_score_incremental_recipes
+            WHERE score_revision_id = ? AND recipe_id = ?
+        ");
+        $affected->execute([$revisionId, $recipeId]);
+        $overlayRecipe = (bool)$affected->fetchColumn();
+    }
+    if (
+        $revision === null
+        || (
+            $revision['status'] !== 'ready'
+            && !$overlayRecipe
+        )
+    ) {
         throw new InvalidArgumentException('v3 score revision is unavailable');
     }
     $stmt = $db->prepare("
@@ -4069,9 +4202,14 @@ function ingredientOntologyV3Activate(
         $db->prepare("
             UPDATE recipe_score_state
             SET active_score_revision_id = ?,
+                active_score_overlay_revision_id = NULL,
                 cursor_revision = cursor_revision + 1
             WHERE id = 1
         ")->execute([$revisionId]);
+        recipeScoreClearPendingProducts(
+            $db,
+            (int)$revision['inventory_revision']
+        );
         $db->exec('COMMIT');
     } catch (Throwable $e) {
         try {
@@ -4272,6 +4410,7 @@ function ingredientOntologyV3Rollback(
         $db->prepare("
             UPDATE recipe_score_state
             SET active_score_revision_id = ?,
+                active_score_overlay_revision_id = NULL,
                 cursor_revision = cursor_revision + 1
             WHERE id = 1
         ")->execute([$targetRevisionId]);

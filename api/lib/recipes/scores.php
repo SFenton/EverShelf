@@ -38,6 +38,11 @@ function recipeScoreState(PDO $db): array {
     $row['active_score_revision_id'] = $row['active_score_revision_id'] !== null
         ? (int)$row['active_score_revision_id']
         : null;
+    $row['active_score_overlay_revision_id'] =
+        isset($row['active_score_overlay_revision_id'])
+        && $row['active_score_overlay_revision_id'] !== null
+            ? (int)$row['active_score_overlay_revision_id']
+            : null;
     return $row;
 }
 
@@ -46,6 +51,10 @@ function recipeScoreMarkDirty(PDO $db): int {
     $db->exec("
         UPDATE recipe_score_state SET
             inventory_revision = inventory_revision + 1,
+            cursor_revision = cursor_revision + CASE
+                WHEN active_score_overlay_revision_id IS NOT NULL
+                THEN 1 ELSE 0 END,
+            active_score_overlay_revision_id = NULL,
             dirty_at = CURRENT_TIMESTAMP,
             updated_at = CURRENT_TIMESTAMP
         WHERE id = 1
@@ -53,12 +62,93 @@ function recipeScoreMarkDirty(PDO $db): int {
     return recipeScoreState($db)['inventory_revision'];
 }
 
+function recipeScoreMarkProductDirty(
+    PDO $db,
+    int $productId,
+    string $reason
+): int {
+    if ($productId <= 0) {
+        throw new InvalidArgumentException(
+            'recipe score dirty product is invalid'
+        );
+    }
+    $inventoryRevision = recipeScoreMarkDirty($db);
+    $active = recipeScoreActiveRevision($db);
+    if (
+        $active === null
+        || (string)($active['scoring_model'] ?? '')
+            !== 'faceted-ontology-v3'
+        || $active['ontology_version_id'] === null
+    ) {
+        return $inventoryRevision;
+    }
+    $db->prepare("
+        INSERT INTO recipe_score_pending_products (
+            product_id, first_inventory_revision,
+            latest_inventory_revision, reason,
+            created_at, updated_at
+        )
+        VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+        ON CONFLICT(product_id) DO UPDATE SET
+            latest_inventory_revision = MAX(
+                recipe_score_pending_products.latest_inventory_revision,
+                excluded.latest_inventory_revision
+            ),
+            reason = excluded.reason,
+            updated_at = CURRENT_TIMESTAMP
+    ")->execute([
+        $productId,
+        $inventoryRevision,
+        $inventoryRevision,
+        mb_substr(trim($reason), 0, 160, 'UTF-8'),
+    ]);
+    return $inventoryRevision;
+}
+
+function recipeScoreClearPendingProducts(
+    PDO $db,
+    int $inventoryRevision,
+    array $productIds = []
+): int {
+    $exists = $db->query("
+        SELECT 1
+        FROM sqlite_master
+        WHERE type = 'table'
+          AND name = 'recipe_score_pending_products'
+    ")->fetchColumn();
+    if (!$exists) {
+        return 0;
+    }
+    $productIds = array_values(array_unique(array_filter(
+        array_map('intval', $productIds),
+        static fn(int $id): bool => $id > 0
+    )));
+    $productWhere = '';
+    $params = [$inventoryRevision];
+    if ($productIds) {
+        $productWhere = ' AND product_id IN ('
+            . implode(',', array_fill(0, count($productIds), '?'))
+            . ')';
+        array_push($params, ...$productIds);
+    }
+    $delete = $db->prepare("
+        DELETE FROM recipe_score_pending_products
+        WHERE latest_inventory_revision <= ?
+        {$productWhere}
+    ");
+    $delete->execute($params);
+    return $delete->rowCount();
+}
+
 function recipeScoreMarkCatalogDirty(PDO $db, bool $cursorUnsafe = false): int {
     recipeScoreState($db);
     $db->prepare("
         UPDATE recipe_score_state SET
             catalog_revision = catalog_revision + 1,
-            cursor_revision = cursor_revision + ?,
+            cursor_revision = cursor_revision + CASE
+                WHEN active_score_overlay_revision_id IS NOT NULL
+                THEN 1 ELSE ? END,
+            active_score_overlay_revision_id = NULL,
             dirty_at = CURRENT_TIMESTAMP,
             updated_at = CURRENT_TIMESTAMP
         WHERE id = 1
@@ -213,6 +303,67 @@ function recipeScoreActiveRevision(PDO $db): ?array {
     }
     $revision = recipeScoreRevision($db, $state['active_score_revision_id']);
     return $revision !== null && $revision['status'] === 'ready' ? $revision : null;
+}
+
+function recipeScoreActiveOverlay(
+    PDO $db,
+    ?array $state = null,
+    ?array $active = null
+): ?array {
+    $state ??= recipeScoreState($db);
+    $overlayId = (int)(
+        $state['active_score_overlay_revision_id'] ?? 0
+    );
+    if ($overlayId <= 0) {
+        return null;
+    }
+    $active ??= recipeScoreActiveRevision($db);
+    $overlay = recipeScoreRevision($db, $overlayId);
+    if (
+        $active === null
+        || $overlay === null
+        || (string)$overlay['status'] !== 'building'
+        || (string)($active['scoring_model'] ?? '')
+            !== 'faceted-ontology-v3'
+        || (string)($overlay['scoring_model'] ?? '')
+            !== 'faceted-ontology-v3'
+        || (int)($overlay['ontology_version_id'] ?? 0)
+            !== (int)($active['ontology_version_id'] ?? 0)
+        || (int)($overlay['parent_score_revision_id'] ?? 0)
+            !== (int)$active['id']
+        || (int)$overlay['inventory_revision']
+            !== (int)$state['inventory_revision']
+        || (int)$overlay['catalog_revision']
+            !== (int)$state['catalog_revision']
+        || (int)$overlay['ontology_source_revision']
+            !== (int)$state['ontology_source_revision']
+        || (string)$overlay['score_date'] !== date('Y-m-d')
+    ) {
+        return null;
+    }
+    $report = json_decode(
+        (string)($overlay['validation_report_json'] ?? '{}'),
+        true
+    );
+    if (
+        !is_array($report)
+        || empty($report['overlay_ready'])
+        || (string)($report['materialized_hash_algorithm'] ?? '')
+            !== 'parent-delta-v1'
+        || !is_string(
+            $report['materialized_values']['overlay']['overlay_hash']
+                ?? null
+        )
+        || strlen(
+            (string)(
+                $report['materialized_values']['overlay']['overlay_hash']
+                    ?? ''
+            )
+        ) !== 64
+    ) {
+        return null;
+    }
+    return $overlay;
 }
 
 function recipeScoreRuntimeEnvironment(): string {
@@ -590,6 +741,7 @@ function recipeScoreReadRevision(PDO $db): array {
         hash('sha256', $setting['raw']),
         recipeScoreRuntimeEnvironment(),
         $state['active_score_revision_id'] ?? 0,
+        $state['active_score_overlay_revision_id'] ?? 0,
         $state['inventory_revision'],
         $state['catalog_revision'],
         $state['cursor_revision'],
@@ -631,9 +783,13 @@ function recipeScoreReadRevision(PDO $db): array {
     $status = !$setting['requested']
         ? 'disabled'
         : ($preview ? 'ready' : 'invalid');
+    $overlay = !$preview
+        ? recipeScoreActiveOverlay($db, $state, $active)
+        : null;
     return $cache[$cacheKey] = [
         'revision' => $selected,
         'active_revision' => $active,
+        'overlay_revision' => $overlay,
         'state' => $state,
         'preview' => $preview,
         'preview_requested' => $setting['requested'],
@@ -654,9 +810,11 @@ function recipeScoreReadRevision(PDO $db): array {
 function recipeScoreActiveReadRevision(PDO $db): array {
     $state = recipeScoreState($db);
     $active = recipeScoreActiveRevision($db);
+    $overlay = recipeScoreActiveOverlay($db, $state, $active);
     return [
         'revision' => $active,
         'active_revision' => $active,
+        'overlay_revision' => $overlay,
         'state' => $state,
         'preview' => false,
         'preview_requested' => false,
@@ -681,6 +839,7 @@ function recipeScoreReadMetadata(array $read): array {
     $revision = $read['revision'] ?? null;
     $active = $read['active_revision'] ?? null;
     $preview = !empty($read['preview']);
+    $overlay = $read['overlay_revision'] ?? null;
     return [
         'preview' => $preview,
         'score_revision_id' => $revision !== null
@@ -692,6 +851,9 @@ function recipeScoreReadMetadata(array $read): array {
                 : null,
         'active_score_revision_id' => $active !== null
             ? (int)$active['id']
+            : null,
+        'overlay_score_revision_id' => $overlay !== null
+            ? (int)$overlay['id']
             : null,
         'preview_revision_id' => $preview
             ? (int)$revision['id']
@@ -719,6 +881,8 @@ function recipeScoreReadResponseMetadata(array $metadata): array {
             'ontology' => $metadata['ontology_version_id'] ?? null,
             'active_score' =>
                 $metadata['active_score_revision_id'] ?? null,
+            'overlay_score' =>
+                $metadata['overlay_score_revision_id'] ?? null,
             'preview_score' =>
                 $metadata['preview_revision_id'] ?? null,
             'preview_ontology' =>
@@ -1129,8 +1293,8 @@ function recipeScorePruneRevisions(PDO $db): array {
         min(
             5000,
             (int)(function_exists('env')
-                ? env('RECIPE_SCORE_PRUNE_CHUNK_ROWS', '1000')
-                : (getenv('RECIPE_SCORE_PRUNE_CHUNK_ROWS') ?: 1000))
+                ? env('RECIPE_SCORE_PRUNE_CHUNK_ROWS', '5000')
+                : (getenv('RECIPE_SCORE_PRUNE_CHUNK_ROWS') ?: 5000))
         )
     );
     $maximumChunks = max(
@@ -1138,8 +1302,8 @@ function recipeScorePruneRevisions(PDO $db): array {
         min(
             500,
             (int)(function_exists('env')
-                ? env('RECIPE_SCORE_PRUNE_MAX_CHUNKS', '50')
-                : (getenv('RECIPE_SCORE_PRUNE_MAX_CHUNKS') ?: 50))
+                ? env('RECIPE_SCORE_PRUNE_MAX_CHUNKS', '500')
+                : (getenv('RECIPE_SCORE_PRUNE_MAX_CHUNKS') ?: 500))
         )
     );
     $guardAvailable = function_exists(
@@ -1211,6 +1375,7 @@ function recipeScorePruneRevisions(PDO $db): array {
         'ingredient_ontology_shadow_requirement_matches',
         'ingredient_ontology_shadow_matches',
         'recipe_inventory_scores',
+        'recipe_score_incremental_recipes',
     ];
     $chunks = 0;
     foreach ($targetIds as $targetId) {
@@ -1600,6 +1765,7 @@ function recipeScoreRebuild(
                         $db->prepare("
                             UPDATE recipe_score_state SET
                                 active_score_revision_id = ?,
+                                active_score_overlay_revision_id = NULL,
                                 last_built_at = CURRENT_TIMESTAMP,
                                 updated_at = CURRENT_TIMESTAMP
                             WHERE id = 1
@@ -1703,7 +1869,10 @@ function recipeScoreResolveRevision(PDO $db, ?int $revisionId = null): array {
     }
     return [
         'revision' => $revision,
-        'ranking_status' => recipeScoreRevisionStatus($db, $revision),
+        'overlay_revision' => $read['overlay_revision'] ?? null,
+        'ranking_status' => ($read['overlay_revision'] ?? null) !== null
+            ? 'fresh_overlay'
+            : recipeScoreRevisionStatus($db, $revision),
         'read' => $read,
         'read_metadata' => recipeScoreReadMetadata($read),
     ];
@@ -1847,10 +2016,12 @@ function recipeCatalogSortSql(array $criteria): string {
 function recipeCatalogBrowseCte(
     array $criteria,
     int $revisionId,
-    int $catalogMaxId
+    int $catalogMaxId,
+    ?int $overlayRevisionId = null
 ): array {
     $params = [
         ':revision_id' => $revisionId,
+        ':overlay_revision_id' => $overlayRevisionId ?? 0,
         ':catalog_max_id' => $catalogMaxId,
         ':minimum_coverage' => $criteria['minimum_coverage'] / 100,
     ];
@@ -1936,7 +2107,52 @@ function recipeCatalogBrowseCte(
     }
     $orderSql = recipeCatalogSortSql($criteria);
     $cte = "
-        WITH base AS (
+        WITH effective_scores AS (
+            SELECT parent.recipe_id,
+                   COALESCE(overlay.coverage, parent.coverage)
+                       AS coverage,
+                   COALESCE(overlay.directness, parent.directness)
+                       AS directness,
+                   COALESCE(overlay.expiry_score, parent.expiry_score)
+                       AS expiry_score,
+                   COALESCE(
+                       overlay.source_user_score,
+                       parent.source_user_score
+                   ) AS source_user_score,
+                   COALESCE(
+                       overlay.availability_score,
+                       parent.availability_score
+                   ) AS availability_score,
+                   COALESCE(
+                       overlay.required_count,
+                       parent.required_count
+                   ) AS required_count,
+                   COALESCE(
+                       overlay.matched_required_count,
+                       parent.matched_required_count
+                   ) AS matched_required_count,
+                   COALESCE(
+                       overlay.missing_required_count,
+                       parent.missing_required_count
+                   ) AS missing_required_count,
+                   COALESCE(
+                       overlay.uncertain_required_count,
+                       parent.uncertain_required_count
+                   ) AS uncertain_required_count,
+                   COALESCE(overlay.cookable, parent.cookable)
+                       AS cookable,
+                   CASE
+                       WHEN overlay.recipe_id IS NOT NULL
+                       THEN overlay.soonest_expiry_days
+                       ELSE parent.soonest_expiry_days
+                   END AS soonest_expiry_days
+            FROM recipe_inventory_scores parent
+            LEFT JOIN recipe_inventory_scores overlay
+              ON overlay.score_revision_id = :overlay_revision_id
+             AND overlay.recipe_id = parent.recipe_id
+            WHERE parent.score_revision_id = :revision_id
+        ),
+        base AS (
             SELECT c.id,
                    COALESCE(cl.cluster_key, 'recipe:' || c.id) AS dedupe_key,
                    LOWER(c.title) AS normalized_title,
@@ -1955,9 +2171,8 @@ function recipeCatalogBrowseCte(
                    {$weightedSql} AS weighted_score
             FROM recipe_catalog c
             {$queryJoin}
-            JOIN recipe_inventory_scores scores
+            JOIN effective_scores scores
               ON scores.recipe_id = c.id
-             AND scores.score_revision_id = :revision_id
             LEFT JOIN recipe_clusters cl ON cl.recipe_id = c.id
             LEFT JOIN recipe_user_state us ON us.recipe_id = c.id
             WHERE c.id <= :catalog_max_id
@@ -2093,6 +2308,8 @@ function recipeCatalogBrowseResult(PDO $db, array $options = []): array {
         $cursor !== null ? $cursor['revision_id'] : null
     );
     $revision = $resolved['revision'];
+    $overlayRevision = $resolved['overlay_revision'] ?? null;
+    $effectiveRevision = $overlayRevision ?? $revision;
     $readMetadata = $resolved['read_metadata'];
     $catalogMaxId = $cursor !== null
         ? $cursor['catalog_max_id']
@@ -2100,7 +2317,10 @@ function recipeCatalogBrowseResult(PDO $db, array $options = []): array {
     $built = recipeCatalogBrowseCte(
         $criteria,
         (int)$revision['id'],
-        $catalogMaxId
+        $catalogMaxId,
+        $overlayRevision !== null
+            ? (int)$overlayRevision['id']
+            : null
     );
     if ($built['empty']) {
         $assertCursorStable();
@@ -2110,10 +2330,12 @@ function recipeCatalogBrowseResult(PDO $db, array $options = []): array {
             'criteria' => $criteria,
             'criteria_hash' => $criteriaHash,
             'snapshot_id' => 'score:' . $revision['id']
+                . ':overlay:' . ($overlayRevision['id'] ?? 0)
                 . ':catalog:' . $snapshotCatalogRevision,
             'ranking_status' => $resolved['ranking_status'],
             'catalog_revision' => $snapshotCatalogRevision,
-            'inventory_revision' => (int)$revision['inventory_revision'],
+            'inventory_revision' =>
+                (int)$effectiveRevision['inventory_revision'],
             'ontology_version_id' =>
                 $revision['ontology_version_id'] ?? null,
             'total' => 0,
@@ -2173,6 +2395,30 @@ function recipeCatalogBrowseResult(PDO $db, array $options = []): array {
         $inventory = $criteria['explain']
             ? recipeInventoryCandidates($db, ['exclude_expired' => true])
             : [];
+        $overlayExplanationRecipes = [];
+        if ($criteria['explain'] && $overlayRevision !== null && $rows) {
+            $rowIds = array_map(
+                static fn(array $row): int => (int)$row['id'],
+                $rows
+            );
+            $placeholders = implode(
+                ',',
+                array_fill(0, count($rowIds), '?')
+            );
+            $affected = $db->prepare("
+                SELECT recipe_id
+                FROM recipe_score_incremental_recipes
+                WHERE score_revision_id = ?
+                  AND recipe_id IN ({$placeholders})
+            ");
+            $affected->execute(array_merge(
+                [(int)$overlayRevision['id']],
+                $rowIds
+            ));
+            foreach ($affected->fetchAll(PDO::FETCH_COLUMN) as $recipeId) {
+                $overlayExplanationRecipes[(int)$recipeId] = true;
+            }
+        }
         foreach ($rows as $row) {
             $recipe = recipeCatalogGetById($db, (int)$row['id']);
             if ($recipe === null) {
@@ -2209,7 +2455,13 @@ function recipeCatalogBrowseResult(PDO $db, array $options = []): array {
                     $result['explain'] =
                         ingredientOntologyV3RecipeExplanation(
                             $db,
-                            (int)$revision['id'],
+                            isset(
+                                $overlayExplanationRecipes[
+                                    (int)$row['id']
+                                ]
+                            )
+                                ? (int)$overlayRevision['id']
+                                : (int)$revision['id'],
                             (int)$row['id']
                         );
                 } else {
@@ -2246,10 +2498,12 @@ function recipeCatalogBrowseResult(PDO $db, array $options = []): array {
         'criteria' => $criteria,
         'criteria_hash' => $criteriaHash,
         'snapshot_id' => 'score:' . $revision['id']
+            . ':overlay:' . ($overlayRevision['id'] ?? 0)
             . ':catalog:' . $snapshotCatalogRevision,
         'ranking_status' => $resolved['ranking_status'],
         'catalog_revision' => $snapshotCatalogRevision,
-        'inventory_revision' => (int)$revision['inventory_revision'],
+        'inventory_revision' =>
+            (int)$effectiveRevision['inventory_revision'],
         'ontology_version_id' => $revision['ontology_version_id'] ?? null,
         'total' => $total,
         'offset' => $offset,
