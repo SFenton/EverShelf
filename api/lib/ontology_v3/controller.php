@@ -16119,15 +16119,27 @@ function ingredientOntologyControllerResumeDurableJob(
                         'disabled' => true,
                     ];
                 }
+                $abandonedGenerations =
+                    ingredientOntologyControllerFailAbandonedGenerations(
+                        $db
+                    );
                 $prunedBuildingVersions = !empty($options['intake_only'])
                     ? [
                         'deleted' => 0,
                         'failed_preserved' => 0,
+                        'failed_generations' =>
+                            $abandonedGenerations['failed'],
+                        'failed_generation_ids' =>
+                            $abandonedGenerations['generation_ids'],
+                        'generation_errors' =>
+                            $abandonedGenerations['errors'],
                         'errors' => [],
                         'skipped' => 'intake_only',
                     ]
                     : ingredientOntologyControllerPruneAbandonedBuildingVersions(
-                        $db
+                        $db,
+                        24,
+                        $abandonedGenerations
                     );
                 $forkCleanup = !empty($options['intake_only'])
                     ? []
@@ -16369,11 +16381,263 @@ function ingredientOntologyControllerResumeDurableJob(
                 ];
             }
 
-            function ingredientOntologyControllerPruneAbandonedBuildingVersions(
+            function ingredientOntologyControllerFailAbandonedGenerations(
                 PDO $db,
                 int $retentionHours = 24
             ): array {
                 $retentionHours = max(1, min(720, $retentionHours));
+                $activationGuard = ingredientOntologyControllerTableExists(
+                    $db,
+                    'ontology_activation_imports'
+                ) ? "
+                    AND NOT EXISTS (
+                        SELECT 1
+                        FROM ontology_activation_imports import
+                        WHERE (
+                            import.candidate_ontology_version_id =
+                                generation.candidate_version_id
+                            OR import.candidate_score_revision_id =
+                                generation.candidate_score_revision_id
+                        )
+                          AND import.status NOT IN (
+                              'active', 'complete', 'cleaned', 'failed'
+                          )
+                    )
+                " : '';
+                $stmt = $db->prepare("
+                    SELECT generation.id,
+                           generation.candidate_version_id,
+                           generation.candidate_score_revision_id
+                    FROM ontology_generations generation
+                    JOIN ingredient_ontology_versions version
+                      ON version.id = generation.candidate_version_id
+                    WHERE generation.status IN (
+                        'building', 'shadowing',
+                        'promotable', 'promoting'
+                    )
+                      AND version.status = 'building'
+                      AND generation.created_at <= datetime(
+                          'now',
+                          '-' || ? || ' hours'
+                      )
+                      AND version.created_at <= datetime(
+                          'now',
+                          '-' || ? || ' hours'
+                      )
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM ontology_controller_jobs job
+                          WHERE (
+                              job.candidate_version_id =
+                                  generation.candidate_version_id
+                              OR (
+                                  job.job_type = 'generation'
+                                  AND CAST(json_extract(
+                                      job.input_json,
+                                      '$.generation_id'
+                                  ) AS INTEGER) = generation.id
+                              )
+                          )
+                            AND job.status IN (
+                                'leased', 'model_running',
+                                'responses_ready', 'staged',
+                                'validating', 'applied',
+                                'generation_pending', 'shadowing',
+                                'promotable', 'promoting'
+                            )
+                      )
+                      {$activationGuard}
+                    ORDER BY generation.created_at, generation.id
+                    LIMIT 20
+                ");
+                $stmt->execute([$retentionHours, $retentionHours]);
+                $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+                $eligibleUnderLock = $db->prepare("
+                    SELECT 1
+                    FROM ontology_generations generation
+                    JOIN ingredient_ontology_versions version
+                      ON version.id = generation.candidate_version_id
+                    WHERE generation.id = ?
+                      AND generation.status IN (
+                          'building', 'shadowing',
+                          'promotable', 'promoting'
+                      )
+                      AND version.status = 'building'
+                      AND generation.created_at <= datetime(
+                          'now',
+                          '-' || ? || ' hours'
+                      )
+                      AND version.created_at <= datetime(
+                          'now',
+                          '-' || ? || ' hours'
+                      )
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM ontology_controller_jobs job
+                          WHERE (
+                              job.candidate_version_id =
+                                  generation.candidate_version_id
+                              OR (
+                                  job.job_type = 'generation'
+                                  AND CAST(json_extract(
+                                      job.input_json,
+                                      '$.generation_id'
+                                  ) AS INTEGER) = generation.id
+                              )
+                          )
+                            AND job.status IN (
+                                'leased', 'model_running',
+                                'responses_ready', 'staged',
+                                'validating', 'applied',
+                                'generation_pending', 'shadowing',
+                                'promotable', 'promoting'
+                            )
+                      )
+                      {$activationGuard}
+                    LIMIT 1
+                ");
+                $failed = [];
+                $errors = [];
+                foreach ($rows as $row) {
+                    $generationId = (int)$row['id'];
+                    $versionId = (int)$row['candidate_version_id'];
+                    $scoreRevisionId = (int)(
+                        $row['candidate_score_revision_id'] ?? 0
+                    );
+                    $report = ingredientOntologyControllerStableJson([
+                        'controller_abandoned' => true,
+                        'reason' =>
+                            'generation exceeded the building retention window',
+                        'generation_id' => $generationId,
+                        'candidate_version_id' => $versionId,
+                    ]);
+                    try {
+                        if (
+                            defined('RECIPE_BACKEND_TEST_MODE')
+                            && RECIPE_BACKEND_TEST_MODE
+                            && is_callable(
+                                $GLOBALS[
+                                    'INGREDIENT_ONTOLOGY_CONTROLLER_BEFORE_ABANDONED_GENERATION_LOCK'
+                                ] ?? null
+                            )
+                        ) {
+                            ($GLOBALS[
+                                'INGREDIENT_ONTOLOGY_CONTROLLER_BEFORE_ABANDONED_GENERATION_LOCK'
+                            ])($db, $generationId, $versionId);
+                        }
+                        $db->exec('BEGIN IMMEDIATE');
+                        $eligibleUnderLock->execute([
+                            $generationId,
+                            $retentionHours,
+                            $retentionHours,
+                        ]);
+                        if ($eligibleUnderLock->fetchColumn() === false) {
+                            $db->exec('ROLLBACK');
+                            continue;
+                        }
+                        ingredientOntologyControllerSetPlanJobStatus(
+                            $db,
+                            $generationId,
+                            'failed',
+                            $scoreRevisionId > 0
+                                ? $scoreRevisionId
+                                : null
+                        );
+                        $jobs = $db->prepare("
+                            UPDATE ontology_controller_jobs
+                            SET status = 'failed',
+                                lease_token = NULL,
+                                leased_until = NULL,
+                                next_attempt_at = NULL,
+                                last_error_kind =
+                                    'generation_abandoned',
+                                last_error = ?,
+                                finished_at = CURRENT_TIMESTAMP,
+                                updated_at = CURRENT_TIMESTAMP
+                            WHERE (
+                                candidate_version_id = ?
+                                OR (
+                                    job_type = 'generation'
+                                    AND CAST(json_extract(
+                                        input_json,
+                                        '$.generation_id'
+                                    ) AS INTEGER) = ?
+                                )
+                            )
+                              AND status NOT IN (
+                                  'superseded', 'abstained',
+                                  'quarantined', 'promoted',
+                                  'rolled_back', 'failed'
+                              )
+                        ");
+                        $jobs->execute([
+                            mb_substr($report, 0, 1000, 'UTF-8'),
+                            $versionId,
+                            $generationId,
+                        ]);
+                        if ($scoreRevisionId > 0) {
+                            $db->prepare("
+                                UPDATE recipe_score_revisions
+                                SET status = 'failed',
+                                    last_error =
+                                        'abandoned ontology generation',
+                                    completed_at = CURRENT_TIMESTAMP
+                                WHERE id = ? AND status = 'building'
+                            ")->execute([$scoreRevisionId]);
+                        }
+                        $db->prepare("
+                            UPDATE ontology_generations
+                            SET status = 'failed',
+                                gate_report_json = ?
+                            WHERE id = ?
+                              AND status IN (
+                                  'building', 'shadowing',
+                                  'promotable', 'promoting'
+                              )
+                        ")->execute([$report, $generationId]);
+                        $db->prepare("
+                            UPDATE ingredient_ontology_versions
+                            SET status = 'failed',
+                                failed_at = CURRENT_TIMESTAMP,
+                                validation_report_json = ?,
+                                updated_at = CURRENT_TIMESTAMP
+                            WHERE id = ? AND status = 'building'
+                        ")->execute([$report, $versionId]);
+                        $db->exec('COMMIT');
+                        $failed[] = $generationId;
+                    } catch (Throwable $error) {
+                        if ($db->inTransaction()) {
+                            $db->rollBack();
+                        }
+                        $errors[] = [
+                            'generation_id' => $generationId,
+                            'error' => mb_substr(
+                                $error->getMessage(),
+                                0,
+                                500,
+                                'UTF-8'
+                            ),
+                        ];
+                    }
+                }
+                return [
+                    'failed' => count($failed),
+                    'generation_ids' => $failed,
+                    'errors' => $errors,
+                ];
+            }
+
+            function ingredientOntologyControllerPruneAbandonedBuildingVersions(
+                PDO $db,
+                int $retentionHours = 24,
+                ?array $generationCleanup = null
+            ): array {
+                $retentionHours = max(1, min(720, $retentionHours));
+                $generationCleanup ??=
+                    ingredientOntologyControllerFailAbandonedGenerations(
+                        $db,
+                        $retentionHours
+                    );
                 $zeroHash = str_repeat('0', 64);
                 $stmt = $db->prepare("
                     SELECT version.id
@@ -16409,6 +16673,12 @@ function ingredientOntologyControllerResumeDurableJob(
                     return [
                         'deleted' => 0,
                         'failed_preserved' => 0,
+                        'failed_generations' =>
+                            $generationCleanup['failed'],
+                        'failed_generation_ids' =>
+                            $generationCleanup['generation_ids'],
+                        'generation_errors' =>
+                            $generationCleanup['errors'],
                         'errors' => [],
                     ];
                 }
@@ -16558,6 +16828,12 @@ function ingredientOntologyControllerResumeDurableJob(
                     'deleted' => $deleted,
                     'failed_preserved' => $failedPreserved,
                     'cleanup_pending' => $cleanupPending,
+                    'failed_generations' =>
+                        $generationCleanup['failed'],
+                    'failed_generation_ids' =>
+                        $generationCleanup['generation_ids'],
+                    'generation_errors' =>
+                        $generationCleanup['errors'],
                     'errors' => $errors,
                 ];
             }

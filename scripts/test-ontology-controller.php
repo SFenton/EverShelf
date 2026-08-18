@@ -4745,10 +4745,12 @@ try {
         && $sharedChildCountAfter - $sharedChildCountBefore <= 1,
         'One hundred compatible feedback acquisitions must share one debounced child version'
     );
-
     $pruneVersions = [];
     foreach (
-        ['free', 'artifact', 'blocked', 'trailing'] as $pruneKind
+        [
+            'free', 'artifact', 'blocked',
+            'trailing', 'generation',
+        ] as $pruneKind
     ) {
         $pruneFork = ingredientOntologyV3ForkVersion(
             $db,
@@ -4767,6 +4769,124 @@ try {
             WHERE id = ?
         ")->execute([$pruneVersions[$pruneKind]]);
     }
+    $staleGenerationVersionId = $pruneVersions['generation'];
+    $constraintEpoch = (int)$db->query("
+        SELECT constraint_epoch
+        FROM ontology_controller_state
+        WHERE id = 1
+    ")->fetchColumn();
+    $db->prepare("
+        INSERT INTO ontology_generations (
+            generation_key, controller_generation,
+            parent_ontology_version_id, parent_score_revision_id,
+            constraint_epoch, constraint_hash,
+            controller_policy_hash, candidate_version_id,
+            status, created_at
+        )
+        VALUES (
+            ?, 999999, ?, NULL, ?, ?, ?, ?,
+            'building', datetime('now', '-48 hours')
+        )
+    ")->execute([
+        ingredientOntologyV3Hash([
+            'test' => 'abandoned-generation',
+        ]),
+        $baseVersionId,
+        $constraintEpoch,
+        ingredientOntologyControllerConstraintHash(
+            $db,
+            $constraintEpoch
+        ),
+        ingredientOntologyControllerPolicyHash(),
+        $staleGenerationVersionId,
+    ]);
+    $staleGenerationId = (int)$db->lastInsertId();
+    $staleGenerationRow = $db->query("
+        SELECT * FROM ontology_generations
+        WHERE id = {$staleGenerationId}
+    ")->fetch(PDO::FETCH_ASSOC);
+    $staleGenerationJob =
+        ingredientOntologyControllerEnsureGenerationFinalizeJob(
+            $db,
+            $staleGenerationRow
+        );
+    $GLOBALS[
+        'INGREDIENT_ONTOLOGY_CONTROLLER_BEFORE_ABANDONED_GENERATION_LOCK'
+    ] = static function (
+        PDO $raceDb,
+        int $generationId
+    ) use (
+        $staleGenerationId,
+        $staleGenerationJob
+    ): void {
+        if ($generationId !== $staleGenerationId) {
+            return;
+        }
+        $raceDb->prepare("
+            UPDATE ontology_controller_jobs
+            SET status = 'leased',
+                lease_token = ?,
+                lease_generation = lease_generation + 1,
+                leased_until = datetime('now', '+5 minutes'),
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ? AND status = 'queued'
+        ")->execute([
+            hash('sha256', 'abandoned-generation-race'),
+            (int)$staleGenerationJob['id'],
+        ]);
+    };
+    $racedMaintenance = ingredientOntologyControllerProcessQueue(
+        $db,
+        1,
+        [
+            'intake_only' => true,
+            'minimum_priority' => 1000000,
+            'provider' => 'fake',
+            'model' => 'fake',
+            'allow_network' => false,
+        ]
+    );
+    unset(
+        $GLOBALS[
+            'INGREDIENT_ONTOLOGY_CONTROLLER_BEFORE_ABANDONED_GENERATION_LOCK'
+        ]
+    );
+    controllerTestAssert(
+        $db->query("
+            SELECT status FROM ontology_generations
+            WHERE id = {$staleGenerationId}
+        ")->fetchColumn() === 'building'
+        && $db->query("
+            SELECT status FROM ontology_controller_jobs
+            WHERE id = " . (int)$staleGenerationJob['id']
+        )->fetchColumn() === 'leased'
+        && (int)(
+            $racedMaintenance['pruned_building_versions'][
+                'failed_generations'
+            ] ?? -1
+        ) === 0,
+        'Abandoned generation cleanup must recheck active leases under the write lock'
+    );
+    $db->prepare("
+        UPDATE ontology_controller_jobs
+        SET status = 'queued',
+            lease_token = NULL,
+            leased_until = NULL,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = ? AND status = 'leased'
+    ")->execute([(int)$staleGenerationJob['id']]);
+    $intakeMaintenance = ingredientOntologyControllerProcessQueue(
+        $db,
+        1,
+        [
+            'intake_only' => true,
+            'minimum_priority' => 1000000,
+            'provider' => 'fake',
+            'model' => 'fake',
+            'allow_network' => false,
+        ]
+    );
+
     $artifactChangeKey = 'controller-prune-artifact';
     $db->prepare("
         INSERT INTO ingredient_ontology_change_sets (
@@ -4831,6 +4951,26 @@ try {
         && $pruneResult['deleted'] >= 2
         && $pruneResult['failed_preserved'] >= 2,
         'Abandoned pruning must preserve staged/FK artifacts, isolate per-row failures, and delete only artifact-free children'
+    );
+    controllerTestAssert(
+        $db->query("
+            SELECT status FROM ontology_generations
+            WHERE id = {$staleGenerationId}
+        ")->fetchColumn() === 'failed'
+        && $db->query("
+            SELECT status FROM ingredient_ontology_versions
+            WHERE id = {$staleGenerationVersionId}
+        ")->fetchColumn() === 'failed'
+        && $db->query("
+            SELECT status FROM ontology_controller_jobs
+            WHERE id = " . (int)$staleGenerationJob['id']
+        )->fetchColumn() === 'failed'
+        && (int)(
+            $intakeMaintenance['pruned_building_versions'][
+                'failed_generations'
+            ] ?? 0
+        ) >= 1,
+        'Abandoned generations must terminalize their candidate versions and finalize jobs'
     );
     $ordinaryApplyRejected = false;
     try {
