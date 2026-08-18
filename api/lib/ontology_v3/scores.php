@@ -79,6 +79,7 @@ function ingredientOntologyV3Inventory(
         $inventoryOptions['score_date'] = $scoreDate;
     }
     $inventory = recipeInventoryCandidates($db, $inventoryOptions);
+    $version = ingredientOntologyV3Version($db, $versionId);
     $productStmt = $db->prepare("
         SELECT id, name, brand, category, prepared_food
         FROM products
@@ -128,11 +129,13 @@ function ingredientOntologyV3Inventory(
     $byEntity = [];
     $byProduct = [];
     $ownerFingerprints = [];
+    $products = [];
     foreach ($inventory as &$candidate) {
         $productId = (int)$candidate['product_id'];
         if (!isset($ownerFingerprints[$productId])) {
             $productStmt->execute([$productId]);
             $product = $productStmt->fetch(PDO::FETCH_ASSOC) ?: null;
+            $products[$productId] = $product;
             $ownerFingerprints[$productId] = $product !== null
                 ? ingredientOntologyV3ProductOwnerFingerprint($product)
                 : '';
@@ -160,6 +163,29 @@ function ingredientOntologyV3Inventory(
                     $productId,
                     $ownerFingerprints[$productId]
                 );
+            } elseif (
+                $annexStatus === false
+                && $version !== null
+                && $products[$productId] !== null
+            ) {
+                $resolution =
+                    ingredientOntologyV3IdentityAnnexResolution(
+                        $db,
+                        $version,
+                        $products[$productId]
+                    );
+                if ((string)$resolution['status'] === 'accepted') {
+                    $mapping =
+                        ingredientOntologyV3IdentityAnnexResolvedMapping(
+                            $db,
+                            $version,
+                            $products[$productId],
+                            $resolution
+                        );
+                    $annexAuthoritative = $mapping !== null;
+                } elseif ((string)$resolution['status'] === 'rejected') {
+                    $annexAuthoritative = true;
+                }
             }
         }
         if (!$annexAuthoritative) {

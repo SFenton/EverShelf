@@ -638,6 +638,87 @@ function evershelfProcessingStatusWorkPhase(
     return 'idle';
 }
 
+function evershelfProcessingStatusEffectiveIdentityCounts(
+    PDO $db,
+    array $version,
+    array $products
+): array {
+    $counts = [
+        'accepted' => 0,
+        'unresolved' => 0,
+        'rejected' => 0,
+    ];
+    $lastUpdatedAt = null;
+    $stmt = $db->prepare("
+        SELECT annex.*
+        FROM ingredient_ontology_identity_annex annex
+        WHERE annex.ontology_version_id = ?
+    ");
+    $stmt->execute([(int)$version['id']]);
+    $annexByProduct = [];
+    foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
+        $annexByProduct[(int)$row['product_id']] = $row;
+    }
+    foreach ($products as $product) {
+        $productId = (int)$product['id'];
+        $fingerprint =
+            ingredientOntologyV3ProductOwnerFingerprint($product);
+        $row = $annexByProduct[$productId] ?? null;
+        $status = null;
+        if (
+            $row !== null
+            && hash_equals(
+                $fingerprint,
+                (string)$row['owner_fingerprint']
+            )
+            && (string)$row['resolver_version'] ===
+                INGREDIENT_ONTOLOGY_IDENTITY_ANNEX_RESOLVER_VERSION
+            && hash_equals(
+                ingredientOntologyV3IdentityAnnexReviewManifestHash(),
+                (string)$row['review_manifest_hash']
+            )
+            && hash_equals(
+                (string)$version['content_hash'],
+                (string)$row['ontology_content_hash']
+            )
+            && hash_equals(
+                (string)$version['seal_hash'],
+                (string)$row['ontology_seal_hash']
+            )
+        ) {
+            $status = (string)$row['status'];
+        } else {
+            $resolution =
+                ingredientOntologyV3IdentityAnnexResolution(
+                    $db,
+                    $version,
+                    $product
+                );
+            $status = (string)$resolution['status'];
+        }
+        if (!array_key_exists((string)$status, $counts)) {
+            $status = 'unresolved';
+        }
+        $counts[(string)$status]++;
+        $candidateUpdatedAt = trim(
+            (string)($row['updated_at'] ?? '')
+        );
+        if (
+            $candidateUpdatedAt !== ''
+            && (
+                $lastUpdatedAt === null
+                || $candidateUpdatedAt > $lastUpdatedAt
+            )
+        ) {
+            $lastUpdatedAt = $candidateUpdatedAt;
+        }
+    }
+    return [
+        'counts' => $counts,
+        'last_updated_at' => $lastUpdatedAt,
+    ];
+}
+
 function evershelfProcessingStatusIdentityAnnex(PDO $db): array {
     if (!evershelfProcessingStatusTableExists(
         $db,
@@ -660,59 +741,44 @@ function evershelfProcessingStatusIdentityAnnex(PDO $db): array {
         && $active['ontology_version_id'] !== null
             ? (int)$active['ontology_version_id']
             : 0;
-    $inventoryCount = (int)$db->query("
-        SELECT COUNT(DISTINCT product_id)
-        FROM inventory
-        WHERE quantity > 0
-    ")->fetchColumn();
+    $products = $db->query("
+        SELECT product.id, product.name, product.brand,
+               product.category, product.prepared_food
+        FROM products product
+        WHERE EXISTS (
+            SELECT 1
+            FROM inventory stock
+            WHERE stock.product_id = product.id
+              AND stock.quantity > 0
+        )
+        ORDER BY product.id
+    ")->fetchAll(PDO::FETCH_ASSOC);
+    $inventoryCount = count($products);
     $counts = [
         'accepted' => 0,
-        'unresolved' => 0,
+        'unresolved' => $inventoryCount,
         'rejected' => 0,
     ];
     $lastUpdatedAt = null;
     if ($versionId > 0) {
-        $stmt = $db->prepare("
-            SELECT annex.status, COUNT(*) AS product_count,
-                   MAX(annex.updated_at) AS last_updated_at
-            FROM ingredient_ontology_identity_annex annex
-            WHERE annex.ontology_version_id = ?
-              AND EXISTS (
-                  SELECT 1
-                  FROM inventory stock
-                  WHERE stock.product_id = annex.product_id
-                    AND stock.quantity > 0
-              )
-            GROUP BY annex.status
-        ");
-        $stmt->execute([$versionId]);
-        foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
-            $status = (string)$row['status'];
-            if (array_key_exists($status, $counts)) {
-                $counts[$status] = (int)$row['product_count'];
-            }
-            $candidateUpdatedAt = trim(
-                (string)($row['last_updated_at'] ?? '')
-            );
-            if (
-                $candidateUpdatedAt !== ''
-                && (
-                    $lastUpdatedAt === null
-                    || $candidateUpdatedAt > $lastUpdatedAt
-                )
-            ) {
-                $lastUpdatedAt = $candidateUpdatedAt;
-            }
+        $version = ingredientOntologyV3Version($db, $versionId);
+        if ($version !== null && (string)$version['status'] === 'ready') {
+            $effective =
+                evershelfProcessingStatusEffectiveIdentityCounts(
+                    $db,
+                    $version,
+                    $products
+                );
+            $counts = $effective['counts'];
+            $lastUpdatedAt = $effective['last_updated_at'];
         }
     }
-    $admitted = array_sum($counts);
-    $missing = max(0, $inventoryCount - $admitted);
     return [
         'available' => true,
         'ontology_version_id' => $versionId ?: null,
         'inventory_product_count' => $inventoryCount,
         'accepted_count' => $counts['accepted'],
-        'unresolved_count' => $counts['unresolved'] + $missing,
+        'unresolved_count' => $counts['unresolved'],
         'rejected_count' => $counts['rejected'],
         'last_updated_at' => $lastUpdatedAt,
     ];

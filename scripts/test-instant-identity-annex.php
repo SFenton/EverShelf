@@ -403,6 +403,70 @@ $assert(
     ) === $entities['potato'],
     'An unresolved annex decision must preserve a current-fingerprint sealed mapping'
 );
+$db->prepare("
+    INSERT INTO inventory (
+        product_id, location, quantity
+    )
+    VALUES (?, 'dispensa', 1)
+")->execute([$productIds['russet']]);
+$db->prepare("
+    DELETE FROM ingredient_ontology_identity_annex
+    WHERE product_id = ?
+")->execute([$productIds['russet']]);
+$annexCountBeforeRead = (int)$db->query("
+    SELECT COUNT(*) FROM ingredient_ontology_identity_annex
+")->fetchColumn();
+$transientInventory = ingredientOntologyV3Inventory(
+    $db,
+    $versionId
+);
+$transientRusset =
+    $transientInventory['by_product'][$productIds['russet']]
+        ?? null;
+$assert(
+    is_array($transientRusset)
+    && $transientRusset['status'] === 'accepted'
+    && $transientRusset['mapping_source']
+        === 'deterministic_identity_annex_read'
+    && (int)$transientRusset['entity_id'] === $entities['potato']
+    && (int)$db->query("
+        SELECT COUNT(*) FROM ingredient_ontology_identity_annex
+    ")->fetchColumn() === $annexCountBeforeRead,
+    'Missing current-version annex rows must resolve reviewed aliases without writes'
+);
+$identityProducts = $db->query("
+    SELECT product.id, product.name, product.brand,
+           product.category, product.prepared_food
+    FROM products product
+    WHERE EXISTS (
+        SELECT 1 FROM inventory stock
+        WHERE stock.product_id = product.id
+          AND stock.quantity > 0
+    )
+    ORDER BY product.id
+")->fetchAll(PDO::FETCH_ASSOC);
+$identityStatus =
+    evershelfProcessingStatusEffectiveIdentityCounts(
+        $db,
+        ingredientOntologyV3Version($db, $versionId),
+        $identityProducts
+    );
+$identityCounts = $identityStatus['counts'];
+$assert(
+    $identityCounts['accepted'] >= 1
+    && count($identityProducts)
+        === array_sum([
+            $identityCounts['accepted'],
+            $identityCounts['unresolved'],
+            $identityCounts['rejected'],
+        ]),
+    'Processing identity counts must include effective read-only annex admissions'
+);
+ingredientOntologyV3IdentityAnnexRefreshProduct(
+    $db,
+    $productIds['russet'],
+    $versionId
+);
 $annexLabelLength = $db->prepare("
     SELECT length(normalized_label)
     FROM ingredient_ontology_identity_annex
@@ -424,12 +488,6 @@ $db->prepare("
     DELETE FROM inventory
     WHERE product_id = ?
 ")->execute([$productIds['sealed']]);
-$db->prepare("
-    INSERT INTO inventory (
-        product_id, location, quantity
-    )
-    VALUES (?, 'dispensa', 1)
-")->execute([$productIds['russet']]);
 $requirementInventory = ingredientOntologyV3Inventory(
     $db,
     $versionId

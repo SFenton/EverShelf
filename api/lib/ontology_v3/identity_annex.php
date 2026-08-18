@@ -552,3 +552,89 @@ function ingredientOntologyV3IdentityAnnexMapping(
         'admission_source' => (string)$row['admission_source'],
     ];
 }
+
+function ingredientOntologyV3IdentityAnnexResolvedMapping(
+        PDO $db,
+        array $version,
+        array $product,
+        array $resolution
+    ): ?array {
+        if (
+            (string)($version['status'] ?? '') !== 'ready'
+            || (string)($resolution['status'] ?? '') !== 'accepted'
+            || (int)($resolution['label_id'] ?? 0) <= 0
+            || (int)($resolution['entity_id'] ?? 0) <= 0
+            || !is_string($version['content_hash'] ?? null)
+            || !is_string($version['seal_hash'] ?? null)
+        ) {
+            return null;
+        }
+        $ownerFingerprint =
+            ingredientOntologyV3ProductOwnerFingerprint($product);
+        $subjectStmt = $db->prepare("
+            SELECT subject_id
+            FROM ontology_subject_occurrences
+            WHERE owner_type = 'product'
+              AND owner_id = ?
+              AND owner_fingerprint = ?
+              AND active = 1
+            ORDER BY id DESC
+            LIMIT 1
+        ");
+        $subjectStmt->execute([
+            (int)$product['id'],
+            $ownerFingerprint,
+        ]);
+        $subjectId = $subjectStmt->fetchColumn();
+        $attributes = (array)($resolution['attributes'] ?? []);
+        ksort($attributes, SORT_STRING);
+        $normalizedAttributes = [];
+        foreach ($attributes as $facet => $value) {
+            if (!is_string($facet) || !is_string($value)) {
+                continue;
+            }
+            $normalizedAttributes[$facet] = [
+                'value' => $value,
+                'is_defining' =>
+                    ingredientOntologyV3FacetIsDefining($facet),
+                'source' => 'reviewed_identity_annex',
+            ];
+        }
+        $evidenceHash = ingredientOntologyV3Hash([
+            'resolver_version' =>
+                INGREDIENT_ONTOLOGY_IDENTITY_ANNEX_RESOLVER_VERSION,
+            'review_manifest_hash' =>
+                ingredientOntologyV3IdentityAnnexReviewManifestHash(),
+            'ontology_version_id' => (int)$version['id'],
+            'ontology_content_hash' => (string)$version['content_hash'],
+            'ontology_seal_hash' => (string)$version['seal_hash'],
+            'product_id' => (int)$product['id'],
+            'owner_fingerprint' => $ownerFingerprint,
+            'label_id' => (int)$resolution['label_id'],
+            'entity_id' => (int)$resolution['entity_id'],
+            'attributes' => $attributes,
+            'admission_source' =>
+                (string)$resolution['admission_source'],
+        ]);
+        return [
+            'mapping_id' => null,
+            'annex_id' => null,
+            'owner_fingerprint' => $ownerFingerprint,
+            'subject_id' => $subjectId !== false
+                ? (int)$subjectId
+                : null,
+            'entity_id' => (int)$resolution['entity_id'],
+            'entity_slug' => (string)$resolution['entity_slug'],
+            'entity_name' => (string)$resolution['entity_name'],
+            'status' => 'accepted',
+            'confidence' => 1.0,
+            'mapping_source' => 'deterministic_identity_annex_read',
+            'source_label' => (string)$product['name'],
+            'attributes' => $normalizedAttributes,
+            'is_staple' => false,
+            'label_id' => (int)$resolution['label_id'],
+            'evidence_hash' => $evidenceHash,
+            'admission_source' =>
+                (string)$resolution['admission_source'],
+        ];
+}

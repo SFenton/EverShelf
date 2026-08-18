@@ -5,6 +5,15 @@ All notable changes to EverShelf will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.11.4] - 2026-08-17
+
+### Fixed
+- Ready ontology versions now apply reviewed exact/attribute alias admission
+  read-only when a current-version annex row has not yet been persisted.
+  Full score rebuilds therefore preserve deterministic product identities
+  across ontology activation without rewriting products or advancing catalog
+  revisions. Processing counters report these effective admissions.
+
 ## [1.11.3] - 2026-08-17
 
 ### Fixed
