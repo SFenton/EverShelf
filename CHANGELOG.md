@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.13.9] - 2026-08-19
+
+### Fixed
+- Provider terms observed after the frozen review set receive explicit dynamic
+  D8 provider-specific unresolved dispositions. They remain fail-closed
+  without blocking reviewed ontology activation.
+
 ## [1.13.8] - 2026-08-19
 
 ### Fixed

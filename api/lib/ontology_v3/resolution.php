@@ -6354,6 +6354,12 @@ function ingredientOntologyV3FinalizeTerminalDispositions(
     int $versionId,
     array $manifest
 ): array {
+    $version = ingredientOntologyV3Version($db, $versionId);
+    $dynamicController = $version !== null
+        && function_exists(
+            'ingredientOntologyControllerUsesDynamicPins'
+        )
+        && ingredientOntologyControllerUsesDynamicPins($version);
     $definitions = ingredientOntologyV3DispositionDefinitions();
     $policies = ingredientOntologyV3ResolutionEntityFacetPolicyMap(
         $db,
@@ -6411,6 +6417,7 @@ function ingredientOntologyV3FinalizeTerminalDispositions(
         WHERE id = ?
     ");
     $providerCounts = [];
+    $dynamicUnreviewedProviderTerms = 0;
     while ($term = $provider->fetch(PDO::FETCH_ASSOC)) {
         $reviewKey = implode('|', [
             (string)$term['connector'],
@@ -6429,7 +6436,19 @@ function ingredientOntologyV3FinalizeTerminalDispositions(
             'consistency_state' => (string)$term['consistency_state'],
         ]);
         if ($review === null) {
-            if (
+            if ($dynamicController) {
+                $review = [
+                    'term_fingerprint' => $fingerprint,
+                    'title_hash' => (string)($term['title_hash'] ?? ''),
+                    'disposition_code' => 'D8',
+                    'entity_slug' => '',
+                    'attributes_json' => '{}',
+                    'rationale' =>
+                        'Dynamic provider term awaits explicit reviewed disposition',
+                    'reviewer' => 'autonomous-controller',
+                ];
+                $dynamicUnreviewedProviderTerms++;
+            } elseif (
                 defined('RECIPE_BACKEND_TEST_MODE')
                 && RECIPE_BACKEND_TEST_MODE
             ) {
@@ -7078,6 +7097,8 @@ function ingredientOntologyV3FinalizeTerminalDispositions(
     unset($counts);
     return [
         'provider_terms' => $providerCounts,
+        'dynamic_unreviewed_provider_term_count' =>
+            $dynamicUnreviewedProviderTerms,
         'products' => $productCounts,
         'mappings' => $mappingCounts,
         'scope_count' => count($cache),
