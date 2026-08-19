@@ -7305,12 +7305,29 @@ function ingredientOntologyV3DispositionAudit(
     $corpusProfile = (string)(
         $version['corpus_profile'] ?? 'test'
     );
-    $frozenCorpusAudit = ingredientOntologyV3FrozenCorpusAudit(
-        $db,
-        $corpusProfile
-    );
-    $subjectUniverseAudit =
-        ingredientOntologyV3SubjectUniverseAudit(
+    $dynamicPins = $version !== null
+        && function_exists(
+            'ingredientOntologyControllerUsesDynamicPins'
+        )
+        && ingredientOntologyControllerUsesDynamicPins($version)
+        && function_exists(
+            'ingredientOntologyControllerDynamicVersionPins'
+        )
+            ? ingredientOntologyControllerDynamicVersionPins(
+                $db,
+                $versionId,
+                $version
+            )
+            : null;
+    $frozenCorpusAudit = $dynamicPins !== null
+        ? $dynamicPins['corpus']
+        : ingredientOntologyV3FrozenCorpusAudit(
+            $db,
+            $corpusProfile
+        );
+    $subjectUniverseAudit = $dynamicPins !== null
+        ? $dynamicPins['subjects']
+        : ingredientOntologyV3SubjectUniverseAudit(
             $db,
             $versionId,
             $corpusProfile

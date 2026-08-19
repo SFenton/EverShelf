@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.13.4] - 2026-08-19
+
+### Fixed
+- Fresh reviewed candidates use controller dynamic corpus and subject pins, so
+  normal production catalog growth does not violate stale static manifest
+  counts.
+
 ## [1.13.3] - 2026-08-19
 
 ### Fixed

@@ -3225,6 +3225,14 @@ function ingredientOntologyActivationQuoteIdentifier(
                             10
                         ),
                     'parent_version_id' => (int)$parentVersion['id'],
+                    'dynamic_controller' => true,
+                    'controller_base_content_hash' =>
+                        (string)$parentVersion['content_hash'],
+                    'controller_constraint_epoch' => $constraintEpoch,
+                    'controller_constraint_hash' => $constraintHash,
+                    'controller_policy_hash' =>
+                        ingredientOntologyControllerPolicyHash(),
+                    'controller_generation_key' => $generationKey,
                 ]
             );
             $candidateVersionId = (int)$candidate['version_id'];

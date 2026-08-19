@@ -6803,6 +6803,68 @@ try {
         && $db->query('PRAGMA foreign_key_check')->fetchAll() === [],
         'Recipe updates must preserve retained historical shadow matches'
     );
+    $dynamicParent = ingredientOntologyV3Version($db, $versionId);
+    $dynamicCandidate = ingredientOntologyV3BuildCandidate(
+        $db,
+        [
+            'version' => 'v3-dynamic-reviewed-test',
+            'corpus_profile' => 'production',
+            'parent_version_id' => $versionId,
+            'dynamic_controller' => true,
+            'controller_base_content_hash' =>
+                (string)$dynamicParent['content_hash'],
+            'controller_constraint_epoch' => 0,
+            'controller_constraint_hash' =>
+                ingredientOntologyControllerConstraintHash($db, 0),
+            'controller_policy_hash' =>
+                ingredientOntologyControllerPolicyHash(),
+            'controller_generation_key' =>
+                ingredientOntologyV3Hash([
+                    'kind' => 'dynamic_reviewed_test',
+                    'parent_version_id' => $versionId,
+                ]),
+        ]
+    );
+    $dynamicVersionId = (int)$dynamicCandidate['version_id'];
+    $dynamicVersion = ingredientOntologyV3Version(
+        $db,
+        $dynamicVersionId
+    );
+    $dynamicManifest = $db->prepare("
+        SELECT manifest_hash, content_hash
+        FROM ingredient_ontology_resolution_manifests
+        WHERE ontology_version_id = ?
+    ");
+    $dynamicManifest->execute([$dynamicVersionId]);
+    $dynamicManifest = $dynamicManifest->fetch(PDO::FETCH_ASSOC);
+    $currentManifest = ingredientOntologyV3ResolutionManifest();
+    ontologyV3TestAssert(
+        (string)$dynamicVersion['status'] === 'ready'
+        && ingredientOntologyControllerUsesDynamicPins($dynamicVersion)
+        && ingredientOntologyControllerVersionIntegrityAudit(
+            $db,
+            $dynamicVersionId
+        )['valid']
+        && is_array($dynamicManifest)
+        && hash_equals(
+            (string)$currentManifest['manifest_hash'],
+            (string)$dynamicManifest['manifest_hash']
+        )
+        && hash_equals(
+            (string)$currentManifest['content_hash'],
+            (string)$dynamicManifest['content_hash']
+        )
+        && ontologyV3TestCount(
+            $db,
+            "SELECT COUNT(*)
+             FROM ingredient_ontology_entities
+             WHERE ontology_version_id = ?
+               AND slug = 'eggplant'
+               AND identity_role = 'identity_leaf'",
+            [$dynamicVersionId]
+        ) === 1,
+        'Dynamic reviewed candidates must seal the live corpus and current Eggplant manifest'
+    );
     $finalActiveId = recipeScoreState($db)['active_score_revision_id'];
     echo 'Ingredient ontology v3 tests passed: '
         . number_format($assertions)

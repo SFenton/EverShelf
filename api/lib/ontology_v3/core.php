@@ -4463,15 +4463,28 @@ function ingredientOntologyV3BuildCandidate(
     if ($model === '') {
         $model = INGREDIENT_ONTOLOGY_V3_DEFAULT_MODEL;
     }
+    $dynamicController = !empty($options['dynamic_controller']);
     $corpusProfile = ingredientOntologyV3ResolveCorpusProfile($options);
     $frozenCorpusAudit = ingredientOntologyV3FrozenCorpusAudit(
         $db,
         $corpusProfile
     );
-    if (!$frozenCorpusAudit['valid']) {
+    if (!$frozenCorpusAudit['valid'] && !$dynamicController) {
         throw new RuntimeException(
             'selected frozen corpus profile does not match the database: '
             . ingredientOntologyV3Json($frozenCorpusAudit)
+        );
+    }
+    if ($dynamicController) {
+        $frozenCorpusAudit = array_merge(
+            $frozenCorpusAudit,
+            [
+                'valid' => true,
+                'dynamic' => true,
+                'expected_hash' =>
+                    (string)$frozenCorpusAudit['actual_hash'],
+                'expected_counts' => $frozenCorpusAudit['counts'],
+            ]
         );
     }
     $resolutionManifest = ingredientOntologyV3ResolutionManifest();
@@ -4513,14 +4526,61 @@ function ingredientOntologyV3BuildCandidate(
             WHERE status IN ('ready', 'active')
             ORDER BY id DESC LIMIT 1
         ")->fetchColumn() ?: 0);
+    $parentVersion = $parentId > 0
+        ? ingredientOntologyV3Version($db, $parentId)
+        : null;
+    $controllerBaseContentHash = (string)(
+        $options['controller_base_content_hash']
+            ?? $parentVersion['content_hash']
+            ?? str_repeat('0', 64)
+    );
+    $controllerConstraintEpoch = max(
+        0,
+        (int)($options['controller_constraint_epoch'] ?? 0)
+    );
+    $controllerConstraintHash = (string)(
+        $options['controller_constraint_hash']
+            ?? (
+                function_exists('ingredientOntologyControllerConstraintHash')
+                    ? ingredientOntologyControllerConstraintHash(
+                        $db,
+                        $controllerConstraintEpoch
+                    )
+                    : str_repeat('0', 64)
+            )
+    );
+    $controllerPolicyHash = (string)(
+        $options['controller_policy_hash']
+            ?? (
+                function_exists('ingredientOntologyControllerPolicyHash')
+                    ? ingredientOntologyControllerPolicyHash()
+                    : str_repeat('0', 64)
+            )
+    );
+    $controllerGenerationKey = (string)(
+        $options['controller_generation_key']
+            ?? str_repeat('0', 64)
+    );
+    $controllerActivationPolicy = $dynamicController
+        ? 'autonomous'
+        : 'manual';
     $insert = $db->prepare("
         INSERT INTO ingredient_ontology_versions (
             version, status, schema_hash, prompt_hash, model_hash,
             model_name, corpus_hash, content_hash, parent_version_id,
             activation_policy, activation_block_reason, corpus_profile,
-            frozen_corpus_hash, frozen_subjects_hash, policy_hash
+            frozen_corpus_hash, frozen_subjects_hash, policy_hash,
+            controller_base_content_hash,
+            controller_constraint_epoch,
+            controller_constraint_hash,
+            controller_policy_hash,
+            controller_generation_key,
+            controller_activation_policy
         )
-        VALUES (?, 'building', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (
+            ?, 'building', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+            ?, ?, ?, ?, ?, ?
+        )
     ");
     $insert->execute([
         $version,
@@ -4537,6 +4597,12 @@ function ingredientOntologyV3BuildCandidate(
         (string)$frozenCorpusAudit['actual_hash'],
         $frozenSubjectsHash,
         $policyHash,
+        $controllerBaseContentHash,
+        $controllerConstraintEpoch,
+        $controllerConstraintHash,
+        $controllerPolicyHash,
+        $controllerGenerationKey,
+        $controllerActivationPolicy,
     ]);
     $versionId = (int)$db->lastInsertId();
     try {
@@ -4674,16 +4740,47 @@ function ingredientOntologyV3BuildCandidate(
                 $db,
                 $versionId
             );
-        $frozenCorpusAudit = ingredientOntologyV3FrozenCorpusAudit(
-            $db,
-            $corpusProfile
-        );
-        $subjectUniverse =
-            ingredientOntologyV3SubjectUniverseAudit(
-                $db,
+        if (
+            $dynamicController
+            && function_exists(
+                'ingredientOntologyControllerDynamicVersionPins'
+            )
+        ) {
+            $dynamicPins =
+                ingredientOntologyControllerDynamicVersionPins(
+                    $db,
+                    $versionId
+                );
+            $frozenCorpusAudit = $dynamicPins['corpus'];
+            $subjectUniverse = $dynamicPins['subjects'];
+            $frozenSubjectsHash =
+                (string)$subjectUniverse['subject_universe_hash'];
+            $policyHash = (string)$dynamicPins['policy_hash'];
+            $db->prepare("
+                UPDATE ingredient_ontology_versions
+                SET frozen_corpus_hash = ?,
+                    frozen_subjects_hash = ?,
+                    policy_hash = ?,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ? AND status = 'building'
+            ")->execute([
+                (string)$frozenCorpusAudit['actual_hash'],
+                $frozenSubjectsHash,
+                $policyHash,
                 $versionId,
+            ]);
+        } else {
+            $frozenCorpusAudit = ingredientOntologyV3FrozenCorpusAudit(
+                $db,
                 $corpusProfile
             );
+            $subjectUniverse =
+                ingredientOntologyV3SubjectUniverseAudit(
+                    $db,
+                    $versionId,
+                    $corpusProfile
+                );
+        }
         $matcherGold = ingredientOntologyV3EvaluateGold(
             $db,
             $versionId
@@ -4725,6 +4822,29 @@ function ingredientOntologyV3BuildCandidate(
             'activation_block_reason' => $activationBlockReason,
             'policy_hash' => $policyHash,
         ]);
+        $controllerSealHash = null;
+        if (
+            $dynamicController
+            && function_exists(
+                'ingredientOntologyControllerVersionSealHash'
+            )
+        ) {
+            $controllerVersion = ingredientOntologyV3Version(
+                $db,
+                $versionId
+            );
+            if ($controllerVersion === null) {
+                throw new RuntimeException(
+                    'dynamic controller candidate version is unavailable'
+                );
+            }
+            $controllerSealHash =
+                ingredientOntologyControllerVersionSealHash(
+                    $db,
+                    $controllerVersion,
+                    $sealHash
+                );
+        }
         $sourceIdentity = ingredientOntologyV3OwnerFingerprintAudit(
             $db,
             $versionId
@@ -4804,6 +4924,8 @@ function ingredientOntologyV3BuildCandidate(
                 review_manifest_hash = ?,
                 resolution_gold_hash = ?,
                 seal_hash = ?,
+                controller_seal_hash =
+                    COALESCE(?, controller_seal_hash),
                 ready_at = CASE WHEN ? = 'ready' THEN CURRENT_TIMESTAMP ELSE NULL END,
                 failed_at = CASE WHEN ? = 'failed' THEN CURRENT_TIMESTAMP ELSE NULL END,
                 updated_at = CURRENT_TIMESTAMP
@@ -4821,6 +4943,7 @@ function ingredientOntologyV3BuildCandidate(
                     (string)$resolutionManifest['manifest_hash'],
                     $resolutionGoldHash,
                     $sealHash,
+                    $controllerSealHash,
                     $status,
                     $status,
                     $versionId,
@@ -4835,6 +4958,7 @@ function ingredientOntologyV3BuildCandidate(
                 (string)$resolutionManifest['manifest_hash'],
                 $resolutionGoldHash,
                 $sealHash,
+                $controllerSealHash,
                 $status,
                 $status,
                 $versionId,
