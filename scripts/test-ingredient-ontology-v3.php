@@ -6865,6 +6865,31 @@ try {
         ) === 1,
         'Dynamic reviewed candidates must seal the live corpus and current Eggplant manifest'
     );
+    ontologyV3TestAssert(
+        ontologyV3TestCount(
+            $db,
+            "SELECT COUNT(*)
+             FROM ingredient_ontology_entities entity
+             WHERE entity.ontology_version_id = ?
+               AND entity.provenance = 'autonomous_controller'
+               AND entity.identity_role = 'structural_category'
+               AND NOT EXISTS (
+                   SELECT 1
+                   FROM ingredient_ontology_relations relation
+                   JOIN ingredient_ontology_entities parent
+                     ON parent.id = relation.to_entity_id
+                   WHERE relation.ontology_version_id =
+                            entity.ontology_version_id
+                     AND relation.from_entity_id = entity.id
+                     AND relation.relation = 'is_a'
+                     AND relation.is_primary = 1
+                     AND relation.review_state = 'accepted'
+                     AND parent.slug = 'ingredient'
+               )",
+            [$dynamicVersionId]
+        ) === 0,
+        'Dynamic legacy extras must remain connected non-satisfying structural placeholders'
+    );
     $finalActiveId = recipeScoreState($db)['active_score_revision_id'];
     echo 'Ingredient ontology v3 tests passed: '
         . number_format($assertions)

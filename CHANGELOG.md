@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.13.6] - 2026-08-19
+
+### Fixed
+- Autonomous structural placeholders are attached to the non-satisfying
+  `ingredient` branch so dynamic reviewed candidates remain one connected,
+  food-rooted graph.
+
 ## [1.13.5] - 2026-08-19
 
 ### Fixed
