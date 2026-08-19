@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.13.7] - 2026-08-19
+
+### Fixed
+- Dynamic placeholder parent links are applied after the explicit reviewed-edge
+  reset, so they survive final graph construction and validation.
+
 ## [1.13.6] - 2026-08-19
 
 ### Fixed
