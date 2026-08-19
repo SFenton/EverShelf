@@ -1522,20 +1522,77 @@ function ingredientOntologyV3ApplyResolutionEntities(
     );
     $manifestSlugs = array_keys($roleRows);
     sort($manifestSlugs, SORT_STRING);
-    if ($actualSlugs !== $manifestSlugs) {
+    $missingRoleSlugs = array_values(array_diff(
+        $manifestSlugs,
+        $actualSlugs
+    ));
+    $extraRoleSlugs = array_values(array_diff(
+        $actualSlugs,
+        $manifestSlugs
+    ));
+    $dynamicVersion = ingredientOntologyV3Version($db, $versionId);
+    $dynamicController = $dynamicVersion !== null
+        && function_exists(
+            'ingredientOntologyControllerUsesDynamicPins'
+        )
+        && ingredientOntologyControllerUsesDynamicPins($dynamicVersion);
+    if ($missingRoleSlugs || ($extraRoleSlugs && !$dynamicController)) {
         throw new RuntimeException(
             'entity-role manifest does not exactly cover the entity set: '
             . ingredientOntologyV3Json([
-                'missing' => array_values(array_diff(
-                    $manifestSlugs,
-                    $actualSlugs
-                )),
-                'extra' => array_values(array_diff(
-                    $actualSlugs,
-                    $manifestSlugs
-                )),
+                'missing' => $missingRoleSlugs,
+                'extra' => $extraRoleSlugs,
             ])
         );
+    }
+    if ($extraRoleSlugs) {
+        $placeholders = implode(
+            ',',
+            array_fill(0, count($extraRoleSlugs), '?')
+        );
+        $extraRows = $db->prepare("
+            SELECT slug, provenance
+            FROM ingredient_ontology_entities
+            WHERE ontology_version_id = ?
+              AND slug IN ({$placeholders})
+            ORDER BY slug
+        ");
+        $extraRows->execute(array_merge(
+            [$versionId],
+            $extraRoleSlugs
+        ));
+        $extraRows = $extraRows->fetchAll(PDO::FETCH_ASSOC);
+        $unsafeExtras = array_values(array_filter(
+            $extraRows,
+            static fn(array $row): bool => !in_array(
+                (string)$row['provenance'],
+                ['legacy_canonical', 'legacy_taxonomy'],
+                true
+            )
+        ));
+        if (
+            count($extraRows) !== count($extraRoleSlugs)
+            || $unsafeExtras
+        ) {
+            throw new RuntimeException(
+                'dynamic entity-role extras are not safe legacy placeholders: '
+                . ingredientOntologyV3Json([
+                    'expected' => $extraRoleSlugs,
+                    'unsafe' => $unsafeExtras,
+                ])
+            );
+        }
+        $db->prepare("
+            UPDATE ingredient_ontology_entities
+            SET identity_role = 'structural_category',
+                provenance = 'autonomous_controller',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE ontology_version_id = ?
+              AND slug IN ({$placeholders})
+        ")->execute(array_merge(
+            [$versionId],
+            $extraRoleSlugs
+        ));
     }
     $entities = ingredientOntologyV3EntityMap($db, $versionId)['by_slug'];
 
@@ -1982,6 +2039,8 @@ function ingredientOntologyV3ApplyResolutionEntities(
         'explicit_primary_edge_coverage' => count($parents),
         'explicit_edge_review_coverage' => count($reviewRows),
         'secondary_relation_count' => $secondaryRelationCount,
+        'dynamic_placeholder_count' => count($extraRoleSlugs),
+        'dynamic_placeholder_slugs' => $extraRoleSlugs,
         'edge_semantic_audit' => $edgeSemanticAudit,
     ];
 }
