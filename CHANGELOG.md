@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.13.1] - 2026-08-19
+
+### Fixed
+- Historical terminal failed activation imports no longer re-enter cleanup on
+  every scheduler cycle, block newer bundles, or report themselves as current
+  activation work when referenced rows cannot be purged.
+
 ## [1.13.0] - 2026-08-19
 
 ### Added
