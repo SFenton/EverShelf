@@ -10752,6 +10752,30 @@ try {
         ]) === [10, 20],
         'Policy-deferred copied jobs must enter the verified defer acknowledgement'
     );
+    controllerTestAssert(
+        ingredientOntologyControllerResultsAreRetryPending([
+            [
+                'job_id' => 10,
+                'status' => 'retry',
+                'error' =>
+                    'controller_generation_in_flight_retryable',
+            ],
+            [
+                'job_id' => 20,
+                'status' => 'retry',
+                'reason' => 'expand_search',
+            ],
+        ])
+        && !ingredientOntologyControllerResultsAreRetryPending([
+            [
+                'job_id' => 30,
+                'status' => 'failed',
+                'error' =>
+                    'controller_generation_in_flight_retryable',
+            ],
+        ]),
+        'Retry-only copied convergence must be advisory no-work'
+    );
     $provenanceSnapshot = [
         'database_lineage_uuid' =>
             ingredientOntologyActivationLineageUuid(

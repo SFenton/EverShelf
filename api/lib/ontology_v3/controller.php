@@ -23358,6 +23358,34 @@ function ingredientOntologyControllerPolicyDeferredJobIds(
     return $jobIds;
 }
 
+function ingredientOntologyControllerResultsAreRetryPending(
+    array $results
+): bool {
+    if (!$results) {
+        return false;
+    }
+    foreach ($results as $result) {
+        if (
+            !is_array($result)
+            || (string)($result['status'] ?? '') !== 'retry'
+        ) {
+            return false;
+        }
+        $reason = (string)(
+            $result['error']
+                ?? $result['reason']
+                ?? ''
+        );
+        if (!in_array($reason, [
+            'controller_generation_in_flight_retryable',
+            'expand_search',
+        ], true)) {
+            return false;
+        }
+    }
+    return true;
+}
+
 function ingredientOntologyControllerBuildActivationBundle(
     PDO $db,
     array $options = []
@@ -23385,6 +23413,7 @@ function ingredientOntologyControllerBuildActivationBundle(
     $acknowledgeableJobIds = [];
     $acknowledgementIntents = [];
     $staleNoOpSourceJobIds = [];
+    $processedResults = [];
     for ($cycle = 0; $cycle < $maximumCycles; $cycle++) {
         $result = ingredientOntologyControllerProcessQueue(
             $db,
@@ -23424,6 +23453,10 @@ function ingredientOntologyControllerBuildActivationBundle(
             ingredientOntologyControllerPolicyDeferredJobIds(
                 (array)($result['results'] ?? [])
             )
+        );
+        $processedResults = array_merge(
+            $processedResults,
+            (array)($result['results'] ?? [])
         );
         $claimed = (int)($result['claimed'] ?? 0);
         $claimedTotal += $claimed;
@@ -23729,6 +23762,20 @@ function ingredientOntologyControllerBuildActivationBundle(
                 'no_work' => true,
                 'superseded_source_job_ids' =>
                     $staleNoOpSourceJobIds,
+            ];
+        }
+        if (
+            $claimedTotal > 0
+            && !$generationResults
+            && ingredientOntologyControllerResultsAreRetryPending(
+                $processedResults
+            )
+        ) {
+            return [
+                'claimed_intents' => $claimedTotal,
+                'generation_results' => [],
+                'no_work' => true,
+                'reason' => 'controller_retry_pending',
             ];
         }
         throw new RuntimeException(

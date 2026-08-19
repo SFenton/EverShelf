@@ -7720,6 +7720,9 @@ function ingredientOntologyActivationAssertActiveDatabase(PDO $db): void {
                 ];
             }
             if (!empty($built['no_work'])) {
+                $noWorkReason = (string)(
+                    $built['reason'] ?? 'no_due_generation_work'
+                );
                 ingredientOntologyActivationWithLiveReservation(
                     $options,
                     'record_policy_deferred',
@@ -7732,7 +7735,7 @@ function ingredientOntologyActivationAssertActiveDatabase(PDO $db): void {
                                     (int)(
                                         $built['claimed_intents'] ?? 0
                                     ),
-                                'reason' => 'no_due_generation_work',
+                                'reason' => $noWorkReason,
                                 'superseded_source_job_ids' =>
                                     array_map(
                                         'intval',
@@ -7746,7 +7749,7 @@ function ingredientOntologyActivationAssertActiveDatabase(PDO $db): void {
                 );
                 return [
                     'action' => 'policy_deferred',
-                    'reason' => 'no_due_generation_work',
+                    'reason' => $noWorkReason,
                     'work_cleanup' => $workCleanup,
                     'cdc_pruned' => $cdcPruned,
                 ];
