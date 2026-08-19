@@ -519,7 +519,7 @@ function evershelfProcessingStatusActivation(PDO $db): array {
             FROM ontology_activation_imports
             WHERE status IN (
                 'staging', 'importing', 'verifying', 'activatable',
-                'rebase_required', 'failed', 'purging'
+                'rebase_required', 'purging'
             )
             ORDER BY
                 CASE bundle_kind WHEN 'ontology' THEN 0 ELSE 1 END,

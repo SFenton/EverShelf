@@ -304,6 +304,11 @@ try {
         '2026-08-16 19:00:00',
     ]);
     $scoreImportId = (int)$db->lastInsertId();
+    $schedulerImport = ingredientOntologyActivationPendingImport($db);
+    $assert(
+        (int)($schedulerImport['id'] ?? 0) === $scoreImportId,
+        'The activation scheduler must skip terminal failed imports'
+    );
     $db->exec("
         UPDATE ontology_activation_state
         SET failure_count = 1,
@@ -313,10 +318,9 @@ try {
     ");
     $activation = evershelfProcessingStatusActivation($db);
     $assert(
-        (int)$activation['current_import']['id'] === $ontologyImportId
+        (int)$activation['current_import']['id'] === $scoreImportId
         && (int)$activation['latest_import']['id'] === $scoreImportId
-        && $activation['current_import']['last_error']
-            === EVERSHELF_PROCESSING_STATUS_PUBLIC_ERROR
+        && $activation['current_import']['last_error'] === null
         && $activation['last_error']
             === EVERSHELF_PROCESSING_STATUS_PUBLIC_ERROR
         && !str_contains(
@@ -327,8 +331,8 @@ try {
             (string)$activation['last_error'],
             '/var/www'
         ),
-        'Activation status must distinguish scheduler-current work from '
-            . 'the latest row without exposing persisted diagnostics'
+        'Terminal failed imports must not block scheduler-current work or '
+            . 'expose persisted diagnostics'
     );
     $problemStatus = evershelfProcessingStatus($db);
     $assert(
