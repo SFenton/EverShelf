@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.13.16] - 2026-08-19
+
+### Fixed
+- The resident sparse score worker runs with a 512 MB PHP memory envelope,
+  preventing production-scale matcher context from exhausting PHP's 128 MB
+  default during multi-product reconciliation.
+
 ## [1.13.15] - 2026-08-19
 
 ### Fixed
