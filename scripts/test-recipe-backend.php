@@ -6052,6 +6052,13 @@ try {
         'steps' => ['Authorized local step.'],
     ], ['connector' => 'manual', 'external_id' => 'unresolved-grocery-detail']);
     $unresolvedDetail = recipeCatalogDetail($db, (int)$unresolvedRecipe['id']);
+    $unresolvedSearch = recipeCatalogTextSearch(
+        $db,
+        'Unknown Alias Ingredient',
+        null,
+        20,
+        0
+    );
     recipeTestAssert(
         $unresolvedDetail['ingredients'][0]['inventory']['state'] === 'uncertain'
         && $unresolvedDetail['capabilities']['grocery_add'] === true
@@ -6059,6 +6066,18 @@ try {
         && $unresolvedDetail['grocery']['missing_count'] === 0
         && $unresolvedDetail['grocery']['eligible_count'] === 0,
         'Unresolved inventory taxonomy must not be claimed missing'
+    );
+    recipeTestAssert(
+        in_array(
+            (int)$unresolvedRecipe['id'],
+            array_map(
+                static fn(array $row): int =>
+                    (int)$row['recipe_id'],
+                $unresolvedSearch['rows']
+            ),
+            true
+        ),
+        'Unresolved ingredients must remain text-searchable without becoming satisfying'
     );
     $unresolvedGrocery = recipeGroceryAddMissing($db, [
         'recipe_id' => (int)$unresolvedRecipe['id'],

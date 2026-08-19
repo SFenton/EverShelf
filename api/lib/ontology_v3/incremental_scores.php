@@ -1764,6 +1764,8 @@ function ingredientOntologyV3IncrementalRebuild(
     int $batchSize = 1000
 ): array {
     $started = hrtime(true);
+    $identityAdmission =
+        ingredientOntologyV3IdentityAdmissionSync($db);
     $pendingProducts =
         ingredientOntologyV3IncrementalPendingProducts($db);
     $pendingRecipes =
@@ -2474,6 +2476,8 @@ function ingredientOntologyV3IncrementalRebuild(
                     INGREDIENT_ONTOLOGY_IDENTITY_ANNEX_RESOLVER_VERSION,
                 'review_manifest_hash' =>
                     ingredientOntologyV3IdentityAnnexReviewManifestHash(),
+                'admission_revision' =>
+                    (int)($identityAdmission['revision'] ?? 0),
                 'product_ids' => $productIds,
                 'affected_recipe_count' =>
                     count($affectedRecipeIds),
@@ -2544,9 +2548,9 @@ function ingredientOntologyV3IncrementalRebuild(
                 || (int)$lockedState['inventory_revision']
                     < (int)$state['inventory_revision']
                 || (int)$lockedState['catalog_revision']
-                    !== (int)$state['catalog_revision']
+                    < (int)$state['catalog_revision']
                 || (int)$lockedState['ontology_source_revision']
-                    !== (int)$state['ontology_source_revision']
+                    < (int)$state['ontology_source_revision']
                 || !hash_equals(
                     (string)(
                         $lockedState[
@@ -2613,8 +2617,8 @@ function ingredientOntologyV3IncrementalRebuild(
                   AND active_score_revision_id = ?
                   AND active_score_projection_revision_id = ?
                   AND inventory_revision >= ?
-                  AND catalog_revision = ?
-                  AND ontology_source_revision = ?
+                  AND catalog_revision >= ?
+                  AND ontology_source_revision >= ?
             ");
             $activate->execute([
                 $revisionId,

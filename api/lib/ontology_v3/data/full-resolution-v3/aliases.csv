@@ -8,6 +8,19 @@ noodle,rice vermicelli,en,"{""form"":""noodle"",""variety"":""rice""}",,,,Rice v
 oil,groundnut oil,en,"{""variety"":""peanut""}",,,,Groundnut is a culinary synonym for peanut oil
 oil,arachis oil,en,"{""variety"":""peanut""}",,,,Arachis is a botanical synonym for peanut oil
 bell-pepper,red capsicum,en,"{""variety"":""red""}",,,,Red capsicum is red bell pepper and never Piper pepper
+eggplant,eggplant,en,{},,,,Reviewed unqualified English eggplant identity
+eggplant,eggplants,en,{},,,,Reviewed unqualified English plural eggplant identity
+eggplant,aubergine,en,{},,,,Reviewed unqualified English aubergine synonym
+eggplant,aubergines,en,{},,,,Reviewed unqualified English plural aubergine synonym
+eggplant,auberginen,de,{},,,,Reviewed German plural eggplant identity
+eggplant,auberginer,da,{},,,,Reviewed Danish plural eggplant wording
+eggplant,melanzana,it,{},,,,Reviewed Italian singular eggplant identity
+eggplant,melanzane,it,{},,,,Reviewed Italian plural eggplant identity
+eggplant,melanzani,de,{},,,,Reviewed German unqualified eggplant wording
+eggplant,di melanzana,it,{},,,,Reviewed Italian source phrase for singular eggplant
+eggplant,di melanzane,it,{},,,,Reviewed Italian source phrase for plural eggplant
+eggplant,d aubergine,fr,{},,,,Reviewed normalized French elision for singular aubergine
+eggplant,d aubergines,fr,{},,,,Reviewed normalized French elision for plural aubergines
 milk-alternative,hazelnut milk,en,"{""variety"":""hazelnut""}",,,,Hazelnut milk is a milk alternative with reviewed hazelnut variety
 olive,pitted Kalamata olives,en,"{""preparation"":""pitted"",""variety"":""kalamata""}",,,,Observed English plural Kalamata olive with pitted preparation
 olive,Kalamata olives pitted,en,"{""preparation"":""pitted"",""variety"":""kalamata""}",,,,Observed English postpositive pitted Kalamata wording

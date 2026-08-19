@@ -111,6 +111,94 @@ try {
             'Streaming canonical hashes must match legacy stable JSON'
         );
     }
+    $permanentLineage =
+        ingredientOntologyActivationClassifyValidationErrors([
+            'incremental input lineage changed',
+        ]);
+    $liveDrift =
+        ingredientOntologyActivationClassifyValidationErrors([
+            'inventory or catalog inputs changed after shadow build',
+            'shadow materialization is incomplete',
+        ]);
+    $scoreDateDrift =
+        ingredientOntologyActivationClassifyValidationErrors([
+            'shadow score date is not current',
+        ]);
+    $activationDateDrift =
+        ingredientOntologyActivationClassifyValidationErrors([
+            'activation score date changed',
+        ]);
+    activationRuntimeTestAssert(
+        empty($permanentLineage['expected'])
+        && !empty($liveDrift['expected'])
+        && $liveDrift['drift_codes'] === [
+            'live_inputs_changed',
+        ]
+        && !empty($scoreDateDrift['expected'])
+        && $scoreDateDrift['drift_codes'] === [
+            'score_date_rolled_over',
+        ]
+        && $scoreDateDrift['outcome_kind'] === 'rebase_required'
+        && !empty($activationDateDrift['expected'])
+        && $activationDateDrift['outcome_kind'] === 'rebase_required',
+        'Only primary live drift plus known derivative errors may rebase'
+    );
+    $standaloneRollover = null;
+    try {
+        ingredientOntologyActivationAssertScoreValidation(
+            [
+                'valid' => false,
+                'errors' => ['shadow score date is not current'],
+            ],
+            'score bundle validation failed',
+            'superseded_snapshot',
+            ['validation_path' => 'standalone_score_bundle']
+        );
+    } catch (IngredientOntologyActivationExpectedOutcome $error) {
+        $standaloneRollover = $error;
+    }
+    $generationRollover = null;
+    try {
+        ingredientOntologyActivationAssertScoreValidation(
+            [
+                'valid' => false,
+                'errors' => ['shadow score date is not current'],
+            ],
+            'ontology activation score attestation failed',
+            'superseded_snapshot',
+            ['validation_path' => 'generation_bundle']
+        );
+    } catch (IngredientOntologyActivationExpectedOutcome $error) {
+        $generationRollover = $error;
+    }
+    $lineageFailureVisible = false;
+    try {
+        ingredientOntologyActivationAssertScoreValidation(
+            [
+                'valid' => false,
+                'errors' => ['incremental input lineage changed'],
+            ],
+            'score bundle validation failed',
+            'rebase_required'
+        );
+    } catch (RuntimeException $error) {
+        $lineageFailureVisible = !($error instanceof
+            IngredientOntologyActivationExpectedOutcome)
+            && str_contains(
+                $error->getMessage(),
+                'incremental input lineage changed'
+            );
+    }
+    activationRuntimeTestAssert(
+        $standaloneRollover instanceof
+            IngredientOntologyActivationExpectedOutcome
+        && $standaloneRollover->outcomeKind() === 'rebase_required'
+        && $generationRollover instanceof
+            IngredientOntologyActivationExpectedOutcome
+        && $generationRollover->outcomeKind() === 'rebase_required'
+        && $lineageFailureVisible,
+        'Standalone and generation score validation must share typed rollover handling while lineage mismatches fail closed'
+    );
 
     $db = new PDO('sqlite:' . $dbPath);
     $db->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);

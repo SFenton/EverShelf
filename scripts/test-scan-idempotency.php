@@ -15,6 +15,7 @@ if ($mode === '--concurrent-writer') {
     $db->setAttribute(PDO::ATTR_DEFAULT_FETCH_MODE, PDO::FETCH_ASSOC);
     $db->exec('PRAGMA foreign_keys = ON');
     $db->exec('PRAGMA busy_timeout = 5000');
+    ingredientOntologyV3RegisterGuardFunctions($db);
     $GLOBALS['INVENTORY_ADD_INPUT'] = [
         'idempotency_key' => 'scan-concurrent-1',
         'product_id' => (int)$argv[3],
@@ -125,7 +126,8 @@ $assert(
     'Malformed idempotency keys must be rejected'
 );
 
-$concurrentDirectory = sys_get_temp_dir() . '/evershelf-scan-idempotency-'
+$concurrentDirectory = dirname(__DIR__)
+    . '/data/.scan-idempotency-concurrent-'
     . getmypid() . '-' . bin2hex(random_bytes(4));
 if (!mkdir($concurrentDirectory, 0770, true)) {
     throw new RuntimeException('Could not create concurrent scan test directory');
@@ -192,7 +194,9 @@ try {
         $status = proc_close($process);
         if ($status !== 0) {
             throw new RuntimeException(
-                'Concurrent scan writer failed: ' . $stderr
+                'Concurrent scan writer failed with status '
+                    . $status . ': ' . $stderr
+                    . ' stdout=' . $stdout
             );
         }
         $decoded = json_decode($stdout, true);

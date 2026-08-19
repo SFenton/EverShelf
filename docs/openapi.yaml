@@ -235,11 +235,14 @@ paths:
       responses:
         "200":
           description: >-
-            Compact processing phase, pending recipe/intake/generation/deferred
-            counts, oldest work age, recipe-score freshness, copied-activation
-            state, provider/logging health, and source-ingredient ontology
-            occurrence coverage. The endpoint never returns recipe rows,
-            prompts, credentials, or provider socket paths.
+            Compact processing phase, pending recipe/intake/generation-intent
+            and policy-deferred counts, coverage-gap advisories, oldest work
+            age, recipe-score freshness, structured copied-activation outcomes,
+            provider/logging health, and source-ingredient ontology occurrence
+            coverage. Unresolved identities and policy-disabled autonomy are
+            advisory; actionable integrity/runtime failures set problem. The
+            endpoint never returns recipe rows, prompts, credentials, or
+            provider socket paths.
           content:
             application/json:
               schema:

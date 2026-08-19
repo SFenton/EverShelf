@@ -14,6 +14,46 @@ function evershelfProcessingStatusPublicError(
         : EVERSHELF_PROCESSING_STATUS_PUBLIC_ERROR;
 }
 
+function evershelfProcessingStatusPublicOutcome(
+    ?string $kind,
+    array $outcome
+): array {
+    $public = [];
+    foreach ([
+        'intent_count',
+        'applied_count',
+        'deferred_count',
+        'claimed_intents',
+        'expected_retry_count',
+        'expected_retry_limit',
+        'next_attempt_seconds',
+    ] as $field) {
+        if (isset($outcome[$field]) && is_numeric($outcome[$field])) {
+            $public[$field] = (int)$outcome[$field];
+        }
+    }
+    foreach ([
+        'policy_deferred',
+        'escalated',
+    ] as $field) {
+        if (array_key_exists($field, $outcome)) {
+            $public[$field] = !empty($outcome[$field]);
+        }
+    }
+    if (is_array($outcome['drift_codes'] ?? null)) {
+        $public['drift_codes'] = array_values(array_filter(
+            array_map('strval', $outcome['drift_codes']),
+            static fn(string $code): bool =>
+                preg_match('/^[a-z][a-z0-9_]{0,79}$/D', $code) === 1
+        ));
+    }
+    $reason = trim((string)($outcome['reason'] ?? ''));
+    if (preg_match('/^[a-z][a-z0-9_]{0,79}$/D', $reason)) {
+        $public['reason'] = $reason;
+    }
+    return $public;
+}
+
 function evershelfProcessingStatusTableExists(
     PDO $db,
     string $table
@@ -132,6 +172,16 @@ function evershelfProcessingStatusOntologyQueue(PDO $db): array {
             'intake_open_count' => 0,
             'generation_open_count' => 0,
             'deferred_count' => 0,
+            'generation_intent_pending_count' => 0,
+            'generation_intent_due_count' => 0,
+            'generation_intent_policy_deferred_count' => 0,
+            'generation_intent_oldest_at' => null,
+            'generation_intent_oldest_age_seconds' => null,
+            'generation_intent_due_oldest_at' => null,
+            'generation_intent_due_oldest_age_seconds' => null,
+            'coverage_gap_open_count' => 0,
+            'coverage_gap_oldest_at' => null,
+            'coverage_gap_oldest_age_seconds' => null,
             'active_count' => 0,
             'failed_24h_count' => 0,
             'oldest_at' => null,
@@ -208,7 +258,62 @@ function evershelfProcessingStatusOntologyQueue(PDO $db): array {
             'healthy' => false,
             'reason' => 'controller_runtime_unavailable',
         ];
+    $intent = [
+        'pending_count' => 0,
+        'due_count' => 0,
+        'policy_deferred_count' => 0,
+        'oldest_at' => null,
+        'oldest_due_at' => null,
+    ];
+    if (evershelfProcessingStatusTableExists(
+        $db,
+        'ontology_generation_intents'
+    )) {
+        $intent = $db->query("
+            SELECT COUNT(*) AS pending_count,
+                   COALESCE(SUM(CASE
+                       WHEN job.next_attempt_at IS NULL
+                         OR job.next_attempt_at <= CURRENT_TIMESTAMP
+                       THEN 1 ELSE 0 END), 0) AS due_count,
+                   COALESCE(SUM(CASE
+                       WHEN job.last_error_kind =
+                            'generation_policy_deferred'
+                       THEN 1 ELSE 0 END), 0)
+                       AS policy_deferred_count,
+                   MIN(intent.created_at) AS oldest_at,
+                   MIN(CASE
+                       WHEN job.next_attempt_at IS NULL
+                         OR job.next_attempt_at <= CURRENT_TIMESTAMP
+                       THEN intent.created_at ELSE NULL END)
+                       AS oldest_due_at
+            FROM ontology_generation_intents intent
+            JOIN ontology_controller_jobs job
+              ON job.id = intent.source_job_id
+            WHERE intent.status = 'pending'
+        ")->fetch(PDO::FETCH_ASSOC) ?: $intent;
+    }
+    $coverageGap = [
+        'open_count' => 0,
+        'oldest_at' => null,
+    ];
+    if (evershelfProcessingStatusTableExists(
+        $db,
+        'ontology_controller_coverage_gaps'
+    )) {
+        $coverageGap = $db->query("
+            SELECT COUNT(*) AS open_count,
+                   MIN(created_at) AS oldest_at
+            FROM ontology_controller_coverage_gaps
+            WHERE status = 'open'
+        ")->fetch(PDO::FETCH_ASSOC) ?: $coverageGap;
+    }
     $oldestAt = trim((string)($row['oldest_at'] ?? '')) ?: null;
+    $intentOldest =
+        trim((string)($intent['oldest_at'] ?? '')) ?: null;
+    $intentDueOldest =
+        trim((string)($intent['oldest_due_at'] ?? '')) ?: null;
+    $coverageGapOldest =
+        trim((string)($coverageGap['oldest_at'] ?? '')) ?: null;
     return [
         'available' => true,
         'runtime_enabled' => $runtimeEnabled,
@@ -218,6 +323,23 @@ function evershelfProcessingStatusOntologyQueue(PDO $db): array {
         'generation_open_count' =>
             (int)($row['generation_open_count'] ?? 0),
         'deferred_count' => (int)($row['deferred_count'] ?? 0),
+        'generation_intent_pending_count' =>
+            (int)($intent['pending_count'] ?? 0),
+        'generation_intent_due_count' =>
+            (int)($intent['due_count'] ?? 0),
+        'generation_intent_policy_deferred_count' =>
+            (int)($intent['policy_deferred_count'] ?? 0),
+        'generation_intent_oldest_at' => $intentOldest,
+        'generation_intent_oldest_age_seconds' =>
+            evershelfProcessingStatusAgeSeconds($intentOldest),
+        'generation_intent_due_oldest_at' => $intentDueOldest,
+        'generation_intent_due_oldest_age_seconds' =>
+            evershelfProcessingStatusAgeSeconds($intentDueOldest),
+        'coverage_gap_open_count' =>
+            (int)($coverageGap['open_count'] ?? 0),
+        'coverage_gap_oldest_at' => $coverageGapOldest,
+        'coverage_gap_oldest_age_seconds' =>
+            evershelfProcessingStatusAgeSeconds($coverageGapOldest),
         'active_count' => (int)($row['active_count'] ?? 0),
         'failed_24h_count' => $failed,
         'oldest_at' => $oldestAt,
@@ -358,7 +480,9 @@ function evershelfProcessingStatusActivation(PDO $db): array {
     ) {
         $state = $db->query("
             SELECT requested_at, requested_reason, next_attempt_at,
-                   failure_count, last_error, updated_at
+                   failure_count, last_error,
+                   last_outcome_kind, last_outcome_json,
+                   last_outcome_at, updated_at
             FROM ontology_activation_state
             WHERE id = 1
         ")->fetch(PDO::FETCH_ASSOC) ?: null;
@@ -434,6 +558,13 @@ function evershelfProcessingStatusActivation(PDO $db): array {
     $lastError = evershelfProcessingStatusPublicError(
         (string)($errors[0]['message'] ?? '')
     );
+    $lastOutcome = json_decode(
+        (string)($state['last_outcome_json'] ?? '{}'),
+        true
+    );
+    $lastOutcome = is_array($lastOutcome) ? $lastOutcome : [];
+    $lastOutcomeKind =
+        trim((string)($state['last_outcome_kind'] ?? '')) ?: null;
     $formatImport = static function (?array $import): ?array {
         if (!is_array($import)) {
             return null;
@@ -482,6 +613,13 @@ function evershelfProcessingStatusActivation(PDO $db): array {
         'next_attempt_at' => $state['next_attempt_at'] ?? null,
         'failure_count' => (int)($state['failure_count'] ?? 0),
         'last_error' => $lastError,
+        'last_outcome_kind' => $lastOutcomeKind,
+        'last_outcome' =>
+            evershelfProcessingStatusPublicOutcome(
+                $lastOutcomeKind,
+                $lastOutcome
+            ),
+        'last_outcome_at' => $state['last_outcome_at'] ?? null,
         'updated_at' => $state['updated_at'] ?? null,
         'current_import' => $formatImport($current),
         'latest_import' => $formatImport($latest),
@@ -635,6 +773,9 @@ function evershelfProcessingStatusWorkPhase(
         && (
             (int)($ontologyQueue['intake_open_count'] ?? 0) > 0
             || (int)($ontologyQueue['generation_open_count'] ?? 0) > 0
+            || (int)(
+                $ontologyQueue['generation_intent_due_count'] ?? 0
+            ) > 0
         )
     ) {
         return 'ontology';
@@ -742,6 +883,9 @@ function evershelfProcessingStatusIdentityAnnex(PDO $db): array {
             'unresolved_count' => 0,
             'rejected_count' => 0,
             'last_updated_at' => null,
+            'admission_revision' => 0,
+            'review_manifest_hash' => '',
+            'last_changed_label_count' => 0,
         ];
     }
     $active = function_exists('recipeScoreActiveRevision')
@@ -770,6 +914,14 @@ function evershelfProcessingStatusIdentityAnnex(PDO $db): array {
         'rejected' => 0,
     ];
     $lastUpdatedAt = null;
+    $admissionState = function_exists(
+        'ingredientOntologyV3IdentityAdmissionState'
+    ) ? ingredientOntologyV3IdentityAdmissionState($db) : [
+        'available' => false,
+        'revision' => 0,
+        'review_manifest_hash' => '',
+        'last_changed_label_count' => 0,
+    ];
     if ($versionId > 0) {
         $version = ingredientOntologyV3Version($db, $versionId);
         if ($version !== null && (string)$version['status'] === 'ready') {
@@ -791,6 +943,12 @@ function evershelfProcessingStatusIdentityAnnex(PDO $db): array {
         'unresolved_count' => $counts['unresolved'],
         'rejected_count' => $counts['rejected'],
         'last_updated_at' => $lastUpdatedAt,
+        'admission_revision' =>
+            (int)($admissionState['revision'] ?? 0),
+        'review_manifest_hash' =>
+            (string)($admissionState['review_manifest_hash'] ?? ''),
+        'last_changed_label_count' =>
+            (int)($admissionState['last_changed_label_count'] ?? 0),
     ];
 }
 
@@ -941,7 +1099,7 @@ function evershelfProcessingStatus(PDO $db): array {
     $incrementalProblem =
         (string)($incremental['phase'] ?? '') === 'failed'
         && $incremental['last_error'] !== null;
-    $coverageProblem = $ontologyQueue['runtime_enabled']
+    $coverageAdvisory = $ontologyQueue['runtime_enabled']
         && $coverage['available']
         && $coverage['missing_recipe_count'] > 0;
     $currentImport = $activation['current_import'];
@@ -949,14 +1107,13 @@ function evershelfProcessingStatus(PDO $db): array {
         || $providerProblem
         || $activationProblem
         || $incrementalProblem
-        || $coverageProblem
         || $recipeQueue['failed_24h_count'] > 0
         || $ontologyQueue['failed_24h_count'] > 0
         || (
             is_array($currentImport)
             && in_array(
                 $currentImport['status'],
-                ['failed', 'rebase_required'],
+                ['failed'],
                 true
             )
         );
@@ -981,7 +1138,7 @@ function evershelfProcessingStatus(PDO $db): array {
                 ?? $activation['current_import']['created_at']
                 ?? null
         ) : null,
-        $coverageProblem ? $coverage['oldest_missing_at'] : null,
+        $ontologyQueue['generation_intent_due_oldest_at'] ?? null,
         $incremental['oldest_at'] ?? null
     );
     $pending = [
@@ -989,14 +1146,12 @@ function evershelfProcessingStatus(PDO $db): array {
             $recipeQueue['open_count']
             + $ontologyQueue['intake_open_count']
             + $ontologyQueue['generation_open_count']
+            + (int)(
+                $ontologyQueue['generation_intent_due_count'] ?? 0
+            )
             + ($scores['stale'] ? 1 : 0)
             + (int)$incremental['pending_product_count']
-            + (int)$incremental['pending_recipe_count']
-            + (
-                $ontologyQueue['runtime_enabled']
-                    ? (int)$coverage['missing_recipe_count']
-                    : 0
-            ),
+            + (int)$incremental['pending_recipe_count'],
         'recipe_jobs' => $recipeQueue['open_count'],
         'ontology_intake_jobs' =>
             $ontologyQueue['intake_open_count'],
@@ -1004,6 +1159,16 @@ function evershelfProcessingStatus(PDO $db): array {
             $ontologyQueue['generation_open_count'],
         'ontology_deferred_jobs' =>
             $ontologyQueue['deferred_count'],
+        'ontology_generation_intents' =>
+            (int)($ontologyQueue[
+                'generation_intent_due_count'
+            ] ?? 0),
+        'ontology_policy_deferred_intents' =>
+            (int)($ontologyQueue[
+                'generation_intent_policy_deferred_count'
+            ] ?? 0),
+        'identity_coverage_gaps' =>
+            (int)($ontologyQueue['coverage_gap_open_count'] ?? 0),
         'recipes_missing_observation' =>
             $ontologyQueue['runtime_enabled']
                 ? (int)$coverage['missing_recipe_count']
@@ -1043,6 +1208,20 @@ function evershelfProcessingStatus(PDO $db): array {
             'healthy' => !empty($logging['healthy']),
             'writable' => !empty($logging['writable']),
             'last_error' => $logging['last_error'] ?? null,
+        ],
+        'advisories' => [
+            'unresolved_inventory_identities' =>
+                (int)($identity['unresolved_count'] ?? 0),
+            'recipe_identity_coverage_missing' =>
+                $coverageAdvisory
+                    ? (int)$coverage['missing_recipe_count']
+                    : 0,
+            'identity_coverage_gaps' =>
+                (int)($ontologyQueue['coverage_gap_open_count'] ?? 0),
+            'policy_deferred_intents' =>
+                (int)($ontologyQueue[
+                    'generation_intent_policy_deferred_count'
+                ] ?? 0),
         ],
     ];
 }

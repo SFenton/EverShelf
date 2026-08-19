@@ -5,6 +5,46 @@ All notable changes to EverShelf will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+## [1.13.0] - 2026-08-19
+
+### Added
+- Reviewed Eggplant identity and multilingual exact aliases shared by product
+  and recipe identity admission, with targeted manifest revision invalidation.
+- Wake-driven canonical queue worker with a 30-second dropped-wake safety poll.
+- Auditable controller coverage-gap records and processing backlog diagnostics.
+
+### Changed
+- Semantic no-op activation acknowledgements now carry verified apply/defer
+  actions without importing rows or moving active pointers.
+- Generation-intent scheduling combines exact-constraint priority, a bounded
+  recent lane, and deterministic oldest-first draining.
+- Shopping socket timeouts and transport failures retry in 60–120 seconds;
+  deterministic abstentions retain the longer negative cache.
+- Activation CDC ignores cosmetic shopping-name/timestamp changes and treats
+  legacy canonical enrichment as non-fencing evidence for active v3 scoring.
+- Sparse publication may commit its captured catalog/source watermark while
+  newer journaled mutations remain pending for the next immutable child.
+- Full shadow scoring synchronizes reviewed recipe annex rows in bounded
+  transactions and skips unchanged overlays instead of autocommitting each
+  ingredient.
+- Restartable Copilot SDK bridge EOF, broken-pipe, I/O, and restart failures
+  use the same bounded transient retry policy as socket outages.
+
+### Fixed
+- Final candidate shards can no longer request expansion, exact-multiple and
+  policy-truncated pools terminate without an empty-shard failure, and
+  low-signal unauthorized identities create one non-satisfying review artifact.
+- Expected no-op, policy-deferred, snapshot-superseded, and rebase outcomes no
+  longer latch global degraded processing health.
+- Committed ontology/score imports now record terminal `converged`/`activated`
+  outcomes that atomically clear prior failure and expected-drift state.
+- Local score-date rollover is a typed rebase condition in standalone,
+  generation, copied-validation, and final-publication paths.
+- Reviewed recipe admission refreshes every active occurrence owned by a
+  subject before resolving its coverage gap.
+
 ## [1.12.0] - 2026-08-18
 
 ### Added

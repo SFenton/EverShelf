@@ -1,7 +1,7 @@
 <?php
 declare(strict_types=1);
 
-const SHOPPING_CLASSIFICATION_CACHE_VERSION = 2;
+const SHOPPING_CLASSIFICATION_CACHE_VERSION = 3;
 const SHOPPING_CLASSIFICATION_PROMPT_VERSION =
     'shopping-name-copilot-v3-canonical-vocabulary';
 const SHOPPING_CLASSIFICATION_SUCCESS_TTL_SECONDS = 2592000;
@@ -13,6 +13,8 @@ const SHOPPING_CLASSIFICATION_QUEUE_CIRCUIT_LIMIT = 3;
 const SHOPPING_CLASSIFICATION_QUEUE_LEASE_SECONDS = 45;
 const SHOPPING_CLASSIFICATION_RETRY_BASE_SECONDS = 60;
 const SHOPPING_CLASSIFICATION_RETRY_MAX_SECONDS = 21600;
+const SHOPPING_CLASSIFICATION_TRANSIENT_RETRY_MIN_SECONDS = 60;
+const SHOPPING_CLASSIFICATION_TRANSIENT_RETRY_MAX_SECONDS = 120;
 
 function shoppingClassificationCachePath(): string {
     if (
@@ -285,6 +287,35 @@ function shoppingClassificationLoadCache(?string $path = null): array {
         return [
             'version' => SHOPPING_CLASSIFICATION_CACHE_VERSION,
             'entries' => $decoded['entries'],
+        ];
+    }
+    if (
+        (int)($decoded['version'] ?? 0) === 2
+        && is_array($decoded['entries'] ?? null)
+    ) {
+        $entries = [];
+        foreach ($decoded['entries'] as $key => $entry) {
+            if (
+                !is_string($key)
+                || !is_array($entry)
+                || (string)($entry['status'] ?? '') !== 'success'
+            ) {
+                continue;
+            }
+            $value = shoppingClassificationSanitizeResult(
+                (string)($entry['value'] ?? '')
+            );
+            if ($value === null) {
+                continue;
+            }
+            $entries[$key] = $entry + [
+                'status' => 'success',
+                'value' => $value,
+            ];
+        }
+        return [
+            'version' => SHOPPING_CLASSIFICATION_CACHE_VERSION,
+            'entries' => $entries,
         ];
     }
 
@@ -963,6 +994,110 @@ function shoppingClassificationFailureReason(Throwable $error): string {
     return evershelfCopilotFailureReason($error);
 }
 
+function shoppingClassificationFailureClass(string $reason): string {
+    $reason = preg_replace(
+        '/[^a-z0-9_]+/',
+        '_',
+        strtolower(trim($reason))
+    ) ?: 'unknown_failure';
+    return in_array($reason, [
+        'shopping_classification_deadline_exceeded',
+        'shopping_classification_lock_timeout',
+        'shopping_classification_transport_unavailable',
+        'controller_copilot_socket_timeout',
+        'controller_copilot_socket_unavailable',
+        'controller_copilot_socket_write_failed',
+        'controller_copilot_socket_read_failed',
+        'controller_copilot_socket_timeout_config_failed',
+        'controller_copilot_server_concurrency_limited',
+        'controller_copilot_server_rate_limited',
+        'controller_copilot_server_quota_exhausted',
+        'controller_copilot_server_copilot_timeout',
+        'controller_copilot_server_copilot_unavailable',
+        'controller_copilot_server_copilot_sdk_bridge_unavailable',
+        'controller_copilot_server_copilot_sdk_bridge_broken_pipe',
+        'controller_copilot_server_copilot_sdk_bridge_io_error',
+        'controller_copilot_server_copilot_sdk_bridge_eof',
+        'controller_copilot_server_copilot_sdk_bridge_restart_failed',
+        'controller_copilot_server_copilot_sdk_bridge_malformed',
+        'controller_copilot_server_copilot_sdk_bridge_mismatched_response',
+        'controller_copilot_server_idle_timeout',
+        'controller_copilot_server_temporarily_unavailable',
+        'controller_copilot_network_error',
+        'controller_copilot_transport_error',
+    ], true)
+        ? 'transient'
+        : 'deterministic';
+}
+
+function shoppingClassificationTransientRetrySeconds(): int {
+    if (
+        defined('RECIPE_BACKEND_TEST_MODE')
+        && RECIPE_BACKEND_TEST_MODE
+        && is_numeric(
+            $GLOBALS[
+                'SHOPPING_CLASSIFICATION_TRANSIENT_RETRY_SECONDS'
+            ] ?? null
+        )
+    ) {
+        return max(
+            SHOPPING_CLASSIFICATION_TRANSIENT_RETRY_MIN_SECONDS,
+            min(
+                SHOPPING_CLASSIFICATION_TRANSIENT_RETRY_MAX_SECONDS,
+                (int)$GLOBALS[
+                    'SHOPPING_CLASSIFICATION_TRANSIENT_RETRY_SECONDS'
+                ]
+            )
+        );
+    }
+    return random_int(
+        SHOPPING_CLASSIFICATION_TRANSIENT_RETRY_MIN_SECONDS,
+        SHOPPING_CLASSIFICATION_TRANSIENT_RETRY_MAX_SECONDS
+    );
+}
+
+function shoppingClassificationRecordSocketTelemetry(
+    string $model,
+    bool $ok,
+    float $elapsedSeconds,
+    int $promptChars,
+    int $outputChars = 0,
+    string $error = ''
+): void {
+    $event = [
+        'action' => 'shopping_classification_socket',
+        'model' => $model,
+        'ok' => $ok,
+        'timeout' => str_contains(strtolower($error), 'timeout'),
+        'elapsed_s' => $elapsedSeconds,
+        'timeout_s' =>
+            (int)ceil(SHOPPING_CLASSIFICATION_WORKER_DEADLINE_SECONDS),
+        'attempts' => 1,
+        'prompt_chars' => $promptChars,
+        'output_chars' => $outputChars,
+        'error' => $error,
+    ];
+    if (
+        defined('RECIPE_BACKEND_TEST_MODE')
+        && RECIPE_BACKEND_TEST_MODE
+    ) {
+        if (is_callable(
+            $GLOBALS[
+                'SHOPPING_CLASSIFICATION_TEST_TELEMETRY'
+            ] ?? null
+        )) {
+            ($GLOBALS[
+                'SHOPPING_CLASSIFICATION_TEST_TELEMETRY'
+            ])($event);
+        }
+        return;
+    }
+    if (!function_exists('_recordAiRequest')) {
+        return;
+    }
+    _recordAiRequest($event);
+}
+
 function shoppingClassificationResolveForWorker(
     string $name,
     string $brand = '',
@@ -1127,6 +1262,13 @@ function shoppingClassificationResolveForWorker(
             mb_strlen($value, 'UTF-8'),
             microtime(true) - $startedAt
         );
+        shoppingClassificationRecordSocketTelemetry(
+            $model,
+            true,
+            microtime(true) - $startedAt,
+            mb_strlen((string)$request['prompt'], 'UTF-8'),
+            mb_strlen($value, 'UTF-8')
+        );
         return [
             'status' => 'success',
             'value' => $value,
@@ -1139,18 +1281,35 @@ function shoppingClassificationResolveForWorker(
         ];
     } catch (Throwable $error) {
         $reason = evershelfCopilotFailureReason($error);
+        $failureClass = shoppingClassificationFailureClass($reason);
         $now = time();
-        shoppingClassificationCacheStore(
-            $cacheKey,
-            [
-                'status' => 'failed',
-                'reason' => mb_substr($reason, 0, 100),
-                'model' => $model,
-                'updated_at' => $now,
-                'expires_at' =>
-                    $now + shoppingClassificationFailureTtlSeconds(),
-            ],
-            $totalDeadline
+        $retryAt = $failureClass === 'transient'
+            ? $now + shoppingClassificationTransientRetrySeconds()
+            : $now + shoppingClassificationFailureTtlSeconds();
+        if ($failureClass !== 'transient') {
+            shoppingClassificationCacheStore(
+                $cacheKey,
+                [
+                    'status' => 'failed',
+                    'reason' => mb_substr($reason, 0, 100),
+                    'failure_class' => $failureClass,
+                    'model' => $model,
+                    'updated_at' => $now,
+                    'expires_at' =>
+                        $now + shoppingClassificationFailureTtlSeconds(),
+                ],
+                $totalDeadline
+            );
+        }
+        shoppingClassificationRecordSocketTelemetry(
+            $model,
+            false,
+            microtime(true) - $startedAt,
+            isset($request)
+                ? mb_strlen((string)$request['prompt'], 'UTF-8')
+                : 0,
+            0,
+            $reason
         );
         EverLog::warn(
             'Shopping classification worker attempt failed',
@@ -1158,6 +1317,8 @@ function shoppingClassificationResolveForWorker(
                 'key' => substr($cacheKey, 0, 16),
                 'model' => $model,
                 'reason' => mb_substr($reason, 0, 100),
+                'failure_class' => $failureClass,
+                'retry_after_seconds' => max(0, $retryAt - $now),
                 'elapsed_ms' =>
                     (int)round((microtime(true) - $startedAt) * 1000),
             ],
@@ -1166,8 +1327,8 @@ function shoppingClassificationResolveForWorker(
         return [
             'status' => 'failed',
             'reason' => $reason,
-            'retry_at' =>
-                $now + shoppingClassificationFailureTtlSeconds(),
+            'failure_class' => $failureClass,
+            'retry_at' => $retryAt,
             'cached' => false,
             'model_called' => $modelCalled,
             'model' => $model,
@@ -1326,7 +1487,8 @@ function shoppingClassificationRetryClaim(
     PDO $db,
     array $claim,
     string $reason,
-    ?int $notBeforeEpoch = null
+    ?int $notBeforeEpoch = null,
+    string $failureClass = 'deterministic'
 ): array {
     $db->exec('BEGIN IMMEDIATE');
     try {
@@ -1352,10 +1514,25 @@ function shoppingClassificationRetryClaim(
         }
         $attempts = (int)$row['attempts'];
         $terminal = $attempts >= (int)$row['max_attempts'];
-        $nextEpoch = max(
-            time() + shoppingClassificationRetryDelay($attempts),
-            $notBeforeEpoch ?? 0
-        );
+        $now = time();
+        if ($failureClass === 'transient') {
+            $candidate = $notBeforeEpoch
+                ?? ($now + shoppingClassificationTransientRetrySeconds());
+            $nextEpoch = max(
+                $now
+                    + SHOPPING_CLASSIFICATION_TRANSIENT_RETRY_MIN_SECONDS,
+                min(
+                    $now
+                        + SHOPPING_CLASSIFICATION_TRANSIENT_RETRY_MAX_SECONDS,
+                    $candidate
+                )
+            );
+        } else {
+            $nextEpoch = max(
+                $now + shoppingClassificationRetryDelay($attempts),
+                $notBeforeEpoch ?? 0
+            );
+        }
         $db->prepare("
             UPDATE shopping_classification_queue
             SET status = ?,
@@ -1638,7 +1815,11 @@ function shoppingClassificationProcessQueue(
                 (string)$resolution['reason'],
                 isset($resolution['retry_at'])
                     ? (int)$resolution['retry_at']
-                    : null
+                    : null,
+                (string)(
+                    $resolution['failure_class']
+                        ?? 'deterministic'
+                )
             );
             if ($outcome['status'] === 'failed') {
                 $summary['failed']++;

@@ -376,8 +376,11 @@ $backfill = recipeScoreBackfillContributorRevision(
 );
 $assert(
     (int)$updated['id'] === $insertedRecipeId
-    && empty($racedUpdate['rebuilt'])
-    && (string)$racedUpdate['reason'] === 'failed'
+    && !empty($racedUpdate['rebuilt'])
+    && $racedUpdate['recipe_operations'][$insertedRecipeId]
+        === 'replace'
+    && (int)$racedUpdate['physical_score_rows'] === 1
+    && (int)$racedUpdate['pending_recipe_count'] === 1
     && !empty($updateDelta['rebuilt'])
     && $updateDelta['recipe_operations'][$insertedRecipeId]
         === 'replace'
@@ -388,7 +391,15 @@ $assert(
     && (int)$updateDelta['pending_recipe_count'] === 0
     && $historicalContributorCount === 1
     && (int)$backfill['match_count'] === 2,
-    'Recipe ingredient edits must refresh annex mappings and replace one score'
+    'Recipe ingredient edits must refresh annex mappings and replace one score: '
+        . ingredientOntologyV3Json([
+            'updated_id' => (int)$updated['id'],
+            'raced_update' => $racedUpdate,
+            'update_delta' => $updateDelta,
+            'historical_contributor_count' =>
+                $historicalContributorCount,
+            'backfill' => $backfill,
+        ])
 );
 $scopedIntegrity = ingredientOntologyV3RevisionIntegrityAudit(
     $db,

@@ -7,6 +7,7 @@ coconut-milk,milk-alternative,operator-corrective-review-v3,full-ontology-resolu
 coffee-creamer,creamer,operator-corrective-review-v3,full-ontology-resolution-v3,Coffee creamer is a subtype of creamer,corrective-v3.13 complete primary-edge semantic audit
 coffee-pod,coffee,operator-corrective-review-v3,full-ontology-resolution-v3,A coffee pod is a packaged prepared coffee identity,corrective-v3.13 complete primary-edge semantic audit
 duck,poultry,operator-corrective-review-v3,full-ontology-resolution-v3,Duck is poultry rather than a direct generic meat child,corrective-v3.13 complete primary-edge semantic audit
+eggplant,vegetable,operator-corrective-review-v3,full-ontology-resolution-v3,Eggplant is a culinary vegetable identity under the reviewed plant-derived vegetable branch,corrective-v3.17 common ingredient coverage review
 fish-sauce,sauce,operator-corrective-review-v3,full-ontology-resolution-v3,Fish sauce is a subtype of sauce,corrective-v3.13 complete primary-edge semantic audit
 foie-gras,prepared-food,operator-corrective-review-v3,full-ontology-resolution-v3,Foie gras is prepared offal and not an is-a child of duck,corrective-v3.13 culinary identity audit
 grits,cereal,operator-corrective-review-v3,full-ontology-resolution-v3,Grits are a prepared cereal derived from corn,corrective-v3.13 complete primary-edge semantic audit

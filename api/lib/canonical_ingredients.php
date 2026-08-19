@@ -1605,6 +1605,62 @@ function canonicalIngredientEnqueueProduct(PDO $db, int $productId, string $reas
     ];
 }
 
+function canonicalIngredientWakeSocketPath(): string {
+    if (
+        defined('RECIPE_BACKEND_TEST_MODE')
+        && RECIPE_BACKEND_TEST_MODE
+        && is_string(
+            $GLOBALS['CANONICAL_QUEUE_TEST_WAKE_SOCKET'] ?? null
+        )
+        && trim(
+            (string)$GLOBALS['CANONICAL_QUEUE_TEST_WAKE_SOCKET']
+        ) !== ''
+    ) {
+        return (string)$GLOBALS['CANONICAL_QUEUE_TEST_WAKE_SOCKET'];
+    }
+    $configured = function_exists('env')
+        ? trim((string)env('CANONICAL_QUEUE_WAKE_SOCKET', ''))
+        : '';
+    return $configured !== ''
+        ? $configured
+        : __DIR__ . '/../../data/canonical-queue.sock';
+}
+
+function canonicalIngredientWake(): bool {
+    if (
+        defined('RECIPE_BACKEND_TEST_MODE')
+        && RECIPE_BACKEND_TEST_MODE
+        && is_callable(
+            $GLOBALS['CANONICAL_QUEUE_TEST_WAKE'] ?? null
+        )
+    ) {
+        return (bool)($GLOBALS['CANONICAL_QUEUE_TEST_WAKE'])();
+    }
+    $path = canonicalIngredientWakeSocketPath();
+    if (
+        $path === ''
+        || strlen($path) > 220
+        || str_contains($path, "\0")
+    ) {
+        return false;
+    }
+    $socket = @stream_socket_client(
+        'udg://' . $path,
+        $errno,
+        $error,
+        0.02,
+        STREAM_CLIENT_CONNECT
+    );
+    if (!is_resource($socket)) {
+        return false;
+    }
+    try {
+        return @fwrite($socket, "wake\n") !== false;
+    } finally {
+        fclose($socket);
+    }
+}
+
 function canonicalIngredientQueueStatusForProduct(PDO $db, int $productId): ?array {
     $stmt = $db->prepare("SELECT * FROM canonical_processing_queue WHERE product_id = ?");
     $stmt->execute([$productId]);
@@ -1682,6 +1738,72 @@ function canonicalIngredientProcessQueue(PDO $db, int $limit = 5, int $maxAttemp
     } finally {
         canonicalIngredientQueueUnlock($lock);
     }
+}
+
+function canonicalIngredientDrainQueue(
+    PDO $db,
+    int $limit = 5,
+    int $maxAttempts = 3,
+    int $maximumBatches = 100
+): array {
+    $limit = max(1, min(50, $limit));
+    $maxAttempts = max(1, min(20, $maxAttempts));
+    $maximumBatches = max(1, min(1000, $maximumBatches));
+    $lock = canonicalIngredientQueueLock();
+    if ($lock === false) {
+        return [
+            'processed' => 0,
+            'succeeded' => 0,
+            'failed' => 0,
+            'superseded' => 0,
+            'pending' =>
+                canonicalIngredientQueueStats($db)['pending'] ?? 0,
+            'items' => [],
+            'batches' => 0,
+            'skipped' => 'already_running',
+        ];
+    }
+    $summary = [
+        'processed' => 0,
+        'succeeded' => 0,
+        'failed' => 0,
+        'superseded' => 0,
+        'pending' => 0,
+        'items' => [],
+        'batches' => 0,
+    ];
+    try {
+        for ($batch = 0; $batch < $maximumBatches; $batch++) {
+            $result = canonicalIngredientProcessQueueBatch(
+                $db,
+                $limit,
+                $maxAttempts
+            );
+            $summary['batches']++;
+            foreach ([
+                'processed',
+                'succeeded',
+                'failed',
+                'superseded',
+            ] as $field) {
+                $summary[$field] += (int)($result[$field] ?? 0);
+            }
+            array_push(
+                $summary['items'],
+                ...(array)($result['items'] ?? [])
+            );
+            $summary['pending'] = (int)($result['pending'] ?? 0);
+            if (
+                $summary['pending'] === 0
+                || (int)($result['processed'] ?? 0) === 0
+            ) {
+                break;
+            }
+        }
+    } finally {
+        canonicalIngredientQueueUnlock($lock);
+    }
+    return $summary;
 }
 
 function canonicalIngredientProcessQueueBatch(PDO $db, int $limit, int $maxAttempts): array {

@@ -204,6 +204,15 @@ try {
             === EVERSHELF_PROCESSING_STATUS_SCHEMA
         && $status['recipe_source_ontology']['missing_row_count'] === 0
         && $status['ontology_queue']['intake_open_count'] >= 1
+        && array_key_exists(
+            'generation_intent_due_count',
+            $status['ontology_queue']
+        )
+        && array_key_exists(
+            'coverage_gap_open_count',
+            $status['ontology_queue']
+        )
+        && array_key_exists('advisories', $status)
         && $status['pending']['total'] >= 1
         && in_array(
             $status['phase'],
@@ -327,6 +336,318 @@ try {
         && $problemStatus['active'] === true
         && $problemStatus['problem'] === true,
         'Active work must remain visible when an independent problem exists'
+    );
+    $db->exec("
+        UPDATE ontology_activation_imports
+        SET status = 'cleaned',
+            last_error = '',
+            completed_at = CURRENT_TIMESTAMP,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id IN ({$ontologyImportId}, {$scoreImportId});
+        UPDATE ontology_activation_state
+        SET failure_count = 0,
+            last_error = '',
+            last_outcome_kind = 'superseded_snapshot',
+            last_outcome_json =
+                '{\"reason\":\"test_snapshot_drift\","
+                . "\"drift_codes\":[\"live_inputs_changed\"],"
+                . "\"error\":\"SQLSTATE secret\","
+                . "\"path\":\"/var/www/html/private.php\"}',
+            last_outcome_at = CURRENT_TIMESTAMP,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = 1
+    ");
+    $expectedOutcomeStatus = evershelfProcessingStatus($db);
+    $assert(
+        $expectedOutcomeStatus['problem'] === false
+        && $expectedOutcomeStatus['activation']['last_outcome_kind']
+            === 'superseded_snapshot'
+        && $expectedOutcomeStatus['activation']['last_outcome'][
+            'reason'
+        ] === 'test_snapshot_drift'
+        && $expectedOutcomeStatus['activation']['last_outcome'][
+            'drift_codes'
+        ] === ['live_inputs_changed']
+        && !array_key_exists(
+            'error',
+            $expectedOutcomeStatus['activation']['last_outcome']
+        )
+        && !array_key_exists(
+            'path',
+            $expectedOutcomeStatus['activation']['last_outcome']
+        ),
+        'Expected snapshot supersession must remain advisory instead of latching degraded health'
+    );
+    $db->exec("
+        UPDATE ontology_activation_state
+        SET failure_count = 1,
+            last_error = 'incremental input lineage changed',
+            last_outcome_kind = 'superseded_snapshot',
+            last_outcome_json =
+                '{\"drift_codes\":[\"live_inputs_changed\"]}',
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = 1
+    ");
+    $permanentFailureStatus = evershelfProcessingStatus($db);
+    $assert(
+        $permanentFailureStatus['problem'] === true
+        && $permanentFailureStatus['activation']['failure_count'] === 1,
+        'Failure health must remain actionable even if a stale expected outcome kind is present'
+    );
+    ingredientOntologyActivationRecordOutcome(
+        $db,
+        'activated',
+        ['reason' => 'score_import_activated'],
+        true
+    );
+    $recoveredStatus = evershelfProcessingStatus($db);
+    $recoveredState = $db->query("
+        SELECT failure_count, last_error, next_attempt_at,
+               expected_outcome_key, expected_outcome_count,
+               last_outcome_kind
+        FROM ontology_activation_state
+        WHERE id = 1
+    ")->fetch(PDO::FETCH_ASSOC);
+    $assert(
+        $recoveredStatus['problem'] === false
+        && (int)$recoveredState['failure_count'] === 0
+        && (string)$recoveredState['last_error'] === ''
+        && $recoveredState['next_attempt_at'] === null
+        && (string)$recoveredState['expected_outcome_key'] === ''
+        && (int)$recoveredState['expected_outcome_count'] === 0
+        && (string)$recoveredState['last_outcome_kind']
+            === 'activated',
+        'A committed terminal-good activation outcome must clear latched failure and drift state'
+    );
+    $db->exec("
+        UPDATE ontology_activation_state
+        SET failure_count = 0,
+            last_error = '',
+            expected_outcome_key = '',
+            expected_outcome_count = 0,
+            next_attempt_at = NULL
+        WHERE id = 1
+    ");
+    $intermittentEscalated = false;
+    for ($index = 0; $index < 6; $index++) {
+        $drift = ingredientOntologyActivationRecordOutcome(
+            $db,
+            'superseded_snapshot',
+            [
+                'drift_codes' => ['live_inputs_changed'],
+                'errors' => [
+                    'inventory or catalog inputs changed after shadow build',
+                ],
+            ],
+            true,
+            60
+        );
+        $intermittentEscalated =
+            $intermittentEscalated || !empty($drift['escalated']);
+        ingredientOntologyActivationRecordOutcome(
+            $db,
+            'converged',
+            ['reason' => 'ontology_import_converged'],
+            true
+        );
+    }
+    $intermittentState = $db->query("
+        SELECT failure_count, expected_outcome_key,
+               expected_outcome_count, last_outcome_kind
+        FROM ontology_activation_state
+        WHERE id = 1
+    ")->fetch(PDO::FETCH_ASSOC);
+    $assert(
+        !$intermittentEscalated
+        && (int)$intermittentState['failure_count'] === 0
+        && (string)$intermittentState['expected_outcome_key'] === ''
+        && (int)$intermittentState['expected_outcome_count'] === 0
+        && (string)$intermittentState['last_outcome_kind']
+            === 'converged',
+        'Intervening successful convergence must reset expected-drift consecutiveness'
+    );
+    $expectedRecords = [];
+    for ($index = 0; $index < 4; $index++) {
+        $expectedRecords[] =
+            ingredientOntologyActivationRecordOutcome(
+                $db,
+                'superseded_snapshot',
+                [
+                    'drift_codes' => ['live_inputs_changed'],
+                    'errors' => [
+                        'inventory or catalog inputs changed after shadow build',
+                    ],
+                ],
+                true,
+                60
+            );
+    }
+    $nonConverging = evershelfProcessingStatus($db);
+    $assert(
+        empty($expectedRecords[0]['escalated'])
+        && empty($expectedRecords[2]['escalated'])
+        && !empty($expectedRecords[3]['escalated'])
+        && $nonConverging['problem'] === true
+        && $nonConverging['activation']['last_outcome_kind']
+            === 'non_converging_expected_outcome',
+        'Repeated identical expected outcomes must escalate after the bounded retry limit'
+    );
+    $outcomeBeforeLock = $db->query("
+        SELECT last_outcome_kind, expected_outcome_count
+        FROM ontology_activation_state
+        WHERE id = 1
+    ")->fetch(PDO::FETCH_ASSOC);
+    $policyOutcomeLocked = false;
+    try {
+        ingredientOntologyActivationWithLiveReservation(
+            [
+                'live_reservation' =>
+                    static function (): never {
+                        throw new
+                            IngredientOntologyActivationReservationUnavailable(
+                                'record_policy_deferred'
+                            );
+                    },
+            ],
+            'record_policy_deferred',
+            static fn(): array =>
+                ingredientOntologyActivationRecordAdvisoryOutcome(
+                    $db,
+                    'policy_deferred',
+                    ['reason' => 'no_due_generation_work'],
+                    300
+                )
+        );
+    } catch (
+        IngredientOntologyActivationReservationUnavailable $error
+    ) {
+        $policyOutcomeLocked =
+            $error->phase() === 'record_policy_deferred';
+    }
+    $outcomeAfterLock = $db->query("
+        SELECT last_outcome_kind, expected_outcome_count
+        FROM ontology_activation_state
+        WHERE id = 1
+    ")->fetch(PDO::FETCH_ASSOC);
+    $assert(
+        $policyOutcomeLocked
+        && $outcomeAfterLock === $outcomeBeforeLock,
+        'Policy-deferred outcomes must not write outside the live reservation'
+    );
+    $preservedExpectedKey = str_repeat('c', 64);
+    $db->prepare("
+        UPDATE ontology_activation_state
+        SET failure_count = 2,
+            last_error = 'fixture integrity failure',
+            next_attempt_at = datetime('now', '+30 minutes'),
+            expected_outcome_key = ?,
+            expected_outcome_count = 3,
+            last_outcome_kind = 'integrity_failure',
+            last_outcome_json =
+                '{\"reason\":\"fixture_integrity_failure\"}',
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = 1
+    ")->execute([$preservedExpectedKey]);
+    $failureBeforeAdvisory = $db->query("
+        SELECT failure_count, last_error, next_attempt_at,
+               expected_outcome_key, expected_outcome_count
+        FROM ontology_activation_state
+        WHERE id = 1
+    ")->fetch(PDO::FETCH_ASSOC);
+    ingredientOntologyActivationWithLiveReservation(
+        [],
+        'record_policy_deferred',
+        static fn(): array =>
+            ingredientOntologyActivationRecordAdvisoryOutcome(
+                $db,
+                'policy_deferred',
+                [
+                    'claimed_intents' => 0,
+                    'reason' => 'no_due_generation_work',
+                ],
+                300
+            )
+    );
+    $failureAfterAdvisory = $db->query("
+        SELECT failure_count, last_error, next_attempt_at,
+               expected_outcome_key, expected_outcome_count,
+               last_outcome_kind
+        FROM ontology_activation_state
+        WHERE id = 1
+    ")->fetch(PDO::FETCH_ASSOC);
+    $failureAdvisoryStatus = evershelfProcessingStatus($db);
+    $assert(
+        (int)$failureAfterAdvisory['failure_count']
+            === (int)$failureBeforeAdvisory['failure_count']
+        && (string)$failureAfterAdvisory['last_error']
+            === (string)$failureBeforeAdvisory['last_error']
+        && (string)$failureAfterAdvisory['next_attempt_at']
+            === (string)$failureBeforeAdvisory['next_attempt_at']
+        && hash_equals(
+            (string)$failureAfterAdvisory['expected_outcome_key'],
+            (string)$failureBeforeAdvisory['expected_outcome_key']
+        )
+        && (int)$failureAfterAdvisory['expected_outcome_count']
+            === (int)$failureBeforeAdvisory['expected_outcome_count']
+        && (string)$failureAfterAdvisory['last_outcome_kind']
+            === 'policy_deferred'
+        && $failureAdvisoryStatus['problem'] === true
+        && $failureAdvisoryStatus['activation']['last_outcome'][
+            'reason'
+        ] === 'no_due_generation_work'
+        && $failureAdvisoryStatus['activation']['last_outcome'][
+            'policy_deferred'
+        ] === true,
+        'Policy-deferred advisory recording must preserve actionable failure, convergence, and longer backoff state'
+    );
+    ingredientOntologyActivationRecordOutcome(
+        $db,
+        'activated',
+        ['reason' => 'score_import_activated'],
+        true
+    );
+    $terminalGoodState = $db->query("
+        SELECT failure_count, last_error, next_attempt_at,
+               expected_outcome_key, expected_outcome_count,
+               last_outcome_kind
+        FROM ontology_activation_state
+        WHERE id = 1
+    ")->fetch(PDO::FETCH_ASSOC);
+    $assert(
+        (int)$terminalGoodState['failure_count'] === 0
+        && (string)$terminalGoodState['last_error'] === ''
+        && $terminalGoodState['next_attempt_at'] === null
+        && (string)$terminalGoodState['expected_outcome_key'] === ''
+        && (int)$terminalGoodState['expected_outcome_count'] === 0
+        && (string)$terminalGoodState['last_outcome_kind']
+            === 'activated',
+        'A later committed terminal-good outcome must clear state preserved by an advisory cycle'
+    );
+    ingredientOntologyActivationRecordAdvisoryOutcome(
+        $db,
+        'policy_deferred',
+        ['reason' => 'no_due_generation_work'],
+        300
+    );
+    $cleanAdvisoryState = $db->query("
+        SELECT failure_count, last_error, next_attempt_at,
+               expected_outcome_key, expected_outcome_count
+        FROM ontology_activation_state
+        WHERE id = 1
+    ")->fetch(PDO::FETCH_ASSOC);
+    $cleanAdvisoryRetry = strtotime(
+        (string)$cleanAdvisoryState['next_attempt_at']
+    );
+    $cleanAdvisoryStatus = evershelfProcessingStatus($db);
+    $assert(
+        (int)$cleanAdvisoryState['failure_count'] === 0
+        && (string)$cleanAdvisoryState['last_error'] === ''
+        && (string)$cleanAdvisoryState['expected_outcome_key'] === ''
+        && (int)$cleanAdvisoryState['expected_outcome_count'] === 0
+        && $cleanAdvisoryRetry >= time() + 295
+        && $cleanAdvisoryRetry <= time() + 305
+        && $cleanAdvisoryStatus['problem'] === false,
+        'A clean policy-deferred advisory may schedule the normal 300-second retry without degrading health'
     );
     $disabledPhase = evershelfProcessingStatusWorkPhase(
         ['open_count' => 0],

@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import importlib.util
 import errno
+import hashlib
+import io
 import json
 import os
 import shutil
@@ -86,8 +88,7 @@ class ProviderTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.root = (
             SCRIPT_DIR.parent
-            / "data"
-            / f".ontology-copilot-provider-test-{os.getpid()}"
+            / f".op-{os.getpid()}"
         )
         if cls.root.exists():
             shutil.rmtree(cls.root)
@@ -98,7 +99,10 @@ class ProviderTests(unittest.TestCase):
         shutil.rmtree(cls.root, ignore_errors=True)
 
     def start_server(self, app, name: str):
-        path = self.root / f"{name}.sock"
+        path = self.root / (
+            hashlib.sha256(name.encode("utf-8")).hexdigest()[:8]
+            + ".sock"
+        )
         server = provider.ProviderServer(str(path), app)
         os.chmod(path.parent, 0o750)
         os.chown(path, -1, os.getgid())
@@ -256,6 +260,77 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(first_usage, {"warm": True})
         self.assertEqual(second_usage, {"warm": True})
         self.assertEqual(starts.read_text(encoding="utf-8"), "start\n")
+
+    def test_sdk_bridge_broken_pipe_has_restartable_reason(self):
+        class BrokenInput:
+            def write(self, _value):
+                raise BrokenPipeError("fixture")
+
+            def flush(self):
+                return None
+
+            def close(self):
+                return None
+
+        class FakeProcess:
+            stdin = BrokenInput()
+            stdout = io.StringIO("")
+
+            def poll(self):
+                return None
+
+            def wait(self, timeout=None):
+                del timeout
+                return 0
+
+        invoker = provider.CopilotInvoker(
+            work_dir=str(self.root / "sdk-bridge-broken-pipe"),
+        )
+        invoker.ensure_bridge = lambda: FakeProcess()
+        with self.assertRaises(provider.ProviderError) as caught:
+            invoker.invoke(request())
+        self.assertEqual(
+            caught.exception.code,
+            "copilot_sdk_bridge_broken_pipe",
+        )
+
+    def test_sdk_bridge_eof_has_restartable_reason(self):
+        bridge = self.root / "fake-sdk-bridge-eof.py"
+        bridge.write_text(
+            "import sys\n"
+            "for _line in sys.stdin:\n"
+            "    raise SystemExit(0)\n",
+            encoding="utf-8",
+        )
+        invoker = provider.CopilotInvoker(
+            bridge_command=[sys.executable, str(bridge)],
+            work_dir=str(self.root / "sdk-bridge-eof-work"),
+        )
+        try:
+            with self.assertRaises(provider.ProviderError) as caught:
+                invoker.invoke(request())
+        finally:
+            invoker.close()
+        self.assertEqual(
+            caught.exception.code,
+            "copilot_sdk_bridge_eof",
+        )
+
+    def test_sdk_bridge_restart_failure_has_restartable_reason(self):
+        invoker = provider.CopilotInvoker(
+            work_dir=str(self.root / "sdk-bridge-restart-failed"),
+        )
+
+        def fail_restart():
+            raise OSError("fixture")
+
+        invoker.ensure_bridge = fail_restart
+        with self.assertRaises(provider.ProviderError) as caught:
+            invoker.invoke(request())
+        self.assertEqual(
+            caught.exception.code,
+            "copilot_sdk_bridge_restart_failed",
+        )
 
     def test_interactive_waiter_precedes_queued_background_waiter(self):
         invoker = provider.CopilotInvoker(

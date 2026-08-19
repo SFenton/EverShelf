@@ -190,37 +190,64 @@ try {
             break;
         }
     }
-    if (
-        (int)($state['failure_count'] ?? 0) > 0
-        || $state['next_attempt_at'] !== null
-    ) {
-        try {
-            $liveReservation(
-                'clear_backoff',
-                static function () use ($db): void {
-                    $db->exec("
-                        UPDATE ontology_activation_state
-                        SET failure_count = 0,
-                            last_error = '',
-                            next_attempt_at = NULL,
-                            updated_at = CURRENT_TIMESTAMP
-                        WHERE id = 1
-                    ");
-                }
-            );
-        } catch (
-            IngredientOntologyActivationReservationUnavailable $error
-        ) {
-            $last = count($results) - 1;
-            if ($last >= 0) {
-                $results[$last]['backoff_reset'] = [
-                    'outcome' => 'locked',
-                    'lock_scope' => 'background_writer',
-                    'lock_phase' => $error->phase(),
-                    'retryable' => true,
-                ];
+} catch (
+    IngredientOntologyActivationExpectedOutcome $expected
+) {
+    $retryAfter = $expected->outcomeKind() === 'rebase_required'
+        ? 30
+        : 60;
+    $recorded = true;
+    $record = null;
+    try {
+        $record = $liveReservation(
+            'record_expected_outcome',
+            static function () use (
+                $db,
+                $expected,
+                $retryAfter
+            ): array {
+                return ingredientOntologyActivationRecordOutcome(
+                    $db,
+                    $expected->outcomeKind(),
+                    $expected->details() + [
+                        'message' => $expected->getMessage(),
+                    ],
+                    true,
+                    $retryAfter
+                );
             }
-        }
+        );
+    } catch (
+        IngredientOntologyActivationReservationUnavailable $lockError
+    ) {
+        $recorded = false;
+        $failureLockPhase = $lockError->phase();
+    }
+    $escalated = !empty($record['escalated']);
+    $results[] = [
+        'cycle' => count($results) + 1,
+        'action' => $escalated
+            ? 'non_converging_expected_outcome'
+            : $expected->outcomeKind(),
+        'expected' => !$escalated,
+        'reason' => $expected->getMessage(),
+        'details' => $expected->details(),
+        'next_attempt_seconds' => (int)(
+            $record['next_attempt_seconds'] ?? $retryAfter
+        ),
+        'outcome_recorded' => $recorded,
+        'escalated' => $escalated,
+    ] + (
+        $recorded
+            ? []
+            : [
+                'status_outcome' => 'locked',
+                'lock_scope' => 'background_writer',
+                'lock_phase' => $failureLockPhase,
+            ]
+    );
+    if ($escalated) {
+        $exitCode = 2;
     }
 } catch (
     IngredientOntologyActivationReservationUnavailable $error
@@ -252,6 +279,9 @@ try {
                     UPDATE ontology_activation_state
                     SET failure_count = ?,
                         last_error = ?,
+                        last_outcome_kind = 'integrity_failure',
+                        last_outcome_json = ?,
+                        last_outcome_at = CURRENT_TIMESTAMP,
                         next_attempt_at = datetime('now', ?),
                         updated_at = CURRENT_TIMESTAMP
                     WHERE id = 1
@@ -263,6 +293,15 @@ try {
                         1000,
                         'UTF-8'
                     ),
+                    ingredientOntologyActivationStableJson([
+                        'error' => mb_substr(
+                            $error->getMessage(),
+                            0,
+                            1000,
+                            'UTF-8'
+                        ),
+                        'failure_count' => $failures,
+                    ]),
                     '+' . $delay . ' seconds',
                 ]);
             }

@@ -58,6 +58,7 @@ foreach ([
     'onion' => 'Onion',
     'potato' => 'Potato',
     'sweet-potato' => 'Sweet Potato',
+    'eggplant' => 'Eggplant',
 ] as $slug => $name) {
     $entity->execute([
         $versionId,
@@ -134,6 +135,19 @@ foreach ([
     ['potatoes', 'potato', 'en', 'Potatoes', 'potatoes', 'exact_alias', 'prior-label-transition-v3', null],
     ['red-onion', 'onion', 'en', 'Red Onion', 'red onion', 'attribute_alias', 'prior-label-transition-v3', 'variety'],
     ['sweet-potatoes', 'sweet-potato', 'en', 'Sweet Potatoes', 'sweet potatoes', 'exact_alias', 'full-resolution-v3', null],
+    ['eggplant', 'eggplant', 'en', 'Eggplant', 'eggplant', 'exact_alias', 'full-resolution-v3', null],
+    ['eggplants', 'eggplant', 'en', 'Eggplants', 'eggplants', 'exact_alias', 'full-resolution-v3', null],
+    ['aubergine', 'eggplant', 'en', 'Aubergine', 'aubergine', 'exact_alias', 'full-resolution-v3', null],
+    ['aubergines', 'eggplant', 'en', 'Aubergines', 'aubergines', 'exact_alias', 'full-resolution-v3', null],
+    ['auberginen', 'eggplant', 'de', 'Auberginen', 'auberginen', 'exact_alias', 'full-resolution-v3', null],
+    ['auberginer', 'eggplant', 'da', 'Auberginer', 'auberginer', 'exact_alias', 'full-resolution-v3', null],
+    ['melanzana', 'eggplant', 'it', 'Melanzana', 'melanzana', 'exact_alias', 'full-resolution-v3', null],
+    ['melanzane', 'eggplant', 'it', 'Melanzane', 'melanzane', 'exact_alias', 'full-resolution-v3', null],
+    ['melanzani', 'eggplant', 'de', 'Melanzani', 'melanzani', 'exact_alias', 'full-resolution-v3', null],
+    ['di-melanzana', 'eggplant', 'it', 'di melanzana', 'di melanzana', 'exact_alias', 'full-resolution-v3', null],
+    ['di-melanzane', 'eggplant', 'it', 'di melanzane', 'di melanzane', 'exact_alias', 'full-resolution-v3', null],
+    ['d-aubergine', 'eggplant', 'fr', 'd aubergine', 'd aubergine', 'exact_alias', 'full-resolution-v3', null],
+    ['d-aubergines', 'eggplant', 'fr', 'd aubergines', 'd aubergines', 'exact_alias', 'full-resolution-v3', null],
 ] as [
     $key,
     $entitySlug,
@@ -218,6 +232,9 @@ foreach ([
     'structural' => ['Root Vegetable', 0],
     'provisional' => ['Provisional Root', 0],
     'ambiguous' => ['Ambiguous Root', 0],
+    'eggplant' => ['Eggplant', 0],
+    'melanzana' => ['Melanzana', 0],
+    'thai_eggplant' => ['Thai Eggplant', 0],
 ] as $key => [$name, $prepared]) {
     $product->execute([$name, $prepared]);
     $productIds[$key] = (int)$db->lastInsertId();
@@ -262,6 +279,84 @@ $sealedMapping->execute([
     'curated oyster sauce',
     $entities['potato'],
 ]);
+$db->prepare("
+    INSERT INTO recipe_catalog (
+        title, primary_connector, language
+    )
+    VALUES ('Eggplant annex fixture', 'manual', 'it')
+")->execute();
+$eggplantRecipeId = (int)$db->lastInsertId();
+$recipeIngredient = $db->prepare("
+    INSERT INTO recipe_ingredients (
+        recipe_id, position, raw_text, normalized_name,
+        is_required, is_optional, is_staple
+    )
+    VALUES (?, ?, ?, ?, 1, 0, 0)
+");
+$recipeIngredient->execute([
+    $eggplantRecipeId,
+    0,
+    'di melanzane',
+    'di melanzane',
+]);
+$reviewedEggplantIngredientId = (int)$db->lastInsertId();
+$recipeIngredient->execute([
+    $eggplantRecipeId,
+    1,
+    'Thai Eggplant',
+    'thai eggplant',
+]);
+$qualifiedEggplantIngredientId = (int)$db->lastInsertId();
+$recipeIngredient->execute([
+    $eggplantRecipeId,
+    2,
+    'Aubergine',
+    'aubergine',
+]);
+$rejectedEggplantIngredientId = (int)$db->lastInsertId();
+$recipeOwner = $db->prepare("
+    SELECT ingredient.*, recipe.language,
+           recipe.primary_connector,
+           '' AS origin_external_id,
+           '' AS origin_locale
+    FROM recipe_ingredients ingredient
+    JOIN recipe_catalog recipe
+      ON recipe.id = ingredient.recipe_id
+    WHERE ingredient.id = ?
+");
+$sealedRecipeMapping = $db->prepare("
+    INSERT INTO ingredient_ontology_mappings (
+        ontology_version_id, owner_type, owner_id,
+        owner_fingerprint, source_label, normalized_label,
+        language, entity_id, status, confidence,
+        mapping_source, evidence_json, attributes_json,
+        is_staple
+    )
+    VALUES (
+        ?, 'recipe_ingredient', ?, ?, ?, ?, ?,
+        NULL, ?, 0, 'test_preexisting_terminal',
+        '{}', '{}', 0
+    )
+");
+foreach ([
+    [$reviewedEggplantIngredientId, 'unresolved'],
+    [$rejectedEggplantIngredientId, 'rejected'],
+] as [$ingredientId, $status]) {
+    $recipeOwner->execute([$ingredientId]);
+    $ownerRow = $recipeOwner->fetch(PDO::FETCH_ASSOC);
+    $sealedRecipeMapping->execute([
+        $versionId,
+        $ingredientId,
+        ingredientOntologyV3RecipeOwnerFingerprint(
+            'recipe_ingredient',
+            $ownerRow
+        ),
+        (string)$ownerRow['raw_text'],
+        (string)$ownerRow['normalized_name'],
+        (string)$ownerRow['language'],
+        $status,
+    ]);
+}
 $contentHash = ingredientOntologyV3ContentHash($db, $versionId);
 ingredientOntologyV3SetPublicationGuard($db, true);
 $db->prepare("
@@ -333,6 +428,21 @@ $ambiguous = ingredientOntologyV3IdentityAnnexRefreshProduct(
     $productIds['ambiguous'],
     $versionId
 );
+$eggplant = ingredientOntologyV3IdentityAnnexRefreshProduct(
+    $db,
+    $productIds['eggplant'],
+    $versionId
+);
+$melanzana = ingredientOntologyV3IdentityAnnexRefreshProduct(
+    $db,
+    $productIds['melanzana'],
+    $versionId
+);
+$thaiEggplant = ingredientOntologyV3IdentityAnnexRefreshProduct(
+    $db,
+    $productIds['thai_eggplant'],
+    $versionId
+);
 
 $assert(
     $red['accepted'] === true
@@ -383,6 +493,61 @@ $assert(
     $unknown['accepted'] === false
     && $unknown['status'] === 'unresolved',
     'Unknown foods must remain non-satisfying'
+);
+$assert(
+    $eggplant['accepted'] === true
+    && $eggplant['entity_id'] === $entities['eggplant']
+    && $melanzana['accepted'] === true
+    && $melanzana['entity_id'] === $entities['eggplant'],
+    'Reviewed Eggplant and Melanzana product labels must share one identity'
+);
+$assert(
+    $thaiEggplant['accepted'] === false
+    && $thaiEggplant['status'] === 'unresolved',
+    'Qualified Thai Eggplant must remain unresolved without separate review'
+);
+
+$recipeAnnex = ingredientOntologyV3RecipeAnnexRefreshRecipe(
+    $db,
+    $eggplantRecipeId,
+    $versionId
+);
+$reviewedRecipeAnnex = $db->query("
+    SELECT status, entity_id
+    FROM ingredient_ontology_recipe_identity_annex
+    WHERE recipe_ingredient_id = {$reviewedEggplantIngredientId}
+")->fetch(PDO::FETCH_ASSOC);
+$qualifiedRecipeAnnex = $db->query("
+    SELECT status, entity_id
+    FROM ingredient_ontology_recipe_identity_annex
+    WHERE recipe_ingredient_id = {$qualifiedEggplantIngredientId}
+")->fetch(PDO::FETCH_ASSOC);
+$rejectedRecipeAnnex = $db->query("
+    SELECT status, entity_id
+    FROM ingredient_ontology_recipe_identity_annex
+    WHERE recipe_ingredient_id = {$rejectedEggplantIngredientId}
+")->fetch(PDO::FETCH_ASSOC);
+$recipeAnnexRepeat = ingredientOntologyV3RecipeAnnexRefreshRecipe(
+    $db,
+    $eggplantRecipeId,
+    $versionId
+);
+$assert(
+    !empty($recipeAnnex['ready'])
+    && (int)$recipeAnnex['changed_row_count'] === 3
+    && (int)$recipeAnnex['write_statement_count'] === 1
+    && (int)$recipeAnnexRepeat['changed_row_count'] === 0
+    && (int)$recipeAnnexRepeat['unchanged_row_count'] === 3
+    && (int)$recipeAnnexRepeat['write_statement_count'] === 0
+    && (string)$reviewedRecipeAnnex['status'] === 'accepted'
+    && (int)$reviewedRecipeAnnex['entity_id']
+        === $entities['eggplant']
+    && (string)$qualifiedRecipeAnnex['status'] === 'unresolved'
+    && $qualifiedRecipeAnnex['entity_id'] === null
+    && (string)$rejectedRecipeAnnex['status'] === 'accepted'
+    && (int)$rejectedRecipeAnnex['entity_id']
+        === $entities['eggplant'],
+    'Recipe annex must override pre-existing unresolved/rejected mappings for reviewed labels while qualified forms remain unresolved'
 );
 $db->prepare("
     INSERT INTO inventory (
@@ -571,6 +736,82 @@ $assert(
         str_repeat('0', 64)
     ) === null,
     'Stale product fingerprints must not read annex identity'
+);
+$initialAdmissionSync =
+    ingredientOntologyV3IdentityAdmissionSync($db);
+$labelPlan = $db->query("
+    EXPLAIN QUERY PLAN
+    SELECT owner_id
+    FROM ingredient_ontology_mappings
+    WHERE ontology_version_id = {$versionId}
+      AND owner_type = 'recipe_ingredient'
+      AND normalized_label IN ('eggplant', 'melanzana')
+")->fetchAll(PDO::FETCH_ASSOC);
+$assert(
+    str_contains(
+        implode(' ', array_column($labelPlan, 'detail')),
+        'idx_ontology_mappings_label'
+    ),
+    'Admission invalidation discovery must use the normalized-label index'
+);
+$db->prepare("
+    INSERT INTO inventory (
+        product_id, location, quantity
+    )
+    VALUES (?, 'dispensa', 1)
+")->execute([$productIds['unknown']]);
+$db->exec("DELETE FROM recipe_score_pending_products");
+$reviewedAliases =
+    ingredientOntologyV3IdentityAnnexReviewedAliases();
+$reviewedAliases['mystery root'] = [
+    'target_normalized_label' => 'potato',
+    'target_language' => 'und',
+    'target_entity_slug' => 'potato',
+    'target_kind' => 'exact_alias',
+    'review_key' => 'test-mystery-root',
+    'rationale' => 'Test-only reviewed alias.',
+];
+$GLOBALS['INGREDIENT_ONTOLOGY_IDENTITY_ANNEX_REVIEWED_ALIASES'] =
+    $reviewedAliases;
+$identityRaceCalls = 0;
+$GLOBALS['IDENTITY_ADMISSION_BEFORE_RESERVATION'] =
+    static function (PDO $raceDb) use (&$identityRaceCalls): void {
+        if ($identityRaceCalls++ > 0) {
+            return;
+        }
+        $raceDb->prepare("
+            UPDATE ingredient_ontology_identity_admission_state
+            SET revision = revision + 1,
+                review_manifest_hash = ?,
+                manifest_json = '{}',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = 1
+        ")->execute([hash('sha256', 'identity-admission-race')]);
+    };
+$changedAdmissionSync =
+    ingredientOntologyV3IdentityAdmissionSync($db);
+unset(
+    $GLOBALS['INGREDIENT_ONTOLOGY_IDENTITY_ANNEX_REVIEWED_ALIASES'],
+    $GLOBALS['IDENTITY_ADMISSION_BEFORE_RESERVATION']
+);
+$assert(
+    !empty($initialAdmissionSync['changed'])
+    && !empty($changedAdmissionSync['changed'])
+    && (int)$changedAdmissionSync['revision']
+        >= (int)$initialAdmissionSync['revision'] + 2
+    && $identityRaceCalls >= 2
+    && in_array(
+        'mystery root',
+        $changedAdmissionSync['changed_labels'],
+        true
+    )
+    && (int)$db->query("
+        SELECT COUNT(*)
+        FROM recipe_score_pending_products
+        WHERE product_id = {$productIds['unknown']}
+          AND reason = 'identity_admission_manifest_changed'
+    ")->fetchColumn() === 1,
+    'Admission manifest changes must advance monotonically and target matching inventory products'
 );
 $assert(
     hash_equals(
