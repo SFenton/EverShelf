@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.13.18] - 2026-08-19
+
+### Fixed
+- Copied batches containing only bounded search expansion or in-flight
+  generation retries are recorded as advisory pending work instead of
+  bundle-readiness integrity failures.
+
 ## [1.13.17] - 2026-08-19
 
 ### Fixed
