@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.13.10] - 2026-08-19
+
+### Fixed
+- Provider facet audits now require the owner-scoped evidence gate before
+  expecting a contextual provider-local alias to resolve. Unrelated occurrences
+  remain correctly unresolved instead of blocking activation.
+
 ## [1.13.9] - 2026-08-19
 
 ### Fixed

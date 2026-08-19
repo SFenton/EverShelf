@@ -3889,6 +3889,17 @@ function ingredientOntologyV3ProviderFacetAudit(
     $mapping = $db->prepare("
         SELECT m.id, m.status, m.attributes_json
         FROM ingredient_ontology_mappings m
+        JOIN ingredient_ontology_label_context_policies policy
+          ON policy.label_id = CAST(
+              json_extract(m.evidence_json, '$.label_id') AS INTEGER
+          )
+         AND policy.required_evidence_kind = 'provider_owner_review'
+        JOIN ingredient_ontology_evidence_sources evidence
+          ON evidence.ontology_version_id = m.ontology_version_id
+         AND evidence.evidence_scope = 'owner_observation'
+         AND evidence.owner_fingerprint = m.owner_fingerprint
+         AND json_extract(evidence.payload_json, '$.review_key')
+             = policy.required_evidence_key
         WHERE m.ontology_version_id = ?
           AND m.owner_type = 'recipe_source_ingredient'
           AND CAST(json_extract(m.evidence_json, '$.label_id') AS INTEGER) = ?
