@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.13.13] - 2026-08-19
+
+### Fixed
+- Dynamic provider corpus validation accepts terms beyond the reviewed manifest
+  only when each remains entity-less, attribute-less, unresolved D8 evidence.
+
 ## [1.13.12] - 2026-08-19
 
 ### Fixed

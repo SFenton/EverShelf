@@ -3859,6 +3859,12 @@ function ingredientOntologyV3ProviderFacetAudit(
     PDO $db,
     int $versionId
 ): array {
+    $version = ingredientOntologyV3Version($db, $versionId);
+    $dynamicController = $version !== null
+        && function_exists(
+            'ingredientOntologyControllerUsesDynamicPins'
+        )
+        && ingredientOntologyControllerUsesDynamicPins($version);
     $terms = [];
     foreach (
         ingredientOntologyV3ResolutionCsvRows('provider-terms.csv')
@@ -4283,10 +4289,44 @@ function ingredientOntologyV3ProviderFacetAudit(
         array_keys($usedTermWaivers)
     ));
     $storedTermCount = count($storedTerms);
-    $storedTermCountValid = (
-        defined('RECIPE_BACKEND_TEST_MODE')
-        && RECIPE_BACKEND_TEST_MODE
-    ) || in_array($storedTermCount, [0, 646], true);
+    $dynamicTermFailures = [];
+    if ($dynamicController) {
+        foreach ($storedTerms as $providerRef => $storedTerm) {
+            if (isset($terms[$providerRef])) {
+                continue;
+            }
+            $attributes = json_decode(
+                (string)$storedTerm['attributes_json'],
+                true
+            ) ?: [];
+            if (
+                (string)$storedTerm['mapping_status'] !== 'unresolved'
+                || $storedTerm['entity_slug'] !== null
+                || $attributes !== []
+                || (string)$storedTerm['disposition_code'] !== 'D8'
+            ) {
+                if (count($dynamicTermFailures) < 100) {
+                    $dynamicTermFailures[] = [
+                        'provider_ref' => $providerRef,
+                        'actual' => $storedTerm,
+                    ];
+                }
+            }
+        }
+    }
+    $storedTermCountValid = $dynamicController
+        ? !$dynamicTermFailures
+            && (
+                $storedTermCount === 0
+                || $storedTermCount >= count($terms)
+            )
+        : (
+            (
+                defined('RECIPE_BACKEND_TEST_MODE')
+                && RECIPE_BACKEND_TEST_MODE
+            )
+            || in_array($storedTermCount, [0, 646], true)
+        );
     return [
         'valid' => !$mismatches
             && !$unreviewedHints
@@ -4308,6 +4348,10 @@ function ingredientOntologyV3ProviderFacetAudit(
         'waiver_count' => count($waivers),
         'provider_term_review_count' => count($terms),
         'stored_provider_term_count' => $storedTermCount,
+        'dynamic_provider_term_failure_count' =>
+            count($dynamicTermFailures),
+        'dynamic_provider_term_failure_sample' =>
+            $dynamicTermFailures,
         'accepted_provider_term_count' => $acceptedTermCount,
         'accepted_provider_title_signature_count' =>
             $acceptedTermTitleSignatureCount,
