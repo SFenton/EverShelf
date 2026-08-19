@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.13.15] - 2026-08-19
+
+### Fixed
+- After ontology activation, inventory identity annex rows are reconciled to
+  the new active version and journaled under one sparse inventory revision.
+  Newly reviewed products therefore receive recipe matches automatically.
+
 ## [1.13.14] - 2026-08-19
 
 ### Fixed
