@@ -447,12 +447,21 @@ function ingredientOntologyV3RevisionIntegrityAudit(
     $currentOntologySourceHash = $scopedInputs
         ? (string)$scoreState['ontology_source_hash']
         : ingredientOntologyV3CorpusHash($db);
+    $canonicalSourceTransition =
+        ingredientOntologyV3CanonicalSourceTransition(
+            $revision,
+            $scoreState,
+            $currentOntologySourceHash
+        );
     if (
         (int)($revision['ontology_source_revision'] ?? -1)
             !== (int)$scoreState['ontology_source_revision']
-        || !hash_equals(
-            (string)($revision['ontology_source_hash'] ?? ''),
-            (string)$scoreState['ontology_source_hash']
+        || (
+            !$canonicalSourceTransition
+            && !hash_equals(
+                (string)($revision['ontology_source_hash'] ?? ''),
+                (string)$scoreState['ontology_source_hash']
+            )
         )
         || (
             $scopedInputs
@@ -3286,6 +3295,12 @@ function ingredientOntologyV3ActivationErrors(array $snapshot): array {
     $state = $snapshot['state'];
     $errors = [];
     $revisionReport = recipeScoreRevisionReport($revision);
+    $canonicalSourceTransition =
+        ingredientOntologyV3CanonicalSourceTransition(
+            $revision,
+            $state,
+            (string)$snapshot['corpus_hash']
+        );
     if (
         (
             (string)($revision['catalog_lineage_hash'] ?? '') !== ''
@@ -3366,16 +3381,21 @@ function ingredientOntologyV3ActivationErrors(array $snapshot): array {
         || (int)$revision['catalog_revision'] !== $state['catalog_revision']
         || (int)($revision['ontology_source_revision'] ?? -1)
             !== (int)($state['ontology_source_revision'] ?? -2)
-        || !hash_equals(
-            (string)($revision['ontology_source_hash'] ?? ''),
-            (string)($state['ontology_source_hash'] ?? '')
-        )
-        || !hash_equals(
-            (string)(
-                $revision['ontology_source_lineage_hash'] ?? ''
-            ),
-            (string)(
-                $state['ontology_source_lineage_hash'] ?? ''
+        || (
+            !$canonicalSourceTransition
+            && (
+                !hash_equals(
+                    (string)($revision['ontology_source_hash'] ?? ''),
+                    (string)($state['ontology_source_hash'] ?? '')
+                )
+                || !hash_equals(
+                    (string)(
+                        $revision['ontology_source_lineage_hash'] ?? ''
+                    ),
+                    (string)(
+                        $state['ontology_source_lineage_hash'] ?? ''
+                    )
+                )
             )
         )
         || !hash_equals(

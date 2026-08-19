@@ -88,6 +88,24 @@ function ingredientOntologyV3Hash(mixed $value): string {
     return hash_final($hash);
 }
 
+function ingredientOntologyV3CanonicalSourceTransition(
+    array $revision,
+    array $state,
+    string $currentCanonicalHash
+): bool {
+    return (string)(
+        $revision['ontology_source_lineage_hash'] ?? ''
+    ) === ''
+        && (string)($state['ontology_source_lineage_hash'] ?? '') !== ''
+        && (int)($revision['ontology_source_revision'] ?? -1)
+            === (int)($state['ontology_source_revision'] ?? -2)
+        && strlen($currentCanonicalHash) === 64
+        && hash_equals(
+            (string)($revision['ontology_source_hash'] ?? ''),
+            $currentCanonicalHash
+        );
+}
+
 function ingredientOntologyV3CanonicalQueryRowsHash(
     PDO $db,
     string $sql,
