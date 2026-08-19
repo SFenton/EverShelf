@@ -292,6 +292,19 @@ try {
     ]);
     $ontologyImportId = (int)$db->lastInsertId();
     $insertImport->execute([
+        hash('sha256', 'processing-status-cleanup-import'),
+        'ontology',
+        $lineage,
+        INGREDIENT_ONTOLOGY_ACTIVATION_SCHEMA_VERSION,
+        $testDirectory . '/cleanup.sqlite',
+        hash('sha256', ''),
+        'purging',
+        'Historical cleanup remains pending.',
+        '2026-08-16 18:30:00',
+        '2026-08-16 18:30:00',
+    ]);
+    $cleanupImportId = (int)$db->lastInsertId();
+    $insertImport->execute([
         hash('sha256', 'processing-status-score-import'),
         'score',
         $lineage,
@@ -305,9 +318,12 @@ try {
     ]);
     $scoreImportId = (int)$db->lastInsertId();
     $schedulerImport = ingredientOntologyActivationPendingImport($db);
+    $maintenanceImport =
+        ingredientOntologyActivationPendingCleanupImport($db);
     $assert(
-        (int)($schedulerImport['id'] ?? 0) === $scoreImportId,
-        'The activation scheduler must skip terminal failed imports'
+        (int)($schedulerImport['id'] ?? 0) === $scoreImportId
+        && (int)($maintenanceImport['id'] ?? 0) === $cleanupImportId,
+        'The activation scheduler must skip terminal and cleanup imports'
     );
     $db->exec("
         UPDATE ontology_activation_state
@@ -347,7 +363,9 @@ try {
             last_error = '',
             completed_at = CURRENT_TIMESTAMP,
             updated_at = CURRENT_TIMESTAMP
-        WHERE id IN ({$ontologyImportId}, {$scoreImportId});
+        WHERE id IN (
+            {$ontologyImportId}, {$cleanupImportId}, {$scoreImportId}
+        );
         UPDATE ontology_activation_state
         SET failure_count = 0,
             last_error = '',

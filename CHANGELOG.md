@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.13.2] - 2026-08-19
+
+### Fixed
+- New ontology and score publication now takes priority over stale import
+  purging. Rebase cleanup remains bounded maintenance work and can no longer
+  starve user-visible identity or recipe updates behind historical imports.
+
 ## [1.13.1] - 2026-08-19
 
 ### Fixed

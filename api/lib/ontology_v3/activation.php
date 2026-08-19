@@ -6828,9 +6828,22 @@ function ingredientOntologyActivationAssertActiveDatabase(PDO $db): void {
         $row = $db->query("
             SELECT * FROM ontology_activation_imports
             WHERE status IN (
-                'staging', 'importing', 'verifying', 'activatable',
-                'rebase_required', 'purging'
+                'staging', 'importing', 'verifying', 'activatable'
             )
+            ORDER BY
+                CASE bundle_kind WHEN 'ontology' THEN 0 ELSE 1 END,
+                id
+            LIMIT 1
+        ")->fetch(PDO::FETCH_ASSOC);
+        return $row ?: null;
+    }
+
+    function ingredientOntologyActivationPendingCleanupImport(
+        PDO $db
+    ): ?array {
+        $row = $db->query("
+            SELECT * FROM ontology_activation_imports
+            WHERE status IN ('rebase_required', 'purging')
             ORDER BY
                 CASE bundle_kind WHEN 'ontology' THEN 0 ELSE 1 END,
                 id
@@ -7446,42 +7459,6 @@ function ingredientOntologyActivationAssertActiveDatabase(PDO $db): void {
             ];
         }
 
-        $staleOntology =
-            ingredientOntologyActivationStaleOntologyImport($db);
-        if ($staleOntology !== null) {
-            $failed =
-                ingredientOntologyActivationWithLiveReservation(
-                    $options,
-                    'mark_stale_import',
-                    static fn(): array =>
-                        ingredientOntologyActivationFailImport(
-                            $db,
-                            (int)$staleOntology['id'],
-                            'Active ontology parent changed before score build.'
-                        )
-                );
-            if (!empty(
-                $options['yield_after_live_reservation']
-            )) {
-                return [
-                    'action' => 'supersede_stale_ontology',
-                    'import' => $failed,
-                    'work_cleanup' => $workCleanup,
-                    'cdc_pruned' => $cdcPruned,
-                ];
-            }
-            return [
-                'action' => 'supersede_stale_ontology',
-                'import' => ingredientOntologyActivationDriveImport(
-                    $db,
-                    (int)$staleOntology['id'],
-                    $options
-                ),
-                'work_cleanup' => $workCleanup,
-                'cdc_pruned' => $cdcPruned,
-            ];
-        }
-
         $waiting = ingredientOntologyActivationWaitingOntologyImport($db);
         if ($waiting !== null) {
             $ontologyBundle =
@@ -7806,6 +7783,57 @@ function ingredientOntologyActivationAssertActiveDatabase(PDO $db): void {
                 'import' => ingredientOntologyActivationDriveImport(
                     $db,
                     (int)$import['id'],
+                    $options
+                ),
+                'work_cleanup' => $workCleanup,
+                'cdc_pruned' => $cdcPruned,
+            ];
+        }
+
+        $cleanupImport =
+            ingredientOntologyActivationPendingCleanupImport($db);
+        if ($cleanupImport !== null) {
+            return [
+                'action' => 'cleanup_import',
+                'import' => ingredientOntologyActivationDriveImport(
+                    $db,
+                    (int)$cleanupImport['id'],
+                    $options
+                ),
+                'work_cleanup' => $workCleanup,
+                'cdc_pruned' => $cdcPruned,
+            ];
+        }
+
+        $staleOntology =
+            ingredientOntologyActivationStaleOntologyImport($db);
+        if ($staleOntology !== null) {
+            $failed =
+                ingredientOntologyActivationWithLiveReservation(
+                    $options,
+                    'mark_stale_import',
+                    static fn(): array =>
+                        ingredientOntologyActivationFailImport(
+                            $db,
+                            (int)$staleOntology['id'],
+                            'Active ontology parent changed before score build.'
+                        )
+                );
+            if (!empty(
+                $options['yield_after_live_reservation']
+            )) {
+                return [
+                    'action' => 'supersede_stale_ontology',
+                    'import' => $failed,
+                    'work_cleanup' => $workCleanup,
+                    'cdc_pruned' => $cdcPruned,
+                ];
+            }
+            return [
+                'action' => 'supersede_stale_ontology',
+                'import' => ingredientOntologyActivationDriveImport(
+                    $db,
+                    (int)$staleOntology['id'],
                     $options
                 ),
                 'work_cleanup' => $workCleanup,
