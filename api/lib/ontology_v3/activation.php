@@ -7080,6 +7080,72 @@ function ingredientOntologyActivationAssertActiveDatabase(PDO $db): void {
         ")->fetchColumn();
     }
 
+    function ingredientOntologyActivationReconcileProductAnnex(
+        PDO $db
+    ): array {
+        if (
+            !function_exists(
+                'ingredientOntologyV3IdentityAnnexRefreshProduct'
+            )
+            || !function_exists('recipeScoreMarkProductsDirty')
+        ) {
+            return [
+                'available' => false,
+                'product_count' => 0,
+                'changed_product_count' => 0,
+            ];
+        }
+        $active = ingredientOntologyV3ActiveVersion($db);
+        if ($active === null) {
+            return [
+                'available' => false,
+                'product_count' => 0,
+                'changed_product_count' => 0,
+            ];
+        }
+        $versionId = (int)$active['id'];
+        $products = $db->prepare("
+            SELECT DISTINCT inventory.product_id
+            FROM inventory
+            LEFT JOIN ingredient_ontology_identity_annex annex
+              ON annex.product_id = inventory.product_id
+            WHERE annex.product_id IS NULL
+               OR annex.ontology_version_id <> ?
+            ORDER BY inventory.product_id
+        ");
+        $products->execute([$versionId]);
+        $productIds = array_map(
+            'intval',
+            $products->fetchAll(PDO::FETCH_COLUMN)
+        );
+        $changed = [];
+        foreach ($productIds as $productId) {
+            $result = ingredientOntologyV3IdentityAnnexRefreshProduct(
+                $db,
+                $productId,
+                $versionId,
+                false
+            );
+            if (!empty($result['changed'])) {
+                $changed[] = $productId;
+            }
+        }
+        if ($changed) {
+            recipeScoreMarkProductsDirty(
+                $db,
+                $changed,
+                'active_ontology_identity_reconciled'
+            );
+        }
+        return [
+            'available' => true,
+            'ontology_version_id' => $versionId,
+            'product_count' => count($productIds),
+            'changed_product_count' => count($changed),
+            'changed_product_ids' => $changed,
+        ];
+    }
+
     function ingredientOntologyActivationNeedsScoreBuild(PDO $db): bool {
         $active = recipeScoreActiveRevision($db);
         return $active !== null
@@ -7501,6 +7567,7 @@ function ingredientOntologyActivationAssertActiveDatabase(PDO $db): void {
             $db,
             $options
         );
+        ingredientOntologyActivationReconcileProductAnnex($db);
         $pending = ingredientOntologyActivationPendingImport($db);
         if ($pending !== null) {
             $result = ingredientOntologyActivationDriveImport(

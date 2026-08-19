@@ -820,6 +820,87 @@ $assert(
     ),
     'Identity annex writes must not change the sealed ontology content hash'
 );
+$db->prepare("
+    INSERT INTO inventory (
+        product_id, location, quantity
+    )
+    VALUES (?, 'dispensa', 1)
+")->execute([$productIds['eggplant']]);
+$db->prepare("
+    DELETE FROM ingredient_ontology_identity_annex
+    WHERE product_id IN (?, ?)
+")->execute([
+    $productIds['unknown'],
+    $productIds['eggplant'],
+]);
+$fixtureState = recipeScoreState($db);
+ingredientOntologyV3SetReadyMutationGuard($db, true);
+try {
+    $db->prepare("
+        INSERT INTO recipe_score_revisions (
+            inventory_revision, catalog_revision, inventory_fingerprint,
+            score_date, catalog_max_id, status, recipe_count,
+            ontology_version_id, scoring_model, scoring_config_hash,
+            catalog_fingerprint, ontology_source_revision,
+            ontology_source_hash, completed_at
+        )
+        VALUES (?, ?, ?, ?, 0, 'ready', 0, ?,
+                'faceted-ontology-v3', ?, ?, ?, ?, CURRENT_TIMESTAMP)
+    ")->execute([
+        $fixtureState['inventory_revision'],
+        $fixtureState['catalog_revision'],
+        str_repeat('1', 64),
+        recipeScoreCurrentDate(),
+        $versionId,
+        ingredientOntologyV3ScoringConfigHash(),
+        str_repeat('2', 64),
+        $fixtureState['ontology_source_revision'],
+        str_repeat('3', 64),
+    ]);
+} finally {
+    ingredientOntologyV3SetReadyMutationGuard($db, false);
+}
+$fixtureActiveRevisionId = (int)$db->lastInsertId();
+$db->prepare("
+    UPDATE recipe_score_state
+    SET active_score_revision_id = ?,
+        active_score_projection_revision_id = ?,
+        updated_at = CURRENT_TIMESTAMP
+    WHERE id = 1
+")->execute([
+    $fixtureActiveRevisionId,
+    $fixtureActiveRevisionId,
+]);
+$db->exec("DELETE FROM recipe_score_pending_products");
+$reconcileRevisionBefore =
+    recipeScoreState($db)['inventory_revision'];
+$reconciled =
+    ingredientOntologyActivationReconcileProductAnnex($db);
+$reconcileRevisionAfter =
+    recipeScoreState($db)['inventory_revision'];
+$assert(
+    (int)$reconciled['changed_product_count'] === 2
+    && $reconcileRevisionAfter === $reconcileRevisionBefore + 1
+    && (int)$db->query("
+        SELECT COUNT(*)
+        FROM recipe_score_pending_products
+        WHERE product_id IN (
+            {$productIds['unknown']},
+            {$productIds['eggplant']}
+        )
+          AND reason = 'active_ontology_identity_reconciled'
+    ")->fetchColumn() === 2
+    && (int)$db->query("
+        SELECT COUNT(*)
+        FROM ingredient_ontology_identity_annex
+        WHERE product_id IN (
+            {$productIds['unknown']},
+            {$productIds['eggplant']}
+        )
+          AND ontology_version_id = {$versionId}
+    ")->fetchColumn() === 2,
+    'Active ontology reconciliation must refresh products and journal one sparse revision'
+);
 
 $db = null;
 @unlink($path);

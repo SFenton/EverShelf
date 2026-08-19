@@ -743,6 +743,55 @@ function recipeScoreMarkProductDirty(
     return $inventoryRevision;
 }
 
+function recipeScoreMarkProductsDirty(
+    PDO $db,
+    array $productIds,
+    string $reason
+): int {
+    $productIds = array_values(array_unique(array_filter(
+        array_map('intval', $productIds),
+        static fn(int $id): bool => $id > 0
+    )));
+    if (!$productIds) {
+        return recipeScoreState($db)['inventory_revision'];
+    }
+    $inventoryRevision = recipeScoreMarkDirty($db);
+    $active = recipeScoreActiveRevision($db);
+    if (
+        $active === null
+        || (string)($active['scoring_model'] ?? '')
+            !== 'faceted-ontology-v3'
+        || $active['ontology_version_id'] === null
+    ) {
+        return $inventoryRevision;
+    }
+    $insert = $db->prepare("
+        INSERT INTO recipe_score_pending_products (
+            product_id, first_inventory_revision,
+            latest_inventory_revision, reason,
+            created_at, updated_at
+        )
+        VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+        ON CONFLICT(product_id) DO UPDATE SET
+            latest_inventory_revision = MAX(
+                recipe_score_pending_products.latest_inventory_revision,
+                excluded.latest_inventory_revision
+            ),
+            reason = excluded.reason,
+            updated_at = CURRENT_TIMESTAMP
+    ");
+    $reason = mb_substr(trim($reason), 0, 160, 'UTF-8');
+    foreach ($productIds as $productId) {
+        $insert->execute([
+            $productId,
+            $inventoryRevision,
+            $inventoryRevision,
+            $reason,
+        ]);
+    }
+    return $inventoryRevision;
+}
+
 function recipeScoreClearPendingProducts(
     PDO $db,
     int $inventoryRevision,
