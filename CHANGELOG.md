@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.13.5] - 2026-08-19
+
+### Fixed
+- Dynamic reviewed candidates retain product-derived legacy canonical entities
+  only as autonomous structural placeholders. They remain identity-ineligible
+  until explicitly reviewed instead of blocking the reviewed ontology build.
+
 ## [1.13.4] - 2026-08-19
 
 ### Fixed
