@@ -3903,6 +3903,15 @@ function ingredientOntologyV3ProviderFacetAudit(
         WHERE m.ontology_version_id = ?
           AND m.owner_type = 'recipe_source_ingredient'
           AND CAST(json_extract(m.evidence_json, '$.label_id') AS INTEGER) = ?
+          AND COALESCE(
+              CAST(
+                  json_extract(
+                      m.evidence_json,
+                      '$.context_gate_missing'
+                  ) AS INTEGER
+              ),
+              0
+          ) = 0
         ORDER BY m.id
     ");
     $mismatches = [];

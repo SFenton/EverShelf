@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.13.11] - 2026-08-19
+
+### Fixed
+- Provider facet audits honor each mapping's immutable mapping-time context
+  gate. Evidence observed later cannot retroactively turn a correctly
+  unresolved occurrence into an activation failure.
+
 ## [1.13.10] - 2026-08-19
 
 ### Fixed
