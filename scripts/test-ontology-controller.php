@@ -10727,6 +10727,31 @@ try {
         && $classifiedNoOp['stale_source_job_ids'] === [99999999],
         'No-op provenance classification must defer validated fallbacks while isolating missing source intents'
     );
+    controllerTestAssert(
+        ingredientOntologyControllerPolicyDeferredJobIds([
+            [
+                'job_id' => 20,
+                'status' => 'quarantined',
+                'apply' => [
+                    'reason' =>
+                        'R2 requires an explicit benchmark policy',
+                ],
+            ],
+            [
+                'job_id' => 10,
+                'status' => 'abstained',
+                'reason' =>
+                    'R1 requires an explicit benchmark policy',
+            ],
+            [
+                'job_id' => 30,
+                'status' => 'failed',
+                'reason' =>
+                    'R2 requires an explicit benchmark policy',
+            ],
+        ]) === [10, 20],
+        'Policy-deferred copied jobs must enter the verified defer acknowledgement'
+    );
     $provenanceSnapshot = [
         'database_lineage_uuid' =>
             ingredientOntologyActivationLineageUuid(

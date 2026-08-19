@@ -23322,6 +23322,42 @@ function ingredientOntologyControllerActivationBundlePreflight(
     ];
 }
 
+function ingredientOntologyControllerPolicyDeferredJobIds(
+    array $results
+): array {
+    $jobIds = [];
+    foreach ($results as $result) {
+        if (
+            !is_array($result)
+            || !in_array(
+                (string)($result['status'] ?? ''),
+                ['quarantined', 'abstained'],
+                true
+            )
+        ) {
+            continue;
+        }
+        $reason = (string)(
+            $result['apply']['reason']
+                ?? $result['reason']
+                ?? ''
+        );
+        $jobId = (int)($result['job_id'] ?? 0);
+        if (
+            $jobId > 0
+            && str_contains(
+                $reason,
+                'requires an explicit benchmark policy'
+            )
+        ) {
+            $jobIds[$jobId] = true;
+        }
+    }
+    $jobIds = array_map('intval', array_keys($jobIds));
+    sort($jobIds, SORT_NUMERIC);
+    return $jobIds;
+}
+
 function ingredientOntologyControllerBuildActivationBundle(
     PDO $db,
     array $options = []
@@ -23383,6 +23419,12 @@ function ingredientOntologyControllerBuildActivationBundle(
                     (int)$processed['source_job_id'];
             }
         }
+        $acknowledgeableJobIds = array_merge(
+            $acknowledgeableJobIds,
+            ingredientOntologyControllerPolicyDeferredJobIds(
+                (array)($result['results'] ?? [])
+            )
+        );
         $claimed = (int)($result['claimed'] ?? 0);
         $claimedTotal += $claimed;
         if ($claimed === 0 || $claimedTotal >= $limit) {
