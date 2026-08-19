@@ -1593,42 +1593,6 @@ function ingredientOntologyV3ApplyResolutionEntities(
             [$versionId],
             $extraRoleSlugs
         ));
-        $ingredientParent = $db->prepare("
-            SELECT id
-            FROM ingredient_ontology_entities
-            WHERE ontology_version_id = ?
-              AND slug = 'ingredient'
-            LIMIT 1
-        ");
-        $ingredientParent->execute([$versionId]);
-        $ingredientParentId = (int)$ingredientParent->fetchColumn();
-        if ($ingredientParentId <= 0) {
-            throw new RuntimeException(
-                'dynamic structural placeholder parent is unavailable'
-            );
-        }
-        $extraEntities = $db->prepare("
-            SELECT id, slug
-            FROM ingredient_ontology_entities
-            WHERE ontology_version_id = ?
-              AND slug IN ({$placeholders})
-            ORDER BY slug
-        ");
-        $extraEntities->execute(array_merge(
-            [$versionId],
-            $extraRoleSlugs
-        ));
-        foreach ($extraEntities->fetchAll(PDO::FETCH_ASSOC) as $entity) {
-            ingredientOntologyV3ResolutionSetPrimaryParent(
-                $db,
-                $versionId,
-                (int)$entity['id'],
-                $ingredientParentId,
-                'autonomous_controller',
-                'Unreviewed dynamic legacy entity remains a non-satisfying '
-                    . 'structural placeholder.'
-            );
-        }
     }
     $entities = ingredientOntologyV3EntityMap($db, $versionId)['by_slug'];
 
@@ -1858,6 +1822,29 @@ function ingredientOntologyV3ApplyResolutionEntities(
                 'identity_satisfaction_denied' => true,
             ]
         );
+    }
+    if ($extraRoleSlugs) {
+        if (!isset($entities['ingredient'])) {
+            throw new RuntimeException(
+                'dynamic structural placeholder parent is unavailable'
+            );
+        }
+        foreach ($extraRoleSlugs as $slug) {
+            if (!isset($entities[$slug])) {
+                throw new RuntimeException(
+                    "dynamic structural placeholder is unavailable: {$slug}"
+                );
+            }
+            ingredientOntologyV3ResolutionSetPrimaryParent(
+                $db,
+                $versionId,
+                (int)$entities[$slug]['id'],
+                (int)$entities['ingredient']['id'],
+                'autonomous_controller',
+                'Unreviewed dynamic legacy entity remains a non-satisfying '
+                    . 'structural placeholder.'
+            );
+        }
     }
     $secondaryRelationCount = 0;
     foreach (
