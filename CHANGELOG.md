@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.13.8] - 2026-08-19
+
+### Fixed
+- Products added after the frozen review set receive explicit dynamic D9
+  unresolved dispositions during reviewed rebuilds. They remain fail-closed
+  without blocking activation of independently reviewed identities.
+
 ## [1.13.7] - 2026-08-19
 
 ### Fixed

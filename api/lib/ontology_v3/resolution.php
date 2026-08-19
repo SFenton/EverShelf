@@ -5283,6 +5283,12 @@ function ingredientOntologyV3ApplyResolutionProductReviews(
         ];
     }
     $reviews = ingredientOntologyV3ResolutionProductReviewMap();
+    $version = ingredientOntologyV3Version($db, $versionId);
+    $dynamicController = $version !== null
+        && function_exists(
+            'ingredientOntologyControllerUsesDynamicPins'
+        )
+        && ingredientOntologyControllerUsesDynamicPins($version);
     $products = $db->prepare("
         SELECT a.id AS assertion_id, a.product_id, a.entity_id,
                a.status, a.attributes_json, e.slug AS entity_slug,
@@ -5304,6 +5310,7 @@ function ingredientOntologyV3ApplyResolutionProductReviews(
     ");
     $counts = [];
     $matchedSupplemental = 0;
+    $dynamicUnreviewed = 0;
     while ($product = $products->fetch(PDO::FETCH_ASSOC)) {
         $attributes = json_decode(
             (string)$product['attributes_json'],
@@ -5336,7 +5343,17 @@ function ingredientOntologyV3ApplyResolutionProductReviews(
         );
         $review = $reviews[$ownerFingerprint] ?? null;
         if ($review === null) {
-            if (
+            if ($dynamicController) {
+                $review = [
+                    'product_id' => (int)$product['product_id'],
+                    'disposition_code' => 'D9',
+                    'entity_slug' => '',
+                    'attributes' => [],
+                    'rationale' =>
+                        'Dynamic product awaits explicit reviewed disposition',
+                ];
+                $dynamicUnreviewed++;
+            } elseif (
                 defined('RECIPE_BACKEND_TEST_MODE')
                 && RECIPE_BACKEND_TEST_MODE
             ) {
@@ -5404,6 +5421,7 @@ function ingredientOntologyV3ApplyResolutionProductReviews(
     return [
         'reviewed_count' => array_sum($counts),
         'explicit_manifest_matches' => $matchedSupplemental,
+        'dynamic_unreviewed_count' => $dynamicUnreviewed,
         'by_disposition' => $counts,
     ];
 }

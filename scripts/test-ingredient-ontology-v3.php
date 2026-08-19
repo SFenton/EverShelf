@@ -6854,6 +6854,9 @@ try {
             (string)$currentManifest['content_hash'],
             (string)$dynamicManifest['content_hash']
         )
+        && (int)$dynamicCandidate['report']['resolution_products'][
+            'dynamic_unreviewed_count'
+        ] > 0
         && ontologyV3TestCount(
             $db,
             "SELECT COUNT(*)
