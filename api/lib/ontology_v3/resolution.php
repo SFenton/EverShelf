@@ -7376,7 +7376,18 @@ function ingredientOntologyV3DispositionAudit(
     ) ? (int)$db->query("
         SELECT COUNT(*) FROM recipe_source_ingredients
     ")->fetchColumn() : 0;
+    $providerVersion = ingredientOntologyV3Version($db, $versionId);
+    $dynamicProviderCorpus = $providerVersion !== null
+        && function_exists(
+            'ingredientOntologyControllerUsesDynamicPins'
+        )
+        && ingredientOntologyControllerUsesDynamicPins($providerVersion);
     $providerCorpusGate = $providerSourceRowCount === 0
+        || (
+            $dynamicProviderCorpus
+            && $providerLocalObservedReviewCount
+                <= $providerLocalReviewCount
+        )
         || (
             $providerSourceRowCount === 3100
             && $providerTermSourceCount === 646

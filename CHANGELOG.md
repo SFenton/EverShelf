@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.13.14] - 2026-08-19
+
+### Fixed
+- Dynamic provider corpora use their sealed snapshot counts and reviewed/D8
+  audits instead of the historical fixed 3,100-row pilot count.
+
 ## [1.13.13] - 2026-08-19
 
 ### Fixed
