@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.13.3] - 2026-08-19
+
+### Fixed
+- Reviewed-manifest changes now force a fresh copied ontology candidate instead
+  of inheriting the previous immutable manifest row through a controller fork.
+- Full score bases may clear sparse source lineage only when their source hash
+  matches the current canonical corpus; permanent lineage mismatches remain
+  fail-closed.
+
 ## [1.13.2] - 2026-08-19
 
 ### Fixed

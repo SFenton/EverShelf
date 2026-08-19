@@ -22,6 +22,49 @@ function ingredientOntologyActivationConfigureDatabase(
     $db->exec('PRAGMA busy_timeout = ' . $busyTimeoutMs);
 }
 
+function ingredientOntologyActivationNeedsReviewedManifestRefresh(
+    PDO $db
+): bool {
+    $active = ingredientOntologyV3ActiveVersion($db);
+    if ($active === null) {
+        return false;
+    }
+    $manifest = ingredientOntologyV3ResolutionManifest();
+    $stmt = $db->prepare("
+        SELECT manifest_version, manifest_hash, content_hash
+        FROM ingredient_ontology_resolution_manifests
+        WHERE ontology_version_id = ?
+          AND manifest_key = ?
+    ");
+    $stmt->execute([
+        (int)$active['id'],
+        (string)$manifest['manifest_key'],
+    ]);
+    $stored = $stmt->fetch(PDO::FETCH_ASSOC);
+    return !$stored
+        || !hash_equals(
+            (string)$stored['manifest_hash'],
+            (string)$manifest['manifest_hash']
+        )
+        || !hash_equals(
+            (string)$stored['content_hash'],
+            (string)$manifest['content_hash']
+        )
+        || (string)$stored['manifest_version']
+            !== (string)$manifest['manifest_version'];
+}
+
+function ingredientOntologyActivationShouldRebuildReviewedManifest(
+    PDO $db,
+    array $options = []
+): bool {
+    $testFixture = defined('RECIPE_BACKEND_TEST_MODE')
+        && RECIPE_BACKEND_TEST_MODE
+        && !empty($options['allow_test_fixture']);
+    return !$testFixture
+        && ingredientOntologyActivationNeedsReviewedManifestRefresh($db);
+}
+
 final class IngredientOntologyActivationReservationUnavailable
     extends RuntimeException
 {
@@ -3160,19 +3203,46 @@ function ingredientOntologyActivationQuoteIdentifier(
             'constraint_hash' => $constraintHash,
             'policy_hash' => ingredientOntologyControllerPolicyHash(),
         ]);
-        $fork = ingredientOntologyControllerChunkedFork(
-            $db,
-            (int)$parentVersion['id'],
-            [
-                'generation_key' => $generationKey,
-                'constraint_epoch' => $constraintEpoch,
-                'constraint_hash' => $constraintHash,
-                'controller_policy_hash' =>
-                    ingredientOntologyControllerPolicyHash(),
-                'activation_policy' => 'autonomous',
-            ]
-        );
-        $candidateVersionId = (int)$fork['version_id'];
+        $reviewedManifestRefresh =
+            ingredientOntologyActivationShouldRebuildReviewedManifest(
+                $db,
+                $options
+            );
+        if ($reviewedManifestRefresh) {
+            $candidate = ingredientOntologyV3BuildCandidate(
+                $db,
+                [
+                    'model' => (string)$parentVersion['model_name'],
+                    'corpus_profile' =>
+                        (string)$parentVersion['corpus_profile'],
+                    'version' => 'v3-reviewed-'
+                        . gmdate('Ymd-His') . '-'
+                        . substr(
+                            (string)ingredientOntologyV3ResolutionManifest()[
+                                'manifest_hash'
+                            ],
+                            0,
+                            10
+                        ),
+                    'parent_version_id' => (int)$parentVersion['id'],
+                ]
+            );
+            $candidateVersionId = (int)$candidate['version_id'];
+        } else {
+            $fork = ingredientOntologyControllerChunkedFork(
+                $db,
+                (int)$parentVersion['id'],
+                [
+                    'generation_key' => $generationKey,
+                    'constraint_epoch' => $constraintEpoch,
+                    'constraint_hash' => $constraintHash,
+                    'controller_policy_hash' =>
+                        ingredientOntologyControllerPolicyHash(),
+                    'activation_policy' => 'autonomous',
+                ]
+            );
+            $candidateVersionId = (int)$fork['version_id'];
+        }
         $candidateVersion = ingredientOntologyV3Version(
             $db,
             $candidateVersionId
@@ -7535,7 +7605,18 @@ function ingredientOntologyActivationAssertActiveDatabase(PDO $db): void {
         }
 
         if (ingredientOntologyActivationNeedsOntologyBuild($db)) {
+            $reviewedManifestRefresh =
+                ingredientOntologyActivationShouldRebuildReviewedManifest(
+                    $db,
+                    $options
+                );
             $built =
+                $reviewedManifestRefresh
+                    ? ingredientOntologyActivationBuildRefresh(
+                        $db,
+                        $options
+                    )
+                    : (
                 ingredientOntologyActivationPendingIntentCount($db) > 0
                     ? ingredientOntologyActivationBuildGeneration(
                         $db,
@@ -7544,7 +7625,7 @@ function ingredientOntologyActivationAssertActiveDatabase(PDO $db): void {
                     : ingredientOntologyActivationBuildRefresh(
                         $db,
                         $options
-                    );
+                    ));
             if (is_array($built['acknowledgement'] ?? null)) {
                 $acknowledgement =
                     ingredientOntologyActivationWithLiveReservation(

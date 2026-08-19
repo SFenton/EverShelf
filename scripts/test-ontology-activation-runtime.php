@@ -128,6 +128,34 @@ try {
         ingredientOntologyActivationClassifyValidationErrors([
             'activation score date changed',
         ]);
+    $canonicalSourceTransition =
+        ingredientOntologyV3CanonicalSourceTransition(
+            [
+                'ontology_source_revision' => 12,
+                'ontology_source_hash' => str_repeat('a', 64),
+                'ontology_source_lineage_hash' => '',
+            ],
+            [
+                'ontology_source_revision' => 12,
+                'ontology_source_hash' => str_repeat('b', 64),
+                'ontology_source_lineage_hash' => str_repeat('c', 64),
+            ],
+            str_repeat('a', 64)
+        );
+    $invalidCanonicalSourceTransition =
+        ingredientOntologyV3CanonicalSourceTransition(
+            [
+                'ontology_source_revision' => 12,
+                'ontology_source_hash' => str_repeat('d', 64),
+                'ontology_source_lineage_hash' => '',
+            ],
+            [
+                'ontology_source_revision' => 12,
+                'ontology_source_hash' => str_repeat('b', 64),
+                'ontology_source_lineage_hash' => str_repeat('c', 64),
+            ],
+            str_repeat('a', 64)
+        );
     activationRuntimeTestAssert(
         empty($permanentLineage['expected'])
         && !empty($liveDrift['expected'])
@@ -142,6 +170,11 @@ try {
         && !empty($activationDateDrift['expected'])
         && $activationDateDrift['outcome_kind'] === 'rebase_required',
         'Only primary live drift plus known derivative errors may rebase'
+    );
+    activationRuntimeTestAssert(
+        $canonicalSourceTransition
+        && !$invalidCanonicalSourceTransition,
+        'A full base may clear sparse source lineage only when it seals the current canonical corpus'
     );
     $standaloneRollover = null;
     try {
