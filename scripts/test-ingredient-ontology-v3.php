@@ -6857,6 +6857,10 @@ try {
         && (int)$dynamicCandidate['report']['resolution_products'][
             'dynamic_unreviewed_count'
         ] > 0
+        && array_key_exists(
+            'dynamic_unreviewed_provider_term_count',
+            $dynamicCandidate['report']['terminal_dispositions']
+        )
         && ontologyV3TestCount(
             $db,
             "SELECT COUNT(*)
