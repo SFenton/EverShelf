@@ -1114,6 +1114,18 @@ function ingredientOntologyV3MigrateMaterializationGuards(PDO $db): void {
             'incremental recipe set',
         ],
         [
+            'recipe_score_recipe_operations',
+            'score_revision_id',
+            'recipe_score_revisions',
+            'recipe score operation',
+        ],
+        [
+            'recipe_score_recipe_ingredients',
+            'score_revision_id',
+            'recipe_score_revisions',
+            'recipe score ingredient snapshot',
+        ],
+        [
             'ingredient_ontology_requirement_input_recipes',
             'requirement_revision_id',
             'ingredient_ontology_requirement_revisions',
@@ -1177,7 +1189,7 @@ function ingredientOntologyV3MigrateMaterializationGuards(PDO $db): void {
     ingredientOntologyV3MigrateTriggerSet(
         $db,
         'materialization_guard_trigger_version',
-        'materialization-guards-v3.18',
+        'materialization-guards-v3.19',
         $triggerNames,
         static function (PDO $db) use (
             $createChildGuards,
@@ -2875,6 +2887,31 @@ function ingredientOntologyV3SchemaMigrate(PDO $db): void {
                 REFERENCES ingredient_ontology_entities(id)
         );
 
+        CREATE TABLE IF NOT EXISTS
+            ingredient_ontology_identity_admission_state (
+            id INTEGER PRIMARY KEY CHECK(id = 1),
+            revision INTEGER NOT NULL DEFAULT 0
+                CHECK(revision >= 0),
+            resolver_version TEXT NOT NULL DEFAULT ''
+                CHECK(length(resolver_version) <= 80),
+            review_manifest_hash TEXT NOT NULL DEFAULT ''
+                CHECK(
+                    review_manifest_hash = ''
+                    OR length(review_manifest_hash) = 64
+                ),
+            manifest_json TEXT NOT NULL DEFAULT '{}'
+                CHECK(length(manifest_json) <= 262144),
+            last_changed_label_count INTEGER NOT NULL DEFAULT 0
+                CHECK(last_changed_label_count >= 0),
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        INSERT OR IGNORE INTO
+            ingredient_ontology_identity_admission_state (
+                id, revision, resolver_version,
+                review_manifest_hash, manifest_json
+            )
+        VALUES (1, 0, '', '', '{}');
+
         CREATE TABLE IF NOT EXISTS ingredient_ontology_requirement_recipe_states (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             requirement_revision_id INTEGER NOT NULL,
@@ -3015,6 +3052,10 @@ function ingredientOntologyV3SchemaMigrate(PDO $db): void {
             ON ingredient_ontology_mappings(
                 ontology_version_id, owner_type, status,
                 mapping_source, normalized_label
+            );
+        CREATE INDEX IF NOT EXISTS idx_ontology_mappings_label
+            ON ingredient_ontology_mappings(
+                ontology_version_id, owner_type, normalized_label
             );
         CREATE INDEX IF NOT EXISTS idx_ontology_mapping_attributes_mapping
             ON ingredient_ontology_mapping_attributes(mapping_id, facet_id);

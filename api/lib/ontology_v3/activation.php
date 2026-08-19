@@ -2,12 +2,15 @@
 declare(strict_types=1);
 
 const INGREDIENT_ONTOLOGY_ACTIVATION_SCHEMA_VERSION =
-    'ontology-activation-v2';
+    'ontology-activation-v3';
 const INGREDIENT_ONTOLOGY_ACTIVATION_TRIGGER_VERSION =
-    'ontology-activation-cdc-v1';
+    'ontology-activation-cdc-v2';
 const INGREDIENT_ONTOLOGY_ACTIVATION_BUNDLE_VERSION =
     'ontology-activation-bundle-v2';
+const INGREDIENT_ONTOLOGY_ACTIVATION_ACKNOWLEDGEMENT_VERSION =
+    'ontology-activation-acknowledgement-v2';
 const INGREDIENT_ONTOLOGY_ACTIVATION_LIVE_BUSY_TIMEOUT_MS = 2500;
+const INGREDIENT_ONTOLOGY_ACTIVATION_EXPECTED_RETRY_LIMIT = 3;
 
 function ingredientOntologyActivationConfigureDatabase(
     PDO $db,
@@ -31,6 +34,39 @@ final class IngredientOntologyActivationReservationUnavailable
 
     public function phase(): string {
         return $this->phase;
+    }
+}
+
+final class IngredientOntologyActivationExpectedOutcome
+    extends RuntimeException
+{
+    private string $outcomeKind;
+    private array $details;
+
+    public function __construct(
+        string $outcomeKind,
+        string $message,
+        array $details = []
+    ) {
+        if (!in_array($outcomeKind, [
+            'superseded_snapshot',
+            'rebase_required',
+        ], true)) {
+            throw new InvalidArgumentException(
+                'ontology activation expected outcome kind is invalid'
+            );
+        }
+        $this->outcomeKind = $outcomeKind;
+        $this->details = $details;
+        parent::__construct($message);
+    }
+
+    public function outcomeKind(): string {
+        return $this->outcomeKind;
+    }
+
+    public function details(): array {
+        return $this->details;
     }
 }
 
@@ -95,6 +131,309 @@ function ingredientOntologyActivationStableJson(mixed $value): string {
     );
 }
 
+function ingredientOntologyActivationRecordOutcome(
+    PDO $db,
+    string $kind,
+    array $details = [],
+    bool $clearFailure = false,
+    ?int $retryAfterSeconds = null
+): array {
+    if (!preg_match('/^[a-z][a-z0-9_]{0,79}$/D', $kind)) {
+        throw new InvalidArgumentException(
+            'ontology activation outcome kind is invalid'
+        );
+    }
+    $json = ingredientOntologyActivationStableJson($details);
+    if (strlen($json) > 32768) {
+        throw new InvalidArgumentException(
+            'ontology activation outcome details are too large'
+        );
+    }
+    $retryAfterSeconds = $retryAfterSeconds !== null
+        ? max(1, min(3600, $retryAfterSeconds))
+        : null;
+    $expected = in_array($kind, [
+        'superseded_snapshot',
+        'rebase_required',
+    ], true);
+    $normalizedDetails = $details;
+    foreach ([
+        'candidate_score_revision_id',
+        'generation_id',
+        'import_id',
+        'message',
+    ] as $ephemeralKey) {
+        unset($normalizedDetails[$ephemeralKey]);
+    }
+    $expectedKey = $expected
+        ? ingredientOntologyV3Hash([
+            'kind' => $kind,
+            'details' => $normalizedDetails,
+        ])
+        : '';
+    $current = $db->query("
+        SELECT failure_count, expected_outcome_key,
+               expected_outcome_count
+        FROM ontology_activation_state
+        WHERE id = 1
+    ")->fetch(PDO::FETCH_ASSOC) ?: [];
+    $expectedCount = $expected
+        ? (
+            hash_equals(
+                (string)($current['expected_outcome_key'] ?? ''),
+                $expectedKey
+            )
+                ? (int)($current['expected_outcome_count'] ?? 0) + 1
+                : 1
+        )
+        : 0;
+    if (
+        $expected
+        && $expectedCount
+            > INGREDIENT_ONTOLOGY_ACTIVATION_EXPECTED_RETRY_LIMIT
+    ) {
+        $delay = min(
+            3600,
+            300 * (
+                2 ** min(
+                    3,
+                    $expectedCount
+                        - INGREDIENT_ONTOLOGY_ACTIVATION_EXPECTED_RETRY_LIMIT
+                        - 1
+                )
+            )
+        );
+        $message = 'Activation convergence did not settle after '
+            . $expectedCount . ' identical ' . $kind . ' outcomes.';
+        $escalatedDetails = $details + [
+            'expected_retry_key' => $expectedKey,
+            'expected_retry_count' => $expectedCount,
+            'expected_retry_limit' =>
+                INGREDIENT_ONTOLOGY_ACTIVATION_EXPECTED_RETRY_LIMIT,
+            'escalated' => true,
+        ];
+        $db->prepare("
+            UPDATE ontology_activation_state
+            SET expected_outcome_key = ?,
+                expected_outcome_count = ?,
+                last_outcome_kind =
+                    'non_converging_expected_outcome',
+                last_outcome_json = ?,
+                last_outcome_at = CURRENT_TIMESTAMP,
+                failure_count = failure_count + 1,
+                last_error = ?,
+                next_attempt_at = datetime(
+                    'now',
+                    '+' || ? || ' seconds'
+                ),
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = 1
+        ")->execute([
+            $expectedKey,
+            $expectedCount,
+            ingredientOntologyActivationStableJson(
+                $escalatedDetails
+            ),
+            mb_substr($message, 0, 1000, 'UTF-8'),
+            $delay,
+        ]);
+        return [
+            'kind' => 'non_converging_expected_outcome',
+            'expected_retry_key' => $expectedKey,
+            'expected_retry_count' => $expectedCount,
+            'escalated' => true,
+            'next_attempt_seconds' => $delay,
+        ];
+    }
+
+    if ($expected) {
+        $details['expected_retry_key'] = $expectedKey;
+        $details['expected_retry_count'] = $expectedCount;
+        $details['expected_retry_limit'] =
+            INGREDIENT_ONTOLOGY_ACTIVATION_EXPECTED_RETRY_LIMIT;
+    }
+    $json = ingredientOntologyActivationStableJson($details);
+    if (strlen($json) > 32768) {
+        throw new InvalidArgumentException(
+            'ontology activation outcome details are too large'
+        );
+    }
+    $db->prepare("
+        UPDATE ontology_activation_state
+        SET last_outcome_kind = ?,
+            last_outcome_json = ?,
+            last_outcome_at = CURRENT_TIMESTAMP,
+            expected_outcome_key = ?,
+            expected_outcome_count = ?,
+            failure_count = CASE WHEN ? THEN 0 ELSE failure_count END,
+            last_error = CASE WHEN ? THEN '' ELSE last_error END,
+            next_attempt_at = CASE
+                WHEN ? IS NULL THEN
+                    CASE WHEN ? THEN NULL ELSE next_attempt_at END
+                ELSE datetime('now', '+' || ? || ' seconds')
+            END,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = 1
+    ")->execute([
+        $kind,
+        $json,
+        $expectedKey,
+        $expectedCount,
+        $clearFailure ? 1 : 0,
+        $clearFailure ? 1 : 0,
+        $retryAfterSeconds,
+        $clearFailure ? 1 : 0,
+        $retryAfterSeconds,
+    ]);
+    return [
+        'kind' => $kind,
+        'expected_retry_key' => $expectedKey ?: null,
+        'expected_retry_count' => $expectedCount,
+        'escalated' => false,
+        'next_attempt_seconds' => $retryAfterSeconds,
+    ];
+}
+
+function ingredientOntologyActivationRecordAdvisoryOutcome(
+    PDO $db,
+    string $kind,
+    array $details = [],
+    ?int $retryAfterSeconds = null
+): array {
+    if ($kind !== 'policy_deferred') {
+        throw new InvalidArgumentException(
+            'ontology activation advisory outcome kind is invalid'
+        );
+    }
+    $retryAfterSeconds = $retryAfterSeconds !== null
+        ? max(1, min(3600, $retryAfterSeconds))
+        : null;
+    $details['advisory'] = true;
+    $details['policy_deferred'] = true;
+    $json = ingredientOntologyActivationStableJson($details);
+    if (strlen($json) > 32768) {
+        throw new InvalidArgumentException(
+            'ontology activation advisory outcome details are too large'
+        );
+    }
+    $db->prepare("
+        UPDATE ontology_activation_state
+        SET last_outcome_kind = ?,
+            last_outcome_json = ?,
+            last_outcome_at = CURRENT_TIMESTAMP,
+            next_attempt_at = CASE
+                WHEN ? IS NULL THEN next_attempt_at
+                WHEN next_attempt_at IS NULL
+                  OR julianday(next_attempt_at) < julianday(
+                      'now',
+                      '+' || ? || ' seconds'
+                  )
+                THEN datetime('now', '+' || ? || ' seconds')
+                ELSE next_attempt_at
+            END,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = 1
+    ")->execute([
+        $kind,
+        $json,
+        $retryAfterSeconds,
+        $retryAfterSeconds,
+        $retryAfterSeconds,
+    ]);
+    return [
+        'kind' => $kind,
+        'advisory' => true,
+        'next_attempt_seconds' => $retryAfterSeconds,
+    ];
+}
+
+function ingredientOntologyActivationClassifyValidationErrors(
+    array $errors
+): array {
+    $errors = array_values(array_unique(array_map('strval', $errors)));
+    if (!$errors) {
+        return [
+            'expected' => false,
+            'drift_codes' => [],
+            'outcome_kind' => null,
+            'errors' => [],
+        ];
+    }
+    $primary = [
+        'inventory or catalog inputs changed after shadow build' =>
+            'live_inputs_changed',
+        'active score pointer changed after shadow build' =>
+            'active_score_pointer_changed',
+        'shadow score date is not current' =>
+            'score_date_rolled_over',
+        'activation score date changed' =>
+            'score_date_rolled_over',
+    ];
+    $derivative = [
+        'shadow materialization is incomplete',
+    ];
+    $codes = [];
+    foreach ($errors as $error) {
+        if (isset($primary[$error])) {
+            $codes[$primary[$error]] = true;
+        }
+    }
+    $expected = (bool)$codes;
+    if ($expected) {
+        foreach ($errors as $error) {
+            if (!isset($primary[$error])
+                && !in_array($error, $derivative, true)) {
+                $expected = false;
+                break;
+            }
+        }
+    }
+    return [
+        'expected' => $expected,
+        'drift_codes' => array_keys($codes),
+        'outcome_kind' => isset($codes['score_date_rolled_over'])
+            ? 'rebase_required'
+            : null,
+        'errors' => $errors,
+    ];
+}
+
+function ingredientOntologyActivationAssertScoreValidation(
+    array $validation,
+    string $failurePrefix,
+    string $expectedOutcomeKind,
+    array $details = []
+): void {
+    if (!empty($validation['valid'])) {
+        return;
+    }
+    $errors = array_values(array_map(
+        'strval',
+        (array)($validation['errors'] ?? [])
+    ));
+    $classification =
+        ingredientOntologyActivationClassifyValidationErrors(
+            $errors
+        );
+    if (!empty($classification['expected'])) {
+        $outcomeKind = (string)(
+            $classification['outcome_kind']
+                ?? $expectedOutcomeKind
+        );
+        throw new IngredientOntologyActivationExpectedOutcome(
+            $outcomeKind,
+            $failurePrefix . ' requires a fresh score snapshot',
+            $details + [
+                'errors' => $errors,
+                'drift_codes' => $classification['drift_codes'],
+            ]
+        );
+    }
+    throw new RuntimeException(
+        $failurePrefix . ': ' . implode('; ', $errors)
+    );
+}
+
 function ingredientOntologyActivationLineageUuid(PDO $db): string {
     $uuid = (string)$db->query("
         SELECT database_lineage_uuid
@@ -152,7 +491,28 @@ function ingredientOntologyActivationCdcSnapshot(PDO $db): array {
 
 function ingredientOntologyActivationTriggerDefinitions(): array {
     return [
-        ['products', 'source', 'id', 'product', 'id'],
+        [
+            'products',
+            'source',
+            'id',
+            'product',
+            'id',
+            [
+                'barcode' => 'OLD.barcode IS NOT NEW.barcode',
+                'name' => 'OLD.name IS NOT NEW.name',
+                'brand' => 'OLD.brand IS NOT NEW.brand',
+                'category' => 'OLD.category IS NOT NEW.category',
+                'off_generic_name' =>
+                    'OLD.off_generic_name IS NOT NEW.off_generic_name',
+                'ingredients_text' =>
+                    'OLD.ingredients_text IS NOT NEW.ingredients_text',
+                'ingredients_tags_json' =>
+                    'OLD.ingredients_tags_json '
+                        . 'IS NOT NEW.ingredients_tags_json',
+                'prepared_food' =>
+                    'OLD.prepared_food IS NOT NEW.prepared_food',
+            ],
+        ],
         ['recipe_catalog', 'source', 'id', 'recipe', 'id'],
         ['recipe_origins', 'source', 'id', 'recipe_origin', 'id'],
         [
@@ -170,22 +530,44 @@ function ingredientOntologyActivationTriggerDefinitions(): array {
             'id',
         ],
         ['recipe_user_state', 'catalog', 'recipe_id', 'recipe', 'recipe_id'],
-        ['inventory', 'inventory', 'id', 'inventory', 'id'],
+        [
+            'inventory',
+            'inventory',
+            'id',
+            'inventory',
+            'id',
+            [
+                'product_id' =>
+                    'OLD.product_id IS NOT NEW.product_id',
+                'location' => 'OLD.location IS NOT NEW.location',
+                'quantity' => 'OLD.quantity IS NOT NEW.quantity',
+                'expiry_date' =>
+                    'OLD.expiry_date IS NOT NEW.expiry_date',
+                'expiry_user_set' =>
+                    'OLD.expiry_user_set IS NOT NEW.expiry_user_set',
+                'vacuum_sealed' =>
+                    'OLD.vacuum_sealed IS NOT NEW.vacuum_sealed',
+                'opened_at' =>
+                    'OLD.opened_at IS NOT NEW.opened_at',
+                'prepared_food' =>
+                    'OLD.prepared_food IS NOT NEW.prepared_food',
+            ],
+        ],
         [
             'product_ingredients',
-            'inventory',
+            'evidence',
             'id',
             'product_mapping',
             'id',
         ],
         [
             'canonical_ingredients',
-            'inventory',
+            'evidence',
             'id',
             'canonical_ingredient',
             'id',
         ],
-        ['taxonomy_nodes', 'inventory', 'id', 'taxonomy_node', 'id'],
+        ['taxonomy_nodes', 'evidence', 'id', 'taxonomy_node', 'id'],
         [
             'ontology_constraint_ledger',
             'constraint',
@@ -228,8 +610,51 @@ function ingredientOntologyActivationTriggerDefinitions(): array {
             'id',
             'controller_state',
             'id',
+            [
+                'constraint_epoch' =>
+                    'OLD.constraint_epoch IS NOT NEW.constraint_epoch',
+                'active_gold_release_id' =>
+                    'OLD.active_gold_release_id '
+                        . 'IS NOT NEW.active_gold_release_id',
+                'active_policy_hash' =>
+                    'OLD.active_policy_hash '
+                        . 'IS NOT NEW.active_policy_hash',
+            ],
         ],
     ];
+}
+
+function ingredientOntologyActivationUpdateWhen(
+    PDO $db,
+    string $table,
+    mixed $definition
+): ?string {
+    if (is_string($definition)) {
+        $definition = trim($definition);
+        return $definition !== '' ? $definition : null;
+    }
+    if (!is_array($definition) || !$definition) {
+        return null;
+    }
+    $columns = array_fill_keys(array_column(
+        $db->query(
+            'PRAGMA table_info('
+                . ingredientOntologyActivationQuoteIdentifier($table)
+                . ')'
+        )->fetchAll(PDO::FETCH_ASSOC),
+        'name'
+    ), true);
+    $predicates = [];
+    foreach ($definition as $column => $predicate) {
+        if (
+            isset($columns[(string)$column])
+            && is_string($predicate)
+            && trim($predicate) !== ''
+        ) {
+            $predicates[] = trim($predicate);
+        }
+    }
+    return $predicates ? implode("\n OR ", $predicates) : null;
 }
 
 function ingredientOntologyActivationAddColumn(
@@ -317,6 +742,18 @@ function ingredientOntologyActivationSchemaMigrate(PDO $db): void {
                 CHECK(failure_count >= 0),
             last_error TEXT NOT NULL DEFAULT ''
                 CHECK(length(last_error) <= 1000),
+            last_outcome_kind TEXT NOT NULL DEFAULT ''
+                CHECK(length(last_outcome_kind) <= 80),
+            last_outcome_json TEXT NOT NULL DEFAULT '{}'
+                CHECK(length(last_outcome_json) <= 32768),
+            last_outcome_at DATETIME DEFAULT NULL,
+            expected_outcome_key TEXT NOT NULL DEFAULT ''
+                CHECK(
+                    expected_outcome_key = ''
+                    OR length(expected_outcome_key) = 64
+                ),
+            expected_outcome_count INTEGER NOT NULL DEFAULT 0
+                CHECK(expected_outcome_count >= 0),
             updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
 
@@ -493,6 +930,39 @@ function ingredientOntologyActivationSchemaMigrate(PDO $db): void {
         "TEXT NOT NULL DEFAULT 'apply' "
             . "CHECK(activation_action IN ('apply','defer'))"
     );
+    ingredientOntologyActivationAddColumn(
+        $db,
+        'ontology_activation_state',
+        'last_outcome_kind',
+        "TEXT NOT NULL DEFAULT '' CHECK(length(last_outcome_kind) <= 80)"
+    );
+    ingredientOntologyActivationAddColumn(
+        $db,
+        'ontology_activation_state',
+        'last_outcome_json',
+        "TEXT NOT NULL DEFAULT '{}' CHECK(length(last_outcome_json) <= 32768)"
+    );
+    ingredientOntologyActivationAddColumn(
+        $db,
+        'ontology_activation_state',
+        'last_outcome_at',
+        'DATETIME DEFAULT NULL'
+    );
+    ingredientOntologyActivationAddColumn(
+        $db,
+        'ontology_activation_state',
+        'expected_outcome_key',
+        "TEXT NOT NULL DEFAULT '' CHECK("
+            . "expected_outcome_key = '' "
+            . "OR length(expected_outcome_key) = 64)"
+    );
+    ingredientOntologyActivationAddColumn(
+        $db,
+        'ontology_activation_state',
+        'expected_outcome_count',
+        'INTEGER NOT NULL DEFAULT 0 '
+            . 'CHECK(expected_outcome_count >= 0)'
+    );
 
     $lineage = (string)$db->query("
         SELECT database_lineage_uuid
@@ -563,13 +1033,22 @@ function ingredientOntologyActivationSchemaMigrate(PDO $db): void {
     $triggerPayload = [];
     $triggerNames = [];
     foreach ($definitions as $definition) {
-        [$table, $domain, $idColumn, $ownerType] = $definition;
+        [
+            $table,
+            $domain,
+            $idColumn,
+            $ownerType,
+            $ownerIdColumn,
+            $updateWhen,
+        ] = array_pad($definition, 6, null);
         if (ingredientOntologyActivationTableExists($db, $table)) {
             $triggerPayload[] = [
                 'table' => $table,
                 'domain' => $domain,
                 'id_column' => $idColumn,
                 'owner_type' => $ownerType,
+                'owner_id_column' => $ownerIdColumn,
+                'update_when' => $updateWhen,
             ];
             foreach (['insert', 'update', 'delete'] as $operation) {
                 $triggerNames[] = 'ontology_activation_cdc_'
@@ -608,7 +1087,14 @@ function ingredientOntologyActivationSchemaMigrate(PDO $db): void {
     }
     try {
         foreach ($definitions as $definition) {
-            [$table, $domain, $idColumn, $ownerType] = $definition;
+            [
+                $table,
+                $domain,
+                $idColumn,
+                $ownerType,
+                $ownerIdColumn,
+                $updateWhen,
+            ] = array_pad($definition, 6, null);
             if (!ingredientOntologyActivationTableExists($db, $table)) {
                 continue;
             }
@@ -617,10 +1103,20 @@ function ingredientOntologyActivationSchemaMigrate(PDO $db): void {
                     . $table . '_' . $operation;
                 $row = $operation === 'delete' ? 'OLD' : 'NEW';
                 $domainColumn = 'cdc_' . $domain . '_high_water';
+                $resolvedUpdateWhen =
+                    ingredientOntologyActivationUpdateWhen(
+                        $db,
+                        $table,
+                        $updateWhen
+                    );
+                $when = $operation === 'update'
+                    && $resolvedUpdateWhen !== null
+                        ? "\n                    WHEN ({$resolvedUpdateWhen})"
+                        : '';
                 $db->exec("DROP TRIGGER IF EXISTS {$trigger}");
                 $db->exec("
                     CREATE TRIGGER {$trigger}
-                    AFTER " . strtoupper($operation) . " ON {$table}
+                    AFTER " . strtoupper($operation) . " ON {$table}{$when}
                     BEGIN
                         UPDATE ontology_activation_state
                         SET cdc_all_high_water =
@@ -635,7 +1131,7 @@ function ingredientOntologyActivationSchemaMigrate(PDO $db): void {
                         )
                         VALUES (
                             '{$domain}', '{$table}', '{$operation}',
-                            '{$ownerType}', {$row}.{$idColumn}
+                            '{$ownerType}', {$row}.{$ownerIdColumn}
                         );
                     END
                 ");
@@ -1497,7 +1993,7 @@ function ingredientOntologyActivationQuoteIdentifier(
             LEFT JOIN ontology_generation_intents intent
               ON intent.source_job_id = job.id
             LEFT JOIN ontology_controller_responses response
-              ON response.id = intent.response_artifact_id
+              ON response.id = job.response_artifact_id
             LEFT JOIN ontology_controller_responses intent_response
               ON intent_response.id = intent.response_artifact_id
             WHERE item.generation_id = ?
@@ -1532,7 +2028,7 @@ function ingredientOntologyActivationQuoteIdentifier(
                     LEFT JOIN ontology_generation_intents intent
                       ON intent.source_job_id = job.id
                     LEFT JOIN ontology_controller_responses response
-                      ON response.id = intent.response_artifact_id
+                      ON response.id = job.response_artifact_id
                     LEFT JOIN ontology_controller_responses intent_response
                       ON intent_response.id = intent.response_artifact_id
                     WHERE job.id = ?
@@ -1598,10 +2094,163 @@ function ingredientOntologyActivationQuoteIdentifier(
         return $intents;
     }
 
+    function ingredientOntologyActivationParsedPlanHash(
+        ?string $planJson
+    ): ?string {
+        if (!is_string($planJson) || trim($planJson) === '') {
+            return null;
+        }
+        $plan = json_decode(
+            $planJson,
+            true,
+            64,
+            JSON_THROW_ON_ERROR
+        );
+        return is_array($plan)
+            ? ingredientOntologyV3Hash($plan)
+            : null;
+    }
+
+    function ingredientOntologyActivationNoOpGenerationIntents(
+        PDO $db,
+        int $generationId
+    ): array {
+        $plans = $db->prepare("
+            SELECT plan.job_id, plan.plan_hash, plan.plan_json,
+                   job.input_json
+            FROM ontology_generation_plans item
+            JOIN ontology_mutation_plans plan
+              ON plan.id = item.mutation_plan_id
+            JOIN ontology_controller_jobs job ON job.id = plan.job_id
+            WHERE item.generation_id = ?
+            ORDER BY item.ordinal
+        ");
+        $plans->execute([$generationId]);
+        $source = $db->prepare("
+            SELECT job.id AS source_job_id,
+                   job.subject_id, job.input_hash,
+                   subject.subject_fingerprint,
+                   intent.intent_kind, intent.status,
+                   intent_response.response_hash
+                       AS intent_response_hash,
+                   intent_response.parsed_plan_json
+                       AS intent_plan_json,
+                   response.response_hash AS job_response_hash,
+                   response.parsed_plan_json AS job_plan_json,
+                   source_plan.plan_hash AS source_plan_hash
+            FROM ontology_controller_jobs job
+            JOIN ontology_generation_intents intent
+              ON intent.source_job_id = job.id
+            LEFT JOIN ontology_subjects subject
+              ON subject.id = job.subject_id
+            LEFT JOIN ontology_controller_responses response
+              ON response.id = job.response_artifact_id
+            LEFT JOIN ontology_controller_responses intent_response
+              ON intent_response.id = intent.response_artifact_id
+            LEFT JOIN ontology_mutation_plans source_plan
+              ON source_plan.job_id = job.id
+            WHERE job.id = ?
+            ORDER BY source_plan.id DESC
+            LIMIT 1
+        ");
+        $records = [];
+        $staleSourceJobIds = [];
+        foreach ($plans->fetchAll(PDO::FETCH_ASSOC) as $planRow) {
+            $sourceJobId = (int)$planRow['job_id'];
+            $input = json_decode(
+                (string)($planRow['input_json'] ?? '{}'),
+                true
+            );
+            $fallback = is_array($input)
+                && (string)($input['operation'] ?? '')
+                    === 'provisional_fallback'
+                && (int)($input['source_job_id'] ?? 0) > 0;
+            if ($fallback) {
+                $sourceJobId = (int)$input['source_job_id'];
+            }
+            $source->execute([$sourceJobId]);
+            $row = $source->fetch(PDO::FETCH_ASSOC);
+            if (!$row) {
+                $staleSourceJobIds[$sourceJobId] = true;
+                continue;
+            }
+            $intentKind = (string)$row['intent_kind'];
+            $plan = json_decode(
+                (string)$planRow['plan_json'],
+                true,
+                64,
+                JSON_THROW_ON_ERROR
+            );
+            $action = $intentKind === 'validated_plan'
+                && (
+                    $fallback
+                    || (string)($plan['repair_kind'] ?? '')
+                        === 'materialize_provisional_subject'
+                )
+                    ? 'defer'
+                    : 'apply';
+            $responseHash = $row['intent_response_hash'] !== null
+                ? (string)$row['intent_response_hash']
+                : (
+                    $row['job_response_hash'] !== null
+                        ? (string)$row['job_response_hash']
+                        : null
+                );
+            $sourcePlanJson = $row['intent_plan_json'] !== null
+                ? (string)$row['intent_plan_json']
+                : (
+                    $row['job_plan_json'] !== null
+                        ? (string)$row['job_plan_json']
+                        : null
+                );
+            $record = [
+                'source_job_id' => $sourceJobId,
+                'subject_id' => $row['subject_id'] !== null
+                    ? (int)$row['subject_id']
+                    : null,
+                'subject_fingerprint' =>
+                    $row['subject_fingerprint'] !== null
+                        ? (string)$row['subject_fingerprint']
+                        : null,
+                'input_hash' => (string)$row['input_hash'],
+                'intent_kind' => $intentKind,
+                'activation_action' => $action,
+                'response_hash' => $responseHash,
+                'source_plan_hash' =>
+                    ingredientOntologyActivationParsedPlanHash(
+                        $sourcePlanJson
+                    ),
+                'plan_hash' => (string)$planRow['plan_hash'],
+            ];
+            if (isset($records[$sourceJobId])) {
+                if (!hash_equals(
+                    ingredientOntologyV3Hash($records[$sourceJobId]),
+                    ingredientOntologyV3Hash($record)
+                )) {
+                    throw new RuntimeException(
+                        'semantic no-op source intent is ambiguous'
+                    );
+                }
+                continue;
+            }
+            $records[$sourceJobId] = $record;
+        }
+        ksort($records, SORT_NUMERIC);
+        $staleSourceJobIds = array_map(
+            'intval',
+            array_keys($staleSourceJobIds)
+        );
+        sort($staleSourceJobIds, SORT_NUMERIC);
+        return [
+            'intents' => array_values($records),
+            'stale_source_job_ids' => $staleSourceJobIds,
+        ];
+    }
+
     function ingredientOntologyActivationIntentRecords(
         PDO $db,
         array $sourceJobIds,
-        string $requiredStatus = 'applied'
+        string|array $requiredStatuses = 'applied'
     ): array {
         $sourceJobIds = array_values(array_unique(array_filter(
             array_map('intval', $sourceJobIds),
@@ -1614,6 +2263,25 @@ function ingredientOntologyActivationQuoteIdentifier(
             ',',
             array_fill(0, count($sourceJobIds), '?')
         );
+        $requiredStatuses = is_array($requiredStatuses)
+            ? array_values(array_unique(array_map(
+                'strval',
+                $requiredStatuses
+            )))
+            : [(string)$requiredStatuses];
+        $requiredStatuses = array_values(array_filter(
+            $requiredStatuses,
+            static fn(string $status): bool => in_array($status, [
+                'pending', 'queued', 'applied', 'superseded', 'failed',
+            ], true)
+        ));
+        if (!$requiredStatuses) {
+            return [];
+        }
+        $statusPlaceholders = implode(
+            ',',
+            array_fill(0, count($requiredStatuses), '?')
+        );
         $stmt = $db->prepare("
             SELECT job.id AS source_job_id,
                    job.subject_id, job.input_hash,
@@ -1621,7 +2289,10 @@ function ingredientOntologyActivationQuoteIdentifier(
                    intent.intent_kind, intent.status,
                    intent_response.response_hash
                        AS intent_response_hash,
+                   intent_response.parsed_plan_json
+                       AS intent_plan_json,
                    response.response_hash AS job_response_hash,
+                   response.parsed_plan_json AS job_plan_json,
                    plan.plan_hash
             FROM ontology_controller_jobs job
             JOIN ontology_generation_intents intent
@@ -1635,10 +2306,10 @@ function ingredientOntologyActivationQuoteIdentifier(
             LEFT JOIN ontology_mutation_plans plan
               ON plan.job_id = job.id
             WHERE job.id IN ({$placeholders})
-              AND intent.status = ?
+              AND intent.status IN ({$statusPlaceholders})
             ORDER BY job.id
         ");
-        $stmt->execute(array_merge($sourceJobIds, [$requiredStatus]));
+        $stmt->execute(array_merge($sourceJobIds, $requiredStatuses));
         return array_map(
             static fn(array $row): array => [
                 'source_job_id' => (int)$row['source_job_id'],
@@ -1651,11 +2322,28 @@ function ingredientOntologyActivationQuoteIdentifier(
                         : null,
                 'input_hash' => (string)$row['input_hash'],
                 'intent_kind' => (string)$row['intent_kind'],
-                'activation_action' => 'apply',
+                'activation_action' =>
+                    (string)$row['intent_kind'] === 'validated_plan'
+                        ? 'defer'
+                        : 'apply',
                 'response_hash' =>
                     $row['intent_response_hash'] !== null
                         ? (string)$row['intent_response_hash']
-                        : null,
+                        : (
+                            $row['job_response_hash'] !== null
+                                ? (string)$row['job_response_hash']
+                                : null
+                        ),
+                'source_plan_hash' =>
+                    ingredientOntologyActivationParsedPlanHash(
+                        $row['intent_plan_json'] !== null
+                            ? (string)$row['intent_plan_json']
+                            : (
+                                $row['job_plan_json'] !== null
+                                    ? (string)$row['job_plan_json']
+                                    : null
+                            )
+                    ),
                 'plan_hash' => $row['plan_hash'] !== null
                     ? (string)$row['plan_hash']
                     : null,
@@ -1667,19 +2355,78 @@ function ingredientOntologyActivationQuoteIdentifier(
     function ingredientOntologyActivationBuildAcknowledgement(
         PDO $db,
         array $snapshot,
-        array $sourceJobIds
+        array $intents
     ): ?array {
-        $intents = ingredientOntologyActivationIntentRecords(
-            $db,
-            $sourceJobIds,
-            'applied'
-        );
         if (!$intents) {
             return null;
         }
+        $normalized = [];
+        foreach ($intents as $intent) {
+            if (!is_array($intent)) {
+                throw new InvalidArgumentException(
+                    'ontology activation acknowledgement intent is invalid'
+                );
+            }
+            $jobId = (int)($intent['source_job_id'] ?? 0);
+            $action = (string)($intent['activation_action'] ?? '');
+            if (
+                $jobId <= 0
+                || !in_array($action, ['apply', 'defer'], true)
+                || !preg_match(
+                    '/^[a-f0-9]{64}$/D',
+                    (string)($intent['input_hash'] ?? '')
+                )
+                || (
+                    ($intent['subject_fingerprint'] ?? null) !== null
+                    && !preg_match(
+                        '/^[a-f0-9]{64}$/D',
+                        (string)$intent['subject_fingerprint']
+                    )
+                )
+                || (
+                    ($intent['response_hash'] ?? null) !== null
+                    && !preg_match(
+                        '/^[a-f0-9]{64}$/D',
+                        (string)$intent['response_hash']
+                    )
+                )
+                || (
+                    ($intent['source_plan_hash'] ?? null) !== null
+                    && !preg_match(
+                        '/^[a-f0-9]{64}$/D',
+                        (string)$intent['source_plan_hash']
+                    )
+                )
+                || (
+                    ($intent['plan_hash'] ?? null) !== null
+                    && !preg_match(
+                        '/^[a-f0-9]{64}$/D',
+                        (string)$intent['plan_hash']
+                    )
+                )
+            ) {
+                throw new InvalidArgumentException(
+                    'ontology activation acknowledgement intent is invalid'
+                );
+            }
+            if (isset($normalized[$jobId])) {
+                if (!hash_equals(
+                    ingredientOntologyV3Hash($normalized[$jobId]),
+                    ingredientOntologyV3Hash($intent)
+                )) {
+                    throw new InvalidArgumentException(
+                        'ontology activation acknowledgement intent is duplicated'
+                    );
+                }
+                continue;
+            }
+            $normalized[$jobId] = $intent;
+        }
+        ksort($normalized, SORT_NUMERIC);
+        $intents = array_values($normalized);
         $document = [
             'schema_version' =>
-                'ontology-activation-acknowledgement-v1',
+                INGREDIENT_ONTOLOGY_ACTIVATION_ACKNOWLEDGEMENT_VERSION,
             'created_at' => gmdate('c'),
             'database_lineage_uuid' =>
                 (string)$snapshot['database_lineage_uuid'],
@@ -1700,7 +2447,7 @@ function ingredientOntologyActivationQuoteIdentifier(
                 'controller_state' => $snapshot['controller_state'],
             ],
             'proof' => [
-                'kind' => 'copied_semantic_no_op',
+                'kind' => 'copied_semantic_no_op_with_actions',
                 'source_job_ids_hash' => ingredientOntologyV3Hash(
                     array_map(
                         static fn(array $intent): int =>
@@ -1708,6 +2455,7 @@ function ingredientOntologyActivationQuoteIdentifier(
                         $intents
                     )
                 ),
+                'intent_set_hash' => ingredientOntologyV3Hash($intents),
                 'active_ontology_content_hash' => (string)(
                     $snapshot['active_version']['content_hash'] ?? ''
                 ),
@@ -1727,9 +2475,18 @@ function ingredientOntologyActivationQuoteIdentifier(
         $expected = (string)($document['document_hash'] ?? '');
         $payload = $document;
         unset($payload['document_hash']);
+        $schemaVersion = (string)($document['schema_version'] ?? '');
+        $legacy = $schemaVersion ===
+            'ontology-activation-acknowledgement-v1';
+        $expectedProofKind = $legacy
+            ? 'copied_semantic_no_op'
+            : 'copied_semantic_no_op_with_actions';
+        $intents = (array)($document['intents'] ?? []);
         if (
-            (string)($document['schema_version'] ?? '')
-                !== 'ontology-activation-acknowledgement-v1'
+            !in_array($schemaVersion, [
+                'ontology-activation-acknowledgement-v1',
+                INGREDIENT_ONTOLOGY_ACTIVATION_ACKNOWLEDGEMENT_VERSION,
+            ], true)
             || !preg_match('/^[a-f0-9]{64}$/D', $expected)
             || !hash_equals(ingredientOntologyV3Hash($payload), $expected)
             || !hash_equals(
@@ -1741,14 +2498,23 @@ function ingredientOntologyActivationQuoteIdentifier(
                 (string)($document['runtime_hash'] ?? '')
             )
             || (string)($document['proof']['kind'] ?? '')
-                !== 'copied_semantic_no_op'
+                !== $expectedProofKind
             || !hash_equals(
                 (string)($document['proof']['source_job_ids_hash'] ?? ''),
                 ingredientOntologyV3Hash(array_map(
                     static fn(array $intent): int =>
                         (int)$intent['source_job_id'],
-                    (array)($document['intents'] ?? [])
+                    $intents
                 ))
+            )
+            || (
+                !$legacy
+                && !hash_equals(
+                    (string)(
+                        $document['proof']['intent_set_hash'] ?? ''
+                    ),
+                    ingredientOntologyV3Hash($intents)
+                )
             )
         ) {
             throw new RuntimeException(
@@ -1880,20 +2646,43 @@ function ingredientOntologyActivationQuoteIdentifier(
                 VALUES (?, ?)
                 ON CONFLICT(document_hash) DO NOTHING
             ")->execute([$expected, $json]);
-            foreach ((array)$document['intents'] as $intent) {
+            $appliedCount = 0;
+            $deferredCount = 0;
+            foreach ($intents as $intent) {
                 $jobId = (int)$intent['source_job_id'];
+                $action = $legacy
+                    ? 'apply'
+                    : (string)($intent['activation_action'] ?? '');
+                if (!in_array($action, ['apply', 'defer'], true)) {
+                    throw new RuntimeException(
+                        'ontology activation acknowledgement action is invalid'
+                    );
+                }
                 $live = $db->prepare("
                     SELECT intent.status, intent.intent_kind,
-                           job.input_hash, response.response_hash,
+                           job.input_hash,
+                           intent_response.response_hash
+                               AS intent_response_hash,
+                           intent_response.parsed_plan_json
+                               AS intent_plan_json,
+                           response.response_hash AS job_response_hash,
+                           response.parsed_plan_json AS job_plan_json,
+                           source_plan.plan_hash AS source_plan_hash,
                            subject.subject_fingerprint
                     FROM ontology_generation_intents intent
                     JOIN ontology_controller_jobs job
                       ON job.id = intent.source_job_id
                     LEFT JOIN ontology_controller_responses response
-                      ON response.id = intent.response_artifact_id
+                      ON response.id = job.response_artifact_id
+                    LEFT JOIN ontology_controller_responses intent_response
+                      ON intent_response.id = intent.response_artifact_id
                     LEFT JOIN ontology_subjects subject
                       ON subject.id = job.subject_id
+                    LEFT JOIN ontology_mutation_plans source_plan
+                      ON source_plan.job_id = job.id
                     WHERE intent.source_job_id = ?
+                    ORDER BY source_plan.id DESC
+                    LIMIT 1
                 ");
                 $live->execute([$jobId]);
                 $row = $live->fetch(PDO::FETCH_ASSOC);
@@ -1913,8 +2702,40 @@ function ingredientOntologyActivationQuoteIdentifier(
                     || (
                         $intent['response_hash'] !== null
                         && !hash_equals(
-                            (string)($row['response_hash'] ?? ''),
+                            (string)(
+                                $row['intent_response_hash']
+                                    ?? $row['job_response_hash']
+                                    ?? ''
+                            ),
                             (string)$intent['response_hash']
+                        )
+                    )
+                    || (
+                        !$legacy
+                        && ($intent['source_plan_hash'] ?? null) !== null
+                        && !hash_equals(
+                            (string)$intent['source_plan_hash'],
+                            (string)(
+                                ingredientOntologyActivationParsedPlanHash(
+                                    $row['intent_plan_json'] !== null
+                                        ? (string)$row['intent_plan_json']
+                                        : (
+                                            $row['job_plan_json'] !== null
+                                                ? (string)$row['job_plan_json']
+                                                : null
+                                        )
+                                ) ?? ''
+                            )
+                        )
+                    )
+                    || (
+                        !$legacy
+                        && $action === 'apply'
+                        && ($intent['plan_hash'] ?? null) !== null
+                        && $row['source_plan_hash'] !== null
+                        && !hash_equals(
+                            (string)$row['source_plan_hash'],
+                            (string)$intent['plan_hash']
                         )
                     )
                     || (
@@ -1929,26 +2750,73 @@ function ingredientOntologyActivationQuoteIdentifier(
                         'ontology activation acknowledgement intent changed'
                     );
                 }
-                $db->prepare("
-                    UPDATE ontology_generation_intents
-                    SET status = 'applied',
-                        last_error = '',
-                        finished_at = CURRENT_TIMESTAMP,
-                        updated_at = CURRENT_TIMESTAMP
-                    WHERE source_job_id = ?
-                      AND status IN ('pending', 'queued')
-                ")->execute([$jobId]);
-                $db->prepare("
+                if ($action === 'apply') {
+                    $intentUpdate = $db->prepare("
+                        UPDATE ontology_generation_intents
+                        SET status = 'applied',
+                            last_error = '',
+                            finished_at = CURRENT_TIMESTAMP,
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE source_job_id = ?
+                          AND status IN ('pending', 'queued')
+                    ");
+                    $intentUpdate->execute([$jobId]);
+                    $appliedCount++;
+                } else {
+                    $intentUpdate = $db->prepare("
+                        UPDATE ontology_generation_intents
+                        SET status = 'pending',
+                            attempts = attempts + 1,
+                            last_error =
+                                'Validated plan deferred; copied semantic fallback is already active.',
+                            finished_at = NULL,
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE source_job_id = ?
+                          AND status IN ('pending', 'queued')
+                    ");
+                    $intentUpdate->execute([$jobId]);
+                    $deferredCount++;
+                }
+                if ($intentUpdate->rowCount() !== 1) {
+                    throw new RuntimeException(
+                        'ontology activation acknowledgement intent CAS failed'
+                    );
+                }
+                $jobUpdate = $db->prepare("
                     UPDATE ontology_controller_jobs
                     SET candidate_version_id = ?,
                         candidate_score_revision_id = ?,
+                        next_attempt_at = CASE
+                            WHEN ? = 'defer'
+                            THEN datetime('now', '+24 hours')
+                            ELSE next_attempt_at
+                        END,
+                        last_error_kind = CASE
+                            WHEN ? = 'defer'
+                            THEN 'generation_policy_deferred'
+                            ELSE last_error_kind
+                        END,
+                        last_error = CASE
+                            WHEN ? = 'defer'
+                            THEN 'Validated plan awaits policy or evidence change; copied semantic fallback is active.'
+                            ELSE last_error
+                        END,
                         updated_at = CURRENT_TIMESTAMP
                     WHERE id = ?
-                ")->execute([
+                ");
+                $jobUpdate->execute([
                     (int)$activeVersion['id'],
                     (int)$state['active_score_revision_id'],
+                    $action,
+                    $action,
+                    $action,
                     $jobId,
                 ]);
+                if ($jobUpdate->rowCount() !== 1) {
+                    throw new RuntimeException(
+                        'ontology activation acknowledgement job CAS failed'
+                    );
+                }
             }
             $db->prepare("
                 UPDATE ontology_activation_acknowledgements
@@ -1957,6 +2825,18 @@ function ingredientOntologyActivationQuoteIdentifier(
                     updated_at = CURRENT_TIMESTAMP
                 WHERE document_hash = ?
             ")->execute([$expected]);
+            ingredientOntologyActivationRecordOutcome(
+                $db,
+                'no_op_acknowledged',
+                [
+                    'document_hash' => $expected,
+                    'intent_count' => count($intents),
+                    'applied_count' => $appliedCount,
+                    'deferred_count' => $deferredCount,
+                    'policy_deferred' => $deferredCount > 0,
+                ],
+                true
+            );
             $db->exec('COMMIT');
         } catch (Throwable $error) {
             try {
@@ -1968,7 +2848,11 @@ function ingredientOntologyActivationQuoteIdentifier(
         return [
             'applied' => true,
             'document_hash' => $expected,
-            'intent_count' => count($document['intents']),
+            'intent_count' => count($intents),
+            'applied_count' => $appliedCount,
+            'deferred_count' => $deferredCount,
+            'outcome' => 'no_op_acknowledged',
+            'policy_deferred' => $deferredCount > 0,
         ];
     }
 
@@ -2072,12 +2956,15 @@ function ingredientOntologyActivationQuoteIdentifier(
                 $db,
                 $candidateScoreId
             );
-        if (empty($scoreValidation['valid'])) {
-            throw new RuntimeException(
-                'ontology activation score attestation failed: '
-                . implode('; ', (array)$scoreValidation['errors'])
-            );
-        }
+        ingredientOntologyActivationAssertScoreValidation(
+            $scoreValidation,
+            'ontology activation score attestation failed',
+            'superseded_snapshot',
+            [
+                'generation_id' => $generationId,
+                'candidate_score_revision_id' => $candidateScoreId,
+            ]
+        );
         $generationKey = (string)$generation['generation_key'];
         $ontologyPayload = ingredientOntologyActivationCreatePayload(
             $db,
@@ -2343,12 +3230,14 @@ function ingredientOntologyActivationQuoteIdentifier(
                 $db,
                 $candidateScoreId
             );
-        if (empty($validation['valid'])) {
-            throw new RuntimeException(
-                'ontology refresh validation failed: '
-                . implode('; ', (array)$validation['errors'])
-            );
-        }
+        ingredientOntologyActivationAssertScoreValidation(
+            $validation,
+            'ontology refresh validation failed',
+            'rebase_required',
+            [
+                'candidate_score_revision_id' => $candidateScoreId,
+            ]
+        );
         $db->exec('BEGIN IMMEDIATE');
         try {
             $db->exec("
@@ -2472,12 +3361,14 @@ function ingredientOntologyActivationQuoteIdentifier(
         $validation = $testFixture
             ? ['valid' => true, 'errors' => [], 'test_fixture' => true]
             : ingredientOntologyV3ValidateActivation($db, $scoreId);
-        if (empty($validation['valid'])) {
-            throw new RuntimeException(
-                'score bundle validation failed: '
-                . implode('; ', (array)$validation['errors'])
-            );
-        }
+        ingredientOntologyActivationAssertScoreValidation(
+            $validation,
+            'score bundle validation failed',
+            'rebase_required',
+            [
+                'candidate_score_revision_id' => $scoreId,
+            ]
+        );
         $key = ingredientOntologyV3Hash([
             'ontology_version_id' => $ontologyVersionId,
             'score_revision_id' => $scoreId,
@@ -3950,10 +4841,21 @@ function ingredientOntologyActivationAssertActiveDatabase(PDO $db): void {
                         $candidateId
                     )
             );
-        if (empty($validation['valid'])) {
+        if ($kind === 'score') {
+            ingredientOntologyActivationAssertScoreValidation(
+                $validation,
+                'ontology activation copied validation failed',
+                'rebase_required',
+                [
+                    'import_id' => $importId,
+                    'candidate_score_revision_id' => $candidateId,
+                ]
+            );
+        } elseif (empty($validation['valid'])) {
+            $errors = (array)($validation['errors'] ?? []);
             throw new RuntimeException(
                 'ontology activation copied validation failed: '
-                . implode('; ', (array)$validation['errors'])
+                . implode('; ', $errors)
             );
         }
         $state = recipeScoreState($db);
@@ -4331,6 +5233,32 @@ function ingredientOntologyActivationAssertActiveDatabase(PDO $db): void {
                 $attestation
             );
             if ($errors) {
+                if ((string)$locked['bundle_kind'] === 'score') {
+                    $classification =
+                        ingredientOntologyActivationClassifyValidationErrors(
+                            $errors
+                        );
+                    if (!empty($classification['expected'])) {
+                        throw new
+                            IngredientOntologyActivationExpectedOutcome(
+                                (string)(
+                                    $classification['outcome_kind']
+                                        ?? 'rebase_required'
+                                ),
+                                'ontology activation final fence requires rebase',
+                                [
+                                    'import_id' => $importId,
+                                    'candidate_score_revision_id' =>
+                                        (int)$locked[
+                                            'candidate_score_revision_id'
+                                        ],
+                                    'errors' => $errors,
+                                    'drift_codes' =>
+                                        $classification['drift_codes'],
+                                ]
+                            );
+                    }
+                }
                 throw new RuntimeException(
                     'ontology activation final fence failed: '
                     . implode('; ', $errors)
@@ -4526,6 +5454,30 @@ function ingredientOntologyActivationAssertActiveDatabase(PDO $db): void {
                     'ontology activation import status CAS failed'
                 );
             }
+            ingredientOntologyActivationRecordOutcome(
+                $db,
+                $kind === 'score' ? 'activated' : 'converged',
+                [
+                    'reason' => $kind === 'score'
+                        ? 'score_import_activated'
+                        : 'ontology_import_converged',
+                    'import_id' => $importId,
+                    'bundle_kind' => $kind,
+                    'candidate_ontology_version_id' =>
+                        $locked['candidate_ontology_version_id'] !== null
+                            ? (int)$locked[
+                                'candidate_ontology_version_id'
+                            ]
+                            : null,
+                    'candidate_score_revision_id' =>
+                        $locked['candidate_score_revision_id'] !== null
+                            ? (int)$locked[
+                                'candidate_score_revision_id'
+                            ]
+                            : null,
+                ],
+                true
+            );
             $db->exec('COMMIT');
             $reservationMs = (hrtime(true) - $reservationStarted) / 1000000;
         } catch (Throwable $error) {
@@ -5099,8 +6051,14 @@ function ingredientOntologyActivationAssertActiveDatabase(PDO $db): void {
         } elseif ($prefix === 'acknowledgement') {
             unset($payload['document_hash']);
             if (
-                (string)($document['schema_version'] ?? '')
-                    !== 'ontology-activation-acknowledgement-v1'
+                !in_array(
+                    (string)($document['schema_version'] ?? ''),
+                    [
+                        'ontology-activation-acknowledgement-v1',
+                        INGREDIENT_ONTOLOGY_ACTIVATION_ACKNOWLEDGEMENT_VERSION,
+                    ],
+                    true
+                )
                 || !hash_equals(
                     ingredientOntologyV3Hash($payload),
                     $hash
@@ -5800,16 +6758,63 @@ function ingredientOntologyActivationAssertActiveDatabase(PDO $db): void {
                     usleep(150000 * $lockRetries);
                     continue;
                 }
+                $expectedOutcome = $error instanceof
+                    IngredientOntologyActivationExpectedOutcome;
                 $failed =
                     ingredientOntologyActivationWithLiveReservation(
                         $options,
-                        'mark_import_failed',
-                        static fn(): array =>
-                            ingredientOntologyActivationFailImport(
+                        $expectedOutcome
+                            ? 'mark_import_rebase_required'
+                            : 'mark_import_failed',
+                        static function () use (
+                            $db,
+                            $importId,
+                            $error,
+                            $expectedOutcome
+                        ): array {
+                            $row = ingredientOntologyActivationFailImport(
                                 $db,
                                 $importId,
-                                $error
-                            )
+                                $error,
+                                $expectedOutcome
+                                    ? 'rebase_required'
+                                    : 'failed'
+                            );
+                            if ($expectedOutcome) {
+                                $record =
+                                    ingredientOntologyActivationRecordOutcome(
+                                    $db,
+                                    $error->outcomeKind(),
+                                    $error->details() + [
+                                        'import_id' => $importId,
+                                        'message' => $error->getMessage(),
+                                    ],
+                                    true,
+                                    30
+                                );
+                                if (!empty($record['escalated'])) {
+                                    $db->prepare("
+                                        UPDATE ontology_activation_imports
+                                        SET status = 'failed',
+                                            last_error = ?,
+                                            updated_at =
+                                                CURRENT_TIMESTAMP
+                                        WHERE id = ?
+                                          AND status =
+                                                'rebase_required'
+                                    ")->execute([
+                                        'Expected activation rebase did not converge.',
+                                        $importId,
+                                    ]);
+                                    $row =
+                                        ingredientOntologyActivationImportRow(
+                                            $db,
+                                            $importId
+                                        );
+                                }
+                            }
+                            return $row;
+                        }
                     );
                 if ($yieldAfterReservation) {
                     return $failed;
@@ -6062,6 +7067,19 @@ function ingredientOntologyActivationAssertActiveDatabase(PDO $db): void {
                 );
                 return [
                     'acknowledgement' => $built['acknowledgement'],
+                ];
+            }
+            if (!empty($built['no_work'])) {
+                return [
+                    'no_work' => true,
+                    'claimed_intents' =>
+                        (int)($built['claimed_intents'] ?? 0),
+                    'superseded_source_job_ids' => array_map(
+                        'intval',
+                        (array)($built[
+                            'superseded_source_job_ids'
+                        ] ?? [])
+                    ),
                 ];
             }
             $bundleSet = $built['bundle_set'];
@@ -6564,6 +7582,38 @@ function ingredientOntologyActivationAssertActiveDatabase(PDO $db): void {
                 return [
                     'action' => 'acknowledge_no_op',
                     'acknowledgement' => $acknowledgement,
+                    'work_cleanup' => $workCleanup,
+                    'cdc_pruned' => $cdcPruned,
+                ];
+            }
+            if (!empty($built['no_work'])) {
+                ingredientOntologyActivationWithLiveReservation(
+                    $options,
+                    'record_policy_deferred',
+                    static fn(): array =>
+                        ingredientOntologyActivationRecordAdvisoryOutcome(
+                            $db,
+                            'policy_deferred',
+                            [
+                                'claimed_intents' =>
+                                    (int)(
+                                        $built['claimed_intents'] ?? 0
+                                    ),
+                                'reason' => 'no_due_generation_work',
+                                'superseded_source_job_ids' =>
+                                    array_map(
+                                        'intval',
+                                        (array)($built[
+                                            'superseded_source_job_ids'
+                                        ] ?? [])
+                                    ),
+                            ],
+                            300
+                        )
+                );
+                return [
+                    'action' => 'policy_deferred',
+                    'reason' => 'no_due_generation_work',
                     'work_cleanup' => $workCleanup,
                     'cdc_pruned' => $cdcPruned,
                 ];

@@ -85,7 +85,7 @@ Connect your pantry to your smart home in minutes — no YAML, no manual sensor 
 - **Export inventory** — Download the full inventory as a UTF-8 CSV (Excel-compatible) or open a print-ready page to save as PDF; export button always visible in the inventory page header
 - **Barcode scanning** — Scan products with your phone camera using QuaggaJS; last 20 scanned products saved as tappable chips so you can re-select them without rescanning
 - **Canonical ingredients** — Products are mapped to common ingredient aliases and editable taxonomy trees (e.g. "Chicken breast" → "Chicken") with optional FoodOn and USDA FoodData Central IDs for better grouping, search, and recipe matching
-- **Queued enrichment** — Product saves return immediately; canonical/FoodOn/USDA post-processing runs from cron or the CLI worker so Home Assistant/API additions stay responsive
+- **Queued enrichment** — Product saves return immediately; a wake-driven canonical worker drains local/FoodOn/USDA post-processing with a 30-second safety poll, while cron remains a fallback
 - **Taxonomy history reuse** — Re-adding a known item replays the placement it was given before (matched by barcode, name+brand, name, or a recorded alias) without calling the model
 - **AI taxonomy review** — Genuinely new items have their heuristic placement checked by Gemini against the whole taxonomy tree, which confirms or corrects the term and may add new nodes; it can never rename, move, or delete existing nodes
 - **Faceted ingredient ontology v3 (shadow only)** — Versioned base entities,
@@ -656,7 +656,7 @@ idempotency candidate, four recent ready-v3 revisions, and two recent legacy
 revisions. The oldest retained ancestor has its parent cleared to mark the
 documented rollback boundary.
 
-Full-resolution v3.16 data under ontology schema v3.17 carries
+Full-resolution v3.17 data under ontology schema v3.17 carries
 `activation_policy=manual_review`; validation still requires the exact frozen
 corpus and reviewed subjects, pinned gold, complete integrity and materialized
 ID/value gates, a validated rollback baseline, plus explicit CLI confirmation
@@ -775,8 +775,13 @@ The Docker image runs this on its own via `docker/evershelf-cron`, so no host se
 needed. Configure it manually only for non-Docker installs:
 
 ```bash
-# Canonical taxonomy and smart shopping, every 5 minutes
+# Smart-shopping refresh and canonical safety fallback, every 5 minutes
 */5 * * * * php /path/to/evershelf/api/cron_smart_shopping.php >> /path/to/evershelf/data/cron.log 2>&1
+
+# Preferred wake-driven canonical processor; one resident process
+php /path/to/evershelf/scripts/canonical-queue-worker.php \
+  --db=/path/to/evershelf.db --allow-active-db \
+  --loop --poll-seconds=30 --limit=5
 
 # Copied ontology/score activation, every minute
 * * * * * php /path/to/evershelf/scripts/process-ontology-activation.php --write --allow-active-db --allow-network >> /path/to/evershelf/data/cron.log 2>&1
@@ -785,8 +790,9 @@ needed. Configure it manually only for non-Docker installs:
 * * * * * php /path/to/evershelf/scripts/process-recipe-queue.php --limit=2 --max-attempts=3 --respect-cookidoo-cadence >> /path/to/evershelf/data/cron.log 2>&1
 ```
 
-These jobs are **not optional** when their features are enabled. The first drains canonical
-ingredient/taxonomy work, the second imports copied ontology/score revisions and
+These jobs are **not optional** when their features are enabled. The resident
+canonical worker normally drains ingredient/taxonomy work and the five-minute
+job provides dropped-wake recovery; activation imports copied ontology/score revisions and
 keeps recipe browse scores current, and the third processes local recipe jobs
 plus terminal cleanup of disabled provider work. Without them, new products never receive
 taxonomy terms, durable ontology intents remain pending, large recipe catalogs

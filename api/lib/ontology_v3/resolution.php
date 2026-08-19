@@ -238,7 +238,7 @@ function ingredientOntologyV3ResolutionManifest(): array {
             !== INGREDIENT_ONTOLOGY_V3_RESOLUTION_MANIFEST_VERSION
         || (string)($manifest['reviewer'] ?? '') === ''
         || (string)($manifest['review_batch'] ?? '') === ''
-        || (string)($manifest['corrective_version'] ?? '') !== 'v3.16'
+        || (string)($manifest['corrective_version'] ?? '') !== 'v3.17'
         || (string)($manifest['activation_policy'] ?? '')
             !== 'manual_review'
         || trim((string)($manifest['activation_block_reason'] ?? '')) === ''
@@ -1504,9 +1504,9 @@ function ingredientOntologyV3ApplyResolutionEntities(
         ]);
         $roleRows[$slug] = $row;
     }
-    if (count($roleRows) !== 304) {
+    if (count($roleRows) !== 305) {
         throw new RuntimeException(
-            'explicit entity-role manifest must contain 304 rows'
+            'explicit entity-role manifest must contain 305 rows'
         );
     }
     $actualSlugs = $db->prepare("
@@ -1726,9 +1726,9 @@ function ingredientOntologyV3ApplyResolutionEntities(
         }
         $parents[$child] = $parent !== '' ? $parent : null;
     }
-    if (count($parents) !== 304) {
+    if (count($parents) !== 305) {
         throw new RuntimeException(
-            'primary-edge manifest must contain 304 rows'
+            'primary-edge manifest must contain 305 rows'
         );
     }
     $db->prepare("
@@ -1858,9 +1858,9 @@ function ingredientOntologyV3ApplyResolutionEntities(
             'rationale' => (string)$row['rationale'],
         ];
     }
-    if (count($reviewRows) !== 304) {
+    if (count($reviewRows) !== 305) {
         throw new RuntimeException(
-            'edge-review manifest must contain 304 rows'
+            'edge-review manifest must contain 305 rows'
         );
     }
     $insertReview = $db->prepare("
@@ -7350,7 +7350,7 @@ function ingredientOntologyV3DispositionAudit(
         $manifest['frozen_sources']['prior_accepted_label_count'] ?? 522
     );
     $expectedEdges = (int)(
-        $manifest['frozen_sources']['entity_count'] ?? 304
+        $manifest['frozen_sources']['entity_count'] ?? 305
     );
     $expectedProviderReviews = (int)(
         $manifest['frozen_sources']['provider_local_review_count'] ?? 100

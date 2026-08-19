@@ -189,7 +189,16 @@ $assert(
     && (int)$observedProgress['processed_recipe_count'] > 0
     && (int)$observedProgress['processed_recipe_count']
         < (int)$observedProgress['total_recipe_count'],
-    'A scored prefix must publish while a newer mutation remains pending'
+    'A scored prefix must publish while a newer mutation remains pending: '
+        . ingredientOntologyV3Json([
+            'first' => $first,
+            'pre_snapshot_revision' => $preSnapshotRevision,
+            'first_mutation_revision' => $firstMutationRevision,
+            'hook_revision' => $hookRevision,
+            'state' => $stateAfterFirst,
+            'pending' => $pendingRow,
+            'progress' => $observedProgress,
+        ])
 );
 
 $second = ingredientOntologyV3IncrementalRebuild($db, true, 100);

@@ -172,6 +172,17 @@ dispensa/
   fork, shadow, or promote. One collecting or shadowing child is permitted per
   copied parent. Exact semantic no-ops skip shadow scoring, while safe shadow
   retries reuse the completed child.
+- Copied semantic no-ops never reuse the ordinary bundle import path. A
+  lineage-bound acknowledgement resolves fallback jobs back to their original
+  source intents, verifies source artifacts under the live reservation, applies
+  or policy-defers each intent, and never imports rows or moves score pointers.
+- Generation-intent scheduling gives exact constraints first priority, reserves
+  only a bounded recent/high-priority lane, and drains the remaining capacity
+  oldest-first so continuous arrivals cannot starve historical work.
+- Sparse score publication binds one captured product/recipe watermark. Newer
+  inventory, catalog, or source mutations remain journaled and pending while
+  that immutable child becomes visible, then publish in the next child rather
+  than invalidating an already completed scored prefix.
 - Production activation uses lineage-bound manifest v2 plus immutable SQLite
   sidecars. Exact copied IDs are admitted only when baseline sequences match,
   imported in adaptive chunks, and validated on a copy. Ontology publication
@@ -181,6 +192,11 @@ dispensa/
   operational alert budgets, not transactional deadlines: SQLite commit latency
   cannot be known before commit, so breaches are persisted for monitoring and
   chunk sizes are reduced on the next reservation.
+- Successful ontology and score imports record `converged` or `activated`
+  inside the same publication transaction. Those terminal-good outcomes clear
+  prior failure/backoff and expected-drift counters only after the import CAS is
+  committed. Local score-date rollover is expected rebase drift; immutable
+  lineage mismatches remain fail-closed integrity errors.
 - One primary navigation `is_a` plus at most two secondary parents is supported
   only when all accepted `is_a` edges form a food-rooted DAG with depth, ancestor,
   and path caps. Secondary ancestry and all typed relations remain non-satisfying.
@@ -197,6 +213,12 @@ dispensa/
   `Unclassified ingredient` node; quarantine isolates the mutation, never the
   subject. Backoff/circuit records permit bounded retry after policy/evidence
   changes or a retry horizon.
+- Reviewed recipe admission is occurrence-complete: every active occurrence
+  for the subject is fingerprint-fenced, every distinct owning recipe receives
+  its annex overlay and sparse dirty marker, and coverage gaps resolve only in
+  the successful job-transition transaction. Full shadow builds synchronize
+  annex rows in recipe batches, use multi-row upserts only for changed rows,
+  and reuse matching seal/content/manifest-bound rows without writes.
 - Prepared products stay in the existing prepared-meal taxonomy path and are
   excluded from autonomous ingredient expansion and backfill totals. Raw to
   prepared deactivates live occurrences/jobs; prepared to raw observes and
@@ -206,6 +228,9 @@ dispensa/
   a versioned model whitelist, no available tools, custom instructions, MCP
   servers, remote export, or shell interpolation. PHP records the exact
   provider/model and never silently falls back.
+- Copilot SDK bridge EOF, broken-pipe, I/O, restart, malformed-response, and
+  mismatched-response failures stop the warm bridge and remain explicitly
+  transient for bounded shopping-classification retry.
 - Production cron is intake-only: it records subjects/occurrences, exact R0
   constraints, immutable model responses, and provisional queue intents, but
   never forks ontology versions, builds shadow scores, monitors, or promotes.
@@ -232,7 +257,7 @@ dispensa/
   restores one of eight retained proven ancestors without freshness gates;
   non-ancestors use full activation validation and must be a v3 child of the
   current active revision.
-- Full-resolution v3.16 data under ontology schema v3.17 uses
+- Full-resolution v3.17 data under ontology schema v3.17 uses
   `activation_policy=manual_review`. Candidate and score builds remain copy-only;
   activation requires the exact frozen production profile, reviewed subject
   sets, graph/gold/integrity and materialized ID/value gates, a valid rollback

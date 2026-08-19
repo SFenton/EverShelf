@@ -8,7 +8,7 @@ const INGREDIENT_ONTOLOGY_CONTROLLER_POLICY_VERSION =
 const INGREDIENT_ONTOLOGY_CONTROLLER_FINGERPRINT_VERSION =
     'ontology-subject-fingerprint-v1';
 const INGREDIENT_ONTOLOGY_CONTROLLER_PROMPT_VERSION =
-    'ontology-controller-prompts-v2';
+    'ontology-controller-prompts-v3';
 const INGREDIENT_ONTOLOGY_CONTROLLER_GOLD_VERSION =
     'ontology-gold-release-v1';
 
@@ -890,6 +890,8 @@ function ingredientOntologyControllerSchemaMigrate(PDO $db): void {
             active_gold_release_id INTEGER DEFAULT NULL,
             active_policy_hash TEXT NOT NULL DEFAULT ''
                 CHECK(active_policy_hash = '' OR length(active_policy_hash) = 64),
+            intent_fairness_cursor INTEGER NOT NULL DEFAULT 0
+                CHECK(intent_fairness_cursor >= 0),
             last_generation_at DATETIME DEFAULT NULL,
             updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
@@ -1226,6 +1228,58 @@ function ingredientOntologyControllerSchemaMigrate(PDO $db): void {
         );
         CREATE INDEX IF NOT EXISTS idx_ontology_generation_intents_ready
             ON ontology_generation_intents(status, created_at, id);
+
+        CREATE TABLE IF NOT EXISTS ontology_controller_coverage_gaps (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            gap_key TEXT NOT NULL UNIQUE CHECK(length(gap_key) = 64),
+            source_job_id INTEGER NOT NULL,
+            subject_id INTEGER DEFAULT NULL,
+            subject_fingerprint TEXT DEFAULT NULL
+                CHECK(
+                    subject_fingerprint IS NULL
+                    OR length(subject_fingerprint) = 64
+                ),
+            normalized_label TEXT NOT NULL
+                CHECK(length(normalized_label) <= 200),
+            language TEXT NOT NULL DEFAULT 'und'
+                CHECK(length(language) BETWEEN 2 AND 16),
+            reason TEXT NOT NULL CHECK(reason IN (
+                'no_candidates',
+                'complete_exhaustion',
+                'policy_truncated',
+                'model_abstained',
+                'low_signal_creation_unauthorized'
+            )),
+            evidence_json TEXT NOT NULL DEFAULT '{}'
+                CHECK(length(evidence_json) <= 32768),
+            pool_total INTEGER NOT NULL DEFAULT 0
+                CHECK(pool_total >= 0),
+            search_total INTEGER NOT NULL DEFAULT 0
+                CHECK(search_total >= 0),
+            searched_count INTEGER NOT NULL DEFAULT 0
+                CHECK(searched_count >= 0),
+            shard_count INTEGER NOT NULL DEFAULT 0
+                CHECK(shard_count >= 0),
+            search_truncated INTEGER NOT NULL DEFAULT 0
+                CHECK(search_truncated IN (0, 1)),
+            status TEXT NOT NULL DEFAULT 'open'
+                CHECK(status IN ('open', 'resolved', 'superseded')),
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            resolved_at DATETIME DEFAULT NULL,
+            FOREIGN KEY(source_job_id)
+                REFERENCES ontology_controller_jobs(id) ON DELETE CASCADE,
+            FOREIGN KEY(subject_id)
+                REFERENCES ontology_subjects(id) ON DELETE SET NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_controller_coverage_gaps_status
+            ON ontology_controller_coverage_gaps(
+                status, created_at, id
+            );
+        CREATE INDEX IF NOT EXISTS idx_controller_coverage_gaps_subject
+            ON ontology_controller_coverage_gaps(
+                subject_id, status, updated_at
+            );
 
         CREATE TABLE IF NOT EXISTS ontology_version_fork_progress (
             candidate_version_id INTEGER PRIMARY KEY,
@@ -1566,6 +1620,13 @@ function ingredientOntologyControllerSchemaMigrate(PDO $db): void {
             );
     ");
 
+    ingredientOntologyControllerAddColumn(
+        $db,
+        'ontology_controller_state',
+        'intent_fairness_cursor',
+        'INTEGER NOT NULL DEFAULT 0 '
+            . 'CHECK(intent_fairness_cursor >= 0)'
+    );
     ingredientOntologyControllerAddColumn(
         $db,
         'ingredient_ontology_versions',
@@ -4664,6 +4725,48 @@ function ingredientOntologyControllerRuntimeStatus(
             ORDER BY status
         ")->fetchAll(PDO::FETCH_KEY_PAIR);
     }
+    $intentCounts = [
+        'pending' => 0,
+        'due' => 0,
+        'policy_deferred' => 0,
+        'oldest_at' => null,
+    ];
+    if (ingredientOntologyControllerTableExists(
+        $db,
+        'ontology_generation_intents'
+    )) {
+        $intentCounts = $db->query("
+            SELECT COUNT(*) AS pending,
+                   COALESCE(SUM(CASE
+                       WHEN job.next_attempt_at IS NULL
+                         OR job.next_attempt_at <= CURRENT_TIMESTAMP
+                       THEN 1 ELSE 0 END), 0) AS due,
+                   COALESCE(SUM(CASE
+                       WHEN job.last_error_kind =
+                            'generation_policy_deferred'
+                       THEN 1 ELSE 0 END), 0) AS policy_deferred,
+                   MIN(intent.created_at) AS oldest_at
+            FROM ontology_generation_intents intent
+            JOIN ontology_controller_jobs job
+              ON job.id = intent.source_job_id
+            WHERE intent.status = 'pending'
+        ")->fetch(PDO::FETCH_ASSOC) ?: $intentCounts;
+    }
+    $coverageGapCounts = [
+        'open' => 0,
+        'oldest_at' => null,
+    ];
+    if (ingredientOntologyControllerTableExists(
+        $db,
+        'ontology_controller_coverage_gaps'
+    )) {
+        $coverageGapCounts = $db->query("
+            SELECT COUNT(*) AS open,
+                   MIN(created_at) AS oldest_at
+            FROM ontology_controller_coverage_gaps
+            WHERE status = 'open'
+        ")->fetch(PDO::FETCH_ASSOC) ?: $coverageGapCounts;
+    }
     return [
         'schema_version' =>
             INGREDIENT_ONTOLOGY_CONTROLLER_SCHEMA_VERSION,
@@ -4696,6 +4799,18 @@ function ingredientOntologyControllerRuntimeStatus(
             'intval',
             $retryCounts
         ),
+        'generation_intents' => [
+            'pending' => (int)($intentCounts['pending'] ?? 0),
+            'due' => (int)($intentCounts['due'] ?? 0),
+            'policy_deferred' =>
+                (int)($intentCounts['policy_deferred'] ?? 0),
+            'oldest_at' => $intentCounts['oldest_at'] ?? null,
+        ],
+        'coverage_gaps' => [
+            'open' => (int)($coverageGapCounts['open'] ?? 0),
+            'oldest_at' =>
+                $coverageGapCounts['oldest_at'] ?? null,
+        ],
         'active_policy_by_risk' => $policies,
         'policy_hash' => ingredientOntologyControllerPolicyHash(),
     ];
@@ -5983,7 +6098,42 @@ function ingredientOntologyControllerStreamEpoch(
             : 64;
     }
 
-    function ingredientOntologyControllerCandidateRows(
+    function ingredientOntologyControllerCandidatePolicyLimit(): int {
+        return 500;
+    }
+
+    function ingredientOntologyControllerLowSignalShortcutEnabled(
+        array $options = []
+    ): bool {
+        if (!empty($options['force_low_signal_coverage_gap'])) {
+            return true;
+        }
+        if (
+            defined('RECIPE_BACKEND_TEST_MODE')
+            && RECIPE_BACKEND_TEST_MODE
+            && array_key_exists(
+                'low_signal_shortcut_enabled',
+                $options
+            )
+        ) {
+            return !empty(
+                $options['low_signal_shortcut_enabled']
+            );
+        }
+        $value = function_exists('env')
+            ? env(
+                'INGREDIENT_ONTOLOGY_CONTROLLER_LOW_SIGNAL_SHORTCUT_ENABLED',
+                'false'
+            )
+            : 'false';
+        return in_array(
+            strtolower(trim((string)$value)),
+            ['1', 'true', 'yes', 'on'],
+            true
+        );
+    }
+
+    function ingredientOntologyControllerCandidateRankedRows(
         PDO $db,
         int $versionId,
         string $text,
@@ -5992,7 +6142,13 @@ function ingredientOntologyControllerStreamEpoch(
         array $requiredEntityIds = []
     ): array {
         $limit ??= ingredientOntologyControllerCandidateLimit();
-        $limit = max(1, min(500, $limit));
+        $limit = max(
+            1,
+            min(
+                ingredientOntologyControllerCandidatePolicyLimit(),
+                $limit
+            )
+        );
         $offset = max(0, $offset);
         $normalized = ingredientOntologyV3NormalizeLabel($text);
         $tokens = preg_split(
@@ -6111,8 +6267,93 @@ function ingredientOntologyControllerStreamEpoch(
                 'name' => (string)$row['canonical_name'],
                 'entity_kind' => (string)$row['entity_kind'],
                 'identity_role' => (string)$row['identity_role'],
+                'lexical_score' => (int)$row['lexical_score'],
             ];
         }, $rows);
+    }
+
+    function ingredientOntologyControllerCandidateShard(
+        PDO $db,
+        int $versionId,
+        string $text,
+        int $offset = 0,
+        ?int $limit = null,
+        array $requiredEntityIds = []
+    ): array {
+        $limit ??= ingredientOntologyControllerCandidateLimit();
+        $limit = max(
+            1,
+            min(
+                ingredientOntologyControllerCandidatePolicyLimit(),
+                $limit
+            )
+        );
+        $offset = max(0, $offset);
+        $poolStmt = $db->prepare("
+            SELECT COUNT(*)
+            FROM ingredient_ontology_entities entity
+            WHERE entity.ontology_version_id = ?
+              AND entity.active = 1
+              AND entity.provenance <> 'autonomous_controller'
+              AND entity.slug NOT LIKE 'provisional-subject-%'
+        ");
+        $poolStmt->execute([$versionId]);
+        $poolTotal = (int)$poolStmt->fetchColumn();
+        $policyLimit =
+            ingredientOntologyControllerCandidatePolicyLimit();
+        $searchTotal = min($poolTotal, $policyLimit);
+        $remainingBefore = max(0, $searchTotal - $offset);
+        $effectiveLimit = min($limit, max(1, $remainingBefore));
+        $rows = $offset < $searchTotal
+            ? ingredientOntologyControllerCandidateRankedRows(
+                $db,
+                $versionId,
+                $text,
+                $offset,
+                $effectiveLimit,
+                $requiredEntityIds
+            )
+            : [];
+        $returned = count($rows);
+        $searchedCount = min(
+            $searchTotal,
+            $offset + $returned
+        );
+        $remaining = max(0, $searchTotal - $searchedCount);
+        $meaningful = $returned > 0
+            && (int)($rows[0]['lexical_score'] ?? 0) > 0;
+        return [
+            'rows' => $rows,
+            'pool_total' => $poolTotal,
+            'policy_limit' => $policyLimit,
+            'search_total' => $searchTotal,
+            'offset' => $offset,
+            'limit' => $limit,
+            'returned_count' => $returned,
+            'searched_count' => $searchedCount,
+            'remaining_count' => $remaining,
+            'search_truncated' => $poolTotal > $searchTotal,
+            'expand_search_allowed' => $remaining > 0,
+            'meaningful_lexical_evidence' => $meaningful,
+        ];
+    }
+
+    function ingredientOntologyControllerCandidateRows(
+        PDO $db,
+        int $versionId,
+        string $text,
+        int $offset = 0,
+        ?int $limit = null,
+        array $requiredEntityIds = []
+    ): array {
+        return ingredientOntologyControllerCandidateShard(
+            $db,
+            $versionId,
+            $text,
+            $offset,
+            $limit,
+            $requiredEntityIds
+        )['rows'];
     }
 
     function ingredientOntologyControllerPromptRepairKinds(
@@ -6169,7 +6410,8 @@ function ingredientOntologyControllerStreamEpoch(
     function ingredientOntologyControllerPromptSchema(
         string $promptType,
         array $candidateIds,
-        array $evidenceIds
+        array $evidenceIds,
+        bool $expandSearchAllowed = true
     ): array {
         if (!preg_match('/^P[1-7]$/D', $promptType)) {
             throw new InvalidArgumentException(
@@ -6274,9 +6516,9 @@ function ingredientOntologyControllerStreamEpoch(
                 'input_hash' => ['type' => 'string'],
                 'decision' => [
                     'type' => 'string',
-                    'enum' => [
-                        'apply', 'expand_search', 'abstain',
-                    ],
+                    'enum' => $expandSearchAllowed
+                        ? ['apply', 'expand_search', 'abstain']
+                        : ['apply', 'abstain'],
                 ],
                 'repair_kind' => [
                     'type' => 'string',
@@ -6427,19 +6669,54 @@ function ingredientOntologyControllerStreamEpoch(
                 ?? $untrustedContext['name']
                 ?? ''
         );
-        $candidates = ingredientOntologyControllerCandidateRows(
-            $db,
-            $versionId,
-            $searchText,
-            $shardOffset,
-            $limit,
-            $requiredIds
+        $candidateShard = is_array(
+            $options['candidate_shard'] ?? null
+        ) ? $options['candidate_shard'] : (
+            ingredientOntologyControllerCandidateShard(
+                $db,
+                $versionId,
+                $searchText,
+                $shardOffset,
+                $limit,
+                $requiredIds
+            )
         );
-        if (!$candidates) {
-            throw new RuntimeException(
-                'controller prompt candidate shard is empty'
-            );
-        }
+        $candidates = array_values((array)(
+            $candidateShard['rows'] ?? []
+        ));
+        $candidateSearch = [
+            'pool_total' =>
+                (int)($candidateShard['pool_total'] ?? count($candidates)),
+            'policy_limit' => (int)(
+                $candidateShard['policy_limit']
+                    ?? ingredientOntologyControllerCandidatePolicyLimit()
+            ),
+            'search_total' =>
+                (int)($candidateShard['search_total'] ?? count($candidates)),
+            'offset' => (int)(
+                $candidateShard['offset'] ?? $shardOffset
+            ),
+            'limit' => (int)($candidateShard['limit'] ?? $limit),
+            'returned_count' => count($candidates),
+            'searched_count' => (int)(
+                $candidateShard['searched_count'] ?? count($candidates)
+            ),
+            'remaining_count' => (int)(
+                $candidateShard['remaining_count'] ?? 0
+            ),
+            'search_truncated' => !empty(
+                $candidateShard['search_truncated']
+            ),
+            'expand_search_allowed' => !empty(
+                $candidateShard['expand_search_allowed']
+            ),
+            'meaningful_lexical_evidence' => !empty(
+                $candidateShard['meaningful_lexical_evidence']
+            ),
+            'low_signal_review_only' => !empty(
+                $candidateShard['low_signal_review_only']
+            ),
+        ];
         $candidateIds = array_column($candidates, 'candidate_id');
         $evidenceMap = [];
         foreach ($evidence as $item) {
@@ -6477,18 +6754,15 @@ function ingredientOntologyControllerStreamEpoch(
             'untrusted_context' => $untrustedContext,
             'evidence' => array_values($evidenceMap),
             'candidates' => $candidates,
-            'candidate_shard' => [
-                'offset' => $shardOffset,
-                'limit' => $limit,
-                'expand_search_allowed' => true,
-            ],
+            'candidate_search' => $candidateSearch,
         ];
         $inputJson = ingredientOntologyControllerStableJson($input);
         $inputHash = hash('sha256', $inputJson);
         $schema = ingredientOntologyControllerPromptSchema(
             $promptType,
             $candidateIds,
-            array_keys($evidenceMap)
+            array_keys($evidenceMap),
+            $candidateSearch['expand_search_allowed']
         );
         $schemaJson = ingredientOntologyControllerStableJson($schema);
         $system = implode("\n", [
@@ -6522,6 +6796,9 @@ function ingredientOntologyControllerStreamEpoch(
             . "<closed_candidates>\n"
             . ingredientOntologyControllerStableJson($candidates)
             . "\n</closed_candidates>\n"
+            . "<candidate_search>\n"
+            . ingredientOntologyControllerStableJson($candidateSearch)
+            . "\n</candidate_search>\n"
             . "Echo request_id and input_hash exactly.\n"
             . 'request_id=' . $requestId . "\n"
             . 'input_hash=' . $inputHash;
@@ -6549,13 +6826,418 @@ function ingredientOntologyControllerStreamEpoch(
                     'candidate_id'
                 ),
                 'trusted_context' => $trustedContext,
+                'untrusted_context' => $untrustedContext,
                 'evidence_map' => $evidenceMap,
-                'shard_offset' => $shardOffset,
-                'shard_limit' => $limit,
+                'shard_offset' => $candidateSearch['offset'],
+                'shard_limit' => $candidateSearch['limit'],
+                'candidate_pool_total' =>
+                    $candidateSearch['pool_total'],
+                'candidate_search_total' =>
+                    $candidateSearch['search_total'],
+                'candidate_returned_count' =>
+                    $candidateSearch['returned_count'],
+                'candidate_searched_count' =>
+                    $candidateSearch['searched_count'],
+                'candidate_remaining_count' =>
+                    $candidateSearch['remaining_count'],
+                'candidate_search_truncated' =>
+                    $candidateSearch['search_truncated'],
+                'expand_search_allowed' =>
+                    $candidateSearch['expand_search_allowed'],
+                'meaningful_lexical_evidence' =>
+                    $candidateSearch['meaningful_lexical_evidence'],
+                'low_signal_review_only' =>
+                    $candidateSearch['low_signal_review_only'],
                 'controller_policy_hash' =>
                     ingredientOntologyControllerPolicyHash(),
             ],
         ];
+    }
+
+    function ingredientOntologyControllerStoreCoverageGap(
+        PDO $db,
+        array $job,
+        array $context,
+        array $candidateSearch,
+        string $reason,
+        ?int $responseArtifactId = null
+    ): array {
+        if (!in_array($reason, [
+            'no_candidates',
+            'complete_exhaustion',
+            'policy_truncated',
+            'model_abstained',
+            'low_signal_creation_unauthorized',
+        ], true)) {
+            throw new InvalidArgumentException(
+                'ontology controller coverage gap reason is invalid'
+            );
+        }
+        $subjectId = (int)($job['subject_id'] ?? 0);
+        $subject = null;
+        if ($subjectId > 0) {
+            $stmt = $db->prepare("
+                SELECT subject_fingerprint, canonical_payload_hash
+                FROM ontology_subjects
+                WHERE id = ?
+            ");
+            $stmt->execute([$subjectId]);
+            $subject = $stmt->fetch(PDO::FETCH_ASSOC) ?: null;
+        }
+        $label = ingredientOntologyV3NormalizeLabel(
+            (string)(
+                $context['untrusted']['text']
+                    ?? $context['untrusted']['name']
+                    ?? ''
+            )
+        );
+        $language = ingredientOntologyV3NormalizeLanguage(
+            (string)($context['untrusted']['language'] ?? 'und')
+        );
+        $evidence = [
+            'job_id' => (int)$job['id'],
+            'job_type' => (string)$job['job_type'],
+            'subject_id' => $subjectId ?: null,
+            'subject_fingerprint' =>
+                $subject['subject_fingerprint'] ?? null,
+            'canonical_payload_hash' =>
+                $subject['canonical_payload_hash'] ?? null,
+            'response_artifact_id' => $responseArtifactId,
+            'trusted_context' => (array)($context['trusted'] ?? []),
+            'evidence' => (array)($context['evidence'] ?? []),
+            'candidate_search' => $candidateSearch,
+            'reason' => $reason,
+        ];
+        $gapKey = ingredientOntologyV3Hash([
+            'schema' => 'ontology-controller-coverage-gap-v1',
+            'source_job_id' => (int)$job['id'],
+            'subject_fingerprint' =>
+                $subject['subject_fingerprint'] ?? null,
+            'normalized_label' => $label,
+            'controller_policy_hash' =>
+                (string)($job['controller_policy_hash'] ?? ''),
+        ]);
+        $shardLimit = max(
+            1,
+            (int)($candidateSearch['limit'] ?? 1)
+        );
+        $searched = max(
+            0,
+            (int)($candidateSearch['searched_count'] ?? 0)
+        );
+        $shardCount = $searched > 0
+            ? (int)ceil($searched / $shardLimit)
+            : 0;
+        $db->prepare("
+            INSERT INTO ontology_controller_coverage_gaps (
+                gap_key, source_job_id, subject_id,
+                subject_fingerprint, normalized_label, language,
+                reason, evidence_json, pool_total, search_total,
+                searched_count, shard_count, search_truncated,
+                status, created_at, updated_at
+            )
+            VALUES (
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                'open', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+            )
+            ON CONFLICT(gap_key) DO UPDATE SET
+                source_job_id = excluded.source_job_id,
+                subject_id = excluded.subject_id,
+                subject_fingerprint =
+                    excluded.subject_fingerprint,
+                normalized_label = excluded.normalized_label,
+                language = excluded.language,
+                reason = excluded.reason,
+                evidence_json = excluded.evidence_json,
+                pool_total = excluded.pool_total,
+                search_total = excluded.search_total,
+                searched_count = excluded.searched_count,
+                shard_count = excluded.shard_count,
+                search_truncated = excluded.search_truncated,
+                status = 'open',
+                resolved_at = NULL,
+                updated_at = CURRENT_TIMESTAMP
+        ")->execute([
+            $gapKey,
+            (int)$job['id'],
+            $subjectId ?: null,
+            $subject['subject_fingerprint'] ?? null,
+            mb_substr($label, 0, 200, 'UTF-8'),
+            $language,
+            $reason,
+            ingredientOntologyControllerStableJson($evidence),
+            max(0, (int)($candidateSearch['pool_total'] ?? 0)),
+            max(0, (int)($candidateSearch['search_total'] ?? 0)),
+            $searched,
+            $shardCount,
+            !empty($candidateSearch['search_truncated']) ? 1 : 0,
+        ]);
+        $read = $db->prepare("
+            SELECT * FROM ontology_controller_coverage_gaps
+            WHERE gap_key = ?
+        ");
+        $read->execute([$gapKey]);
+        $row = $read->fetch(PDO::FETCH_ASSOC);
+        if (!$row) {
+            throw new RuntimeException(
+                'ontology controller coverage gap was not stored'
+            );
+        }
+        return $row;
+    }
+
+    function ingredientOntologyControllerResolveCoverageGaps(
+        PDO $db,
+        int $subjectId
+    ): int {
+        if ($subjectId <= 0) {
+            return 0;
+        }
+        $stmt = $db->prepare("
+            UPDATE ontology_controller_coverage_gaps
+            SET status = 'resolved',
+                resolved_at = CURRENT_TIMESTAMP,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE subject_id = ? AND status = 'open'
+        ");
+        $stmt->execute([$subjectId]);
+        return $stmt->rowCount();
+    }
+
+    function ingredientOntologyControllerActiveOccurrences(
+        PDO $db,
+        int $subjectId
+    ): array {
+        if ($subjectId <= 0) {
+            return [];
+        }
+        $stmt = $db->prepare("
+            SELECT id, owner_type, owner_id, owner_fingerprint
+            FROM ontology_subject_occurrences
+            WHERE subject_id = ? AND active = 1
+            ORDER BY owner_type, owner_id, id
+        ");
+        $stmt->execute([$subjectId]);
+        return array_map(
+            static fn(array $row): array => [
+                'id' => (int)$row['id'],
+                'owner_type' => (string)$row['owner_type'],
+                'owner_id' => (int)$row['owner_id'],
+                'owner_fingerprint' =>
+                    (string)$row['owner_fingerprint'],
+            ],
+            $stmt->fetchAll(PDO::FETCH_ASSOC)
+        );
+    }
+
+    function ingredientOntologyControllerOccurrenceFenceHash(
+        PDO $db,
+        int $subjectId
+    ): string {
+        return ingredientOntologyV3Hash(
+            ingredientOntologyControllerActiveOccurrences(
+                $db,
+                $subjectId
+            )
+        );
+    }
+
+    function ingredientOntologyControllerReviewedAdmission(
+        PDO $db,
+        array $job,
+        int $versionId
+    ): ?array {
+        $subjectId = (int)($job['subject_id'] ?? 0);
+        if ($subjectId <= 0) {
+            return null;
+        }
+        $subjectStmt = $db->prepare("
+            SELECT subject_kind
+            FROM ontology_subjects
+            WHERE id = ?
+        ");
+        $subjectStmt->execute([$subjectId]);
+        $subjectKind = (string)($subjectStmt->fetchColumn() ?: '');
+        $occurrences = ingredientOntologyControllerActiveOccurrences(
+            $db,
+            $subjectId
+        );
+        if (!$occurrences) {
+            return null;
+        }
+        $occurrenceFenceHash = ingredientOntologyV3Hash($occurrences);
+        $version = ingredientOntologyV3Version($db, $versionId);
+        if ($version === null || (string)$version['status'] !== 'ready') {
+            return null;
+        }
+        if ($subjectKind === 'product') {
+            $productOccurrences = array_values(array_filter(
+                $occurrences,
+                static fn(array $occurrence): bool =>
+                    (string)$occurrence['owner_type'] === 'product'
+            ));
+            if (!$productOccurrences) {
+                return null;
+            }
+            $owner = $productOccurrences[count($productOccurrences) - 1];
+            $product = $db->prepare("
+                SELECT id, name, brand, category, prepared_food
+                FROM products
+                WHERE id = ?
+            ");
+            $product->execute([(int)$owner['owner_id']]);
+            $row = $product->fetch(PDO::FETCH_ASSOC);
+            if (
+                !$row
+                || !hash_equals(
+                    (string)$owner['owner_fingerprint'],
+                    ingredientOntologyV3ProductOwnerFingerprint($row)
+                )
+            ) {
+                return null;
+            }
+            $resolution = ingredientOntologyV3IdentityAnnexResolution(
+                $db,
+                $version,
+                $row
+            );
+            if ((string)$resolution['status'] !== 'accepted') {
+                return null;
+            }
+            ingredientOntologyV3IdentityAnnexRefreshProduct(
+                $db,
+                (int)$row['id'],
+                $versionId,
+                false
+            );
+            return $resolution + [
+                'owner_type' => 'product',
+                'owner_id' => (int)$row['id'],
+                'occurrence_fence_hash' => $occurrenceFenceHash,
+            ];
+        }
+        if ($subjectKind === 'recipe_ingredient') {
+            $recipeOccurrences = array_values(array_filter(
+                $occurrences,
+                static fn(array $occurrence): bool =>
+                    (string)$occurrence['owner_type']
+                        === 'recipe_ingredient'
+            ));
+            if (!$recipeOccurrences) {
+                return null;
+            }
+            $ownerIds = array_values(array_unique(array_map(
+                static fn(array $occurrence): int =>
+                    (int)$occurrence['owner_id'],
+                $recipeOccurrences
+            )));
+            $placeholders = implode(
+                ',',
+                array_fill(0, count($ownerIds), '?')
+            );
+            $ingredient = $db->prepare("
+                SELECT ingredient.*,
+                       COALESCE(
+                           NULLIF(ingredient.raw_text, ''),
+                           ingredient.normalized_name
+                       ) AS source_label,
+                       recipe.language, recipe.primary_connector,
+                       COALESCE(origin.external_id, '')
+                           AS origin_external_id,
+                       COALESCE(origin.locale, '') AS origin_locale
+                FROM recipe_ingredients ingredient
+                JOIN recipe_catalog recipe
+                  ON recipe.id = ingredient.recipe_id
+                LEFT JOIN recipe_origins origin
+                  ON origin.id = (
+                      SELECT candidate.id
+                      FROM recipe_origins candidate
+                      WHERE candidate.recipe_id = ingredient.recipe_id
+                        AND candidate.connector =
+                            recipe.primary_connector
+                      ORDER BY candidate.id
+                      LIMIT 1
+                  )
+                WHERE ingredient.id IN ({$placeholders})
+                  AND recipe.deleted_at IS NULL
+                ORDER BY ingredient.id
+            ");
+            $ingredient->execute($ownerIds);
+            $rows = $ingredient->fetchAll(PDO::FETCH_ASSOC);
+            if (count($rows) !== count($ownerIds)) {
+                return null;
+            }
+            $occurrenceByOwner = [];
+            foreach ($recipeOccurrences as $occurrence) {
+                $occurrenceByOwner[(int)$occurrence['owner_id']] =
+                    (string)$occurrence['owner_fingerprint'];
+            }
+            $resolutions = [];
+            foreach ($rows as $row) {
+                $currentOwnerFingerprint =
+                    ingredientOntologyV3RecipeOwnerFingerprint(
+                        'recipe_ingredient',
+                        $row
+                    );
+                if (
+                    !isset($occurrenceByOwner[(int)$row['id']])
+                    || !hash_equals(
+                        $occurrenceByOwner[(int)$row['id']],
+                        $currentOwnerFingerprint
+                    )
+                ) {
+                    return null;
+                }
+                $resolution =
+                    ingredientOntologyV3RecipeAnnexResolution(
+                        $db,
+                        $version,
+                        (string)$row['source_label'],
+                        (string)$row['language']
+                    );
+                if ((string)$resolution['status'] !== 'accepted') {
+                    return null;
+                }
+                $resolutions[] = $resolution;
+            }
+            $recipeIds = array_values(array_unique(array_map(
+                static fn(array $row): int => (int)$row['recipe_id'],
+                $rows
+            )));
+            sort($recipeIds, SORT_NUMERIC);
+            $annex = ingredientOntologyV3RecipeAnnexRefreshBatch(
+                $db,
+                $recipeIds,
+                $versionId,
+                false
+            );
+            if (empty($annex['ready'])) {
+                throw new RuntimeException(
+                    'reviewed recipe admissions did not materialize'
+                );
+            }
+            if (function_exists('recipeScoreMarkRecipeDirty')) {
+                foreach ($recipeIds as $recipeId) {
+                    recipeScoreMarkRecipeDirty(
+                        $db,
+                        $recipeId,
+                        'replace',
+                        'deterministic_reviewed_identity',
+                        false
+                    );
+                }
+            }
+            return $resolutions[0] + [
+                    'owner_type' => 'recipe_ingredient',
+                    'owner_id' => $ownerIds[0],
+                    'owner_ids' => $ownerIds,
+                    'recipe_id' => $recipeIds[0],
+                    'recipe_ids' => $recipeIds,
+                    'recipe_annex' => $annex,
+                    'occurrence_fence_hash' => $occurrenceFenceHash,
+                ];
+        }
+        return null;
     }
 
     function ingredientOntologyControllerValidatePlan(
@@ -6625,6 +7307,17 @@ function ingredientOntologyControllerStreamEpoch(
                 true
             )) {
                 $errors[] = 'decision is invalid';
+            }
+            if (
+                $decision === 'expand_search'
+                && array_key_exists(
+                    'expand_search_allowed',
+                    $manifest
+                )
+                && empty($manifest['expand_search_allowed'])
+            ) {
+                $errors[] =
+                    'expand search is forbidden for the terminal shard';
             }
             $repair = (string)($plan['repair_kind'] ?? '');
             if (!in_array(
@@ -13887,10 +14580,58 @@ function ingredientOntologyControllerAdvanceCandidateSearch(
         1,
         min(500, (int)($manifest['shard_limit'] ?? 64))
     );
-    $nextOffset = $shardOffset + $candidateLimit;
-    $moreCandidates = count($candidateIds) === $candidateLimit
-        && $nextOffset < 500;
+    $searchedCount = max(
+        $shardOffset + count($candidateIds),
+        (int)($manifest['candidate_searched_count'] ?? 0)
+    );
+    $nextOffset = $searchedCount;
+    $moreCandidates = array_key_exists(
+        'expand_search_allowed',
+        $manifest
+    ) ? !empty($manifest['expand_search_allowed']) : (
+        count($candidateIds) === $candidateLimit
+        && $nextOffset < 500
+    );
     if (!$moreCandidates) {
+        $searchTruncated = !empty(
+            $manifest['candidate_search_truncated']
+        );
+        $gap = ingredientOntologyControllerStoreCoverageGap(
+            $db,
+            $lease,
+            [
+                'trusted' => (array)(
+                    $manifest['trusted_context'] ?? []
+                ),
+                'untrusted' => (array)(
+                    $manifest['untrusted_context'] ?? []
+                ),
+                'evidence' => array_values((array)(
+                    $manifest['evidence_map'] ?? []
+                )),
+            ],
+            [
+                'pool_total' => (int)(
+                    $manifest['candidate_pool_total']
+                        ?? count($candidateIds)
+                ),
+                'search_total' => (int)(
+                    $manifest['candidate_search_total']
+                        ?? $searchedCount
+                ),
+                'searched_count' => $searchedCount,
+                'limit' => $candidateLimit,
+                'search_truncated' => $searchTruncated,
+            ],
+            $searchTruncated
+                ? 'policy_truncated'
+                : (
+                    $searchedCount > 0
+                        ? 'complete_exhaustion'
+                        : 'no_candidates'
+                ),
+            $responseArtifactId
+        );
         ingredientOntologyControllerTransitionJob(
             $db,
             $lease,
@@ -13898,15 +14639,22 @@ function ingredientOntologyControllerAdvanceCandidateSearch(
             'abstained',
             [
                 'response_artifact_id' => $responseArtifactId,
-                'last_error_kind' => 'candidate_search_exhausted',
+                'last_error_kind' => $searchTruncated
+                    ? 'candidate_search_policy_truncated'
+                    : 'candidate_search_exhausted',
                 'last_error' =>
-                    'All benchmark-authorized candidate shards were exhausted.',
+                    $searchTruncated
+                        ? 'Closed candidate search reached its policy limit.'
+                        : 'The complete closed candidate pool was exhausted.',
             ]
         );
         return [
             'job_id' => (int)$lease['id'],
             'status' => 'abstained',
-            'reason' => 'candidate_search_exhausted',
+            'reason' => $searchTruncated
+                ? 'candidate_search_policy_truncated'
+                : 'candidate_search_exhausted',
+            'coverage_gap_id' => (int)$gap['id'],
         ];
     }
     $jobInput = json_decode(
@@ -14752,77 +15500,13 @@ function ingredientOntologyControllerResumeDurableJob(
                         && (string)($plan['decision'] ?? '')
                             === 'expand_search'
                     ) {
-                        $nextOffset = $shardOffset + $candidateLimit;
-                        $moreCandidates =
-                            count($artifact['manifest']['candidate_ids'])
-                                === $candidateLimit
-                            && $nextOffset < 500;
-                        if (!$moreCandidates) {
-                            ingredientOntologyControllerTransitionJob(
-                                $db,
-                                $lease,
-                                'model_running',
-                                'abstained',
-                                [
-                                    'response_artifact_id' =>
-                                        (int)$response['id'],
-                                    'last_error_kind' =>
-                                        'candidate_search_exhausted',
-                                    'last_error' =>
-                                        'All benchmark-authorized candidate shards were exhausted.',
-                                ]
-                            );
-                            return [
-                                'job_id' => (int)$lease['id'],
-                                'status' => 'abstained',
-                                'reason' =>
-                                    'candidate_search_exhausted',
-                            ];
-                        }
-                        $jobInput['next_shard_offset'] = $nextOffset;
-                        $inputJson =
-                            ingredientOntologyControllerStableJson(
-                                $jobInput
-                            );
-                        $expand = $db->prepare("
-                            UPDATE ontology_controller_jobs
-                            SET status = 'retry',
-                                input_json = ?,
-                                input_hash = ?,
-                                response_artifact_id = ?,
-                                next_attempt_at = CURRENT_TIMESTAMP,
-                                lease_token = NULL,
-                                leased_until = NULL,
-                                last_error_kind = 'expand_search',
-                                last_error = ?,
-                                updated_at = CURRENT_TIMESTAMP
-                            WHERE id = ?
-                              AND status = 'model_running'
-                              AND lease_token = ?
-                              AND lease_generation = ?
-                              AND required_epoch = ?
-                              AND controller_generation = ?
-                        ");
-                        $expand->execute([
-                            $inputJson,
-                            hash('sha256', $inputJson),
+                        return ingredientOntologyControllerAdvanceCandidateSearch(
+                            $db,
+                            $lease,
                             (int)$response['id'],
-                            'Continuing with disjoint candidate shard at offset '
-                                . $nextOffset . '.',
-                            (int)$lease['id'],
-                            (string)$lease['lease_token'],
-                            (int)$lease['lease_generation'],
-                            (int)$lease['required_epoch'],
-                            (int)$lease['controller_generation'],
-                        ]);
-                        return [
-                            'job_id' => (int)$lease['id'],
-                            'status' => $expand->rowCount() === 1
-                                ? 'retry'
-                                : 'superseded',
-                            'reason' => 'expand_search',
-                            'next_shard_offset' => $nextOffset,
-                        ];
+                            $artifact,
+                            'model_running'
+                        );
                     }
                     if (!$validation['valid']) {
                         ingredientOntologyControllerTransitionJob(
@@ -15401,10 +16085,11 @@ function ingredientOntologyControllerResumeDurableJob(
                 ")->fetchColumn();
                 $db->exec('BEGIN IMMEDIATE');
                 try {
-                    $rows = $db->query("
+                    $baseSelect = "
                         SELECT intent.*, job.prompt_artifact_id,
                                job.response_artifact_id AS job_response_id,
-                               job.status AS job_status
+                               job.status AS job_status,
+                               job.priority AS job_priority
                         FROM ontology_generation_intents intent
                         JOIN ontology_controller_jobs job
                           ON job.id = intent.source_job_id
@@ -15413,18 +16098,134 @@ function ingredientOntologyControllerResumeDurableJob(
                               job.next_attempt_at IS NULL
                               OR job.next_attempt_at <= CURRENT_TIMESTAMP
                           )
-                          AND intent.intent_kind IN (
-                              'validated_plan', 'exact_constraint'
+                    ";
+                    $rows = [];
+                    $selectedIds = [];
+                    $appendRows = static function (
+                        array $candidates
+                    ) use (&$rows, &$selectedIds, $limit): void {
+                        foreach ($candidates as $candidate) {
+                            $intentId = (int)$candidate['id'];
+                            if (
+                                isset($selectedIds[$intentId])
+                                || count($rows) >= $limit
+                            ) {
+                                continue;
+                            }
+                            $selectedIds[$intentId] = true;
+                            $rows[] = $candidate;
+                        }
+                    };
+
+                    $validatedPending = (int)$db->query("
+                        SELECT COUNT(*)
+                        FROM ontology_generation_intents intent
+                        JOIN ontology_controller_jobs job
+                          ON job.id = intent.source_job_id
+                        WHERE intent.status = 'pending'
+                          AND intent.intent_kind = 'validated_plan'
+                          AND (
+                              job.next_attempt_at IS NULL
+                              OR job.next_attempt_at
+                                    <= CURRENT_TIMESTAMP
                           )
-                        ORDER BY job.priority DESC,
-                                 CASE intent.intent_kind
-                                     WHEN 'exact_constraint' THEN 0
-                                     ELSE 1
-                                 END,
-                                 intent.created_at DESC,
-                                 intent.id DESC
-                        LIMIT {$limit}
-                    ")->fetchAll(PDO::FETCH_ASSOC);
+                    ")->fetchColumn();
+                    $exactPending = (int)$db->query("
+                        SELECT COUNT(*)
+                        FROM ontology_generation_intents intent
+                        JOIN ontology_controller_jobs job
+                          ON job.id = intent.source_job_id
+                        WHERE intent.status = 'pending'
+                          AND intent.intent_kind = 'exact_constraint'
+                          AND (
+                              job.next_attempt_at IS NULL
+                              OR job.next_attempt_at
+                                    <= CURRENT_TIMESTAMP
+                          )
+                    ")->fetchColumn();
+                    $fairnessCursor = (int)$db->query("
+                        SELECT intent_fairness_cursor
+                        FROM ontology_controller_state
+                        WHERE id = 1
+                    ")->fetchColumn();
+                    if (
+                        $limit === 1
+                        && $validatedPending > 0
+                        && $exactPending > 0
+                    ) {
+                        $exactLimit = ($fairnessCursor % 2) === 0
+                            ? 1
+                            : 0;
+                    } else {
+                        $exactLimit = $validatedPending > 0
+                            ? max(1, (int)floor($limit / 2))
+                            : $limit;
+                    }
+                    if ($exactLimit > 0) {
+                        $exact = $db->query($baseSelect . "
+                              AND intent.intent_kind = 'exact_constraint'
+                            ORDER BY job.priority DESC,
+                                     intent.created_at ASC,
+                                     intent.id ASC
+                            LIMIT {$exactLimit}
+                        ")->fetchAll(PDO::FETCH_ASSOC);
+                        $appendRows($exact);
+                    }
+
+                    $remaining = $limit - count($rows);
+                    if ($remaining > 0) {
+                        $recentLimit = min(
+                            10,
+                            (int)floor($remaining / 5)
+                        );
+                        if ($recentLimit > 0) {
+                            $exclusion = $selectedIds
+                                ? ' AND intent.id NOT IN ('
+                                    . implode(',', array_keys($selectedIds))
+                                    . ')'
+                                : '';
+                            $recent = $db->query($baseSelect . "
+                                  AND intent.intent_kind = 'validated_plan'
+                                  {$exclusion}
+                                ORDER BY job.priority DESC,
+                                         intent.created_at DESC,
+                                         intent.id DESC
+                                LIMIT {$recentLimit}
+                            ")->fetchAll(PDO::FETCH_ASSOC);
+                            $appendRows($recent);
+                        }
+                    }
+
+                    $remaining = $limit - count($rows);
+                    if ($remaining > 0) {
+                        $exclusion = $selectedIds
+                            ? ' AND intent.id NOT IN ('
+                                . implode(',', array_keys($selectedIds))
+                                . ')'
+                            : '';
+                        $oldest = $db->query($baseSelect . "
+                              AND intent.intent_kind = 'validated_plan'
+                              {$exclusion}
+                            ORDER BY intent.created_at ASC,
+                                     intent.id ASC
+                            LIMIT {$remaining}
+                        ")->fetchAll(PDO::FETCH_ASSOC);
+                        $appendRows($oldest);
+                    }
+                    if (
+                        $limit === 1
+                        && $validatedPending > 0
+                        && $exactPending > 0
+                        && $rows
+                    ) {
+                        $db->exec("
+                            UPDATE ontology_controller_state
+                            SET intent_fairness_cursor =
+                                    intent_fairness_cursor + 1,
+                                updated_at = CURRENT_TIMESTAMP
+                            WHERE id = 1
+                        ");
+                    }
                     $queued = 0;
                     foreach ($rows as $row) {
                         if (
@@ -15741,6 +16542,99 @@ function ingredientOntologyControllerResumeDurableJob(
                             'controller_base_version_unavailable'
                         );
                     }
+                    $reviewedAdmission =
+                        ingredientOntologyControllerReviewedAdmission(
+                            $db,
+                            $lease,
+                            $versionId
+                        );
+                    if ($reviewedAdmission !== null) {
+                        ingredientOntologyControllerHook(
+                            'controller_before_reviewed_admission_transition',
+                            [
+                                'job_id' => (int)$lease['id'],
+                                'subject_id' =>
+                                    (int)($lease['subject_id'] ?? 0),
+                            ]
+                        );
+                        dbBeginImmediateWithRetry($db);
+                        try {
+                            $occurrenceFenceCurrent =
+                                ingredientOntologyControllerOccurrenceFenceHash(
+                                    $db,
+                                    (int)($lease['subject_id'] ?? 0)
+                                );
+                            $occurrenceFenceMatched = hash_equals(
+                                (string)$reviewedAdmission[
+                                    'occurrence_fence_hash'
+                                ],
+                                $occurrenceFenceCurrent
+                            );
+                            if ($occurrenceFenceMatched) {
+                                $transitioned =
+                                    ingredientOntologyControllerTransitionJob(
+                                        $db,
+                                        $lease,
+                                        'model_running',
+                                        'promoted',
+                                        [
+                                            'candidate_version_id' =>
+                                                $versionId,
+                                            'last_error_kind' =>
+                                                'deterministic_reviewed_identity',
+                                            'last_error' =>
+                                                'Reviewed exact identity admission required no model call.',
+                                        ]
+                                    );
+                            } else {
+                                ingredientOntologyControllerTransitionJob(
+                                    $db,
+                                    $lease,
+                                    'model_running',
+                                    'superseded',
+                                    [
+                                        'last_error_kind' =>
+                                            'reviewed_admission_occurrence_fence_lost',
+                                        'last_error' =>
+                                            'Active subject occurrences changed before reviewed admission promotion.',
+                                    ]
+                                );
+                                $transitioned = false;
+                            }
+                            if ($transitioned) {
+                                ingredientOntologyControllerResolveCoverageGaps(
+                                    $db,
+                                    (int)($lease['subject_id'] ?? 0)
+                                );
+                            }
+                            $db->exec('COMMIT');
+                        } catch (Throwable $error) {
+                            try {
+                                $db->exec('ROLLBACK');
+                            } catch (Throwable $ignored) {
+                            }
+                            throw $error;
+                        }
+                        if (!$transitioned) {
+                            return [
+                                'job_id' => (int)$lease['id'],
+                                'status' => 'superseded',
+                                'intake_only' => true,
+                                'reason' => !$occurrenceFenceMatched
+                                    ? 'reviewed_admission_occurrence_fence_lost'
+                                    : 'reviewed_admission_transition_fence_lost',
+                                'model_called' => false,
+                            ];
+                        }
+                        return [
+                            'job_id' => (int)$lease['id'],
+                            'status' => 'promoted',
+                            'intake_only' => true,
+                            'deterministic_admission' =>
+                                $reviewedAdmission,
+                            'model_called' => false,
+                        ];
+                    }
                     $context =
                         ingredientOntologyControllerJobPromptContext(
                             $db,
@@ -15762,6 +16656,87 @@ function ingredientOntologyControllerResumeDurableJob(
                         $options['candidate_limit']
                             ?? ingredientOntologyControllerCandidateLimit()
                     );
+                    $searchText = (string)(
+                        $context['untrusted']['text']
+                            ?? $context['untrusted']['name']
+                            ?? ''
+                    );
+                    $candidateShard =
+                        ingredientOntologyControllerCandidateShard(
+                            $db,
+                            $versionId,
+                            $searchText,
+                            $shardOffset,
+                            $candidateLimit,
+                            $context['required_entity_ids']
+                        );
+                    $gapReason = null;
+                    $lowSignalUnauthorized =
+                        $shardOffset === 0
+                        && empty(
+                            $candidateShard[
+                                'meaningful_lexical_evidence'
+                            ]
+                        )
+                        && (
+                            !empty(
+                                $options[
+                                    'force_low_signal_creation_unauthorized'
+                                ]
+                            )
+                            || !ingredientOntologyControllerRiskAuthorized(
+                                $db,
+                                'R2',
+                                $options
+                            )
+                        );
+                    if (!$candidateShard['rows']) {
+                        $gapReason = !empty(
+                            $candidateShard['search_truncated']
+                        ) ? 'policy_truncated' : 'no_candidates';
+                    } elseif (
+                        $lowSignalUnauthorized
+                        && ingredientOntologyControllerLowSignalShortcutEnabled(
+                            $options
+                        )
+                    ) {
+                        $gapReason =
+                            'low_signal_creation_unauthorized';
+                    } elseif ($lowSignalUnauthorized) {
+                        $candidateShard['expand_search_allowed'] = false;
+                        $candidateShard['remaining_count'] = 0;
+                        $candidateShard['low_signal_review_only'] = true;
+                    }
+                    if ($gapReason !== null) {
+                        $gap =
+                            ingredientOntologyControllerStoreCoverageGap(
+                                $db,
+                                $lease,
+                                $context,
+                                $candidateShard,
+                                $gapReason
+                            );
+                        ingredientOntologyControllerTransitionJob(
+                            $db,
+                            $lease,
+                            'model_running',
+                            'abstained',
+                            [
+                                'last_error_kind' =>
+                                    'identity_coverage_gap',
+                                'last_error' =>
+                                    'No trusted identity candidate is available; review is required.',
+                            ]
+                        );
+                        return [
+                            'job_id' => (int)$lease['id'],
+                            'status' => 'abstained',
+                            'intake_only' => true,
+                            'reason' => $gapReason,
+                            'coverage_gap_id' => (int)$gap['id'],
+                            'model_called' => false,
+                        ];
+                    }
                     $artifact = ingredientOntologyControllerBuildPrompt(
                         $db,
                         (string)$context['prompt_type'],
@@ -15775,6 +16750,7 @@ function ingredientOntologyControllerResumeDurableJob(
                                 $context['required_entity_ids'],
                             'candidate_limit' => $candidateLimit,
                             'shard_offset' => $shardOffset,
+                            'candidate_shard' => $candidateShard,
                         ]
                     );
                     $providerKey = (string)(
@@ -15874,6 +16850,79 @@ function ingredientOntologyControllerResumeDurableJob(
                             $artifact,
                             'model_running'
                         );
+                    }
+                    if (
+                        !empty($validation['valid'])
+                        && (string)($plan['decision'] ?? '') === 'abstain'
+                    ) {
+                        $manifest = (array)$artifact['manifest'];
+                        $gapReason = !empty(
+                            $manifest['low_signal_review_only']
+                        ) ? 'model_abstained' : (!empty(
+                            $manifest['candidate_search_truncated']
+                        ) ? 'policy_truncated' : (
+                            (int)($manifest[
+                                'candidate_remaining_count'
+                            ] ?? 0) > 0
+                                ? 'model_abstained'
+                                : 'complete_exhaustion'
+                        ));
+                        $gap =
+                            ingredientOntologyControllerStoreCoverageGap(
+                                $db,
+                                $lease,
+                                $context,
+                                [
+                                    'pool_total' => (int)(
+                                        $manifest[
+                                            'candidate_pool_total'
+                                        ] ?? 0
+                                    ),
+                                    'search_total' => (int)(
+                                        $manifest[
+                                            'candidate_search_total'
+                                        ] ?? 0
+                                    ),
+                                    'searched_count' => (int)(
+                                        $manifest[
+                                            'candidate_searched_count'
+                                        ] ?? 0
+                                    ),
+                                    'limit' => (int)(
+                                        $manifest['shard_limit'] ?? 1
+                                    ),
+                                    'search_truncated' => !empty(
+                                        $manifest[
+                                            'candidate_search_truncated'
+                                        ]
+                                    ),
+                                ],
+                                $gapReason,
+                                (int)$response['id']
+                            );
+                        ingredientOntologyControllerTransitionJob(
+                            $db,
+                            $lease,
+                            'model_running',
+                            'abstained',
+                            [
+                                'response_artifact_id' =>
+                                    (int)$response['id'],
+                                'last_error_kind' =>
+                                    'identity_coverage_gap',
+                                'last_error' =>
+                                    'Closed candidate search ended without a trusted identity.',
+                            ]
+                        );
+                        return [
+                            'job_id' => (int)$lease['id'],
+                            'status' => 'abstained',
+                            'intake_only' => true,
+                            'reason' => $gapReason,
+                            'coverage_gap_id' => (int)$gap['id'],
+                            'response_artifact_id' =>
+                                (int)$response['id'],
+                        ];
                     }
                     $queue =
                         ingredientOntologyControllerQueueProvisionalIntent(
@@ -22298,6 +23347,8 @@ function ingredientOntologyControllerBuildActivationBundle(
     );
     $claimedTotal = 0;
     $acknowledgeableJobIds = [];
+    $acknowledgementIntents = [];
+    $staleNoOpSourceJobIds = [];
     for ($cycle = 0; $cycle < $maximumCycles; $cycle++) {
         $result = ingredientOntologyControllerProcessQueue(
             $db,
@@ -22358,23 +23409,41 @@ function ingredientOntologyControllerBuildActivationBundle(
         $needsGenerationJobs = false;
         foreach ($cycleResults as $cycleResult) {
             if (!empty($cycleResult['no_op'])) {
-                $planJobs = $db->prepare("
-                    SELECT plan.job_id
-                    FROM ontology_generation_plans item
-                    JOIN ontology_mutation_plans plan
-                      ON plan.id = item.mutation_plan_id
-                    WHERE item.generation_id = ?
-                ");
-                $planJobs->execute([
-                    (int)$cycleResult['generation_id'],
-                ]);
-                $acknowledgeableJobIds = array_merge(
-                    $acknowledgeableJobIds,
-                    array_map(
-                        'intval',
-                        $planJobs->fetchAll(PDO::FETCH_COLUMN)
+                $noOpIntentResult =
+                    ingredientOntologyActivationNoOpGenerationIntents(
+                        $db,
+                        (int)$cycleResult['generation_id']
+                    );
+                $staleNoOpSourceJobIds = array_values(array_unique(
+                    array_merge(
+                        $staleNoOpSourceJobIds,
+                        array_map(
+                            'intval',
+                            (array)($noOpIntentResult[
+                                'stale_source_job_ids'
+                            ] ?? [])
+                        )
                     )
-                );
+                ));
+                foreach (
+                    (array)($noOpIntentResult['intents'] ?? [])
+                    as $intent
+                ) {
+                    $intentId = (int)$intent['source_job_id'];
+                    $existing = $acknowledgementIntents[$intentId]
+                        ?? null;
+                    if (
+                        $existing === null
+                        || (
+                            (string)$intent['activation_action']
+                                === 'defer'
+                            && (string)$existing['activation_action']
+                                !== 'defer'
+                        )
+                    ) {
+                        $acknowledgementIntents[$intentId] = $intent;
+                    }
+                }
             }
             if (in_array(
                 (string)($cycleResult['status'] ?? ''),
@@ -22566,6 +23635,25 @@ function ingredientOntologyControllerBuildActivationBundle(
         $generationId = (int)($eligible->fetchColumn() ?: 0);
     }
     if ($generationId <= 0) {
+        $extraAcknowledgements =
+            ingredientOntologyActivationIntentRecords(
+                $db,
+                $acknowledgeableJobIds,
+                ['pending', 'queued', 'applied']
+            );
+        foreach ($extraAcknowledgements as $intent) {
+                $intentId = (int)$intent['source_job_id'];
+                if (
+                    isset($acknowledgementIntents[$intentId])
+                    && (string)$acknowledgementIntents[$intentId][
+                        'activation_action'
+                    ] === 'defer'
+                ) {
+                    continue;
+                }
+                $acknowledgementIntents[$intentId] = $intent;
+            }
+        ksort($acknowledgementIntents, SORT_NUMERIC);
         $acknowledgement = $activationSnapshot !== null
             && function_exists(
                 'ingredientOntologyActivationBuildAcknowledgement'
@@ -22573,7 +23661,7 @@ function ingredientOntologyControllerBuildActivationBundle(
                 ? ingredientOntologyActivationBuildAcknowledgement(
                     $db,
                     $activationSnapshot,
-                    $acknowledgeableJobIds
+                    array_values($acknowledgementIntents)
                 )
                 : null;
         if ($acknowledgement !== null) {
@@ -22581,6 +23669,24 @@ function ingredientOntologyControllerBuildActivationBundle(
                 'claimed_intents' => $claimedTotal,
                 'generation_results' => $generationResults,
                 'acknowledgement' => $acknowledgement,
+                'superseded_source_job_ids' =>
+                    $staleNoOpSourceJobIds,
+            ];
+        }
+        if ($claimedTotal === 0 && !$generationResults) {
+            return [
+                'claimed_intents' => 0,
+                'generation_results' => [],
+                'no_work' => true,
+            ];
+        }
+        if ($staleNoOpSourceJobIds && !$acknowledgementIntents) {
+            return [
+                'claimed_intents' => $claimedTotal,
+                'generation_results' => $generationResults,
+                'no_work' => true,
+                'superseded_source_job_ids' =>
+                    $staleNoOpSourceJobIds,
             ];
         }
         throw new RuntimeException(

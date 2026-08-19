@@ -511,31 +511,54 @@ class CopilotInvoker:
                     else None
                 ),
             }
-            process = self.ensure_bridge()
+            try:
+                process = self.ensure_bridge()
+            except OSError as exc:
+                self.stop_bridge()
+                raise ProviderError(
+                    "copilot_sdk_bridge_restart_failed"
+                ) from exc
             if process.stdin is None or process.stdout is None:
                 self.stop_bridge()
                 raise ProviderError("copilot_sdk_bridge_unavailable")
             try:
                 process.stdin.write(stable_json(payload) + "\n")
                 process.stdin.flush()
-            except (BrokenPipeError, OSError) as exc:
+            except BrokenPipeError as exc:
                 self.stop_bridge()
                 raise ProviderError(
-                    "copilot_sdk_bridge_unavailable"
+                    "copilot_sdk_bridge_broken_pipe"
                 ) from exc
-            ready, _, _ = select.select(
-                [process.stdout],
-                [],
-                [],
-                self.timeout_seconds + 5,
-            )
+            except OSError as exc:
+                self.stop_bridge()
+                raise ProviderError(
+                    "copilot_sdk_bridge_io_error"
+                ) from exc
+            try:
+                ready, _, _ = select.select(
+                    [process.stdout],
+                    [],
+                    [],
+                    self.timeout_seconds + 5,
+                )
+            except OSError as exc:
+                self.stop_bridge()
+                raise ProviderError(
+                    "copilot_sdk_bridge_io_error"
+                ) from exc
             if not ready:
                 self.stop_bridge()
                 raise ProviderError("copilot_timeout")
-            line = process.stdout.readline()
+            try:
+                line = process.stdout.readline()
+            except OSError as exc:
+                self.stop_bridge()
+                raise ProviderError(
+                    "copilot_sdk_bridge_io_error"
+                ) from exc
             if line == "":
                 self.stop_bridge()
-                raise ProviderError("copilot_sdk_bridge_unavailable")
+                raise ProviderError("copilot_sdk_bridge_eof")
             try:
                 response = json.loads(line)
             except json.JSONDecodeError as exc:

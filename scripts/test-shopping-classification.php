@@ -134,6 +134,13 @@ try {
     shoppingTestCleanupCache($cachePath);
     $GLOBALS['SHOPPING_CLASSIFICATION_CACHE_PATH'] = $cachePath;
     $GLOBALS['SHOPPING_CLASSIFICATION_MODEL'] = 'gemini-3.7-flash';
+    $shoppingTelemetry = [];
+    $GLOBALS['SHOPPING_CLASSIFICATION_TEST_TELEMETRY'] =
+        static function (array $event) use (
+            &$shoppingTelemetry
+        ): void {
+            $shoppingTelemetry[] = $event;
+        };
 
     $db = new PDO('sqlite:' . $dbPath);
     $db->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
@@ -143,6 +150,67 @@ try {
     migrateDB($db);
     shoppingClassificationSchemaMigrate($db);
     shoppingClassificationSchemaMigrate($db);
+
+    foreach ([
+        'shopping_classification_deadline_exceeded',
+        'controller_copilot_socket_timeout',
+        'controller_copilot_socket_unavailable',
+        'controller_copilot_server_rate_limited',
+        'controller_copilot_server_concurrency_limited',
+        'controller_copilot_server_copilot_sdk_bridge_unavailable',
+        'controller_copilot_server_copilot_sdk_bridge_broken_pipe',
+        'controller_copilot_server_copilot_sdk_bridge_io_error',
+        'controller_copilot_server_copilot_sdk_bridge_eof',
+        'controller_copilot_server_copilot_sdk_bridge_restart_failed',
+        'controller_copilot_server_copilot_sdk_bridge_malformed',
+        'controller_copilot_server_copilot_sdk_bridge_mismatched_response',
+        'controller_copilot_transport_error',
+        'shopping_classification_lock_timeout',
+    ] as $transientReason) {
+        shoppingTestAssert(
+            shoppingClassificationFailureClass($transientReason)
+                === 'transient',
+            "Transient reason must be allowlisted: {$transientReason}"
+        );
+    }
+    foreach ([
+        'failed_to_generate',
+        'blocked_by_safety',
+        'shopping_classification_invalid_response',
+        'shopping_classification_abstained',
+    ] as $deterministicReason) {
+        shoppingTestAssert(
+            shoppingClassificationFailureClass($deterministicReason)
+                === 'deterministic',
+            "Deterministic reason must not match by substring: {$deterministicReason}"
+        );
+    }
+
+    $legacyFailureKey = hash('sha256', 'legacy-failure-cache');
+    file_put_contents(
+        $cachePath,
+        json_encode([
+            'version' => 2,
+            'entries' => [
+                $legacyFailureKey => [
+                    'status' => 'failed',
+                    'reason' => 'controller_copilot_socket_timeout',
+                    'updated_at' => time(),
+                    'expires_at' => time() + 900,
+                ],
+            ],
+        ], JSON_THROW_ON_ERROR)
+    );
+    $legacyFailureCache =
+        shoppingClassificationLoadCache($cachePath);
+    shoppingTestAssert(
+        shoppingClassificationCacheEntry(
+            $legacyFailureCache,
+            [$legacyFailureKey]
+        ) === null,
+        'Pre-upgrade v2 failure cache rows must not suppress transient retries'
+    );
+    shoppingTestCleanupCache($cachePath);
 
     $productColumns = array_column(
         $db->query("PRAGMA table_info(products)")
@@ -547,21 +615,169 @@ try {
     $negativeRun = shoppingClassificationProcessQueue($db, 1);
     $negativeAfter = shoppingTestQueue($db, $negativeId);
     shoppingTestAssert(
-        $failureCalls === SHOPPING_CLASSIFICATION_QUEUE_CIRCUIT_LIMIT
-        && $negativeRun['cached'] === 1
-        && $negativeRun['model_calls'] === 0
+        $failureCalls
+            === SHOPPING_CLASSIFICATION_QUEUE_CIRCUIT_LIMIT + 1
+        && $negativeRun['cached'] === 0
+        && $negativeRun['model_calls'] === 1
         && $negativeAfter['status'] === 'retry'
         && (int)$negativeAfter['attempts']
             === (int)$negativeBefore['attempts'] + 1
         && strtotime((string)$negativeAfter['next_retry_at'])
-            >= time() + SHOPPING_CLASSIFICATION_FAILURE_TTL_SECONDS - 5,
-        'Negative cache must suppress transport and defer retry until its TTL'
+            >= time()
+                + SHOPPING_CLASSIFICATION_TRANSIENT_RETRY_MIN_SECONDS
+                - 5
+        && strtotime((string)$negativeAfter['next_retry_at'])
+            <= time()
+                + SHOPPING_CLASSIFICATION_TRANSIENT_RETRY_MAX_SECONDS
+                + 5,
+        'Transient failures must retry without a long-lived negative cache'
     );
+
+    $bridgeFailureId = shoppingTestInsertDeterministicProduct(
+        $db,
+        'SDK Bridge EOF Reserve'
+    );
+    $bridgeFailureCalls = 0;
+    $GLOBALS['SHOPPING_CLASSIFICATION_TRANSPORT'] =
+        static function () use (&$bridgeFailureCalls): array {
+            $bridgeFailureCalls++;
+            throw new RuntimeException(
+                'controller_copilot_server_copilot_sdk_bridge_eof'
+            );
+        };
+    $bridgeFailureFirst =
+        shoppingClassificationProcessQueue($db, 1);
+    $bridgeQueueFirst = shoppingTestQueue($db, $bridgeFailureId);
+    $db->prepare("
+        UPDATE shopping_classification_queue
+        SET status = 'retry',
+            next_retry_at = CURRENT_TIMESTAMP
+        WHERE product_id = ?
+    ")->execute([$bridgeFailureId]);
+    $bridgeFailureSecond =
+        shoppingClassificationProcessQueue($db, 1);
+    $bridgeQueueSecond = shoppingTestQueue($db, $bridgeFailureId);
+    shoppingTestAssert(
+        $bridgeFailureCalls === 2
+        && $bridgeFailureFirst['cached'] === 0
+        && $bridgeFailureFirst['model_calls'] === 1
+        && $bridgeFailureFirst['retried'] === 1
+        && $bridgeFailureSecond['cached'] === 0
+        && $bridgeFailureSecond['model_calls'] === 1
+        && $bridgeFailureSecond['retried'] === 1
+        && strtotime((string)$bridgeQueueFirst['next_retry_at'])
+            >= time()
+                + SHOPPING_CLASSIFICATION_TRANSIENT_RETRY_MIN_SECONDS
+                - 5
+        && strtotime((string)$bridgeQueueFirst['next_retry_at'])
+            <= time()
+                + SHOPPING_CLASSIFICATION_TRANSIENT_RETRY_MAX_SECONDS
+                + 5
+        && strtotime((string)$bridgeQueueSecond['next_retry_at'])
+            >= time()
+                + SHOPPING_CLASSIFICATION_TRANSIENT_RETRY_MIN_SECONDS
+                - 5
+        && strtotime((string)$bridgeQueueSecond['next_retry_at'])
+            <= time()
+                + SHOPPING_CLASSIFICATION_TRANSIENT_RETRY_MAX_SECONDS
+                + 5,
+        'SDK bridge EOF must remain an uncached transient retry within 60-120 seconds'
+    );
+
+    $deterministicFailureId =
+        shoppingTestInsertDeterministicProduct(
+            $db,
+            'Deterministic Abstention Reserve'
+        );
+    $deterministicFailureCalls = 0;
+    $GLOBALS['SHOPPING_CLASSIFICATION_TRANSPORT'] =
+        static function () use (&$deterministicFailureCalls): array {
+            $deterministicFailureCalls++;
+            throw new RuntimeException(
+                'shopping_classification_abstained'
+            );
+        };
+    $deterministicFirst =
+        shoppingClassificationProcessQueue($db, 1);
+    $db->prepare("
+        UPDATE shopping_classification_queue
+        SET status = 'retry',
+            next_retry_at = CURRENT_TIMESTAMP
+        WHERE product_id = ?
+    ")->execute([$deterministicFailureId]);
+    $deterministicCached =
+        shoppingClassificationProcessQueue($db, 1);
+    $deterministicQueue = shoppingTestQueue(
+        $db,
+        $deterministicFailureId
+    );
+    shoppingTestAssert(
+        $deterministicFailureCalls === 1
+        && $deterministicFirst['retried'] === 1
+        && $deterministicCached['cached'] === 1
+        && $deterministicCached['model_calls'] === 0
+        && strtotime((string)$deterministicQueue['next_retry_at'])
+            >= time()
+                + SHOPPING_CLASSIFICATION_FAILURE_TTL_SECONDS
+                - 5,
+        'Deterministic abstention must retain the bounded negative cache'
+    );
+
+    $GLOBALS['SHOPPING_CLASSIFICATION_TRANSIENT_RETRY_SECONDS'] = 90;
+    foreach ([2, 3, 4] as $attemptNumber) {
+        $retryProductId = shoppingTestInsertDeterministicProduct(
+            $db,
+            "Transient Attempt {$attemptNumber} Reserve"
+        );
+        $db->prepare("
+            UPDATE shopping_classification_queue
+            SET attempts = ?,
+                status = 'pending',
+                next_retry_at = NULL
+            WHERE product_id = ?
+        ")->execute([
+            $attemptNumber - 1,
+            $retryProductId,
+        ]);
+        $retryClaim = shoppingClassificationClaimOne($db);
+        $retryOutcome = shoppingClassificationRetryClaim(
+            $db,
+            $retryClaim,
+            'controller_copilot_socket_timeout',
+            time() + 90,
+            'transient'
+        );
+        $retryQueue = shoppingTestQueue($db, $retryProductId);
+        $retryEpoch = strtotime(
+            (string)$retryQueue['next_retry_at']
+        );
+        shoppingTestAssert(
+            (int)$retryClaim['attempts'] === $attemptNumber
+            && $retryOutcome['status'] === 'retry'
+            && $retryEpoch
+                >= time()
+                    + SHOPPING_CLASSIFICATION_TRANSIENT_RETRY_MIN_SECONDS
+                    - 5
+            && $retryEpoch
+                <= time()
+                    + SHOPPING_CLASSIFICATION_TRANSIENT_RETRY_MAX_SECONDS
+                    + 5,
+            "Transient attempt {$attemptNumber} must remain within 60-120 seconds"
+        );
+    }
+    unset($GLOBALS['SHOPPING_CLASSIFICATION_TRANSIENT_RETRY_SECONDS']);
 
     $terminalId = shoppingTestInsertDeterministicProduct(
         $db,
         'Terminal Failure Reserve'
     );
+    $GLOBALS['SHOPPING_CLASSIFICATION_TRANSPORT'] =
+        static function () use (&$failureCalls): array {
+            $failureCalls++;
+            throw new RuntimeException(
+                'controller_copilot_socket_timeout'
+            );
+        };
     $db->prepare("
         UPDATE shopping_classification_queue
         SET attempts = ?,
@@ -629,7 +845,21 @@ try {
         ($cacheDocument['version'] ?? 0)
             === SHOPPING_CLASSIFICATION_CACHE_VERSION
         && glob($cachePath . '.write.*.lock') === [],
-        'Worker cache must remain valid version-2 JSON without temp artifacts'
+        'Worker cache must remain valid current-version JSON without temp artifacts'
+    );
+    shoppingTestAssert(
+        count($shoppingTelemetry) >= 5
+        && count(array_filter(
+            $shoppingTelemetry,
+            static fn(array $event): bool =>
+                !empty($event['ok'])
+        )) >= 1
+        && count(array_filter(
+            $shoppingTelemetry,
+            static fn(array $event): bool =>
+                !empty($event['timeout'])
+        )) >= 1,
+        'Copilot socket classification must emit normal success and timeout telemetry'
     );
 
     echo "Shopping classification queue tests passed: {$assertions} assertions\n";
@@ -639,7 +869,9 @@ try {
         $GLOBALS['PRODUCT_SAVE_TEST_HOOK'],
         $GLOBALS['SHOPPING_CLASSIFICATION_CACHE_PATH'],
         $GLOBALS['SHOPPING_CLASSIFICATION_MODEL'],
-        $GLOBALS['SHOPPING_CLASSIFICATION_TRANSPORT']
+        $GLOBALS['SHOPPING_CLASSIFICATION_TRANSPORT'],
+        $GLOBALS['SHOPPING_CLASSIFICATION_TEST_TELEMETRY'],
+        $GLOBALS['SHOPPING_CLASSIFICATION_TRANSIENT_RETRY_SECONDS']
     );
     shoppingTestCleanupCache($cachePath);
     foreach ($cleanup as $path) {

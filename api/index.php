@@ -3812,6 +3812,9 @@ function saveProduct(PDO $db): void {
         );
         $db->exec('COMMIT');
         $transactionStarted = false;
+        if (!empty($queue['queued'])) {
+            canonicalIngredientWake();
+        }
         if (
                 !empty($controllerObservation['observed'])
                 && ingredientOntologyControllerEnabled()
@@ -3943,6 +3946,9 @@ function setProductPreparedFood(PDO $db): void {
     });
     if (!empty($controllerObservation['observed'])) {
         ingredientOntologyControllerWake();
+    }
+    if (!empty($queue['queued'])) {
+        canonicalIngredientWake();
     }
     echo json_encode([
         'success' => true,
@@ -6408,6 +6414,9 @@ function setInventoryPreparedFood(PDO $db): void {
     if (ingredientOntologyControllerEnabled()) {
         ingredientOntologyControllerWake();
     }
+    if (!empty($queue['queued'])) {
+        canonicalIngredientWake();
+    }
 
     echo json_encode([
         'success' => true,
@@ -6624,6 +6633,7 @@ function mergeProducts(PDO $db, int $keepId, int $dropId): void {
     if (ingredientOntologyControllerEnabled()) {
         ingredientOntologyControllerWake();
     }
+    canonicalIngredientWake();
 }
 
 function mergeProduct(PDO $db): void {
@@ -7636,7 +7646,6 @@ function getStats(PDO $db): void {
         if ($ws['type'] === 'out')   { $used30 = (int)$ws['m0']; $usedP30 = (int)$ws['m1']; $usedP60 = (int)$ws['m2']; }
         if ($ws['type'] === 'waste') { $wasted30 = (int)$ws['m0']; $wastedP30 = (int)$ws['m1']; $wastedP60 = (int)$ws['m2']; }
     }
-
     echo json_encode([
         'total_products' => (int)$totalProducts,
         'total_items' => (float)$totalItems,
@@ -8571,7 +8580,12 @@ function _recordAiRequest(array $event): void {
     $curlErrno = (int)($event['curl_errno'] ?? 0);
     $curlError = (string)($event['curl_error'] ?? '');
     $httpCode = (int)($event['http_code'] ?? 0);
-    $timeout = $curlErrno === 28 || ($httpCode === 0 && stripos($curlError, 'timed out') !== false);
+    $timeout = !empty($event['timeout'])
+        || $curlErrno === 28
+        || (
+            $httpCode === 0
+            && stripos($curlError, 'timed out') !== false
+        );
 
     $rows[] = [
         'ts' => gmdate('c'),

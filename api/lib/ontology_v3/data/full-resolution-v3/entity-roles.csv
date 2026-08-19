@@ -2,6 +2,7 @@ slug,canonical_name,entity_kind,identity_role,active,reviewer,review_batch,ratio
 bacon,Bacon,ingredient,prepared_identity,1,operator-corrective-review-v3,full-ontology-resolution-v3,Cured pork product reviewed as a prepared identity,corrective-v3.13 edge semantic audit
 breadcrumbs,Breadcrumbs,ingredient,prepared_identity,1,operator-corrective-review-v3,full-ontology-resolution-v3,Prepared bread crumbs reviewed as a prepared identity,corrective-v3.13 edge semantic audit
 chili-pepper,Chili pepper,ingredient,identity_leaf,0,operator-corrective-review-v3,full-ontology-resolution-v3,Inactive spelling duplicate of chilli-pepper,corrective-v3.13 duplicate identity audit
+eggplant,Eggplant,ingredient,identity_leaf,1,operator-corrective-review-v3,full-ontology-resolution-v3,Unqualified culinary eggplant is a reviewed vegetable identity,corrective-v3.17 common ingredient coverage review
 foie-gras,Foie gras,prepared_food,prepared_identity,1,operator-corrective-review-v3,full-ontology-resolution-v3,Foie gras is a prepared offal identity and not a duck subtype,corrective-v3.13 culinary identity audit
 grits,Grits,ingredient,prepared_identity,1,operator-corrective-review-v3,full-ontology-resolution-v3,Grits are a prepared cereal identity derived from corn,corrective-v3.13 edge semantic audit
 half-and-half,Half and half,ingredient,identity_leaf,0,operator-corrective-review-v3,full-ontology-resolution-v3,Inactive duplicate represented by cream plus cream_class,corrective-v3.13 duplicate identity audit

@@ -851,7 +851,7 @@ function ingredientOntologyV3LoadRecipeBatch(
           ON annex_version.id = ?
          AND annex_version.status = 'ready'
         LEFT JOIN ingredient_ontology_recipe_identity_annex annex
-          ON ? = 1
+          ON CAST(? AS INTEGER) = 1
          AND annex.ontology_version_id = annex_version.id
          AND annex.recipe_ingredient_id = ri.id
          AND annex.ontology_content_hash =
@@ -1720,6 +1720,17 @@ function ingredientOntologyV3BuildShadow(
         $lastId = 0;
         $written = 0;
         $candidateCache = [];
+        $annexMetrics = [
+            'batch_count' => 0,
+            'transaction_count' => 0,
+            'ingredient_count' => 0,
+            'accepted_count' => 0,
+            'changed_row_count' => 0,
+            'unchanged_row_count' => 0,
+            'write_statement_count' => 0,
+            'resolution_query_count' => 0,
+            'coverage_resolved_count' => 0,
+        ];
         while (true) {
             $ids = $db->prepare("
                 SELECT id FROM recipe_catalog
@@ -1734,25 +1745,38 @@ function ingredientOntologyV3BuildShadow(
             if (!$recipeIds) {
                 break;
             }
-            $recipes = ingredientOntologyV3LoadRecipeBatch(
-                $db,
-                $versionId,
-                $recipeIds
-            );
-            $scores = [];
-            $matches = [];
-            foreach ($recipes as $recipe) {
-                $result = ingredientOntologyV3ScoreRecipe(
-                    $context,
-                    $recipe,
-                    $inventory,
-                    $candidateCache
-                );
-                $scores[] = $result['score'];
-                array_push($matches, ...$result['matches']);
-            }
             $db->beginTransaction();
             try {
+                $annex =
+                    ingredientOntologyV3RecipeAnnexRefreshBatch(
+                        $db,
+                        $recipeIds,
+                        $versionId,
+                        false
+                    );
+                if (empty($annex['ready'])) {
+                    throw new RuntimeException(
+                        'recipe annex batch is incomplete'
+                    );
+                }
+                $recipes = ingredientOntologyV3LoadRecipeBatch(
+                    $db,
+                    $versionId,
+                    $recipeIds,
+                    true
+                );
+                $scores = [];
+                $matches = [];
+                foreach ($recipes as $recipe) {
+                    $result = ingredientOntologyV3ScoreRecipe(
+                        $context,
+                        $recipe,
+                        $inventory,
+                        $candidateCache
+                    );
+                    $scores[] = $result['score'];
+                    array_push($matches, ...$result['matches']);
+                }
                 ingredientOntologyV3WriteScoreRows(
                     $db,
                     $revisionId,
@@ -1760,6 +1784,20 @@ function ingredientOntologyV3BuildShadow(
                     $matches
                 );
                 $db->commit();
+                $annexMetrics['batch_count']++;
+                $annexMetrics['transaction_count']++;
+                foreach ([
+                    'ingredient_count',
+                    'accepted_count',
+                    'changed_row_count',
+                    'unchanged_row_count',
+                    'write_statement_count',
+                    'resolution_query_count',
+                    'coverage_resolved_count',
+                ] as $field) {
+                    $annexMetrics[$field] +=
+                        (int)($annex[$field] ?? 0);
+                }
             } catch (Throwable $e) {
                 if ($db->inTransaction()) {
                     $db->rollBack();
@@ -1966,6 +2004,7 @@ function ingredientOntologyV3BuildShadow(
                     $state['ontology_source_revision'],
                 'ontology_source_hash' => $ontologySourceHash,
                 'active_score_revision_id_before' => $parentRevisionId,
+                'recipe_identity_annex' => $annexMetrics,
                 'materialized_id_sets' => $idSetAudit,
                 'materialized_values' => $valueAudit,
             ];
@@ -2030,6 +2069,7 @@ function ingredientOntologyV3BuildShadow(
             'scoring_config_hash' => $scoringConfigHash,
             'active_score_revision_id' =>
                 recipeScoreState($db)['active_score_revision_id'],
+            'annex_sync' => $annexMetrics,
             'activated' => false,
         ];
     } catch (Throwable $e) {

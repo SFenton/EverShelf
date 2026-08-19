@@ -256,6 +256,16 @@ $match->execute([
     1,
     'exact',
 ]);
+$db->prepare("
+    INSERT INTO recipe_score_recipe_ingredients (
+        score_revision_id, recipe_id, recipe_ingredient_id
+    )
+    VALUES (?, ?, ?)
+")->execute([
+    $childRevisionId,
+    $secondRecipeId,
+    $secondIngredientId,
+]);
 ingredientOntologyV3SetPublicationGuard($db, true);
 $db->prepare("
     UPDATE recipe_score_revisions
@@ -263,6 +273,62 @@ $db->prepare("
     WHERE id = ?
 ")->execute([$childRevisionId]);
 ingredientOntologyV3SetPublicationGuard($db, false);
+
+$readySparseGuardFailures = 0;
+foreach ([
+    [
+        "INSERT INTO recipe_score_recipe_operations (
+            score_revision_id, recipe_id, operation
+        ) VALUES (
+            {$childRevisionId}, {$firstRecipeId}, 'replace'
+        )",
+    ],
+    [
+        "UPDATE recipe_score_recipe_operations
+         SET operation = 'delete'
+         WHERE score_revision_id = {$childRevisionId}
+           AND recipe_id = {$secondRecipeId}",
+    ],
+    [
+        "DELETE FROM recipe_score_recipe_operations
+         WHERE score_revision_id = {$childRevisionId}
+           AND recipe_id = {$secondRecipeId}",
+    ],
+    [
+        "INSERT INTO recipe_score_recipe_ingredients (
+            score_revision_id, recipe_id, recipe_ingredient_id
+        ) VALUES (
+            {$childRevisionId}, {$firstRecipeId},
+            {$secondIngredientId}
+        )",
+    ],
+    [
+        "UPDATE recipe_score_recipe_ingredients
+         SET recipe_id = {$firstRecipeId}
+         WHERE score_revision_id = {$childRevisionId}
+           AND recipe_id = {$secondRecipeId}",
+    ],
+    [
+        "DELETE FROM recipe_score_recipe_ingredients
+         WHERE score_revision_id = {$childRevisionId}",
+    ],
+] as [$sql]) {
+    try {
+        $db->exec($sql);
+    } catch (PDOException $error) {
+        if (str_contains(
+            $error->getMessage(),
+            'ready recipe score'
+        )) {
+            $readySparseGuardFailures++;
+        }
+    }
+}
+$assert(
+    $readySparseGuardFailures === 6,
+    'Ready sparse operation and ingredient snapshots must reject every mutation kind: '
+        . $readySparseGuardFailures
+);
 
 $db->exec('BEGIN IMMEDIATE');
 recipeScoreApplyDeltaProjection(

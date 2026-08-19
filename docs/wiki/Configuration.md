@@ -171,6 +171,7 @@ INGREDIENT_ONTOLOGY_CONTROLLER_ENABLED=false
 INGREDIENT_ONTOLOGY_CONTROLLER_MODEL_ENABLED=false
 INGREDIENT_ONTOLOGY_CONTROLLER_PROMOTION_ENABLED=false
 INGREDIENT_ONTOLOGY_CONTROLLER_POLL_MS=250
+INGREDIENT_ONTOLOGY_CONTROLLER_LOW_SIGNAL_SHORTCUT_ENABLED=false
 INGREDIENT_ONTOLOGY_CONTROLLER_LEASE_SECONDS=600
 INGREDIENT_ONTOLOGY_CONTROLLER_CRON_LIMIT=10
 INGREDIENT_ONTOLOGY_CONTROLLER_MINIMUM_PRIORITY=50
@@ -183,6 +184,11 @@ INGREDIENT_ONTOLOGY_CONTROLLER_GOOGLE_THINKING_LEVEL=medium
 INGREDIENT_ONTOLOGY_CONTROLLER_WAKE_SOCKET=
 INGREDIENT_ONTOLOGY_CONTROLLER_MODEL_ROSTER_JSON=
 ```
+
+Keep `INGREDIENT_ONTOLOGY_CONTROLLER_LOW_SIGNAL_SHORTCUT_ENABLED=false`
+to allow one bounded semantic review call for zero-overlap, cross-language
+subjects. Set it to `true` only to opt into immediate coverage-gap recording
+without a model call when autonomous creation is unavailable.
 
 `TAXONOMY_AI_REVIEW` is retained only as a legacy v2 compatibility signal and is
 observation-only; it can no longer call a
@@ -202,13 +208,34 @@ The gate participates in each v3 revision's deterministic
 `scoring_config_hash`; toggling it makes existing v3 scores stale and prevents
 reuse, activation, or rollback of scores built under the other setting.
 
+Canonical enrichment is asynchronous and wake-driven in Docker:
+
+```dotenv
+CANONICAL_QUEUE_WORKER_LIMIT=5
+CANONICAL_QUEUE_WORKER_MAX_BATCHES=100
+CANONICAL_QUEUE_MAX_ATTEMPTS=3
+CANONICAL_QUEUE_LEASE_SECONDS=600
+CANONICAL_QUEUE_WAKE_SOCKET=/var/www/html/data/canonical-queue.sock
+CANONICAL_QUEUE_SAFETY_POLL_SECONDS=30
+```
+
+Product commits send a nonblocking local datagram after commit. The resident
+worker retains the existing request-generation, fingerprint and lease CAS, and
+the five-minute smart-shopping cron remains a dropped-wake/restart fallback.
+Non-Docker installations should run exactly one
+`scripts/canonical-queue-worker.php --db=/path/to/evershelf.db
+--allow-active-db --loop` process.
+
 The autonomous controller records immutable ingestion subjects only when its
 live-ingestion gate is enabled; explicit correction constraints remain
 transactional. It performs no model call or automatic promotion unless the
 controller model/promotion gates are enabled. Its Google key is separate from both
 `GEMINI_API_KEY` and the legacy proposal key. Candidate limits support benchmark
 rungs `64|96|128|277|500`; 64 is the default. Provider/model selection is
-versioned data and has no silent fallback.
+versioned data and has no silent fallback. Prompts include the bounded pool
+total, offset, remaining count and truthful expansion permission. Complete
+exhaustion and policy truncation create non-satisfying coverage-gap evidence;
+they never create accepted identity.
 
 `ONTOLOGY_AUTONOMOUS_ENABLED=false` is the default live-ingestion gate.
 Disabled product/recipe hooks perform no controller write. Enabled hooks run in
