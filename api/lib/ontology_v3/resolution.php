@@ -3902,6 +3902,7 @@ function ingredientOntologyV3ProviderFacetAudit(
              = policy.required_evidence_key
         WHERE m.ontology_version_id = ?
           AND m.owner_type = 'recipe_source_ingredient'
+          AND m.status = 'accepted'
           AND CAST(json_extract(m.evidence_json, '$.label_id') AS INTEGER) = ?
           AND COALESCE(
               CAST(

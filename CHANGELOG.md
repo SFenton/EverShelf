@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.13.12] - 2026-08-19
+
+### Fixed
+- Provider facet audits validate accepted contextual mappings only. Missing-
+  context mappings remain explicitly unresolved and are covered by separate
+  frozen gold and owner-outcome gates.
+
 ## [1.13.11] - 2026-08-19
 
 ### Fixed
