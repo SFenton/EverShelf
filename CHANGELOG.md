@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.14.2] - 2026-08-20
+
+### Fixed
+- Canonical/product corpus drift is now compared directly with the active
+  ontology version. A changed corpus selects the copied ontology refresh path
+  instead of attempting an obsolete score-only refresh that must fail its
+  sealed-corpus validation.
+
 ## [1.14.1] - 2026-08-20
 
 ### Fixed

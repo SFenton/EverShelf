@@ -22,12 +22,30 @@ function ingredientOntologyActivationConfigureDatabase(
     $db->exec('PRAGMA busy_timeout = ' . $busyTimeoutMs);
 }
 
+function ingredientOntologyActivationCorpusDrifted(
+    PDO $db,
+    ?array $active = null
+): bool {
+    $active ??= ingredientOntologyV3ActiveVersion($db);
+    if ($active === null) {
+        return false;
+    }
+    $sealed = trim((string)($active['corpus_hash'] ?? ''));
+    $current = ingredientOntologyV3CorpusHash($db);
+    return strlen($sealed) !== 64
+        || strlen($current) !== 64
+        || !hash_equals($sealed, $current);
+}
+
 function ingredientOntologyActivationNeedsReviewedManifestRefresh(
     PDO $db
 ): bool {
     $active = ingredientOntologyV3ActiveVersion($db);
     if ($active === null) {
         return false;
+    }
+    if (ingredientOntologyActivationCorpusDrifted($db, $active)) {
+        return true;
     }
     $manifest = ingredientOntologyV3ResolutionManifest();
     $stmt = $db->prepare("
@@ -7016,6 +7034,9 @@ function ingredientOntologyActivationAssertActiveDatabase(PDO $db): void {
         $active = recipeScoreActiveRevision($db);
         if ($active === null || $active['ontology_version_id'] === null) {
             return false;
+        }
+        if (ingredientOntologyActivationCorpusDrifted($db)) {
+            return true;
         }
         $state = recipeScoreState($db);
         if (
