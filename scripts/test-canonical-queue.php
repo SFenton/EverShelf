@@ -2120,9 +2120,12 @@ try {
         }
         return [$productMs, $inventoryMs];
     };
+    for ($index = 0; $index < 4; $index++) {
+        $apiRound($benchmarkDb, $index, 'warmup');
+    }
     $baselineProduct = [];
     $baselineInventory = [];
-    for ($index = 0; $index < 8; $index++) {
+    for ($index = 0; $index < 20; $index++) {
         [$productMs, $inventoryMs] =
             $apiRound($benchmarkDb, $index, 'baseline');
         $baselineProduct[] = $productMs;
@@ -2144,7 +2147,7 @@ try {
     }
     $contendedProduct = [];
     $contendedInventory = [];
-    for ($index = 0; $index < 8; $index++) {
+    for ($index = 0; $index < 20; $index++) {
         [$productMs, $inventoryMs] =
             $apiRound($benchmarkDb, $index, 'contended');
         $contendedProduct[] = $productMs;
