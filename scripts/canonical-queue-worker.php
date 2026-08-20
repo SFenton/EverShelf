@@ -144,6 +144,7 @@ if ($databasePath === '') {
     migrateDB($db);
 }
 $cycle = 0;
+$lockUnavailableStreak = 0;
 try {
     do {
         $cycle++;
@@ -188,13 +189,28 @@ try {
             break;
         }
         if (
+            (string)($result['skipped'] ?? '')
+            === 'lock_unavailable'
+        ) {
+            $lockUnavailableStreak++;
+        } else {
+            $lockUnavailableStreak = 0;
+        }
+        if (
             (int)($result['processed'] ?? 0) > 0
-            && (int)($result['pending'] ?? 0) > 0
+            && (int)($result['due'] ?? 0) > 0
         ) {
             continue;
         }
+        $sleepSeconds = canonicalIngredientWorkerSleepDelay(
+            $db,
+            $pollSeconds,
+            $maxAttempts,
+            $result,
+            $lockUnavailableStreak
+        );
         if (!is_resource($wakeSocket)) {
-            sleep($pollSeconds);
+            sleep($sleepSeconds);
             continue;
         }
         $read = [$wakeSocket];
@@ -204,7 +220,7 @@ try {
             $read,
             $write,
             $except,
-            $pollSeconds
+            $sleepSeconds
         );
         if ($ready === false || $ready === 0) {
             continue;

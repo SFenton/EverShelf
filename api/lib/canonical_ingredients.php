@@ -604,6 +604,115 @@ function canonicalIngredientEnvBool(string $key, bool $default): bool {
     return in_array(strtolower(trim((string)$raw)), ['1', 'true', 'yes', 'on'], true);
 }
 
+final class CanonicalIngredientProviderBudgetExceeded
+    extends RuntimeException
+{
+}
+
+function canonicalIngredientApplyReserveSeconds(
+    int $crashLeaseSeconds
+): int {
+    $configured = function_exists('env')
+        ? (int)env('CANONICAL_QUEUE_APPLY_RESERVE_SECONDS', '30')
+        : 30;
+    $maximum = max(5, $crashLeaseSeconds - 10);
+    return max(5, min($maximum, min(300, $configured)));
+}
+
+function canonicalIngredientProviderDeadlineFromLease(
+    string $leaseExpiresAt,
+    int $crashLeaseSeconds
+): array {
+    $leaseEpoch = strtotime(trim($leaseExpiresAt) . ' UTC');
+    if ($leaseEpoch === false) {
+        throw new RuntimeException(
+            'canonical provider lease deadline is invalid'
+        );
+    }
+    $remaining = max(
+        0.0,
+        $leaseEpoch
+            - time()
+            - canonicalIngredientApplyReserveSeconds(
+                $crashLeaseSeconds
+            )
+    );
+    if (
+        defined('RECIPE_BACKEND_TEST_MODE')
+        && RECIPE_BACKEND_TEST_MODE
+        && isset(
+            $GLOBALS[
+                'CANONICAL_QUEUE_TEST_PROVIDER_DEADLINE_SECONDS'
+            ]
+        )
+    ) {
+        $remaining = max(
+            0.0,
+            (float)$GLOBALS[
+                'CANONICAL_QUEUE_TEST_PROVIDER_DEADLINE_SECONDS'
+            ]
+        );
+    }
+    return [
+        'epoch' => microtime(true) + $remaining,
+        'monotonic' => hrtime(true) / 1000000000 + $remaining,
+    ];
+}
+
+function canonicalIngredientProviderRemainingSeconds(
+    ?array $deadline
+): ?float {
+    if ($deadline === null) {
+        return null;
+    }
+    $remaining = [];
+    if (isset($deadline['monotonic'])) {
+        $remaining[] = (float)$deadline['monotonic']
+            - (hrtime(true) / 1000000000);
+    }
+    if (isset($deadline['epoch'])) {
+        $remaining[] = (float)$deadline['epoch'] - microtime(true);
+    }
+    return $remaining
+        ? min($remaining)
+        : null;
+}
+
+function canonicalIngredientProviderRequireBudget(
+    ?array $deadline,
+    string $stage
+): ?float {
+    $remaining = canonicalIngredientProviderRemainingSeconds(
+        $deadline
+    );
+    if ($remaining !== null && $remaining <= 0) {
+        throw new CanonicalIngredientProviderBudgetExceeded(
+            'canonical provider budget exhausted at ' . $stage
+        );
+    }
+    return $remaining;
+}
+
+function canonicalIngredientProviderTimeoutMilliseconds(
+    ?array $deadline,
+    int $configuredSeconds,
+    string $stage
+): int {
+    $remaining =
+        canonicalIngredientProviderRequireBudget($deadline, $stage);
+    $configuredMs = max(1, $configuredSeconds) * 1000;
+    if ($remaining === null) {
+        return $configuredMs;
+    }
+    return max(
+        1,
+        min(
+            $configuredMs,
+            (int)floor($remaining * 1000)
+        )
+    );
+}
+
 function canonicalIngredientFoodOnEnabled(): bool {
     return canonicalIngredientEnvBool('FOODON_ENABLED', true);
 }
@@ -612,36 +721,443 @@ function canonicalIngredientFoodOnLookupOnSave(): bool {
     return canonicalIngredientEnvBool('FOODON_LOOKUP_ON_SAVE', true);
 }
 
-function canonicalIngredientFoodOnCacheLoad(): array {
-    static $cache = null;
-    if (is_array($cache)) {
-        return $cache;
+function canonicalIngredientJsonCacheRead(string $path): array {
+    if (!is_file($path)) {
+        return [];
     }
-    $cache = [];
-    $path = defined('FOODON_CACHE_PATH') ? FOODON_CACHE_PATH : (__DIR__ . '/../../data/foodon_lookup_cache.json');
-    if (is_file($path)) {
-        $raw = @file_get_contents($path);
-        $decoded = $raw ? json_decode($raw, true) : null;
-        if (is_array($decoded)) {
-            $cache = $decoded;
+    $raw = @file_get_contents($path);
+    $decoded = is_string($raw) && $raw !== ''
+        ? json_decode($raw, true)
+        : null;
+    return is_array($decoded) ? $decoded : [];
+}
+
+function canonicalIngredientJsonCacheSignature(
+    string $path
+): ?string {
+    clearstatcache(true, $path);
+    $stat = @stat($path);
+    if (!is_array($stat)) {
+        return null;
+    }
+    return canonicalIngredientJsonCacheSignatureFromStat($stat);
+}
+
+function canonicalIngredientJsonCacheSignatureFromStat(
+    array $stat
+): string {
+    return implode(':', [
+        (string)($stat['dev'] ?? ''),
+        (string)($stat['ino'] ?? ''),
+        (string)($stat['size'] ?? ''),
+        (string)($stat['mtime'] ?? ''),
+        (string)($stat['ctime'] ?? ''),
+    ]);
+}
+
+function canonicalIngredientJsonCacheReadSnapshot(
+    string $path,
+    int $attempt
+): array {
+    $handle = @fopen($path, 'rb');
+    if ($handle === false) {
+        $pathSignature =
+            canonicalIngredientJsonCacheSignature($path);
+        return [
+            'value' => [],
+            'signature' => $pathSignature,
+            'stable' => $pathSignature === null,
+        ];
+    }
+    try {
+        $before = @fstat($handle);
+        $raw = stream_get_contents($handle);
+        if (
+            defined('RECIPE_BACKEND_TEST_MODE')
+            && RECIPE_BACKEND_TEST_MODE
+            && is_callable(
+                $GLOBALS[
+                    'CANONICAL_QUEUE_TEST_CACHE_AFTER_READ'
+                ] ?? null
+            )
+        ) {
+            ($GLOBALS[
+                'CANONICAL_QUEUE_TEST_CACHE_AFTER_READ'
+            ])($path, $attempt);
+        }
+        $after = @fstat($handle);
+    } finally {
+        fclose($handle);
+    }
+    $beforeSignature = is_array($before)
+        ? canonicalIngredientJsonCacheSignatureFromStat($before)
+        : null;
+    $afterSignature = is_array($after)
+        ? canonicalIngredientJsonCacheSignatureFromStat($after)
+        : null;
+    $pathSignature =
+        canonicalIngredientJsonCacheSignature($path);
+    $decoded = is_string($raw) && $raw !== ''
+        ? json_decode($raw, true)
+        : null;
+    return [
+        'value' => is_array($decoded) ? $decoded : [],
+        'signature' => $afterSignature,
+        'stable' => $beforeSignature !== null
+            && $beforeSignature === $afterSignature
+            && $afterSignature === $pathSignature,
+    ];
+}
+
+function canonicalIngredientJsonCacheState(
+    string $path,
+    ?array $replacement = null,
+    string|false|null $replacementSignature = null
+): array {
+    static $states = [];
+    if ($replacement !== null) {
+        $signatureProvided = func_num_args() >= 3;
+        $states[$path] = [
+            'value' => $replacement,
+            'signature' => $signatureProvided
+                ? $replacementSignature
+                : canonicalIngredientJsonCacheSignature($path),
+        ];
+        return $replacement;
+    }
+    $signature = canonicalIngredientJsonCacheSignature($path);
+    if (
+        isset($states[$path])
+        && ($states[$path]['signature'] ?? null) === $signature
+    ) {
+        if (
+            defined('RECIPE_BACKEND_TEST_MODE')
+            && RECIPE_BACKEND_TEST_MODE
+        ) {
+            $GLOBALS['CANONICAL_QUEUE_TEST_CACHE_HITS'][$path] =
+                (int)($GLOBALS[
+                    'CANONICAL_QUEUE_TEST_CACHE_HITS'
+                ][$path] ?? 0) + 1;
+        }
+        return (array)$states[$path]['value'];
+    }
+    $value = [];
+    $stableSignature = false;
+    for ($attempt = 0; $attempt < 2; $attempt++) {
+        if (
+            defined('RECIPE_BACKEND_TEST_MODE')
+            && RECIPE_BACKEND_TEST_MODE
+        ) {
+            $GLOBALS['CANONICAL_QUEUE_TEST_CACHE_READS'][$path] =
+                (int)($GLOBALS[
+                    'CANONICAL_QUEUE_TEST_CACHE_READS'
+                ][$path] ?? 0) + 1;
+        }
+        $snapshot = canonicalIngredientJsonCacheReadSnapshot(
+            $path,
+            $attempt
+        );
+        $value = (array)$snapshot['value'];
+        if (!empty($snapshot['stable'])) {
+            $stableSignature = $snapshot['signature'];
+            break;
         }
     }
-    return $cache;
+    $states[$path] = [
+        'value' => $value,
+        'signature' => $stableSignature,
+    ];
+    return $value;
+}
+
+function canonicalIngredientJsonCacheMergedEntry(
+    mixed $existing,
+    array $entry
+): array {
+    if (
+        is_array($existing)
+        && !empty($existing['found'])
+        && (string)($entry['reason'] ?? '')
+            === 'hierarchy_failed'
+        && isset($existing['ts'])
+        && (time() - (int)$existing['ts'])
+            < canonicalIngredientFoodOnCacheTtlSeconds(
+                $existing
+            )
+    ) {
+        return $existing;
+    }
+    return $entry;
+}
+
+function canonicalIngredientJsonCachePublishResidentFallback(
+    string $path,
+    string $key,
+    array $entry
+): void {
+    $resident = [];
+    for ($attempt = 0; $attempt < 2; $attempt++) {
+        $before =
+            canonicalIngredientJsonCacheSignature($path);
+        $resident = canonicalIngredientJsonCacheState($path);
+        $resident[$key] =
+            canonicalIngredientJsonCacheMergedEntry(
+                $resident[$key] ?? null,
+                $entry
+            );
+        if (
+            defined('RECIPE_BACKEND_TEST_MODE')
+            && RECIPE_BACKEND_TEST_MODE
+            && is_callable(
+                $GLOBALS[
+                    'CANONICAL_QUEUE_TEST_CACHE_FALLBACK_AFTER_LOAD'
+                ] ?? null
+            )
+        ) {
+            ($GLOBALS[
+                'CANONICAL_QUEUE_TEST_CACHE_FALLBACK_AFTER_LOAD'
+            ])($path, $key, $attempt);
+        }
+        $after =
+            canonicalIngredientJsonCacheSignature($path);
+        if (
+            defined('RECIPE_BACKEND_TEST_MODE')
+            && RECIPE_BACKEND_TEST_MODE
+            && is_callable(
+                $GLOBALS[
+                    'CANONICAL_QUEUE_TEST_CACHE_FALLBACK_BEFORE_PUBLISH'
+                ] ?? null
+            )
+        ) {
+            ($GLOBALS[
+                'CANONICAL_QUEUE_TEST_CACHE_FALLBACK_BEFORE_PUBLISH'
+            ])($path, $key, $attempt);
+        }
+        if ($before === $after) {
+            canonicalIngredientJsonCacheState(
+                $path,
+                $resident,
+                $after
+            );
+            return;
+        }
+    }
+    canonicalIngredientJsonCacheState(
+        $path,
+        $resident,
+        false
+    );
+}
+
+function canonicalIngredientJsonCacheStore(
+    string $path,
+    string $key,
+    array $entry,
+    bool $blockingLock = true
+): array {
+    if (
+        defined('RECIPE_BACKEND_TEST_MODE')
+        && RECIPE_BACKEND_TEST_MODE
+        && is_callable(
+            $GLOBALS['CANONICAL_QUEUE_TEST_CACHE_STORE'] ?? null
+        )
+    ) {
+        ($GLOBALS['CANONICAL_QUEUE_TEST_CACHE_STORE'])(
+            $path,
+            $key,
+            $entry
+        );
+    }
+    $dir = dirname($path);
+    if (
+        !is_dir($dir)
+        && !mkdir($dir, 0775, true)
+        && !is_dir($dir)
+    ) {
+        throw new RuntimeException(
+            'canonical cache directory is unavailable'
+        );
+    }
+    $lock = @fopen($path . '.lock', 'c+');
+    if ($lock === false) {
+        throw new RuntimeException(
+            'canonical cache lock is unavailable'
+        );
+    }
+    $tmp = '';
+    try {
+        $lockMode = LOCK_EX
+            | ($blockingLock ? 0 : LOCK_NB);
+        if (!flock($lock, $lockMode)) {
+            throw new RuntimeException(
+                'canonical cache lock could not be acquired'
+            );
+        }
+        $cache = canonicalIngredientJsonCacheRead($path);
+        $entry = canonicalIngredientJsonCacheMergedEntry(
+            $cache[$key] ?? null,
+            $entry
+        );
+        $cache[$key] = $entry;
+        $encoded = json_encode(
+            $cache,
+            JSON_PRETTY_PRINT
+                | JSON_UNESCAPED_UNICODE
+                | JSON_UNESCAPED_SLASHES
+                | JSON_THROW_ON_ERROR
+        );
+        $tmp = $path . '.tmp.' . getmypid() . '.'
+            . bin2hex(random_bytes(6));
+        $handle = @fopen($tmp, 'xb');
+        if ($handle === false) {
+            throw new RuntimeException(
+                'canonical cache temporary file is unavailable'
+            );
+        }
+        try {
+            $offset = 0;
+            $length = strlen($encoded);
+            while ($offset < $length) {
+                $written = fwrite($handle, substr($encoded, $offset));
+                if ($written === false || $written === 0) {
+                    throw new RuntimeException(
+                        'canonical cache write failed'
+                    );
+                }
+                $offset += $written;
+            }
+            if (!fflush($handle)) {
+                throw new RuntimeException(
+                    'canonical cache flush failed'
+                );
+            }
+            if (function_exists('fsync') && !fsync($handle)) {
+                throw new RuntimeException(
+                    'canonical cache sync failed'
+                );
+            }
+        } finally {
+            fclose($handle);
+        }
+        if (!@rename($tmp, $path)) {
+            throw new RuntimeException(
+                'canonical cache publish failed'
+            );
+        }
+        $tmp = '';
+        canonicalIngredientJsonCacheState(
+            $path,
+            $cache,
+            canonicalIngredientJsonCacheSignature($path)
+        );
+        return $cache;
+    } finally {
+        if ($tmp !== '' && is_file($tmp)) {
+            @unlink($tmp);
+        }
+        @flock($lock, LOCK_UN);
+        fclose($lock);
+    }
+}
+
+function canonicalIngredientJsonCachePublishBestEffort(
+    string $provider,
+    string $path,
+    string $key,
+    array $entry
+): bool {
+    try {
+        canonicalIngredientJsonCacheStore(
+            $path,
+            $key,
+            $entry,
+            false
+        );
+        return true;
+    } catch (Throwable $error) {
+        canonicalIngredientJsonCachePublishResidentFallback(
+            $path,
+            $key,
+            $entry
+        );
+        if (class_exists('EverLog', false)) {
+            EverLog::warn(
+                'canonical provider cache publication failed',
+                [
+                    'provider' => $provider,
+                    'cache_key_hash' => hash('sha256', $key),
+                    'error' => mb_substr(
+                        $error->getMessage(),
+                        0,
+                        200,
+                        'UTF-8'
+                    ),
+                ],
+                'canonical_queue'
+            );
+        }
+        return false;
+    }
+}
+
+function canonicalIngredientFoodOnCachePath(): string {
+    if (
+        defined('RECIPE_BACKEND_TEST_MODE')
+        && RECIPE_BACKEND_TEST_MODE
+        && is_string(
+            $GLOBALS['CANONICAL_FOODON_TEST_CACHE_PATH'] ?? null
+        )
+    ) {
+        return (string)$GLOBALS[
+            'CANONICAL_FOODON_TEST_CACHE_PATH'
+        ];
+    }
+    return defined('FOODON_CACHE_PATH')
+        ? FOODON_CACHE_PATH
+        : (__DIR__ . '/../../data/foodon_lookup_cache.json');
+}
+
+function canonicalIngredientUsdaCachePath(): string {
+    if (
+        defined('RECIPE_BACKEND_TEST_MODE')
+        && RECIPE_BACKEND_TEST_MODE
+        && is_string(
+            $GLOBALS['CANONICAL_USDA_TEST_CACHE_PATH'] ?? null
+        )
+    ) {
+        return (string)$GLOBALS[
+            'CANONICAL_USDA_TEST_CACHE_PATH'
+        ];
+    }
+    return defined('USDA_FDC_CACHE_PATH')
+        ? USDA_FDC_CACHE_PATH
+        : (__DIR__ . '/../../data/usda_fdc_lookup_cache.json');
+}
+
+function canonicalIngredientFoodOnCacheLoad(): array {
+    return canonicalIngredientJsonCacheState(
+        canonicalIngredientFoodOnCachePath()
+    );
 }
 
 function canonicalIngredientFoodOnCacheStore(string $key, array $entry): void {
-    $cache = canonicalIngredientFoodOnCacheLoad();
-    $cache[$key] = $entry;
-    $path = defined('FOODON_CACHE_PATH') ? FOODON_CACHE_PATH : (__DIR__ . '/../../data/foodon_lookup_cache.json');
-    $dir = dirname($path);
-    if (!is_dir($dir)) {
-        @mkdir($dir, 0775, true);
-    }
-    $tmp = $path . '.tmp';
-    @file_put_contents($tmp, json_encode($cache, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE), LOCK_EX);
-    if (is_file($tmp)) {
-        @rename($tmp, $path);
-    }
+    canonicalIngredientJsonCacheStore(
+        canonicalIngredientFoodOnCachePath(),
+        $key,
+        $entry
+    );
+}
+
+function canonicalIngredientFoodOnCachePublish(
+    string $key,
+    array $entry
+): bool {
+    return canonicalIngredientJsonCachePublishBestEffort(
+        'foodon',
+        canonicalIngredientFoodOnCachePath(),
+        $key,
+        $entry
+    );
 }
 
 function canonicalIngredientFoodOnPreferredQuery(string $slug, string $name): string {
@@ -889,18 +1405,41 @@ function canonicalIngredientFoodOnSelectBest(
     return $bestScore >= 35 ? $best : null;
 }
 
-function canonicalIngredientFoodOnThrottle(): void {
+function canonicalIngredientFoodOnThrottle(
+    ?array $providerDeadline = null
+): void {
     static $lastRequestAt = 0.0;
     $intervalMs = max(0, (int)(function_exists('env') ? env('FOODON_MIN_REQUEST_INTERVAL_MS', '250') : '250'));
     if ($intervalMs <= 0) {
+        canonicalIngredientProviderRequireBudget(
+            $providerDeadline,
+            'foodon_after_throttle'
+        );
         return;
     }
     $now = microtime(true);
     $elapsedMs = ($now - $lastRequestAt) * 1000;
     if ($lastRequestAt > 0 && $elapsedMs < $intervalMs) {
-        usleep((int)(($intervalMs - $elapsedMs) * 1000));
+        $sleepUs = (int)(($intervalMs - $elapsedMs) * 1000);
+        $remaining = canonicalIngredientProviderRequireBudget(
+            $providerDeadline,
+            'foodon_before_throttle'
+        );
+        if (
+            $remaining !== null
+            && $sleepUs >= (int)floor($remaining * 1000000)
+        ) {
+            throw new CanonicalIngredientProviderBudgetExceeded(
+                'canonical provider budget exhausted at foodon_throttle'
+            );
+        }
+        usleep($sleepUs);
     }
     $lastRequestAt = microtime(true);
+    canonicalIngredientProviderRequireBudget(
+        $providerDeadline,
+        'foodon_after_throttle'
+    );
 }
 
 function canonicalIngredientFoodOnDecodeParentTerms(
@@ -974,7 +1513,10 @@ function canonicalIngredientFoodOnAppendHierarchyParents(
     return true;
 }
 
-function canonicalIngredientFoodOnParentTerms(string $iri): ?array {
+function canonicalIngredientFoodOnParentTerms(
+    string $iri,
+    ?array $providerDeadline = null
+): ?array {
     $iri = trim($iri);
     if (
         $iri === ''
@@ -985,10 +1527,19 @@ function canonicalIngredientFoodOnParentTerms(string $iri): ?array {
     ) {
         return [];
     }
-    canonicalIngredientFoodOnThrottle();
+    canonicalIngredientProviderRequireBudget(
+        $providerDeadline,
+        'foodon_parent_before_throttle'
+    );
+    canonicalIngredientFoodOnThrottle($providerDeadline);
     $timeout = max(2, (int)(function_exists('env')
         ? env('FOODON_TIMEOUT_SEC', '6')
         : '6'));
+    $timeoutMs = canonicalIngredientProviderTimeoutMilliseconds(
+        $providerDeadline,
+        $timeout,
+        'foodon_parent_before_request'
+    );
     $userAgent = function_exists('env')
         ? env(
             'FOODON_USER_AGENT',
@@ -998,11 +1549,29 @@ function canonicalIngredientFoodOnParentTerms(string $iri): ?array {
     $encoded = rawurlencode(rawurlencode($iri));
     $url = 'https://www.ebi.ac.uk/ols4/api/ontologies/foodon/terms/'
         . $encoded . '/parents?page=0&size=1000';
+    if (
+        defined('RECIPE_BACKEND_TEST_MODE')
+        && RECIPE_BACKEND_TEST_MODE
+        && is_callable(
+            $GLOBALS[
+                'CANONICAL_FOODON_TEST_PARENT_TERMS'
+            ] ?? null
+        )
+    ) {
+        $parents = ($GLOBALS[
+            'CANONICAL_FOODON_TEST_PARENT_TERMS'
+        ])($iri);
+        canonicalIngredientProviderRequireBudget(
+            $providerDeadline,
+            'foodon_parent_after_request'
+        );
+        return is_array($parents) ? $parents : null;
+    }
     $ch = curl_init($url);
     curl_setopt_array($ch, [
         CURLOPT_RETURNTRANSFER => true,
-        CURLOPT_TIMEOUT => $timeout,
-        CURLOPT_CONNECTTIMEOUT => min(3, $timeout),
+        CURLOPT_TIMEOUT_MS => $timeoutMs,
+        CURLOPT_CONNECTTIMEOUT_MS => min(3000, $timeoutMs),
         CURLOPT_FOLLOWLOCATION => false,
         CURLOPT_HTTPHEADER => [
             'Accept: application/json',
@@ -1014,6 +1583,10 @@ function canonicalIngredientFoodOnParentTerms(string $iri): ?array {
     $body = curl_exec($ch);
     $code = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
     curl_close($ch);
+    canonicalIngredientProviderRequireBudget(
+        $providerDeadline,
+        'foodon_parent_after_request'
+    );
     if ($body === false || $code < 200 || $code >= 300) {
         return null;
     }
@@ -1022,7 +1595,8 @@ function canonicalIngredientFoodOnParentTerms(string $iri): ?array {
 
 function canonicalIngredientFoodOnHierarchy(
     string $iri,
-    int $maximumDepth = 2
+    int $maximumDepth = 2,
+    ?array $providerDeadline = null
 ): ?array {
     $maximumDepth = max(1, min(4, $maximumDepth));
     $frontier = [$iri];
@@ -1031,7 +1605,14 @@ function canonicalIngredientFoodOnHierarchy(
     for ($depth = 1; $depth <= $maximumDepth; $depth++) {
         $next = [];
         foreach ($frontier as $currentIri) {
-            $parents = canonicalIngredientFoodOnParentTerms($currentIri);
+            canonicalIngredientProviderRequireBudget(
+                $providerDeadline,
+                'foodon_hierarchy_between_terms'
+            );
+            $parents = canonicalIngredientFoodOnParentTerms(
+                $currentIri,
+                $providerDeadline
+            );
             if ($parents === null) {
                 return null;
             }
@@ -1053,7 +1634,38 @@ function canonicalIngredientFoodOnHierarchy(
     return $hierarchy;
 }
 
-function canonicalIngredientFoodOnLookup(string $name, string $slug = '', string $category = ''): ?array {
+function canonicalIngredientFoodOnCacheTtlSeconds(
+    array $entry
+): int {
+    if (
+        (string)($entry['reason'] ?? '')
+        === 'hierarchy_failed'
+    ) {
+        $seconds = function_exists('env')
+            ? (int)env(
+                'FOODON_HIERARCHY_FAILURE_CACHE_TTL_SECONDS',
+                '900'
+            )
+            : 900;
+        return max(30, min(86400, $seconds));
+    }
+    $days = max(
+        1,
+        (int)(
+            function_exists('env')
+                ? env('FOODON_CACHE_TTL_DAYS', '30')
+                : '30'
+        )
+    );
+    return $days * 86400;
+}
+
+function canonicalIngredientFoodOnLookup(
+    string $name,
+    string $slug = '',
+    string $category = '',
+    ?array $providerDeadline = null
+): ?array {
     if (!canonicalIngredientFoodOnEnabled() || trim($name) === '') {
         return null;
     }
@@ -1064,16 +1676,59 @@ function canonicalIngredientFoodOnLookup(string $name, string $slug = '', string
     }
     $query = canonicalIngredientFoodOnPreferredQuery($slug, $name);
     $cacheKey = FOODON_LOOKUP_CACHE_VERSION . ':' . canonicalIngredientSlug($query);
-    $ttlDays = max(1, (int)(function_exists('env') ? env('FOODON_CACHE_TTL_DAYS', '30') : '30'));
-    $ttlSeconds = $ttlDays * 86400;
     $cache = canonicalIngredientFoodOnCacheLoad();
     $cached = $cache[$cacheKey] ?? null;
-    if (is_array($cached) && isset($cached['ts']) && (time() - (int)$cached['ts']) < $ttlSeconds) {
+    if (
+        is_array($cached)
+        && isset($cached['ts'])
+        && (time() - (int)$cached['ts'])
+            < canonicalIngredientFoodOnCacheTtlSeconds($cached)
+    ) {
         return !empty($cached['found']) && is_array($cached['foodon'] ?? null) ? $cached['foodon'] : null;
     }
+    if (
+        defined('RECIPE_BACKEND_TEST_MODE')
+        && RECIPE_BACKEND_TEST_MODE
+        && is_callable(
+            $GLOBALS['CANONICAL_FOODON_TEST_LOOKUP'] ?? null
+        )
+    ) {
+        canonicalIngredientProviderRequireBudget(
+            $providerDeadline,
+            'foodon_test_before_request'
+        );
+        $foodOn = ($GLOBALS['CANONICAL_FOODON_TEST_LOOKUP'])(
+            $name,
+            $slug,
+            $category
+        );
+        canonicalIngredientProviderRequireBudget(
+            $providerDeadline,
+            'foodon_test_after_request'
+        );
+        canonicalIngredientFoodOnCachePublish($cacheKey, [
+            'ts' => time(),
+            'found' => is_array($foodOn),
+            'query' => $query,
+            'foodon' => is_array($foodOn) ? $foodOn : null,
+            'reason' => is_array($foodOn)
+                ? ''
+                : 'test_negative',
+        ]);
+        return is_array($foodOn) ? $foodOn : null;
+    }
 
-    canonicalIngredientFoodOnThrottle();
+    canonicalIngredientProviderRequireBudget(
+        $providerDeadline,
+        'foodon_search_before_throttle'
+    );
+    canonicalIngredientFoodOnThrottle($providerDeadline);
     $timeout = max(2, (int)(function_exists('env') ? env('FOODON_TIMEOUT_SEC', '6') : '6'));
+    $timeoutMs = canonicalIngredientProviderTimeoutMilliseconds(
+        $providerDeadline,
+        $timeout,
+        'foodon_search_before_request'
+    );
     $userAgent = function_exists('env')
         ? env('FOODON_USER_AGENT', 'EverShelf/1.0 (FoodOn integration; https://github.com/SFenton/EverShelf)')
         : 'EverShelf/1.0 (FoodOn integration; https://github.com/SFenton/EverShelf)';
@@ -1084,48 +1739,77 @@ function canonicalIngredientFoodOnLookup(string $name, string $slug = '', string
         'type' => 'class',
     ]);
 
-    $ch = curl_init($url);
-    curl_setopt_array($ch, [
-        CURLOPT_RETURNTRANSFER => true,
-        CURLOPT_TIMEOUT => $timeout,
-        CURLOPT_CONNECTTIMEOUT => min(3, $timeout),
-        CURLOPT_FOLLOWLOCATION => false,
-        CURLOPT_HTTPHEADER => [
-            'Accept: application/json',
-            'Accept-Encoding: gzip, deflate',
-            'User-Agent: ' . $userAgent,
-        ],
-        CURLOPT_ENCODING => '',
-    ]);
-    $body = curl_exec($ch);
-    $code = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
-    $err = curl_error($ch);
-    curl_close($ch);
-
-    if ($body === false || $code < 200 || $code >= 300) {
-        if (class_exists('EverLog', false)) {
-            EverLog::warn('FoodOn lookup failed', ['query' => $query, 'http_code' => $code, 'error' => $err]);
-        }
-        return null;
-    }
-
-    $docs = canonicalIngredientFoodOnDecodeSearchDocs((string)$body);
-    if ($docs === null) {
-        if (class_exists('EverLog', false)) {
-            EverLog::warn(
-                'FoodOn search response malformed',
-                ['query' => $query]
+    $best = null;
+    $malformedIdentity = false;
+    if (
+        defined('RECIPE_BACKEND_TEST_MODE')
+        && RECIPE_BACKEND_TEST_MODE
+        && is_callable(
+            $GLOBALS['CANONICAL_FOODON_TEST_SEARCH'] ?? null
+        )
+    ) {
+        $best = ($GLOBALS['CANONICAL_FOODON_TEST_SEARCH'])(
+            $name,
+            $query
+        );
+        canonicalIngredientProviderRequireBudget(
+            $providerDeadline,
+            'foodon_search_after_request'
+        );
+        if ($best !== null && !is_array($best)) {
+            throw new RuntimeException(
+                'canonical FoodOn test search result is invalid'
             );
         }
-        return null;
+    } else {
+        $ch = curl_init($url);
+        curl_setopt_array($ch, [
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_TIMEOUT_MS => $timeoutMs,
+            CURLOPT_CONNECTTIMEOUT_MS => min(3000, $timeoutMs),
+            CURLOPT_FOLLOWLOCATION => false,
+            CURLOPT_HTTPHEADER => [
+                'Accept: application/json',
+                'Accept-Encoding: gzip, deflate',
+                'User-Agent: ' . $userAgent,
+            ],
+            CURLOPT_ENCODING => '',
+        ]);
+        $body = curl_exec($ch);
+        $code = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $err = curl_error($ch);
+        curl_close($ch);
+        canonicalIngredientProviderRequireBudget(
+            $providerDeadline,
+            'foodon_search_after_request'
+        );
+
+        if ($body === false || $code < 200 || $code >= 300) {
+            if (class_exists('EverLog', false)) {
+                EverLog::warn('FoodOn lookup failed', ['query' => $query, 'http_code' => $code, 'error' => $err]);
+            }
+            return null;
+        }
+
+        $docs = canonicalIngredientFoodOnDecodeSearchDocs(
+            (string)$body
+        );
+        if ($docs === null) {
+            if (class_exists('EverLog', false)) {
+                EverLog::warn(
+                    'FoodOn search response malformed',
+                    ['query' => $query]
+                );
+            }
+            return null;
+        }
+        $best = canonicalIngredientFoodOnSelectBest(
+            $docs,
+            $name,
+            $query,
+            $malformedIdentity
+        );
     }
-    $malformedIdentity = false;
-    $best = canonicalIngredientFoodOnSelectBest(
-        $docs,
-        $name,
-        $query,
-        $malformedIdentity
-    );
     if ($malformedIdentity) {
         if (class_exists('EverLog', false)) {
             EverLog::warn(
@@ -1136,7 +1820,7 @@ function canonicalIngredientFoodOnLookup(string $name, string $slug = '', string
         return null;
     }
     if (!$best) {
-        canonicalIngredientFoodOnCacheStore($cacheKey, ['ts' => time(), 'found' => false, 'query' => $query]);
+        canonicalIngredientFoodOnCachePublish($cacheKey, ['ts' => time(), 'found' => false, 'query' => $query]);
         return null;
     }
 
@@ -1157,9 +1841,17 @@ function canonicalIngredientFoodOnLookup(string $name, string $slug = '', string
         $foodOn['description'] = mb_substr((string)$best['description'][0], 0, 500, 'UTF-8');
     }
     $hierarchy = canonicalIngredientFoodOnHierarchy(
-        (string)$foodOn['iri']
+        (string)$foodOn['iri'],
+        2,
+        $providerDeadline
     );
     if ($hierarchy === null) {
+        canonicalIngredientFoodOnCachePublish($cacheKey, [
+            'ts' => time(),
+            'found' => false,
+            'query' => $query,
+            'reason' => 'hierarchy_failed',
+        ]);
         if (class_exists('EverLog', false)) {
             EverLog::warn(
                 'FoodOn hierarchy lookup failed',
@@ -1169,7 +1861,7 @@ function canonicalIngredientFoodOnLookup(string $name, string $slug = '', string
         return null;
     }
     $foodOn['hierarchy'] = $hierarchy;
-    canonicalIngredientFoodOnCacheStore($cacheKey, ['ts' => time(), 'found' => true, 'query' => $query, 'foodon' => $foodOn]);
+    canonicalIngredientFoodOnCachePublish($cacheKey, ['ts' => time(), 'found' => true, 'query' => $query, 'foodon' => $foodOn]);
     return $foodOn;
 }
 
@@ -1184,11 +1876,18 @@ function canonicalIngredientMergeExternalIds(?string $existingJson, array $newEx
     return $existing;
 }
 
-function canonicalIngredientEnrichMappingsWithFoodOn(array $mappings): array {
+function canonicalIngredientEnrichMappingsWithFoodOn(
+    array $mappings,
+    ?array $providerDeadline = null
+): array {
     if (!canonicalIngredientFoodOnLookupOnSave()) {
         return $mappings;
     }
     foreach ($mappings as &$mapping) {
+        canonicalIngredientProviderRequireBudget(
+            $providerDeadline,
+            'foodon_between_mappings'
+        );
         if (
             !empty($mapping['external_ids']['foodon'])
             && array_key_exists(
@@ -1201,7 +1900,8 @@ function canonicalIngredientEnrichMappingsWithFoodOn(array $mappings): array {
         $foodOn = canonicalIngredientFoodOnLookup(
             (string)($mapping['name'] ?? ''),
             (string)($mapping['slug'] ?? ''),
-            (string)($mapping['category'] ?? '')
+            (string)($mapping['category'] ?? ''),
+            $providerDeadline
         );
         if ($foodOn) {
             $mapping['external_ids']['foodon'] = $foodOn;
@@ -1287,6 +1987,7 @@ function canonicalIngredientResolveFoodOnParents(
         }
     }
     unset($mapping);
+    $find->closeCursor();
     return $mappings;
 }
 
@@ -1295,8 +1996,10 @@ function canonicalIngredientUpsert(PDO $db, array $mapping): int {
     if (!empty($externalIds)) {
         $existing = $db->prepare("SELECT external_ids_json FROM canonical_ingredients WHERE slug = ?");
         $existing->execute([$mapping['slug']]);
+        $existingJson = $existing->fetchColumn() ?: null;
+        $existing->closeCursor();
         $externalIds = canonicalIngredientMergeExternalIds(
-            $existing->fetchColumn() ?: null,
+            $existingJson,
             $externalIds
         );
     }
@@ -1324,17 +2027,51 @@ function canonicalIngredientUpsert(PDO $db, array $mapping): int {
     ]);
     $id = $db->prepare("SELECT id FROM canonical_ingredients WHERE slug = ?");
     $id->execute([$mapping['slug']]);
-    return (int)$id->fetchColumn();
+    $ingredientId = (int)$id->fetchColumn();
+    $id->closeCursor();
+    return $ingredientId;
 }
 
-function canonicalIngredientSyncProduct(PDO $db, int $productId, ?array $product = null, array $options = []): array {
+function canonicalIngredientProductFingerprint(array $product): string {
+    return function_exists('ingredientOntologyControllerProductFingerprint')
+        ? ingredientOntologyControllerProductFingerprint($product)
+        : hash(
+            'sha256',
+            canonicalIngredientNormalizeText(
+                (string)($product['name'] ?? '')
+            )
+        );
+}
+
+function canonicalIngredientBuildProduct(
+    PDO $db,
+    int $productId,
+    ?array $product = null,
+    array $options = []
+): array {
+    $providerDeadline = is_array(
+        $options['provider_deadline'] ?? null
+    )
+        ? $options['provider_deadline']
+        : null;
     if ($product === null) {
         $stmt = $db->prepare("SELECT * FROM products WHERE id = ?");
         $stmt->execute([$productId]);
         $product = $stmt->fetch(PDO::FETCH_ASSOC) ?: null;
+        $stmt->closeCursor();
     }
     if (!$product) {
-        return ['product_id' => $productId, 'mapped' => 0, 'mappings' => [], 'tags' => []];
+        return [
+            'product_id' => $productId,
+            'mapped' => 0,
+            'mappings' => [],
+            'tags' => [],
+            'decision' => 'missing_product',
+            'decision_detail' => [],
+            '_request_fingerprint' => '',
+            '_product_exists' => false,
+            '_apply_canonical' => true,
+        ];
     }
 
     $mappings = canonicalIngredientInferProduct($product, $db);
@@ -1344,9 +2081,8 @@ function canonicalIngredientSyncProduct(PDO $db, int $productId, ?array $product
         }));
     }
 
-    // Replay a previous classification when we have seen this item before, otherwise let
-    // Gemini confirm/adjust the heuristic against the whole tree. Falls back to the
-    // heuristic result whenever the model is unavailable.
+    // Reuse a previous classification when available. The legacy review path
+    // remains compatibility-only and otherwise preserves the heuristic result.
     $decision = 'heuristic';
     $decisionDetail = [];
     if (function_exists('taxonomyResolveForProduct')) {
@@ -1357,63 +2093,24 @@ function canonicalIngredientSyncProduct(PDO $db, int $productId, ?array $product
         $decisionDetail = $resolved['detail'];
     }
 
-    $mappings = canonicalIngredientEnrichMappingsWithFoodOn($mappings);
+    $mappings = canonicalIngredientEnrichMappingsWithFoodOn(
+        $mappings,
+        $providerDeadline
+    );
     $mappings = canonicalIngredientResolveFoodOnParents($db, $mappings);
-    $mappings = canonicalIngredientEnrichMappingsWithUsda($mappings);
+    canonicalIngredientProviderRequireBudget(
+        $providerDeadline,
+        'between_foodon_and_usda'
+    );
+    $mappings = canonicalIngredientEnrichMappingsWithUsda(
+        $mappings,
+        $providerDeadline
+    );
+    canonicalIngredientProviderRequireBudget(
+        $providerDeadline,
+        'after_provider_enrichment'
+    );
     $tags = canonicalProductInferTags($product, $mappings);
-    $db->beginTransaction();
-    try {
-        $db->prepare("DELETE FROM product_ingredients WHERE product_id = ? AND source != 'manual'")
-           ->execute([$productId]);
-        $db->prepare("DELETE FROM product_tags WHERE product_id = ? AND source != 'manual'")
-           ->execute([$productId]);
-        $link = $db->prepare("
-            INSERT INTO product_ingredients (product_id, ingredient_id, role, confidence, source, evidence, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-            ON CONFLICT(product_id, ingredient_id, role) DO UPDATE SET
-                confidence = excluded.confidence,
-                source = excluded.source,
-                evidence = excluded.evidence,
-                updated_at = CURRENT_TIMESTAMP
-        ");
-        foreach ($mappings as $mapping) {
-            $ingredientId = canonicalIngredientUpsert($db, $mapping);
-            $link->execute([
-                $productId,
-                $ingredientId,
-                $mapping['role'],
-                $mapping['confidence'],
-                $mapping['source'],
-                $mapping['evidence'],
-            ]);
-        }
-        $tagStmt = $db->prepare("
-            INSERT INTO product_tags (product_id, facet, value, source, confidence, evidence, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-            ON CONFLICT(product_id, facet, value) DO UPDATE SET
-                source = excluded.source,
-                confidence = excluded.confidence,
-                evidence = excluded.evidence,
-                updated_at = CURRENT_TIMESTAMP
-        ");
-        foreach ($tags as $tag) {
-            $tagStmt->execute([
-                $productId,
-                $tag['facet'],
-                $tag['value'],
-                $tag['source'],
-                $tag['confidence'],
-                $tag['evidence'],
-            ]);
-        }
-        $db->commit();
-    } catch (Throwable $e) {
-        if ($db->inTransaction()) {
-            $db->rollBack();
-        }
-        throw $e;
-    }
-
     return [
         'product_id' => $productId,
         'mapped' => count($mappings),
@@ -1421,7 +2118,173 @@ function canonicalIngredientSyncProduct(PDO $db, int $productId, ?array $product
         'tags' => $tags,
         'decision' => $decision,
         'decision_detail' => $decisionDetail,
+        '_request_fingerprint' =>
+            canonicalIngredientProductFingerprint($product),
+        '_product_exists' => true,
+        '_apply_canonical' => true,
     ];
+}
+
+function canonicalIngredientApplyPreparedProduct(
+    PDO $db,
+    int $productId,
+    array $result
+): void {
+    $db->prepare(
+        "DELETE FROM product_ingredients
+         WHERE product_id = ? AND source != 'manual'"
+    )->execute([$productId]);
+    $db->prepare(
+        "DELETE FROM product_tags
+         WHERE product_id = ? AND source != 'manual'"
+    )->execute([$productId]);
+    $link = $db->prepare("
+        INSERT INTO product_ingredients (
+            product_id, ingredient_id, role, confidence,
+            source, evidence, updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(product_id, ingredient_id, role) DO UPDATE SET
+            confidence = excluded.confidence,
+            source = excluded.source,
+            evidence = excluded.evidence,
+            updated_at = CURRENT_TIMESTAMP
+    ");
+    foreach ((array)($result['mappings'] ?? []) as $mapping) {
+        $ingredientId = canonicalIngredientUpsert($db, $mapping);
+        $link->execute([
+            $productId,
+            $ingredientId,
+            $mapping['role'],
+            $mapping['confidence'],
+            $mapping['source'],
+            $mapping['evidence'],
+        ]);
+    }
+    $tagStmt = $db->prepare("
+        INSERT INTO product_tags (
+            product_id, facet, value, source,
+            confidence, evidence, updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(product_id, facet, value) DO UPDATE SET
+            source = excluded.source,
+            confidence = excluded.confidence,
+            evidence = excluded.evidence,
+            updated_at = CURRENT_TIMESTAMP
+    ");
+    foreach ((array)($result['tags'] ?? []) as $tag) {
+        $tagStmt->execute([
+            $productId,
+            $tag['facet'],
+            $tag['value'],
+            $tag['source'],
+            $tag['confidence'],
+            $tag['evidence'],
+        ]);
+    }
+}
+
+function canonicalIngredientPublicResult(array $result): array {
+    foreach (array_keys($result) as $key) {
+        if (str_starts_with((string)$key, '_')) {
+            unset($result[$key]);
+        }
+    }
+    return $result;
+}
+
+function canonicalIngredientSyncProduct(
+    PDO $db,
+    int $productId,
+    ?array $product = null,
+    array $options = []
+): array {
+    for ($buildAttempt = 0; $buildAttempt < 2; $buildAttempt++) {
+        $result = canonicalIngredientBuildProduct(
+            $db,
+            $productId,
+            $buildAttempt === 0 ? $product : null,
+            $options
+        );
+        if (empty($result['_product_exists'])) {
+            return canonicalIngredientPublicResult($result);
+        }
+
+        $transactionStarted = false;
+        try {
+            canonicalIngredientQueueTestHook(
+                'before_direct_apply_transaction',
+                [
+                    'product_id' => $productId,
+                    'build_attempt' => $buildAttempt + 1,
+                ]
+            );
+            dbBeginImmediateWithRetry($db);
+            $transactionStarted = true;
+            $currentStmt = $db->prepare(
+                'SELECT * FROM products WHERE id = ?'
+            );
+            $currentStmt->execute([$productId]);
+            $currentProduct =
+                $currentStmt->fetch(PDO::FETCH_ASSOC) ?: null;
+            $currentStmt->closeCursor();
+            $currentFingerprint = $currentProduct !== null
+                ? canonicalIngredientProductFingerprint($currentProduct)
+                : '';
+            if (
+                $currentProduct === null
+                || !hash_equals(
+                    (string)$result['_request_fingerprint'],
+                    $currentFingerprint
+                )
+            ) {
+                $db->exec('ROLLBACK');
+                $transactionStarted = false;
+                if ($buildAttempt === 0 && $currentProduct !== null) {
+                    continue;
+                }
+                if ($currentProduct !== null) {
+                    canonicalIngredientEnqueueProduct(
+                        $db,
+                        $productId,
+                        'direct_sync_superseded'
+                    );
+                }
+                return [
+                    'product_id' => $productId,
+                    'mapped' => 0,
+                    'mappings' => [],
+                    'tags' => [],
+                    'decision' => 'superseded',
+                    'decision_detail' => [
+                        'reason' => 'product_fingerprint_changed',
+                    ],
+                    'status' => 'superseded',
+                    'superseded' => true,
+                ];
+            }
+            canonicalIngredientApplyPreparedProduct(
+                $db,
+                $productId,
+                $result
+            );
+            $db->exec('COMMIT');
+            $transactionStarted = false;
+            return canonicalIngredientPublicResult($result);
+        } catch (Throwable $error) {
+            if ($transactionStarted) {
+                try {
+                    $db->exec('ROLLBACK');
+                } catch (Throwable $ignored) {
+                }
+            }
+            throw $error;
+        }
+    }
+    throw new LogicException(
+        'canonical direct sync retry loop exhausted unexpectedly'
+    );
 }
 
 function canonicalProductTagPut(array &$tags, string $facet, string $value, string $source, float $confidence, string $evidence): void {
@@ -1552,25 +2415,22 @@ function canonicalIngredientEnqueueProduct(PDO $db, int $productId, string $reas
     $productStmt = $db->prepare("SELECT * FROM products WHERE id = ?");
     $productStmt->execute([$productId]);
     $product = $productStmt->fetch(PDO::FETCH_ASSOC);
+    $productStmt->closeCursor();
     if (!$product) {
         return ['queued' => false, 'status' => 'missing_product'];
     }
-    $requestFingerprint = function_exists(
-        'ingredientOntologyControllerProductFingerprint'
-    )
-        ? ingredientOntologyControllerProductFingerprint($product)
-        : hash('sha256', canonicalIngredientNormalizeText(
-            (string)$product['name']
-        ));
+    $requestFingerprint =
+        canonicalIngredientProductFingerprint($product);
     $stmt = $db->prepare("
         INSERT INTO canonical_processing_queue (
             product_id, reason, status, attempts, last_error,
+            last_error_kind, next_retry_at,
             requested_at, started_at, processed_at, updated_at,
             request_generation, request_fingerprint,
             lease_token, lease_expires_at
         )
         VALUES (
-            ?, ?, 'pending', 0, '', CURRENT_TIMESTAMP,
+            ?, ?, 'pending', 0, '', '', NULL, CURRENT_TIMESTAMP,
             NULL, NULL, CURRENT_TIMESTAMP, 1, ?, NULL, NULL
         )
         ON CONFLICT(product_id) DO UPDATE SET
@@ -1578,6 +2438,8 @@ function canonicalIngredientEnqueueProduct(PDO $db, int $productId, string $reas
             status = 'pending',
             attempts = 0,
             last_error = '',
+            last_error_kind = '',
+            next_retry_at = NULL,
             requested_at = CURRENT_TIMESTAMP,
             started_at = NULL,
             processed_at = NULL,
@@ -1595,6 +2457,7 @@ function canonicalIngredientEnqueueProduct(PDO $db, int $productId, string $reas
     ]);
 
     $status = canonicalIngredientQueueStatusForProduct($db, $productId);
+    canonicalIngredientScheduleWake();
     return [
         'queued' => true,
         'queue_id' => (int)($status['id'] ?? 0),
@@ -1661,19 +2524,240 @@ function canonicalIngredientWake(): bool {
     }
 }
 
+function canonicalIngredientScheduleWake(): void {
+    static $registered = false;
+    if ($registered) {
+        return;
+    }
+    $registered = true;
+    register_shutdown_function(
+        static function (): void {
+            canonicalIngredientWake();
+        }
+    );
+}
+
 function canonicalIngredientQueueStatusForProduct(PDO $db, int $productId): ?array {
     $stmt = $db->prepare("SELECT * FROM canonical_processing_queue WHERE product_id = ?");
     $stmt->execute([$productId]);
     $row = $stmt->fetch(PDO::FETCH_ASSOC);
+    $stmt->closeCursor();
     return $row ?: null;
 }
 
-function canonicalIngredientQueueStats(PDO $db): array {
-    $stats = ['pending' => 0, 'in_progress' => 0, 'done' => 0, 'failed' => 0];
-    foreach ($db->query("SELECT status, COUNT(*) AS c FROM canonical_processing_queue GROUP BY status") as $row) {
+function canonicalIngredientQueueStats(
+    PDO $db,
+    ?int $maxAttempts = null
+): array {
+    $stats = [
+        'pending' => 0,
+        'in_progress' => 0,
+        'done' => 0,
+        'failed' => 0,
+        'due' => 0,
+        'retry_scheduled' => 0,
+    ];
+    foreach (
+        $db->query("
+            SELECT status, COUNT(*) AS c
+            FROM canonical_processing_queue
+            GROUP BY status
+        ") as $row
+    ) {
         $stats[$row['status']] = (int)$row['c'];
     }
+    $maxAttempts = max(
+        1,
+        min(
+            20,
+            $maxAttempts ?? (
+                function_exists('env')
+                    ? (int)env(
+                        'CANONICAL_QUEUE_MAX_ATTEMPTS',
+                        '3'
+                    )
+                    : 3
+            )
+        )
+    );
+    $dueStmt = $db->prepare("
+        SELECT
+            COALESCE(SUM(CASE
+                WHEN status IN ('pending', 'failed')
+                 AND attempts < ?
+                 AND (
+                    next_retry_at IS NULL
+                    OR next_retry_at <= CURRENT_TIMESTAMP
+                 )
+                THEN 1 ELSE 0 END), 0) AS due_count,
+            COALESCE(SUM(CASE
+                WHEN status IN ('pending', 'failed')
+                 AND attempts < ?
+                 AND next_retry_at > CURRENT_TIMESTAMP
+                THEN 1 ELSE 0 END), 0) AS retry_scheduled_count
+        FROM canonical_processing_queue
+    ");
+    $dueStmt->execute([$maxAttempts, $maxAttempts]);
+    $due = $dueStmt->fetch(PDO::FETCH_ASSOC) ?: [];
+    $dueStmt->closeCursor();
+    $stats['due'] = (int)($due['due_count'] ?? 0);
+    $stats['retry_scheduled'] =
+        (int)($due['retry_scheduled_count'] ?? 0);
     return $stats;
+}
+
+function canonicalIngredientQueueNextWakeDelay(
+    PDO $db,
+    int $safetyPollSeconds = 30,
+    ?int $maxAttempts = null
+): int {
+    canonicalIngredientQueueTestHook(
+        'before_next_wake_query',
+        []
+    );
+    $safetyPollSeconds = max(1, min(300, $safetyPollSeconds));
+    $maxAttempts = max(
+        1,
+        min(
+            20,
+            $maxAttempts ?? (
+                function_exists('env')
+                    ? (int)env(
+                        'CANONICAL_QUEUE_MAX_ATTEMPTS',
+                        '3'
+                    )
+                    : 3
+            )
+        )
+    );
+    $stmt = $db->prepare("
+        SELECT
+            COALESCE(SUM(CASE
+                WHEN status IN ('pending', 'failed')
+                 AND attempts < ?
+                 AND (
+                    next_retry_at IS NULL
+                    OR next_retry_at <= CURRENT_TIMESTAMP
+                 )
+                THEN 1 ELSE 0 END), 0) AS due_count,
+            MIN(CASE
+                WHEN status IN ('pending', 'failed')
+                 AND attempts < ?
+                 AND next_retry_at > CURRENT_TIMESTAMP
+                THEN CAST(strftime('%s', next_retry_at) AS INTEGER)
+                WHEN status = 'in_progress'
+                 AND lease_expires_at IS NOT NULL
+                THEN CAST(strftime('%s', lease_expires_at) AS INTEGER)
+                ELSE NULL
+            END) AS next_epoch
+        FROM canonical_processing_queue
+    ");
+    $stmt->execute([$maxAttempts, $maxAttempts]);
+    $row = $stmt->fetch(PDO::FETCH_ASSOC) ?: [];
+    $stmt->closeCursor();
+    if ((int)($row['due_count'] ?? 0) > 0) {
+        return 1;
+    }
+    $nextEpoch = (int)($row['next_epoch'] ?? 0);
+    if ($nextEpoch <= 0) {
+        return $safetyPollSeconds;
+    }
+    return max(
+        1,
+        min(
+            $safetyPollSeconds,
+            $nextEpoch - time()
+        )
+    );
+}
+
+function canonicalIngredientWorkerSleepDelay(
+    PDO $db,
+    int $safetyPollSeconds,
+    int $maxAttempts,
+    array $result,
+    int $lockUnavailableStreak
+): int {
+    $safetyPollSeconds = max(1, min(300, $safetyPollSeconds));
+    if (
+        (string)($result['skipped'] ?? '')
+        === 'lock_unavailable'
+    ) {
+        return $lockUnavailableStreak <= 1
+            ? min(5, $safetyPollSeconds)
+            : $safetyPollSeconds;
+    }
+    try {
+        return canonicalIngredientQueueNextWakeDelay(
+            $db,
+            $safetyPollSeconds,
+            $maxAttempts
+        );
+    } catch (Throwable $error) {
+        if (class_exists('EverLog', false)) {
+            EverLog::exception(
+                $error,
+                'canonical_queue_wake_delay'
+            );
+        }
+        return $safetyPollSeconds;
+    }
+}
+
+function canonicalIngredientQueueLockPath(): string {
+    return (
+        defined('RECIPE_BACKEND_TEST_MODE')
+        && RECIPE_BACKEND_TEST_MODE
+        && is_string(
+            $GLOBALS['CANONICAL_QUEUE_TEST_LOCK_PATH'] ?? null
+        )
+    )
+        ? (string)$GLOBALS['CANONICAL_QUEUE_TEST_LOCK_PATH']
+        : __DIR__ . '/../../data/canonical_queue.lock';
+}
+
+function canonicalIngredientQueueLockAvailable(): bool {
+    $path = canonicalIngredientQueueLockPath();
+    $dir = dirname($path);
+    if (!file_exists($path) && !is_link($path)) {
+        return is_dir($dir) && is_writable($dir);
+    }
+    if (!is_file($path)) {
+        return false;
+    }
+    $handle = @fopen($path, 'r+');
+    if ($handle === false) {
+        return false;
+    }
+    fclose($handle);
+    return true;
+}
+
+function canonicalIngredientWarnQueueLockUnavailable(
+    string $path
+): void {
+    $interval = function_exists('env')
+        ? (int)env(
+            'CANONICAL_QUEUE_LOCK_WARNING_INTERVAL_SECONDS',
+            '60'
+        )
+        : 60;
+    $interval = max(1, min(3600, $interval));
+    $now = microtime(true);
+    $last = (float)($GLOBALS[
+        'CANONICAL_QUEUE_LOCK_WARNING_LAST_AT'
+    ] ?? 0.0);
+    if ($last > 0 && ($now - $last) < $interval) {
+        return;
+    }
+    $GLOBALS['CANONICAL_QUEUE_LOCK_WARNING_LAST_AT'] = $now;
+    if (class_exists('EverLog', false)) {
+        EverLog::warn(
+            'canonical queue lock unavailable',
+            ['path' => basename($path)],
+            'canonical_queue'
+        );
+    }
 }
 
 /**
@@ -1686,14 +2770,15 @@ function canonicalIngredientQueueStats(PDO $db): array {
  * Returns a live handle, or false when another run holds the lock.
  */
 function canonicalIngredientQueueLock(): mixed {
-    $path = __DIR__ . '/../../data/canonical_queue.lock';
+    $path = canonicalIngredientQueueLockPath();
     $dir = dirname($path);
     if (!is_dir($dir)) {
         @mkdir($dir, 0775, true);
     }
-    $handle = @fopen($path, 'c');
+    $handle = @fopen($path, 'c+');
     if ($handle === false) {
-        return null; // Cannot lock — better to work than to stall permanently.
+        canonicalIngredientWarnQueueLockUnavailable($path);
+        return null;
     }
     if (!flock($handle, LOCK_EX | LOCK_NB)) {
         fclose($handle);
@@ -1715,21 +2800,35 @@ function canonicalIngredientProcessQueue(PDO $db, int $limit = 5, int $maxAttemp
         return [
             'processed' => 0,
             'succeeded' => 0,
+            'retried' => 0,
             'failed' => 0,
-            'pending' => canonicalIngredientQueueStats($db)['pending'] ?? 0,
+            'release_failed' => 0,
+            'pending' =>
+                canonicalIngredientQueueStats(
+                    $db,
+                    $maxAttempts
+                )['pending'] ?? 0,
             'items' => [],
         ];
     }
 
     $lock = canonicalIngredientQueueLock();
-    if ($lock === false) {
+    if ($lock === false || $lock === null) {
         return [
             'processed' => 0,
             'succeeded' => 0,
+            'retried' => 0,
             'failed' => 0,
-            'pending' => canonicalIngredientQueueStats($db)['pending'] ?? 0,
+            'release_failed' => 0,
+            'pending' =>
+                canonicalIngredientQueueStats(
+                    $db,
+                    $maxAttempts
+                )['pending'] ?? 0,
             'items' => [],
-            'skipped' => 'already_running',
+            'skipped' => $lock === null
+                ? 'lock_unavailable'
+                : 'already_running',
         ];
     }
 
@@ -1750,25 +2849,39 @@ function canonicalIngredientDrainQueue(
     $maxAttempts = max(1, min(20, $maxAttempts));
     $maximumBatches = max(1, min(1000, $maximumBatches));
     $lock = canonicalIngredientQueueLock();
-    if ($lock === false) {
+    if ($lock === false || $lock === null) {
         return [
             'processed' => 0,
             'succeeded' => 0,
+            'retried' => 0,
             'failed' => 0,
+            'release_failed' => 0,
             'superseded' => 0,
             'pending' =>
-                canonicalIngredientQueueStats($db)['pending'] ?? 0,
+                canonicalIngredientQueueStats(
+                    $db,
+                    $maxAttempts
+                )['pending'] ?? 0,
             'items' => [],
             'batches' => 0,
-            'skipped' => 'already_running',
+            'skipped' => $lock === null
+                ? 'lock_unavailable'
+                : 'already_running',
         ];
     }
     $summary = [
         'processed' => 0,
         'succeeded' => 0,
+        'retried' => 0,
         'failed' => 0,
+        'release_failed' => 0,
         'superseded' => 0,
+        'reclaimed' => 0,
+        'clamped_leases' => 0,
+        'normalized_exhausted' => 0,
         'pending' => 0,
+        'due' => 0,
+        'retry_scheduled' => 0,
         'items' => [],
         'batches' => 0,
     ];
@@ -1783,8 +2896,13 @@ function canonicalIngredientDrainQueue(
             foreach ([
                 'processed',
                 'succeeded',
+                'retried',
                 'failed',
+                'release_failed',
                 'superseded',
+                'reclaimed',
+                'clamped_leases',
+                'normalized_exhausted',
             ] as $field) {
                 $summary[$field] += (int)($result[$field] ?? 0);
             }
@@ -1793,8 +2911,11 @@ function canonicalIngredientDrainQueue(
                 ...(array)($result['items'] ?? [])
             );
             $summary['pending'] = (int)($result['pending'] ?? 0);
+            $summary['due'] = (int)($result['due'] ?? 0);
+            $summary['retry_scheduled'] =
+                (int)($result['retry_scheduled'] ?? 0);
             if (
-                $summary['pending'] === 0
+                $summary['due'] === 0
                 || (int)($result['processed'] ?? 0) === 0
             ) {
                 break;
@@ -1806,22 +2927,650 @@ function canonicalIngredientDrainQueue(
     return $summary;
 }
 
-function canonicalIngredientProcessQueueBatch(PDO $db, int $limit, int $maxAttempts): array {
+function canonicalIngredientQueueTestHook(
+    string $stage,
+    array $context = []
+): void {
+    if (
+        defined('RECIPE_BACKEND_TEST_MODE')
+        && RECIPE_BACKEND_TEST_MODE
+        && is_callable(
+            $GLOBALS['CANONICAL_QUEUE_TEST_HOOK'] ?? null
+        )
+    ) {
+        ($GLOBALS['CANONICAL_QUEUE_TEST_HOOK'])(
+            $stage,
+            $context
+        );
+    }
+}
+
+function canonicalIngredientSqliteErrorContext(
+    Throwable $error
+): array {
+    $errorInfo = $error instanceof PDOException
+        && is_array($error->errorInfo ?? null)
+        ? $error->errorInfo
+        : [];
+    return [
+        'error_class' => get_class($error),
+        'sqlstate' => isset($errorInfo[0])
+            ? (string)$errorInfo[0]
+            : '',
+        'sqlite_code' => isset($errorInfo[1])
+            ? (int)$errorInfo[1]
+            : 0,
+        'sqlite_message' => isset($errorInfo[2])
+            ? mb_substr((string)$errorInfo[2], 0, 200, 'UTF-8')
+            : '',
+    ];
+}
+
+function canonicalIngredientRetryBudgetMilliseconds(
+    string $stage
+): int {
+    if (
+        defined('RECIPE_BACKEND_TEST_MODE')
+        && RECIPE_BACKEND_TEST_MODE
+        && is_array(
+            $GLOBALS['CANONICAL_QUEUE_TEST_RETRY_BUDGET_MS'] ?? null
+        )
+        && isset(
+            $GLOBALS['CANONICAL_QUEUE_TEST_RETRY_BUDGET_MS'][$stage]
+        )
+    ) {
+        return max(
+            1,
+            (int)$GLOBALS[
+                'CANONICAL_QUEUE_TEST_RETRY_BUDGET_MS'
+            ][$stage]
+        );
+    }
+    $defaultSeconds = $stage === 'release' ? 45 : 20;
+    $envKey = $stage === 'release'
+        ? 'CANONICAL_QUEUE_RELEASE_RETRY_SECONDS'
+        : 'CANONICAL_QUEUE_APPLY_RETRY_SECONDS';
+    $seconds = function_exists('env')
+        ? (int)env($envKey, (string)$defaultSeconds)
+        : $defaultSeconds;
+    return max(1, min(90, $seconds)) * 1000;
+}
+
+function canonicalIngredientBusyDelayMicroseconds(
+    int $attempt
+): int {
+    if (
+        defined('RECIPE_BACKEND_TEST_MODE')
+        && RECIPE_BACKEND_TEST_MODE
+        && isset($GLOBALS['CANONICAL_QUEUE_TEST_BUSY_DELAY_US'])
+    ) {
+        return max(
+            1000,
+            (int)$GLOBALS['CANONICAL_QUEUE_TEST_BUSY_DELAY_US']
+        );
+    }
+    $base = min(
+        2000000,
+        50000 * (2 ** min(6, max(0, $attempt - 1)))
+    );
+    return (int)round(
+        $base * (random_int(80, 120) / 100)
+    );
+}
+
+function canonicalIngredientWithBusyRetry(
+    PDO $db,
+    string $stage,
+    callable $operation
+): mixed {
+    $timeoutStmt = $db->query('PRAGMA busy_timeout');
+    $previousTimeout = (int)($timeoutStmt->fetchColumn() ?: 0);
+    $timeoutStmt->closeCursor();
+    $busyTimeoutMs = function_exists('env')
+        ? (int)env('CANONICAL_QUEUE_BUSY_TIMEOUT_MS', '250')
+        : 250;
+    $busyTimeoutMs = max(1, min(2000, $busyTimeoutMs));
+    $db->exec('PRAGMA busy_timeout = ' . $busyTimeoutMs);
+    $deadline = microtime(true)
+        + (
+            canonicalIngredientRetryBudgetMilliseconds($stage)
+            / 1000
+        );
+    $attempt = 0;
+    try {
+        while (true) {
+            try {
+                return $operation();
+            } catch (Throwable $error) {
+                if (!databaseIsLockError($error)) {
+                    throw $error;
+                }
+                $attempt++;
+                $remainingUs = (int)floor(
+                    max(0, $deadline - microtime(true)) * 1000000
+                );
+                if ($remainingUs <= 0) {
+                    throw $error;
+                }
+                $delayUs = min(
+                    $remainingUs,
+                    canonicalIngredientBusyDelayMicroseconds($attempt)
+                );
+                if (class_exists('EverLog', false)) {
+                    EverLog::warn(
+                        'canonical sqlite busy retry',
+                        [
+                            'stage' => $stage,
+                            'attempt' => $attempt,
+                            'delay_ms' =>
+                                (int)ceil($delayUs / 1000),
+                        ] + canonicalIngredientSqliteErrorContext($error),
+                        'canonical_queue'
+                    );
+                }
+                canonicalIngredientQueueTestHook(
+                    'busy_retry',
+                    [
+                        'stage' => $stage,
+                        'attempt' => $attempt,
+                        'delay_us' => $delayUs,
+                    ]
+                );
+                usleep($delayUs);
+            }
+        }
+    } finally {
+        $db->exec(
+            'PRAGMA busy_timeout = ' . max(0, $previousTimeout)
+        );
+    }
+}
+
+function canonicalIngredientApplyQueueResultOnce(
+    PDO $db,
+    array $claim,
+    array $result
+): array {
+    $transactionStarted = false;
+    try {
+        canonicalIngredientQueueTestHook(
+            'before_apply_transaction',
+            $claim
+        );
+        $db->exec('BEGIN IMMEDIATE');
+        $transactionStarted = true;
+        $queueStmt = $db->prepare("
+            SELECT *,
+                   CASE
+                       WHEN lease_expires_at > CURRENT_TIMESTAMP
+                       THEN 1 ELSE 0
+                   END AS lease_valid
+            FROM canonical_processing_queue
+            WHERE id = ?
+        ");
+        $queueStmt->execute([(int)$claim['queue_id']]);
+        $queue = $queueStmt->fetch(PDO::FETCH_ASSOC) ?: null;
+        $queueStmt->closeCursor();
+        $ownsLease = $queue !== null
+            && (string)$queue['status'] === 'in_progress'
+            && (int)$queue['request_generation']
+                === (int)$claim['request_generation']
+            && hash_equals(
+                (string)$queue['lease_token'],
+                (string)$claim['lease_token']
+            )
+            && (int)$queue['lease_generation']
+                === (int)$claim['lease_generation']
+            && (int)$queue['lease_valid'] === 1;
+        if (!$ownsLease) {
+            $db->exec('ROLLBACK');
+            $transactionStarted = false;
+            return [
+                'status' => 'superseded',
+                'reason' => 'lease_fence_lost',
+            ];
+        }
+
+        $productStmt = $db->prepare(
+            'SELECT * FROM products WHERE id = ?'
+        );
+        $productStmt->execute([(int)$claim['product_id']]);
+        $product = $productStmt->fetch(PDO::FETCH_ASSOC) ?: null;
+        $productStmt->closeCursor();
+        if ($product === null) {
+            $db->exec('ROLLBACK');
+            $transactionStarted = false;
+            return [
+                'status' => 'superseded',
+                'reason' => 'product_missing',
+            ];
+        }
+        $currentFingerprint =
+            canonicalIngredientProductFingerprint($product);
+        if (!hash_equals(
+            (string)$claim['request_fingerprint'],
+            $currentFingerprint
+        )) {
+            $requeue = $db->prepare("
+                UPDATE canonical_processing_queue
+                SET status = 'pending',
+                    attempts = 0,
+                    request_generation = request_generation + 1,
+                    request_fingerprint = ?,
+                    requested_at = CURRENT_TIMESTAMP,
+                    started_at = NULL,
+                    processed_at = NULL,
+                    next_retry_at = NULL,
+                    last_error_kind =
+                        'product_fingerprint_changed',
+                    last_error =
+                        'Product changed before canonical apply.',
+                    lease_token = NULL,
+                    lease_expires_at = NULL,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                  AND status = 'in_progress'
+                  AND request_generation = ?
+                  AND lease_token = ?
+                  AND lease_generation = ?
+                  AND lease_expires_at > CURRENT_TIMESTAMP
+            ");
+            $requeue->execute([
+                $currentFingerprint,
+                (int)$claim['queue_id'],
+                (int)$claim['request_generation'],
+                (string)$claim['lease_token'],
+                (int)$claim['lease_generation'],
+            ]);
+            if ($requeue->rowCount() !== 1) {
+                $db->exec('ROLLBACK');
+                $transactionStarted = false;
+                return [
+                    'status' => 'superseded',
+                    'reason' => 'fingerprint_requeue_fence_lost',
+                ];
+            }
+            $db->exec('COMMIT');
+            $transactionStarted = false;
+            return [
+                'status' => 'superseded',
+                'reason' => 'product_fingerprint_changed',
+                'requeued' => true,
+            ];
+        }
+
+        canonicalIngredientQueueTestHook(
+            'before_canonical_apply',
+            $claim
+        );
+        if (!empty($result['_apply_canonical'])) {
+            canonicalIngredientApplyPreparedProduct(
+                $db,
+                (int)$claim['product_id'],
+                $result
+            );
+        }
+        canonicalIngredientQueueTestHook(
+            'after_canonical_writes',
+            $claim
+        );
+        $complete = $db->prepare("
+            UPDATE canonical_processing_queue
+            SET status = 'done',
+                processed_at = CURRENT_TIMESTAMP,
+                updated_at = CURRENT_TIMESTAMP,
+                last_error = '',
+                last_error_kind = '',
+                next_retry_at = NULL,
+                lease_token = NULL,
+                lease_expires_at = NULL
+            WHERE id = ?
+              AND status = 'in_progress'
+              AND request_generation = ?
+              AND lease_token = ?
+              AND lease_generation = ?
+              AND lease_expires_at > CURRENT_TIMESTAMP
+        ");
+        $complete->execute([
+            (int)$claim['queue_id'],
+            (int)$claim['request_generation'],
+            (string)$claim['lease_token'],
+            (int)$claim['lease_generation'],
+        ]);
+        if ($complete->rowCount() !== 1) {
+            $db->exec('ROLLBACK');
+            $transactionStarted = false;
+            return [
+                'status' => 'superseded',
+                'reason' => 'completion_fence_lost',
+            ];
+        }
+        canonicalIngredientQueueTestHook(
+            'after_queue_done',
+            $claim
+        );
+        if (!function_exists('recipeJobEnqueueTaxonomyReady')) {
+            throw new RuntimeException(
+                'canonical taxonomy-ready enqueue is unavailable'
+            );
+        }
+        recipeJobEnqueueTaxonomyReady(
+            $db,
+            (int)$claim['product_id']
+        );
+        canonicalIngredientQueueTestHook(
+            'after_taxonomy_enqueue',
+            $claim
+        );
+        $db->exec('COMMIT');
+        $transactionStarted = false;
+        return ['status' => 'done'];
+    } catch (Throwable $error) {
+        if ($transactionStarted) {
+            try {
+                $db->exec('ROLLBACK');
+            } catch (Throwable $ignored) {
+            }
+        }
+        throw $error;
+    }
+}
+
+function canonicalIngredientApplyQueueResult(
+    PDO $db,
+    array $claim,
+    array $result
+): array {
+    return canonicalIngredientWithBusyRetry(
+        $db,
+        'apply',
+        static fn(): array =>
+            canonicalIngredientApplyQueueResultOnce(
+                $db,
+                $claim,
+                $result
+            )
+    );
+}
+
+function canonicalIngredientRetryDelaySeconds(int $attempts): int {
+    return match (max(1, $attempts)) {
+        1 => 2,
+        2 => 8,
+        default => 30,
+    };
+}
+
+function canonicalIngredientReleaseClaimOnce(
+    PDO $db,
+    array $claim,
+    Throwable $error,
+    string $stage,
+    int $maxAttempts
+): array {
+    canonicalIngredientQueueTestHook(
+        'before_failure_release',
+        $claim + ['stage' => $stage]
+    );
+    $transactionStarted = false;
+    try {
+        $db->exec('BEGIN IMMEDIATE');
+        $transactionStarted = true;
+        $terminal =
+            (int)$claim['attempts'] >= max(1, $maxAttempts);
+        $retrySeconds = $terminal
+            ? null
+            : canonicalIngredientRetryDelaySeconds(
+                (int)$claim['attempts']
+            );
+        $kind = $error
+            instanceof CanonicalIngredientProviderBudgetExceeded
+            ? 'provider_budget_exhausted'
+            : (
+                databaseIsLockError($error)
+                    ? 'sqlite_busy'
+                    : preg_replace(
+                '/[^a-z0-9_]+/',
+                '_',
+                strtolower($stage . '_failure')
+                    )
+            );
+        $update = $db->prepare("
+            UPDATE canonical_processing_queue
+            SET status = ?,
+                next_retry_at = ?,
+                last_error_kind = ?,
+                last_error = ?,
+                lease_token = NULL,
+                lease_expires_at = NULL,
+                started_at = NULL,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+              AND status = 'in_progress'
+              AND request_generation = ?
+              AND lease_token = ?
+              AND lease_generation = ?
+        ");
+        $nextRetryAt = $retrySeconds === null
+            ? null
+            : gmdate(
+                'Y-m-d H:i:s',
+                time() + $retrySeconds
+            );
+        $update->execute([
+            $terminal ? 'failed' : 'pending',
+            $nextRetryAt,
+            mb_substr((string)$kind, 0, 80, 'UTF-8'),
+            mb_substr($error->getMessage(), 0, 500, 'UTF-8'),
+            (int)$claim['queue_id'],
+            (int)$claim['request_generation'],
+            (string)$claim['lease_token'],
+            (int)$claim['lease_generation'],
+        ]);
+        if ($update->rowCount() !== 1) {
+            $db->exec('ROLLBACK');
+            $transactionStarted = false;
+            return [
+                'status' => 'superseded',
+                'reason' => 'release_fence_lost',
+            ];
+        }
+        $db->exec('COMMIT');
+        $transactionStarted = false;
+        return [
+            'status' => $terminal ? 'failed' : 'retry',
+            'retry_seconds' => $retrySeconds,
+            'next_retry_at' => $nextRetryAt,
+            'last_error_kind' => $kind,
+        ];
+    } catch (Throwable $releaseError) {
+        if ($transactionStarted) {
+            try {
+                $db->exec('ROLLBACK');
+            } catch (Throwable $ignored) {
+            }
+        }
+        throw $releaseError;
+    }
+}
+
+function canonicalIngredientReleaseClaim(
+    PDO $db,
+    array $claim,
+    Throwable $error,
+    string $stage,
+    int $maxAttempts
+): array {
+    return canonicalIngredientWithBusyRetry(
+        $db,
+        'release',
+        static fn(): array =>
+            canonicalIngredientReleaseClaimOnce(
+                $db,
+                $claim,
+                $error,
+                $stage,
+                $maxAttempts
+            )
+    );
+}
+
+function canonicalIngredientCrashLeaseSeconds(): int {
+    $readRaw = static function (string $key): string|false {
+        if (function_exists('loadEnv')) {
+            $values = loadEnv();
+            if (array_key_exists($key, $values)) {
+                return (string)$values[$key];
+            }
+        }
+        return getenv($key);
+    };
+    $newValue = $readRaw('CANONICAL_QUEUE_CRASH_LEASE_SECONDS');
+    $legacyValue = $readRaw('CANONICAL_QUEUE_LEASE_SECONDS');
+    if (
+        $newValue !== false
+        && trim((string)$newValue) !== ''
+    ) {
+        $seconds = (int)$newValue;
+    } elseif (
+        $legacyValue !== false
+        && trim((string)$legacyValue) !== ''
+        && (int)$legacyValue !== 600
+    ) {
+        $seconds = (int)$legacyValue;
+    } else {
+        $seconds = 120;
+    }
+    return max(30, min(3600, $seconds));
+}
+
+function canonicalIngredientClampInheritedLeases(
+    PDO $db,
+    int $crashLeaseSeconds
+): int {
+    $stmt = $db->prepare("
+        UPDATE canonical_processing_queue
+        SET lease_expires_at = datetime(
+                'now',
+                '+' || ? || ' seconds'
+            ),
+            updated_at = CURRENT_TIMESTAMP
+        WHERE status = 'in_progress'
+          AND lease_token IS NOT NULL
+          AND lease_expires_at IS NOT NULL
+          AND lease_expires_at > datetime(
+              'now',
+              '+' || ? || ' seconds'
+          )
+    ");
+    $stmt->execute([
+        $crashLeaseSeconds,
+        $crashLeaseSeconds,
+    ]);
+    return $stmt->rowCount();
+}
+
+function canonicalIngredientNormalizeExhaustedRows(
+    PDO $db,
+    int $maxAttempts
+): int {
+    $stmt = $db->prepare("
+        UPDATE canonical_processing_queue
+        SET status = 'failed',
+            next_retry_at = NULL,
+            last_error_kind = CASE
+                WHEN TRIM(COALESCE(last_error_kind, '')) = ''
+                THEN 'attempts_exhausted'
+                ELSE last_error_kind
+            END,
+            last_error = CASE
+                WHEN TRIM(COALESCE(last_error, '')) = ''
+                THEN 'canonical processing attempts exhausted'
+                ELSE last_error
+            END,
+            lease_token = NULL,
+            lease_expires_at = NULL,
+            started_at = NULL,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE status IN ('pending', 'failed')
+          AND attempts >= ?
+          AND (
+              status <> 'failed'
+              OR next_retry_at IS NOT NULL
+              OR TRIM(COALESCE(last_error_kind, '')) = ''
+          )
+    ");
+    $stmt->execute([$maxAttempts]);
+    return $stmt->rowCount();
+}
+
+function canonicalIngredientProcessQueueBatch(
+    PDO $db,
+    int $limit,
+    int $maxAttempts
+): array {
     $maxAttempts = max(1, $maxAttempts);
-    $leaseSeconds = max(
-        30,
+    $leaseSeconds = canonicalIngredientCrashLeaseSeconds();
+    $clampedLeases = canonicalIngredientWithBusyRetry(
+        $db,
+        'claim',
+        static fn(): int =>
+            canonicalIngredientClampInheritedLeases(
+                $db,
+                $leaseSeconds
+            )
+    );
+    $configuredMaxAttempts = max(
+        1,
         min(
-            3600,
+            20,
             function_exists('env')
-                ? (int)env('CANONICAL_QUEUE_LEASE_SECONDS', '600')
-                : 600
+                ? (int)env(
+                    'CANONICAL_QUEUE_MAX_ATTEMPTS',
+                    '3'
+                )
+                : 3
         )
     );
-    $db->prepare("
+    $normalizedExhausted = $maxAttempts
+        === $configuredMaxAttempts
+            ? canonicalIngredientWithBusyRetry(
+                $db,
+                'claim',
+                static fn(): int =>
+                    canonicalIngredientNormalizeExhaustedRows(
+                        $db,
+                        $maxAttempts
+                    )
+            )
+            : 0;
+    if (
+        ($clampedLeases > 0 || $normalizedExhausted > 0)
+        && class_exists('EverLog', false)
+    ) {
+        EverLog::warn(
+            'canonical queue startup normalization',
+            [
+                'clamped_leases' => $clampedLeases,
+                'normalized_exhausted' => $normalizedExhausted,
+                'crash_lease_seconds' => $leaseSeconds,
+            ],
+            'canonical_queue'
+        );
+    }
+    $reclaim = $db->prepare("
         UPDATE canonical_processing_queue
         SET status = CASE
                 WHEN attempts >= ? THEN 'failed'
                 ELSE 'pending'
+            END,
+            next_retry_at = CASE
+                WHEN attempts >= ? THEN NULL
+                ELSE CURRENT_TIMESTAMP
+            END,
+            last_error_kind = CASE
+                WHEN attempts >= ? THEN 'lease_exhausted'
+                ELSE 'lease_expired'
             END,
             last_error = CASE
                 WHEN attempts >= ? THEN 'lease_exhausted'
@@ -1834,7 +3583,31 @@ function canonicalIngredientProcessQueueBatch(PDO $db, int $limit, int $maxAttem
         WHERE status = 'in_progress'
           AND lease_expires_at IS NOT NULL
           AND lease_expires_at <= CURRENT_TIMESTAMP
-    ")->execute([$maxAttempts, $maxAttempts]);
+    ");
+    canonicalIngredientWithBusyRetry(
+        $db,
+        'claim',
+        static function () use (
+            $reclaim,
+            $maxAttempts
+        ): void {
+            $reclaim->execute([
+                $maxAttempts,
+                $maxAttempts,
+                $maxAttempts,
+                $maxAttempts,
+            ]);
+        }
+    );
+    $reclaimed = $reclaim->rowCount();
+    if ($reclaimed > 0 && class_exists('EverLog', false)) {
+        EverLog::warn(
+            'canonical crash lease recovered',
+            ['reclaimed' => $reclaimed],
+            'canonical_queue'
+        );
+    }
+
     $stmt = $db->prepare("
         SELECT q.id, q.product_id, q.attempts,
                q.request_generation, q.request_fingerprint
@@ -1842,29 +3615,42 @@ function canonicalIngredientProcessQueueBatch(PDO $db, int $limit, int $maxAttem
         JOIN products p ON p.id = q.product_id
         WHERE q.status IN ('pending', 'failed')
           AND q.attempts < ?
+          AND (
+              q.next_retry_at IS NULL
+              OR q.next_retry_at <= CURRENT_TIMESTAMP
+          )
         ORDER BY q.requested_at ASC, q.id ASC
         LIMIT {$limit}
     ");
     $stmt->execute([$maxAttempts]);
     $queueRows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+    $stmt->closeCursor();
 
     $processed = 0;
     $succeeded = 0;
+    $retried = 0;
     $failed = 0;
     $superseded = 0;
+    $releaseFailed = 0;
     $items = [];
     foreach ($queueRows as $queueRow) {
         $queueId = (int)$queueRow['id'];
         $productId = (int)$queueRow['product_id'];
-        $requestGeneration = (int)$queueRow['request_generation'];
+        $requestGeneration =
+            (int)$queueRow['request_generation'];
+        $requestFingerprint =
+            (string)$queueRow['request_fingerprint'];
         $leaseToken = hash(
             'sha256',
             random_bytes(32) . ':' . $queueId . ':' . hrtime(true)
         );
-        $claim = $db->prepare("
+        $claimStmt = $db->prepare("
             UPDATE canonical_processing_queue
             SET status = 'in_progress',
                 attempts = attempts + 1,
+                next_retry_at = NULL,
+                last_error = '',
+                last_error_kind = '',
                 lease_token = ?,
                 lease_generation = lease_generation + 1,
                 lease_expires_at = datetime(
@@ -1876,156 +3662,249 @@ function canonicalIngredientProcessQueueBatch(PDO $db, int $limit, int $maxAttem
             WHERE id = ?
               AND request_generation = ?
               AND status IN ('pending', 'failed')
+              AND attempts < ?
+              AND (
+                  next_retry_at IS NULL
+                  OR next_retry_at <= CURRENT_TIMESTAMP
+              )
         ");
-        $claim->execute([
-            $leaseToken,
-            $leaseSeconds,
-            $queueId,
-            $requestGeneration,
-        ]);
-        if ($claim->rowCount() !== 1) {
+        canonicalIngredientWithBusyRetry(
+            $db,
+            'claim',
+            static function () use (
+                $claimStmt,
+                $leaseToken,
+                $leaseSeconds,
+                $queueId,
+                $requestGeneration,
+                $maxAttempts
+            ): void {
+                $claimStmt->execute([
+                    $leaseToken,
+                    $leaseSeconds,
+                    $queueId,
+                    $requestGeneration,
+                    $maxAttempts,
+                ]);
+            }
+        );
+        if ($claimStmt->rowCount() !== 1) {
             continue;
         }
         $leaseRead = $db->prepare("
-            SELECT lease_generation
+            SELECT attempts, lease_generation, lease_expires_at
             FROM canonical_processing_queue
             WHERE id = ? AND lease_token = ?
         ");
         $leaseRead->execute([$queueId, $leaseToken]);
-        $leaseGeneration = (int)($leaseRead->fetchColumn() ?: 0);
+        $lease = $leaseRead->fetch(PDO::FETCH_ASSOC) ?: null;
+        $leaseRead->closeCursor();
+        $leaseGeneration =
+            (int)($lease['lease_generation'] ?? 0);
         if ($leaseGeneration <= 0) {
             continue;
         }
+        $claim = [
+            'queue_id' => $queueId,
+            'product_id' => $productId,
+            'attempts' => (int)($lease['attempts'] ?? 0),
+            'request_generation' => $requestGeneration,
+            'request_fingerprint' => $requestFingerprint,
+            'lease_token' => $leaseToken,
+            'lease_generation' => $leaseGeneration,
+            'lease_expires_at' =>
+                (string)($lease['lease_expires_at'] ?? ''),
+        ];
         $processed++;
-        if (function_exists('ingredientOntologyControllerHook')) {
-            ingredientOntologyControllerHook(
-                'canonical_claimed',
-                [
-                    'queue_id' => $queueId,
-                    'product_id' => $productId,
-                    'request_generation' => $requestGeneration,
-                    'lease_token' => $leaseToken,
-                    'lease_generation' => $leaseGeneration,
-                ]
-            );
-        }
-
+        $stage = 'claim_setup';
         try {
+            if (function_exists('ingredientOntologyControllerHook')) {
+                ingredientOntologyControllerHook(
+                    'canonical_claimed',
+                    $claim
+                );
+            }
+            $providerDeadline =
+                canonicalIngredientProviderDeadlineFromLease(
+                    (string)$claim['lease_expires_at'],
+                    $leaseSeconds
+                );
+            $stage = 'work';
             $processor = $GLOBALS[
                 'CANONICAL_QUEUE_TEST_PROCESSOR'
             ] ?? null;
-            $result = (
+            if (
                 defined('RECIPE_BACKEND_TEST_MODE')
                 && RECIPE_BACKEND_TEST_MODE
                 && is_callable($processor)
-            )
-                ? $processor(
+            ) {
+                $result = $processor($db, $productId, $claim);
+                if (!array_key_exists('_apply_canonical', $result)) {
+                    $result['_apply_canonical'] = false;
+                }
+            } else {
+                $result = canonicalIngredientBuildProduct(
                     $db,
                     $productId,
+                    null,
                     [
-                        'queue_id' => $queueId,
-                        'request_generation' => $requestGeneration,
-                        'lease_token' => $leaseToken,
-                        'lease_generation' => $leaseGeneration,
+                        'allow_ai' => false,
+                        'provider_deadline' => $providerDeadline,
                     ]
-                )
-                : canonicalIngredientSyncProduct($db, $productId);
-            $mapped = (int)($result['mapped'] ?? 0);
-            $complete = $db->prepare("
-                UPDATE canonical_processing_queue
-                SET status = 'done',
-                    processed_at = CURRENT_TIMESTAMP,
-                    updated_at = CURRENT_TIMESTAMP,
-                    last_error = '',
-                    lease_token = NULL,
-                    lease_expires_at = NULL
-                WHERE id = ?
-                  AND status = 'in_progress'
-                  AND request_generation = ?
-                  AND lease_token = ?
-                  AND lease_generation = ?
-            ");
-            $complete->execute([
-                $queueId,
-                $requestGeneration,
-                $leaseToken,
-                $leaseGeneration,
-            ]);
-            if ($complete->rowCount() !== 1) {
-                $superseded++;
-                $items[] = [
-                    'product_id' => $productId,
-                    'status' => 'superseded',
-                    'mapped' => $mapped,
-                ];
-                continue;
+                );
             }
-            if (function_exists('recipeJobEnqueueTaxonomyReady')) {
-                recipeJobEnqueueTaxonomyReady($db, $productId);
-            }
-            $succeeded++;
-            $items[] = [
-                'product_id' => $productId,
-                'status' => 'done',
-                'mapped' => $mapped,
-                'decision' => (string)($result['decision'] ?? 'heuristic'),
-            ];
-        } catch (Throwable $e) {
-            $message = mb_substr($e->getMessage(), 0, 500, 'UTF-8');
-            $failure = $db->prepare("
-                UPDATE canonical_processing_queue
-                SET status = 'failed',
-                    last_error = ?,
-                    lease_token = NULL,
-                    lease_expires_at = NULL,
-                    updated_at = CURRENT_TIMESTAMP
-                WHERE id = ?
-                  AND status = 'in_progress'
-                  AND request_generation = ?
-                  AND lease_token = ?
-                  AND lease_generation = ?
-            ");
-            $failure->execute([
-                $message,
-                $queueId,
-                $requestGeneration,
-                $leaseToken,
-                $leaseGeneration,
-            ]);
-            if ($failure->rowCount() !== 1) {
+            $stage = 'apply';
+            $outcome = canonicalIngredientApplyQueueResult(
+                $db,
+                $claim,
+                $result
+            );
+            if (($outcome['status'] ?? '') !== 'done') {
                 $superseded++;
+                if (!empty($outcome['requeued'])) {
+                    canonicalIngredientWake();
+                }
                 if (class_exists('EverLog', false)) {
                     EverLog::warn(
-                        'canonical queue crash superseded by newer request',
+                        'canonical apply fence rejected stale work',
                         [
-                            'product_id' => $productId,
                             'queue_id' => $queueId,
-                            'request_generation' => $requestGeneration,
-                            'error' => $message,
-                        ]
+                            'product_id' => $productId,
+                            'request_generation' =>
+                                $requestGeneration,
+                            'reason' =>
+                                (string)($outcome['reason'] ?? ''),
+                        ],
+                        'canonical_queue'
                     );
                 }
                 $items[] = [
                     'product_id' => $productId,
                     'status' => 'superseded',
+                    'reason' =>
+                        (string)($outcome['reason'] ?? ''),
+                    'mapped' => (int)($result['mapped'] ?? 0),
                 ];
                 continue;
             }
+            $succeeded++;
+            $items[] = [
+                'product_id' => $productId,
+                'status' => 'done',
+                'mapped' => (int)($result['mapped'] ?? 0),
+                'decision' =>
+                    (string)($result['decision'] ?? 'heuristic'),
+            ];
+        } catch (Throwable $error) {
+            $primaryContext = [
+                'stage' => $stage,
+                'queue_id' => $queueId,
+                'product_id' => $productId,
+                'request_generation' => $requestGeneration,
+                'lease_generation' => $leaseGeneration,
+            ] + canonicalIngredientSqliteErrorContext($error);
             if (class_exists('EverLog', false)) {
-                EverLog::exception($e, 'canonical_queue');
+                EverLog::exception(
+                    $error,
+                    'canonical_queue_primary',
+                    $primaryContext
+                );
             }
-            $failed++;
-            $items[] = ['product_id' => $productId, 'status' => 'failed', 'error' => $message];
+            try {
+                $release = canonicalIngredientReleaseClaim(
+                    $db,
+                    $claim,
+                    $error,
+                    $stage,
+                    $maxAttempts
+                );
+            } catch (Throwable $releaseError) {
+                $releaseFailed++;
+                if (class_exists('EverLog', false)) {
+                    $releaseContext =
+                        canonicalIngredientSqliteErrorContext(
+                            $releaseError
+                        );
+                    EverLog::exception(
+                        $releaseError,
+                        'canonical_queue_release',
+                        [
+                            'primary_error' => mb_substr(
+                                $error->getMessage(),
+                                0,
+                                300,
+                                'UTF-8'
+                            ),
+                            'primary_stage' => $stage,
+                            'queue_id' => $queueId,
+                            'product_id' => $productId,
+                            'request_generation' =>
+                                $requestGeneration,
+                            'lease_generation' => $leaseGeneration,
+                            'release_error_class' =>
+                                $releaseContext['error_class'],
+                            'release_sqlstate' =>
+                                $releaseContext['sqlstate'],
+                            'release_sqlite_code' =>
+                                $releaseContext['sqlite_code'],
+                            'release_sqlite_message' =>
+                                $releaseContext['sqlite_message'],
+                        ]
+                    );
+                }
+                $items[] = [
+                    'product_id' => $productId,
+                    'status' => 'release_failed',
+                    'error' => mb_substr(
+                        $error->getMessage(),
+                        0,
+                        500,
+                        'UTF-8'
+                    ),
+                ];
+                continue;
+            }
+            $releaseStatus = (string)($release['status'] ?? '');
+            if ($releaseStatus === 'retry') {
+                $retried++;
+                canonicalIngredientWake();
+            } elseif ($releaseStatus === 'failed') {
+                $failed++;
+            } else {
+                $superseded++;
+            }
+            $items[] = [
+                'product_id' => $productId,
+                'status' => $releaseStatus,
+                'stage' => $stage,
+                'error' => mb_substr(
+                    $error->getMessage(),
+                    0,
+                    500,
+                    'UTF-8'
+                ),
+                'last_error_kind' =>
+                    (string)($release['last_error_kind'] ?? ''),
+                'next_retry_at' =>
+                    $release['next_retry_at'] ?? null,
+            ];
         }
     }
 
-    $stats = canonicalIngredientQueueStats($db);
+    $stats = canonicalIngredientQueueStats($db, $maxAttempts);
     return [
         'processed' => $processed,
         'succeeded' => $succeeded,
+        'retried' => $retried,
         'failed' => $failed,
+        'release_failed' => $releaseFailed,
         'superseded' => $superseded,
+        'reclaimed' => $reclaimed,
+        'clamped_leases' => $clampedLeases,
+        'normalized_exhausted' => $normalizedExhausted,
         'pending' => $stats['pending'] ?? 0,
+        'due' => $stats['due'] ?? 0,
+        'retry_scheduled' => $stats['retry_scheduled'] ?? 0,
         'items' => $items,
     ];
 }
@@ -2185,35 +4064,29 @@ function canonicalIngredientUsdaLookupOnSave(): bool {
 }
 
 function canonicalIngredientUsdaCacheLoad(): array {
-    static $cache = null;
-    if (is_array($cache)) {
-        return $cache;
-    }
-    $cache = [];
-    $path = defined('USDA_FDC_CACHE_PATH') ? USDA_FDC_CACHE_PATH : (__DIR__ . '/../../data/usda_fdc_lookup_cache.json');
-    if (is_file($path)) {
-        $raw = @file_get_contents($path);
-        $decoded = $raw ? json_decode($raw, true) : null;
-        if (is_array($decoded)) {
-            $cache = $decoded;
-        }
-    }
-    return $cache;
+    return canonicalIngredientJsonCacheState(
+        canonicalIngredientUsdaCachePath()
+    );
 }
 
 function canonicalIngredientUsdaCacheStore(string $key, array $entry): void {
-    $cache = canonicalIngredientUsdaCacheLoad();
-    $cache[$key] = $entry;
-    $path = defined('USDA_FDC_CACHE_PATH') ? USDA_FDC_CACHE_PATH : (__DIR__ . '/../../data/usda_fdc_lookup_cache.json');
-    $dir = dirname($path);
-    if (!is_dir($dir)) {
-        @mkdir($dir, 0775, true);
-    }
-    $tmp = $path . '.tmp';
-    @file_put_contents($tmp, json_encode($cache, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE), LOCK_EX);
-    if (is_file($tmp)) {
-        @rename($tmp, $path);
-    }
+    canonicalIngredientJsonCacheStore(
+        canonicalIngredientUsdaCachePath(),
+        $key,
+        $entry
+    );
+}
+
+function canonicalIngredientUsdaCachePublish(
+    string $key,
+    array $entry
+): bool {
+    return canonicalIngredientJsonCachePublishBestEffort(
+        'usda_fdc',
+        canonicalIngredientUsdaCachePath(),
+        $key,
+        $entry
+    );
 }
 
 function canonicalIngredientUsdaPreferredQuery(string $slug, string $name): string {
@@ -2373,21 +4246,49 @@ function canonicalIngredientUsdaSelectBest(array $foods, string $name, string $q
     return $bestScore >= 35 ? $best : null;
 }
 
-function canonicalIngredientUsdaThrottle(): void {
+function canonicalIngredientUsdaThrottle(
+    ?array $providerDeadline = null
+): void {
     static $lastRequestAt = 0.0;
     $intervalMs = max(0, (int)(function_exists('env') ? env('USDA_FDC_MIN_REQUEST_INTERVAL_MS', '4000') : '4000'));
     if ($intervalMs <= 0) {
+        canonicalIngredientProviderRequireBudget(
+            $providerDeadline,
+            'usda_after_throttle'
+        );
         return;
     }
     $now = microtime(true);
     $elapsedMs = ($now - $lastRequestAt) * 1000;
     if ($lastRequestAt > 0 && $elapsedMs < $intervalMs) {
-        usleep((int)(($intervalMs - $elapsedMs) * 1000));
+        $sleepUs = (int)(($intervalMs - $elapsedMs) * 1000);
+        $remaining = canonicalIngredientProviderRequireBudget(
+            $providerDeadline,
+            'usda_before_throttle'
+        );
+        if (
+            $remaining !== null
+            && $sleepUs >= (int)floor($remaining * 1000000)
+        ) {
+            throw new CanonicalIngredientProviderBudgetExceeded(
+                'canonical provider budget exhausted at usda_throttle'
+            );
+        }
+        usleep($sleepUs);
     }
     $lastRequestAt = microtime(true);
+    canonicalIngredientProviderRequireBudget(
+        $providerDeadline,
+        'usda_after_throttle'
+    );
 }
 
-function canonicalIngredientUsdaLookup(string $name, string $slug = '', string $category = ''): ?array {
+function canonicalIngredientUsdaLookup(
+    string $name,
+    string $slug = '',
+    string $category = '',
+    ?array $providerDeadline = null
+): ?array {
     static $circuitUntil = 0;
     if (!canonicalIngredientUsdaEnabled() || trim($name) === '' || time() < $circuitUntil) {
         return null;
@@ -2406,10 +4307,48 @@ function canonicalIngredientUsdaLookup(string $name, string $slug = '', string $
     if (is_array($cached) && isset($cached['ts']) && (time() - (int)$cached['ts']) < $ttlSeconds) {
         return !empty($cached['found']) && is_array($cached['usda_fdc'] ?? null) ? $cached['usda_fdc'] : null;
     }
+    if (
+        defined('RECIPE_BACKEND_TEST_MODE')
+        && RECIPE_BACKEND_TEST_MODE
+        && is_callable(
+            $GLOBALS['CANONICAL_USDA_TEST_LOOKUP'] ?? null
+        )
+    ) {
+        canonicalIngredientProviderRequireBudget(
+            $providerDeadline,
+            'usda_test_before_request'
+        );
+        $fdc = ($GLOBALS['CANONICAL_USDA_TEST_LOOKUP'])(
+            $name,
+            $slug,
+            $category
+        );
+        canonicalIngredientProviderRequireBudget(
+            $providerDeadline,
+            'usda_test_after_request'
+        );
+        canonicalIngredientUsdaCachePublish($cacheKey, [
+            'ts' => time(),
+            'found' => is_array($fdc),
+            'query' => $query,
+            'usda_fdc' => is_array($fdc) ? $fdc : null,
+            'reason' => is_array($fdc) ? '' : 'test_negative',
+        ]);
+        return is_array($fdc) ? $fdc : null;
+    }
 
-    canonicalIngredientUsdaThrottle();
+    canonicalIngredientProviderRequireBudget(
+        $providerDeadline,
+        'usda_before_throttle'
+    );
+    canonicalIngredientUsdaThrottle($providerDeadline);
     $apiKey = trim((string)env('USDA_FDC_API_KEY', ''));
     $timeout = max(2, (int)env('USDA_FDC_TIMEOUT_SEC', '8'));
+    $timeoutMs = canonicalIngredientProviderTimeoutMilliseconds(
+        $providerDeadline,
+        $timeout,
+        'usda_before_request'
+    );
     $userAgent = env('USDA_FDC_USER_AGENT', 'EverShelf/1.0 (USDA FDC integration; https://github.com/SFenton/EverShelf)');
     $url = 'https://api.nal.usda.gov/fdc/v1/foods/search?' . http_build_query([
         'api_key' => $apiKey,
@@ -2421,8 +4360,8 @@ function canonicalIngredientUsdaLookup(string $name, string $slug = '', string $
     $ch = curl_init($url);
     curl_setopt_array($ch, [
         CURLOPT_RETURNTRANSFER => true,
-        CURLOPT_TIMEOUT => $timeout,
-        CURLOPT_CONNECTTIMEOUT => min(3, $timeout),
+        CURLOPT_TIMEOUT_MS => $timeoutMs,
+        CURLOPT_CONNECTTIMEOUT_MS => min(3000, $timeoutMs),
         CURLOPT_FOLLOWLOCATION => false,
         CURLOPT_HTTPHEADER => [
             'Accept: application/json',
@@ -2437,6 +4376,10 @@ function canonicalIngredientUsdaLookup(string $name, string $slug = '', string $
     $headerSize = (int)curl_getinfo($ch, CURLINFO_HEADER_SIZE);
     $err = curl_error($ch);
     curl_close($ch);
+    canonicalIngredientProviderRequireBudget(
+        $providerDeadline,
+        'usda_after_request'
+    );
 
     $headers = is_string($response) ? substr($response, 0, $headerSize) : '';
     $body = is_string($response) ? substr($response, $headerSize) : '';
@@ -2458,7 +4401,7 @@ function canonicalIngredientUsdaLookup(string $name, string $slug = '', string $
     $foods = $decoded['foods'] ?? [];
     $best = is_array($foods) ? canonicalIngredientUsdaSelectBest($foods, $name, $query) : null;
     if (!$best) {
-        canonicalIngredientUsdaCacheStore($cacheKey, ['ts' => time(), 'found' => false, 'query' => $query]);
+        canonicalIngredientUsdaCachePublish($cacheKey, ['ts' => time(), 'found' => false, 'query' => $query]);
         return null;
     }
 
@@ -2471,22 +4414,30 @@ function canonicalIngredientUsdaLookup(string $name, string $slug = '', string $
         'source' => 'usda_fdc',
         'match_score' => (int)$best['_match_score'],
     ];
-    canonicalIngredientUsdaCacheStore($cacheKey, ['ts' => time(), 'found' => true, 'query' => $query, 'usda_fdc' => $fdc]);
+    canonicalIngredientUsdaCachePublish($cacheKey, ['ts' => time(), 'found' => true, 'query' => $query, 'usda_fdc' => $fdc]);
     return $fdc;
 }
 
-function canonicalIngredientEnrichMappingsWithUsda(array $mappings): array {
+function canonicalIngredientEnrichMappingsWithUsda(
+    array $mappings,
+    ?array $providerDeadline = null
+): array {
     if (!canonicalIngredientUsdaLookupOnSave()) {
         return $mappings;
     }
     foreach ($mappings as &$mapping) {
+        canonicalIngredientProviderRequireBudget(
+            $providerDeadline,
+            'usda_between_mappings'
+        );
         if (!empty($mapping['external_ids']['usda_fdc'])) {
             continue;
         }
         $fdc = canonicalIngredientUsdaLookup(
             (string)($mapping['name'] ?? ''),
             (string)($mapping['slug'] ?? ''),
-            (string)($mapping['category'] ?? '')
+            (string)($mapping['category'] ?? ''),
+            $providerDeadline
         );
         if ($fdc) {
             $mapping['external_ids']['usda_fdc'] = $fdc;

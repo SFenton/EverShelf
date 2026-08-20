@@ -41,8 +41,19 @@ for database_file in \
     /var/www/html/data/evershelf.db \
     /var/www/html/data/evershelf.db-wal \
     /var/www/html/data/evershelf.db-shm \
-    /var/www/html/data/evershelf.db.migration.lock
+    /var/www/html/data/evershelf.db.migration.lock \
+    /var/www/html/data/canonical_queue.lock \
+    /var/www/html/data/.canonical-queue-worker.lock \
+    /var/www/html/data/foodon_lookup_cache.json.lock \
+    /var/www/html/data/usda_fdc_lookup_cache.json.lock
 do
+    case "$database_file" in
+        *.lock)
+            if [ ! -e "$database_file" ]; then
+                : > "$database_file"
+            fi
+            ;;
+    esac
     if [ -e "$database_file" ]; then
         chown www-data:www-data "$database_file"
         chmod 0664 "$database_file"

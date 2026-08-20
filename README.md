@@ -25,7 +25,7 @@
 [![SQLite](https://img.shields.io/badge/SQLite-3-blue.svg)](https://www.sqlite.org/)
 [![Docker](https://img.shields.io/badge/Docker-Ready-2496ED.svg)](Dockerfile)
 [![i18n](https://img.shields.io/badge/i18n-IT%20%7C%20EN%20%7C%20DE%20%7C%20FR%20%7C%20ES-orange.svg)](translations/)
-[![Version](https://img.shields.io/badge/version-1.8.3-brightgreen.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-1.14.0-brightgreen.svg)](CHANGELOG.md)
 [![GitHub stars](https://img.shields.io/github/stars/dadaloop82/EverShelf?style=social)](https://github.com/dadaloop82/EverShelf/stargazers)
 [![Last commit](https://img.shields.io/github/last-commit/dadaloop82/EverShelf/main)](https://github.com/dadaloop82/EverShelf/commits/main)
 [![Contributors](https://img.shields.io/github/contributors/dadaloop82/EverShelf)](https://github.com/dadaloop82/EverShelf/graphs/contributors)
@@ -801,6 +801,24 @@ activation and queue runs share the background-writer lock only during bounded
 live import and publication phases. Copied generation and validation run
 without it; web scans stay independent and force a safe rebase if their inputs
 change.
+
+Canonical enrichment performs FoodOn/USDA work before opening a write
+transaction. Its short apply transaction rechecks the product fingerprint and
+unexpired queue lease, writes mappings/tags, marks the request done, and
+enqueues taxonomy-score invalidation atomically. Ordinary SQLite contention
+retries the prepared result and then uses bounded due scheduling rather than
+waiting for the 120-second crash lease. Provider requests must finish before
+the lease-derived deadline (about 90 seconds by default), otherwise the claim
+is explicitly released for retry. Default total executions retry after 2 and
+8 seconds before terminal failure; the 30-second backoff exists only with four
+or more configured attempts. FoodOn hierarchy failures use a short 15-minute
+negative TTL, while definitive misses retain the normal day-based TTL.
+Cache-file publication is best-effort and merge-safe for different keys, but
+never waits behind another publisher; a fresh positive is not replaced by a
+transient hierarchy failure. Concurrent cold misses across processes are not
+single-flight deduplicated.
+`processing_status` exposes lock availability, due/stale work, active leases,
+recent terminal failures, and overdue leases.
 
 ### Backup (Optional)
 

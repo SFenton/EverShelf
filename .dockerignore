@@ -17,7 +17,9 @@ data/*.db-shm
 data/backups/
 data/logs/
 data/ontology-activation/
+data/tmp/
 data/*.json
+data/*.tmp.*
 data/cron.log
 data/smart_shopping_cache.json
 data/bring_token.json

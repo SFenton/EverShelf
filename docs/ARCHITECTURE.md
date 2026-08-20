@@ -32,6 +32,40 @@ dispensa/
 - Secrets (`HA_TOKEN`, `TTS_TOKEN`, `GEMINI_API_KEY`) stay in `.env`; `get_settings` exposes only `*_set` flags.
 - **`GH_ISSUE_TOKEN_ENC`** + **`GH_ISSUE_TOKEN_KEY`**: AES-256-GCM encrypted GitHub Issues token.
 
+## Wake-driven canonical enrichment
+
+- Product writes enqueue canonical work durably in the same foreground SQLite
+  transaction and send a nonblocking Unix datagram only after commit. They do
+  not perform provider or model calls.
+- The singleton canonical worker computes taxonomy, FoodOn, and USDA evidence
+  without a database transaction and under a deadline derived from the crash
+  lease minus a reserved apply window. Budget exhaustion explicitly releases
+  the claim; it never waits for crash reclaim.
+- Provider caches use resident signature validation plus locked atomic
+  read-modify-write publication. Provider paths never wait behind a held cache
+  lock: busy or failed publication is logged, and the resident process retains
+  the valid result. Different-key writers merge safely when published, and a
+  transient hierarchy failure cannot replace a fresh positive. Cross-process
+  cold misses for the same key are intentionally not single-flight
+  deduplicated. FoodOn hierarchy failures store no partial term and use a short
+  transient TTL.
+- Apply uses one short `BEGIN IMMEDIATE` transaction. It verifies the current
+  request generation, lease token/generation/expiry, and product fingerprint
+  before writing canonical mappings. Canonical rows, queue completion, and the
+  taxonomy-ready score job commit together.
+- SQLite contention retries only the prepared result. Exhausted handled work is
+  explicitly released to due scheduling. Three total executions use 2- and
+  8-second delays before terminal failure; the 30-second third delay requires
+  at least four executions. The tunable 120-second crash lease is reserved for
+  process recovery, and inherited longer claims are clamped without changing
+  their live token. The worker sleeps
+  until the earliest retry, lease expiry, wake datagram, or 30-second safety
+  poll.
+- The resident worker and five-minute cron fallback share a writable canonical
+  queue lock. An unavailable lock fails closed instead of allowing overlapping
+  provider work. Status reports lock availability and treats blocked or stale
+  due work as actionable.
+
 ## Recipe metadata boundary
 
 - `recipe_catalog_detail` is a bounded projection, not a persistence-row endpoint.
