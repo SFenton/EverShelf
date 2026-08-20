@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.13.19] - 2026-08-19
+
+### Fixed
+- Any copied batch whose claimed jobs all return the controller's typed `retry`
+  status is advisory pending work, regardless of the individual retry reason.
+
 ## [1.13.18] - 2026-08-19
 
 ### Fixed
