@@ -1592,7 +1592,10 @@ try {
     unset($GLOBALS['CANONICAL_QUEUE_TEST_PROCESSOR']);
     $assert(
         $stale['superseded'] === 1
-        && $row($db, $staleProduct)['request_generation'] === 2
+        && (int)$row(
+            $db,
+            $staleProduct
+        )['request_generation'] === 2
         && $mappingSlugs($db, $staleProduct) === [],
         'An older request generation must write no canonical data'
     );
