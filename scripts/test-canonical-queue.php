@@ -1176,6 +1176,11 @@ try {
         && str_contains($logText, '"stage":"release"'),
         'Primary and release-contention diagnostics must both be retained'
     );
+    $db->prepare(
+        'DELETE FROM canonical_processing_queue WHERE product_id = ?'
+    )->execute([$incidentProduct]);
+    $db->prepare('DELETE FROM products WHERE id = ?')
+       ->execute([$incidentProduct]);
 
     $contentionProduct = $insertProduct($db, 'Contention proof');
     canonicalIngredientEnqueueProduct(
