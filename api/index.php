@@ -3433,30 +3433,27 @@ function productSaveRefreshIdentity(
         'product_identity_changed',
         false
     );
-    if (!empty($admission['score_required']) && !$scoreAlreadyQueued) {
-        $inventory = $db->prepare("
-            SELECT 1
-            FROM inventory
-            WHERE product_id = ? AND quantity > 0
-            LIMIT 1
-        ");
-        $inventory->execute([$productId]);
-        if ($inventory->fetchColumn()) {
-            recipeJobEnqueueInventoryChanged(
+    if (
+        !$scoreAlreadyQueued
+        && (
+            !empty($admission['changed'])
+            || !empty($admission['score_required'])
+        )
+    ) {
+        recipeJobEnqueueInventoryChanged(
+            $db,
+            $productId,
+            'product_identity_changed'
+        );
+        $admission =
+            ingredientOntologyV3IdentityAdmissionPublishProduct(
                 $db,
                 $productId,
-                'product_identity_changed'
+                null,
+                'product_identity_changed',
+                false
             );
-            $admission =
-                ingredientOntologyV3IdentityAdmissionPublishProduct(
-                    $db,
-                    $productId,
-                    null,
-                    'product_identity_changed',
-                    false
-                );
-            $admission['score_queued'] = true;
-        }
+        $admission['score_queued'] = true;
     }
     return $admission;
 }

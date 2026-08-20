@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.15.2] - 2026-08-20
+
+### Fixed
+- Product saves now queue a sparse source publication even before inventory is
+  added, so rapid save-then-stock flows cannot expose an unscoped source
+  revision to the score worker.
+- Sparse snapshots adopt every product owner present in the bounded source
+  mutation journal, preserving prefix publication when a later product save
+  lands between pending discovery and the write snapshot instead of entering
+  the 30-second failure backoff.
+
 ## [1.15.1] - 2026-08-20
 
 ### Fixed

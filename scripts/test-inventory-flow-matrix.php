@@ -187,6 +187,14 @@ $assert(
     ")->fetchColumn() === 1,
     'Manual no-barcode and prepared-food products must commit'
 );
+$assert(
+    (int)$db->query("
+        SELECT COUNT(*)
+        FROM recipe_score_pending_products
+        WHERE product_id IN (" . implode(',', $productIds) . ")
+    ")->fetchColumn() === count($productIds),
+    'Product saves must queue sparse source publication before inventory arrives'
+);
 
 $adds = [];
 foreach ([

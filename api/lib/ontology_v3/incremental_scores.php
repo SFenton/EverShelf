@@ -226,6 +226,34 @@ function ingredientOntologyV3IncrementalSourceDeltaIsProductOnly(
     return true;
 }
 
+function ingredientOntologyV3IncrementalSourceProductIds(
+    PDO $db,
+    array $parent,
+    array $state
+): array {
+    $from = (int)$parent['ontology_source_revision'];
+    $through = (int)$state['ontology_source_revision'];
+    if ($through <= $from) {
+        return [];
+    }
+    $stmt = $db->prepare("
+        SELECT DISTINCT owner_id
+        FROM recipe_score_mutations
+        WHERE domain = 'source'
+          AND revision > ?
+          AND revision <= ?
+          AND owner_type = 'product'
+          AND owner_id IS NOT NULL
+          AND owner_id > 0
+        ORDER BY owner_id
+    ");
+    $stmt->execute([$from, $through]);
+    return array_map(
+        'intval',
+        $stmt->fetchAll(PDO::FETCH_COLUMN)
+    );
+}
+
 function ingredientOntologyV3IncrementalScopedParentErrors(
     PDO $db,
     array $parent,
@@ -1960,6 +1988,29 @@ function ingredientOntologyV3IncrementalRebuild(
             'intval',
             array_keys($recipeOperations)
         );
+        $productIds = array_values(array_unique(array_merge(
+            $productIds,
+            ingredientOntologyV3IncrementalSourceProductIds(
+                $db,
+                $parent,
+                $state
+            )
+        )));
+        sort($productIds, SORT_NUMERIC);
+        if (
+            count($productIds)
+                > ingredientOntologyV3IncrementalProductLimit()
+        ) {
+            return [
+                'rebuilt' => false,
+                'reason' => 'full_rebuild_required',
+                'errors' => [
+                    'incremental scoped product limit exceeded',
+                ],
+                'pending_product_count_at_least' =>
+                    ingredientOntologyV3IncrementalProductLimit() + 1,
+            ];
+        }
         $parentErrors =
             ingredientOntologyV3IncrementalScopedParentErrors(
                 $db,
@@ -2063,6 +2114,24 @@ function ingredientOntologyV3IncrementalRebuild(
                 'intval',
                 array_keys($recipeOperations)
             );
+            $state = recipeScoreState($db);
+            $productIds = array_values(array_unique(array_merge(
+                $productIds,
+                ingredientOntologyV3IncrementalSourceProductIds(
+                    $db,
+                    $parent,
+                    $state
+                )
+            )));
+            sort($productIds, SORT_NUMERIC);
+            if (
+                count($productIds)
+                    > ingredientOntologyV3IncrementalProductLimit()
+            ) {
+                throw new RuntimeException(
+                    'incremental scoped product limit exceeded'
+                );
+            }
             recipeScoreSetWorkState(
                 $db,
                 'preparing',
@@ -2073,7 +2142,6 @@ function ingredientOntologyV3IncrementalRebuild(
                 count($productIds),
                 count($pendingRecipeIds)
             );
-            $state = recipeScoreState($db);
             $snapshotParent = recipeScoreActiveRevision($db);
             if (
                 $snapshotParent === null

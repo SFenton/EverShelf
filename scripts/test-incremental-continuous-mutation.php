@@ -442,6 +442,81 @@ $assert(
     'Source-fence harness must restore product and inventory state'
 );
 
+$unscopedProductRevision = $mutate(
+    $db,
+    $inventoryId,
+    $productId,
+    $originalQuantity + 1,
+    'unscoped_product_source_probe'
+);
+$db->exec("
+    INSERT INTO products (
+        name, brand, category, prepared_food
+    )
+    VALUES (
+        'Unscoped Product Source Fixture',
+        '',
+        '',
+        0
+    )
+");
+$unscopedProductId = (int)$db->lastInsertId();
+$unscopedProduct = ingredientOntologyV3IncrementalRebuild(
+    $db,
+    true,
+    100
+);
+$assert(
+    !empty($unscopedProduct['rebuilt'])
+    && (int)$unscopedProduct['inventory_revision']
+        === $unscopedProductRevision
+    && in_array(
+        $unscopedProductId,
+        (array)$unscopedProduct['product_ids'],
+        true
+    ),
+    'Product source mutations without an existing pending row must join the sparse snapshot'
+);
+$db->beginTransaction();
+try {
+    $db->prepare("
+        UPDATE inventory
+        SET quantity = ?, updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+    ")->execute([$originalQuantity, $inventoryId]);
+    $unscopedRestoreRevision = recipeScoreMarkProductDirty(
+        $db,
+        $productId,
+        'unscoped_product_source_restore'
+    );
+    recipeScoreMarkProductDirty(
+        $db,
+        $unscopedProductId,
+        'unscoped_product_source_delete'
+    );
+    $db->prepare("
+        DELETE FROM products WHERE id = ?
+    ")->execute([$unscopedProductId]);
+    $db->commit();
+} catch (Throwable $error) {
+    if ($db->inTransaction()) {
+        $db->rollBack();
+    }
+    throw $error;
+}
+$unscopedRestored =
+    ingredientOntologyV3IncrementalRebuild($db, true, 100);
+$assert(
+    !empty($unscopedRestored['rebuilt'])
+    && (int)$unscopedRestored['inventory_revision']
+        >= $unscopedRestoreRevision
+    && (int)$db->query("
+        SELECT COUNT(*) FROM products
+        WHERE id = {$unscopedProductId}
+    ")->fetchColumn() === 0,
+    'Unscoped product source harness must restore product and inventory state'
+);
+
 echo json_encode([
     'success' => true,
     'assertions' => $assertions,
@@ -458,4 +533,7 @@ echo json_encode([
     'post_commit_restored' => $postCommitRestored,
     'source_fence' => $sourceFence,
     'source_fence_restored' => $sourceFenceRestored,
+    'unscoped_product_source' => $unscopedProduct,
+    'unscoped_product_source_restored' =>
+        $unscopedRestored,
 ], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . PHP_EOL;
