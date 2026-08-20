@@ -3416,7 +3416,7 @@ function productSaveRefreshIdentity(
     bool $scoreAlreadyQueued = false
 ): array {
     if (!function_exists(
-        'ingredientOntologyV3IdentityAnnexRefreshProduct'
+        'ingredientOntologyV3IdentityAdmissionPublishProduct'
     )) {
         return [
             'available' => false,
@@ -3425,11 +3425,15 @@ function productSaveRefreshIdentity(
             'reason' => 'identity_annex_unavailable',
         ];
     }
-    $admission = ingredientOntologyV3IdentityAnnexRefreshProduct(
+    $admission =
+        ingredientOntologyV3IdentityAdmissionPublishProduct(
         $db,
-        $productId
+        $productId,
+        null,
+        'product_identity_changed',
+        false
     );
-    if (!empty($admission['changed']) && !$scoreAlreadyQueued) {
+    if (!empty($admission['score_required']) && !$scoreAlreadyQueued) {
         $inventory = $db->prepare("
             SELECT 1
             FROM inventory
@@ -3443,6 +3447,14 @@ function productSaveRefreshIdentity(
                 $productId,
                 'product_identity_changed'
             );
+            $admission =
+                ingredientOntologyV3IdentityAdmissionPublishProduct(
+                    $db,
+                    $productId,
+                    null,
+                    'product_identity_changed',
+                    false
+                );
             $admission['score_queued'] = true;
         }
     }
@@ -3932,9 +3944,12 @@ function setProductPreparedFood(PDO $db): void {
                     $id
                 );
             $identityAdmission =
-                ingredientOntologyV3IdentityAnnexRefreshProduct(
+                ingredientOntologyV3IdentityAdmissionPublishProduct(
                     $db,
-                    $id
+                    $id,
+                    null,
+                    'product_prepared_food_flag',
+                    false
                 );
             $db->commit();
         } catch (Throwable $e) {

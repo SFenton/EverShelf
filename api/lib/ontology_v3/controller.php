@@ -7015,6 +7015,104 @@ function ingredientOntologyControllerStreamEpoch(
         return $stmt->rowCount();
     }
 
+    function ingredientOntologyControllerSupersedeResolvedIdentityWork(
+        PDO $db,
+        int $subjectId,
+        int $sourceJobId
+    ): array {
+        if ($subjectId <= 0) {
+            return [
+                'generation_intents' => 0,
+                'provisional_items' => 0,
+                'quarantine_retries' => 0,
+                'jobs' => 0,
+            ];
+        }
+        $generationIntents = 0;
+        if (ingredientOntologyControllerTableExists(
+            $db,
+            'ontology_generation_intents'
+        )) {
+            $stmt = $db->prepare("
+                UPDATE ontology_generation_intents
+                SET status = 'superseded',
+                    last_error =
+                        'Resolved by deterministic identity admission.',
+                    finished_at = CURRENT_TIMESTAMP,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE subject_id = ?
+                  AND source_job_id <> ?
+                  AND intent_kind IN (
+                      'validated_plan', 'provisional'
+                  )
+                  AND status IN ('pending', 'queued')
+            ");
+            $stmt->execute([$subjectId, $sourceJobId]);
+            $generationIntents = $stmt->rowCount();
+        }
+        $provisionalItems = 0;
+        if (ingredientOntologyControllerTableExists(
+            $db,
+            'ontology_provisional_queue'
+        )) {
+            $stmt = $db->prepare("
+                UPDATE ontology_provisional_queue
+                SET status = 'resolved',
+                    reason =
+                        'Resolved by deterministic identity admission.',
+                    next_attempt_at = NULL,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE subject_id = ?
+                  AND status IN ('pending', 'plan_ready', 'retry')
+            ");
+            $stmt->execute([$subjectId]);
+            $provisionalItems = $stmt->rowCount();
+        }
+        $quarantineRetries = 0;
+        if (ingredientOntologyControllerTableExists(
+            $db,
+            'ontology_quarantine_retries'
+        )) {
+            $stmt = $db->prepare("
+                UPDATE ontology_quarantine_retries
+                SET status = 'resolved',
+                    last_error =
+                        'Resolved by deterministic identity admission.',
+                    resolved_at = CURRENT_TIMESTAMP,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE subject_id = ?
+                  AND status IN (
+                      'pending', 'scheduled', 'circuit_open'
+                  )
+            ");
+            $stmt->execute([$subjectId]);
+            $quarantineRetries = $stmt->rowCount();
+        }
+        $jobs = 0;
+        $stmt = $db->prepare("
+            UPDATE ontology_controller_jobs
+            SET status = 'superseded',
+                last_error_kind = NULL,
+                last_error =
+                    'Superseded by deterministic identity admission.',
+                next_attempt_at = NULL,
+                finished_at = CURRENT_TIMESTAMP,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE subject_id = ?
+              AND id <> ?
+              AND job_type = 'subject_resolution'
+              AND status IN ('queued', 'retry')
+        ");
+        $stmt->execute([$subjectId, $sourceJobId]);
+        $jobs = $stmt->rowCount();
+        return [
+            'generation_intents' => $generationIntents,
+            'provisional_items' => $provisionalItems,
+            'quarantine_retries' => $quarantineRetries,
+            'jobs' => $jobs,
+        ];
+    }
+
     function ingredientOntologyControllerActiveOccurrences(
         PDO $db,
         int $subjectId
@@ -7090,40 +7188,65 @@ function ingredientOntologyControllerStreamEpoch(
             if (!$productOccurrences) {
                 return null;
             }
-            $owner = $productOccurrences[count($productOccurrences) - 1];
+            if (count($productOccurrences) !== count($occurrences)) {
+                return null;
+            }
             $product = $db->prepare("
                 SELECT id, name, brand, category, prepared_food
                 FROM products
                 WHERE id = ?
             ");
-            $product->execute([(int)$owner['owner_id']]);
-            $row = $product->fetch(PDO::FETCH_ASSOC);
-            if (
-                !$row
-                || !hash_equals(
+            $admissions = [];
+            $semanticHash = null;
+            foreach ($productOccurrences as $owner) {
+                $product->execute([(int)$owner['owner_id']]);
+                $row = $product->fetch(PDO::FETCH_ASSOC);
+                if (
+                    !$row
+                    || !hash_equals(
+                        (string)$owner['owner_fingerprint'],
+                        ingredientOntologyV3ProductOwnerFingerprint(
+                            $row
+                        )
+                    )
+                ) {
+                    return null;
+                }
+                $resolution =
+                    ingredientOntologyV3IdentityAnnexResolution(
+                        $db,
+                        $version,
+                        $row
+                    );
+                if ((string)$resolution['status'] !== 'accepted') {
+                    return null;
+                }
+                $candidateSemanticHash =
+                    ingredientOntologyV3Hash([
+                        'entity_id' => (int)$resolution['entity_id'],
+                        'attributes' =>
+                            (array)$resolution['attributes'],
+                    ]);
+                if (
+                    $semanticHash !== null
+                    && !hash_equals(
+                        $semanticHash,
+                        $candidateSemanticHash
+                    )
+                ) {
+                    return null;
+                }
+                $semanticHash = $candidateSemanticHash;
+                $admissions[] = $resolution + [
+                    'owner_type' => 'product',
+                    'owner_id' => (int)$row['id'],
+                    'owner_fingerprint' =>
                     (string)$owner['owner_fingerprint'],
-                    ingredientOntologyV3ProductOwnerFingerprint($row)
-                )
-            ) {
-                return null;
+                ];
             }
-            $resolution = ingredientOntologyV3IdentityAnnexResolution(
-                $db,
-                $version,
-                $row
-            );
-            if ((string)$resolution['status'] !== 'accepted') {
-                return null;
-            }
-            ingredientOntologyV3IdentityAnnexRefreshProduct(
-                $db,
-                (int)$row['id'],
-                $versionId,
-                false
-            );
-            return $resolution + [
-                'owner_type' => 'product',
-                'owner_id' => (int)$row['id'],
+            $primary = $admissions[count($admissions) - 1];
+            return $primary + [
+                'product_admissions' => $admissions,
                 'occurrence_fence_hash' => $occurrenceFenceHash,
             ];
         }
@@ -16570,6 +16693,9 @@ function ingredientOntologyControllerResumeDurableJob(
                         );
                         dbBeginImmediateWithRetry($db);
                         try {
+                            $publishedAdmission =
+                                $reviewedAdmission;
+                            $supersededWork = [];
                             $occurrenceFenceCurrent =
                                 ingredientOntologyControllerOccurrenceFenceHash(
                                     $db,
@@ -16581,6 +16707,72 @@ function ingredientOntologyControllerResumeDurableJob(
                                 ],
                                 $occurrenceFenceCurrent
                             );
+                            if (
+                                $occurrenceFenceMatched
+                                && (string)$reviewedAdmission['owner_type']
+                                    === 'product'
+                            ) {
+                                $publishedAdmissions = [];
+                                $expectedAdmissions = (array)(
+                                    $reviewedAdmission[
+                                        'product_admissions'
+                                    ] ?? [$reviewedAdmission]
+                                );
+                                foreach (
+                                    $expectedAdmissions as
+                                    $expectedAdmission
+                                ) {
+                                    $published =
+                                        ingredientOntologyV3IdentityAdmissionPublishProduct(
+                                        $db,
+                                        (int)$expectedAdmission['owner_id'],
+                                        $versionId,
+                                        'deterministic_reviewed_identity',
+                                        true,
+                                        false,
+                                        false
+                                    );
+                                    $occurrenceFenceMatched =
+                                        !empty($published['accepted'])
+                                        && (int)$published['entity_id']
+                                            === (int)$expectedAdmission[
+                                                'entity_id'
+                                            ]
+                                        && hash_equals(
+                                            (string)$published[
+                                                'owner_fingerprint'
+                                            ],
+                                            (string)$expectedAdmission[
+                                                'owner_fingerprint'
+                                            ]
+                                        )
+                                        && hash_equals(
+                                            ingredientOntologyV3Hash(
+                                                (array)$published[
+                                                    'attributes'
+                                                ]
+                                            ),
+                                            ingredientOntologyV3Hash(
+                                                (array)$expectedAdmission[
+                                                    'attributes'
+                                                ]
+                                            )
+                                        );
+                                    if (!$occurrenceFenceMatched) {
+                                        throw new RuntimeException(
+                                            'reviewed_admission_publication_fence_lost'
+                                        );
+                                    }
+                                    $publishedAdmissions[] = $published;
+                                }
+                                $publishedAdmission =
+                                    $publishedAdmissions[
+                                        count($publishedAdmissions) - 1
+                                    ] + [
+                                        'product_admissions' =>
+                                            $publishedAdmissions,
+                                    ];
+                            }
                             if ($occurrenceFenceMatched) {
                                 $transitioned =
                                     ingredientOntologyControllerTransitionJob(
@@ -16592,9 +16784,8 @@ function ingredientOntologyControllerResumeDurableJob(
                                             'candidate_version_id' =>
                                                 $versionId,
                                             'last_error_kind' =>
-                                                'deterministic_reviewed_identity',
-                                            'last_error' =>
-                                                'Reviewed exact identity admission required no model call.',
+                                                null,
+                                            'last_error' => '',
                                         ]
                                     );
                             } else {
@@ -16617,6 +16808,12 @@ function ingredientOntologyControllerResumeDurableJob(
                                     $db,
                                     (int)($lease['subject_id'] ?? 0)
                                 );
+                                $supersededWork =
+                                    ingredientOntologyControllerSupersedeResolvedIdentityWork(
+                                        $db,
+                                        (int)($lease['subject_id'] ?? 0),
+                                        (int)$lease['id']
+                                    );
                             }
                             $db->exec('COMMIT');
                         } catch (Throwable $error) {
@@ -16642,7 +16839,8 @@ function ingredientOntologyControllerResumeDurableJob(
                             'status' => 'promoted',
                             'intake_only' => true,
                             'deterministic_admission' =>
-                                $reviewedAdmission,
+                                $publishedAdmission,
+                            'superseded_work' => $supersededWork,
                             'model_called' => false,
                         ];
                     }

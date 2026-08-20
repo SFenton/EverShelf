@@ -7,6 +7,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.15.0] - 2026-08-20
+
+### Added
+- Product-local, fingerprint-fenced exact-number admission maps safe English
+  plurals to a unique reviewed ingredient identity before any model, FoodOn
+  lookup, ontology generation, or copied database work.
+- Per-product semantic readiness records expose accepted-but-unscored,
+  scoring, ready, retry, needs-review, non-satisfying, and failed states with
+  bounded retries, visible latency, affected recipe counts, and diagnostics.
+
+### Changed
+- Canonical enrichment, product saves, controller admission, and incremental
+  scoring now publish annex identity and score readiness through the same
+  fenced transaction path.
+- Deterministic admission validates every active product occurrence sharing a
+  subject and supersedes only obsolete subject-resolution work, preserving
+  exact correction constraints as audit evidence.
+- Resolver migration refreshes existing inventory annex rows in place,
+  backfills unchanged accepted products as ready, and sparsely queues only
+  products whose effective identity changed. Migration now advances in
+  bounded, crash-recoverable product transactions instead of one long writer
+  reservation.
+
+### Fixed
+- Product-only source drift represented by the identity annex no longer
+  launches a copied ontology refresh or full-corpus score rebase.
+- Activation defers copied score refreshes while valid product-local sparse
+  work is pending, eliminating its race with the incremental score worker.
+- A legitimate copied score fallback now backfills readiness for accepted
+  products whose pending rows it consumes.
+- Annex reconciliation now commits identity, readiness, and score queuing
+  atomically per product, so a crash cannot leave current identity with lost
+  score work.
+- Post-publication telemetry failures no longer report a committed score
+  revision as failed or demote ready products after their pending work was
+  cleared.
+- Product-source changes that land during sparse preparation recompute the
+  semantic fence inside the publication snapshot instead of backing off for
+  30 seconds.
+- Unresolved products no longer disappear after a zero-impact score
+  publication; retries terminate visibly within 30 seconds instead of
+  hot-looping indefinitely.
+- Idle retry polling no longer reserves the SQLite writer, and terminal
+  review/failure rows no longer inflate pending-age diagnostics.
+- Successful activation clears stale reservation warnings, and the example
+  live controller no longer includes copy-generation flags rejected by the
+  active-database CLI.
+
 ## [1.14.2] - 2026-08-20
 
 ### Fixed

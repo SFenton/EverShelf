@@ -2,7 +2,7 @@
 declare(strict_types=1);
 
 const EVERSHELF_PROCESSING_STATUS_SCHEMA =
-    'evershelf-processing-status-v1';
+    'evershelf-processing-status-v2';
 const EVERSHELF_PROCESSING_STATUS_PUBLIC_ERROR =
     'EverShelf processing needs attention. Check the server logs for details.';
 
@@ -1086,7 +1086,7 @@ function evershelfProcessingStatusEffectiveIdentityCounts(
                 (string)$row['owner_fingerprint']
             )
             && (string)$row['resolver_version'] ===
-                INGREDIENT_ONTOLOGY_IDENTITY_ANNEX_RESOLVER_VERSION
+                INGREDIENT_ONTOLOGY_PRODUCT_IDENTITY_ANNEX_RESOLVER_VERSION
             && hash_equals(
                 ingredientOntologyV3IdentityAnnexReviewManifestHash(),
                 (string)$row['review_manifest_hash']
@@ -1336,6 +1336,162 @@ function evershelfProcessingStatusIncrementalScores(PDO $db): array {
     ];
 }
 
+function evershelfProcessingStatusIdentityReadiness(PDO $db): array {
+    if (!evershelfProcessingStatusTableExists(
+        $db,
+        'ingredient_ontology_product_readiness'
+    )) {
+        return [
+            'available' => false,
+            'product_count' => 0,
+            'accepted_unscored_count' => 0,
+            'scoring_count' => 0,
+            'ready_count' => 0,
+            'retry_count' => 0,
+            'needs_review_count' => 0,
+            'non_satisfying_count' => 0,
+            'failed_count' => 0,
+            'zero_contributor_count' => 0,
+            'oldest_pending_at' => null,
+            'oldest_pending_age_seconds' => null,
+            'latest_ready_at' => null,
+            'maximum_visible_ms' => null,
+            'last_error' => null,
+        ];
+    }
+    $rows = $db->query("
+        SELECT readiness.status, COUNT(*) AS product_count,
+               MIN(readiness.requested_at) AS oldest_requested_at,
+               MAX(readiness.ready_at) AS latest_ready_at,
+               MAX(readiness.visible_ms) AS maximum_visible_ms
+        FROM ingredient_ontology_product_readiness readiness
+        WHERE EXISTS (
+            SELECT 1
+            FROM inventory stock
+            WHERE stock.product_id = readiness.product_id
+              AND stock.quantity > 0
+        )
+        GROUP BY readiness.status
+    ")->fetchAll(PDO::FETCH_ASSOC);
+    $counts = [
+        'accepted_unscored' => 0,
+        'scoring' => 0,
+        'ready' => 0,
+        'retry' => 0,
+        'needs_review' => 0,
+        'non_satisfying' => 0,
+        'failed' => 0,
+    ];
+    $productCount = 0;
+    $oldestPendingAt = null;
+    $latestReadyAt = null;
+    $maximumVisibleMs = null;
+    foreach ($rows as $row) {
+        $status = (string)$row['status'];
+        $count = (int)$row['product_count'];
+        if (array_key_exists($status, $counts)) {
+            $counts[$status] = $count;
+        }
+        $productCount += $count;
+        if (in_array(
+            $status,
+            [
+                'accepted_unscored', 'scoring', 'retry',
+            ],
+            true
+        )) {
+            $oldestPendingAt = evershelfProcessingStatusEarliest(
+                $oldestPendingAt,
+                $row['oldest_requested_at'] ?? null
+            );
+        }
+        $candidateReadyAt = trim(
+            (string)($row['latest_ready_at'] ?? '')
+        );
+        if (
+            $candidateReadyAt !== ''
+            && (
+                $latestReadyAt === null
+                || $candidateReadyAt > $latestReadyAt
+            )
+        ) {
+            $latestReadyAt = $candidateReadyAt;
+        }
+        if ($row['maximum_visible_ms'] !== null) {
+            $maximumVisibleMs = max(
+                (float)($maximumVisibleMs ?? 0.0),
+                (float)$row['maximum_visible_ms']
+            );
+        }
+    }
+    $zeroContributorCount = 0;
+    if (
+        evershelfProcessingStatusTableExists(
+            $db,
+            'recipe_score_match_contributors'
+        )
+        && evershelfProcessingStatusTableExists(
+            $db,
+            'recipe_score_effective_sources'
+        )
+    ) {
+        $zeroContributorCount = (int)$db->query("
+            SELECT COUNT(*)
+            FROM ingredient_ontology_product_readiness readiness
+            WHERE readiness.status = 'ready'
+              AND readiness.identity_status = 'accepted'
+              AND EXISTS (
+                  SELECT 1
+                  FROM inventory stock
+                  WHERE stock.product_id = readiness.product_id
+                    AND stock.quantity > 0
+              )
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM recipe_score_match_contributors contributor
+                  JOIN recipe_score_effective_sources source
+                    ON source.recipe_id = contributor.recipe_id
+                   AND source.score_revision_id =
+                       contributor.score_revision_id
+                  WHERE contributor.product_id =
+                        readiness.product_id
+              )
+        ")->fetchColumn();
+    }
+    $lastError = $db->query("
+        SELECT last_error
+        FROM ingredient_ontology_product_readiness
+        WHERE status IN ('failed', 'needs_review')
+          AND last_error <> ''
+        ORDER BY updated_at DESC, product_id DESC
+        LIMIT 1
+    ")->fetchColumn();
+    return [
+        'available' => true,
+        'product_count' => $productCount,
+        'accepted_unscored_count' =>
+            $counts['accepted_unscored'],
+        'scoring_count' => $counts['scoring'],
+        'ready_count' => $counts['ready'],
+        'retry_count' => $counts['retry'],
+        'needs_review_count' => $counts['needs_review'],
+        'non_satisfying_count' =>
+            $counts['non_satisfying'],
+        'failed_count' => $counts['failed'],
+        'zero_contributor_count' => $zeroContributorCount,
+        'oldest_pending_at' => $oldestPendingAt,
+        'oldest_pending_age_seconds' =>
+            evershelfProcessingStatusAgeSeconds(
+                $oldestPendingAt
+            ),
+        'latest_ready_at' => $latestReadyAt,
+        'maximum_visible_ms' => $maximumVisibleMs,
+        'last_error' => $lastError !== false
+            ? (string)$lastError
+            : null,
+    ];
+}
+
 function evershelfProcessingStatus(PDO $db): array {
     $recipeQueue = evershelfProcessingStatusRecipeQueue($db);
     $canonicalQueue =
@@ -1348,6 +1504,8 @@ function evershelfProcessingStatus(PDO $db): array {
     $identity = evershelfProcessingStatusIdentityAnnex($db);
     $incremental =
         evershelfProcessingStatusIncrementalScores($db);
+    $identityReadiness =
+        evershelfProcessingStatusIdentityReadiness($db);
     $logging = class_exists('EverLog', false)
         ? EverLog::status()
         : [
@@ -1364,6 +1522,8 @@ function evershelfProcessingStatus(PDO $db): array {
     $incrementalProblem =
         (string)($incremental['phase'] ?? '') === 'failed'
         && $incremental['last_error'] !== null;
+    $identityProblem =
+        (int)($identityReadiness['failed_count'] ?? 0) > 0;
     $canonicalProblem =
         (int)$canonicalQueue['overdue_lease_count'] > 0
         || (int)$canonicalQueue['failed_24h_count'] > 0
@@ -1381,6 +1541,7 @@ function evershelfProcessingStatus(PDO $db): array {
         || $providerProblem
         || $activationProblem
         || $incrementalProblem
+        || $identityProblem
         || $canonicalProblem
         || $recipeQueue['failed_24h_count'] > 0
         || $ontologyQueue['failed_24h_count'] > 0
@@ -1416,7 +1577,8 @@ function evershelfProcessingStatus(PDO $db): array {
                 ?? null
         ) : null,
         $ontologyQueue['generation_intent_due_oldest_at'] ?? null,
-        $incremental['oldest_at'] ?? null
+        $incremental['oldest_at'] ?? null,
+        $identityReadiness['oldest_pending_at'] ?? null
     );
     $pending = [
         'total' =>
@@ -1429,7 +1591,12 @@ function evershelfProcessingStatus(PDO $db): array {
             )
             + ($scores['stale'] ? 1 : 0)
             + (int)$incremental['pending_product_count']
-            + (int)$incremental['pending_recipe_count'],
+            + (int)$incremental['pending_recipe_count']
+            + (int)($identityReadiness[
+                'accepted_unscored_count'
+            ] ?? 0)
+            + (int)($identityReadiness['scoring_count'] ?? 0)
+            + (int)($identityReadiness['retry_count'] ?? 0),
         'recipe_jobs' => $recipeQueue['open_count'],
         'canonical_queue' => $canonicalQueue['open_count'],
         'canonical_due' => $canonicalQueue['retry_due_count'],
@@ -1458,11 +1625,16 @@ function evershelfProcessingStatus(PDO $db): array {
             (int)$incremental['pending_product_count'],
         'score_recipes' =>
             (int)$incremental['pending_recipe_count'],
+        'identity_retry' =>
+            (int)($identityReadiness['retry_count'] ?? 0),
+        'identity_scoring' =>
+            (int)($identityReadiness['scoring_count'] ?? 0),
     ];
     $lastError = $canonicalProblem
         ? $canonicalQueue['last_error']
         : null;
     $lastError ??= $incremental['last_error']
+        ?? $identityReadiness['last_error']
         ?? $activation['last_error']
         ?? $logging['last_error']
         ?? null;
@@ -1486,6 +1658,7 @@ function evershelfProcessingStatus(PDO $db): array {
         'recipe_scores' => $scores,
         'incremental_scores' => $incremental,
         'identity_admission' => $identity,
+        'identity_readiness' => $identityReadiness,
         'activation' => $activation,
         'recipe_source_ontology' => $coverage,
         'logging' => [
@@ -1496,6 +1669,16 @@ function evershelfProcessingStatus(PDO $db): array {
         'advisories' => [
             'unresolved_inventory_identities' =>
                 (int)($identity['unresolved_count'] ?? 0),
+            'identity_needs_review' =>
+                (int)($identityReadiness[
+                    'needs_review_count'
+                ] ?? 0),
+            'identity_failed' =>
+                (int)($identityReadiness['failed_count'] ?? 0),
+            'identity_zero_contributors' =>
+                (int)($identityReadiness[
+                    'zero_contributor_count'
+                ] ?? 0),
             'recipe_identity_coverage_missing' =>
                 $coverageAdvisory
                     ? (int)$coverage['missing_recipe_count']

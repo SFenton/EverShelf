@@ -97,6 +97,10 @@ $firstMutationRevision = $mutate(
     $firstQuantity,
     'continuous_mutation_first'
 );
+$assert(
+    ingredientOntologyActivationNeedsScoreBuild($db) === false,
+    'Sparse product work must not race a copied activation score refresh'
+);
 $secondaryProductId = 203;
 $secondaryExists = $db->prepare("
     SELECT 1 FROM products WHERE id = ?
@@ -236,6 +240,208 @@ $assert(
     'Continuous mutation harness must restore its inventory fixture'
 );
 
+$prePublicationActiveRevision =
+    (int)recipeScoreState($db)['active_score_revision_id'];
+$prePublicationRevision = $mutate(
+    $db,
+    $inventoryId,
+    $productId,
+    $originalQuantity + 1,
+    'pre_publication_fault_probe'
+);
+$GLOBALS['INGREDIENT_ONTOLOGY_V3_BEFORE_PUBLICATION_COMMIT'] =
+    static function (): void {
+        throw new RuntimeException('pre_publication_fault_probe');
+    };
+$prePublication = ingredientOntologyV3IncrementalRebuild(
+    $db,
+    true,
+    100
+);
+unset($GLOBALS['INGREDIENT_ONTOLOGY_V3_BEFORE_PUBLICATION_COMMIT']);
+$prePublicationReadiness =
+    ingredientOntologyV3ProductReadinessRow($db, $productId);
+$prePublicationFailedRevision =
+    (int)($prePublication['revision_id'] ?? 0);
+$assert(
+    empty($prePublication['rebuilt'])
+    && (string)($prePublication['reason'] ?? '') === 'failed'
+    && (int)recipeScoreState($db)['active_score_revision_id']
+        === $prePublicationActiveRevision
+    && (int)$db->query("
+        SELECT COUNT(*)
+        FROM recipe_score_pending_products
+        WHERE product_id = {$productId}
+          AND latest_inventory_revision =
+              {$prePublicationRevision}
+    ")->fetchColumn() === 1
+    && (string)($prePublicationReadiness['status'] ?? '')
+        === 'accepted_unscored'
+    && (string)$db->query("
+        SELECT phase FROM recipe_score_work_state WHERE id = 1
+    ")->fetchColumn() === 'failed'
+    && $prePublicationFailedRevision > 0
+    && (string)$db->query("
+        SELECT status
+        FROM recipe_score_revisions
+        WHERE id = {$prePublicationFailedRevision}
+    ")->fetchColumn() === 'failed',
+    'Pre-publication faults must fail visibly without clearing pending work'
+);
+$prePublicationRecovered =
+    ingredientOntologyV3IncrementalRebuild($db, true, 100);
+$assert(
+    !empty($prePublicationRecovered['rebuilt'])
+    && (int)$prePublicationRecovered['inventory_revision']
+        === $prePublicationRevision
+    && (string)(
+        ingredientOntologyV3ProductReadinessRow(
+            $db,
+            $productId
+        )['status'] ?? ''
+    ) === 'ready',
+    'Pending work must recover after a pre-publication fault'
+);
+$prePublicationRestoreRevision = $mutate(
+    $db,
+    $inventoryId,
+    $productId,
+    $originalQuantity,
+    'pre_publication_fault_restore'
+);
+$prePublicationRestored =
+    ingredientOntologyV3IncrementalRebuild($db, true, 100);
+$assert(
+    !empty($prePublicationRestored['rebuilt'])
+    && (int)$prePublicationRestored['inventory_revision']
+        === $prePublicationRestoreRevision,
+    'Pre-publication fault harness must restore its inventory fixture'
+);
+
+$postCommitRevision = $mutate(
+    $db,
+    $inventoryId,
+    $productId,
+    $originalQuantity + 1,
+    'post_commit_fault_probe'
+);
+$GLOBALS['INGREDIENT_ONTOLOGY_V3_AFTER_OVERLAY_PUBLICATION'] =
+    static function (): void {
+        throw new RuntimeException('post_commit_fault_probe');
+    };
+$postCommit = ingredientOntologyV3IncrementalRebuild(
+    $db,
+    true,
+    100
+);
+unset($GLOBALS['INGREDIENT_ONTOLOGY_V3_AFTER_OVERLAY_PUBLICATION']);
+$postCommitReadiness =
+    ingredientOntologyV3ProductReadinessRow($db, $productId);
+$assert(
+    !empty($postCommit['rebuilt'])
+    && (int)$postCommit['inventory_revision']
+        === $postCommitRevision
+    && str_contains(
+        (string)($postCommit['cleanup_warning'] ?? ''),
+        'post_commit_fault_probe'
+    )
+    && (string)($postCommitReadiness['status'] ?? '') === 'ready'
+    && (int)($postCommitReadiness['score_attempts'] ?? -1) === 0
+    && (int)$db->query("
+        SELECT COUNT(*)
+        FROM recipe_score_pending_products
+        WHERE product_id = {$productId}
+    ")->fetchColumn() === 0,
+    'Post-publication telemetry failures must not demote committed readiness'
+);
+$postCommitRestoreRevision = $mutate(
+    $db,
+    $inventoryId,
+    $productId,
+    $originalQuantity,
+    'post_commit_fault_restore'
+);
+$postCommitRestored =
+    ingredientOntologyV3IncrementalRebuild($db, true, 100);
+$assert(
+    !empty($postCommitRestored['rebuilt'])
+    && (int)$postCommitRestored['inventory_revision']
+        === $postCommitRestoreRevision,
+    'Post-publication fault harness must restore its inventory fixture'
+);
+
+$product = $db->prepare("
+    SELECT brand FROM products WHERE id = ?
+");
+$product->execute([$productId]);
+$originalBrand = (string)$product->fetchColumn();
+$sourceFenceRevision = $mutate(
+    $db,
+    $inventoryId,
+    $productId,
+    $originalQuantity + 1,
+    'source_fence_probe'
+);
+$GLOBALS['INGREDIENT_ONTOLOGY_V3_BEFORE_INCREMENTAL_SNAPSHOT'] =
+    static function (PDO $hookDb) use ($productId): void {
+        $hookDb->prepare("
+            UPDATE products
+            SET brand = 'Source Fence Probe',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+        ")->execute([$productId]);
+    };
+$sourceFence = ingredientOntologyV3IncrementalRebuild(
+    $db,
+    true,
+    100
+);
+unset($GLOBALS['INGREDIENT_ONTOLOGY_V3_BEFORE_INCREMENTAL_SNAPSHOT']);
+$assert(
+    !empty($sourceFence['rebuilt'])
+    && (int)$sourceFence['inventory_revision']
+        === $sourceFenceRevision,
+    'A product source change before snapshot must recompute its semantic fence without failing'
+);
+$db->beginTransaction();
+try {
+    $db->prepare("
+        UPDATE products
+        SET brand = ?, updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+    ")->execute([$originalBrand, $productId]);
+    $db->prepare("
+        UPDATE inventory
+        SET quantity = ?, updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+    ")->execute([$originalQuantity, $inventoryId]);
+    $sourceFenceRestoreRevision = recipeScoreMarkProductDirty(
+        $db,
+        $productId,
+        'source_fence_restore'
+    );
+    $db->commit();
+} catch (Throwable $error) {
+    if ($db->inTransaction()) {
+        $db->rollBack();
+    }
+    throw $error;
+}
+$sourceFenceRestored =
+    ingredientOntologyV3IncrementalRebuild($db, true, 100);
+$assert(
+    !empty($sourceFenceRestored['rebuilt'])
+    && (int)$sourceFenceRestored['inventory_revision']
+        === $sourceFenceRestoreRevision
+    && abs(
+        (float)$db->query("
+            SELECT quantity FROM inventory
+            WHERE id = {$inventoryId}
+        ")->fetchColumn() - $originalQuantity
+    ) < 0.000001,
+    'Source-fence harness must restore product and inventory state'
+);
+
 echo json_encode([
     'success' => true,
     'assertions' => $assertions,
@@ -244,4 +450,12 @@ echo json_encode([
     'first' => $first,
     'second' => $second,
     'restored' => $restored,
+    'pre_publication' => $prePublication,
+    'pre_publication_recovered' => $prePublicationRecovered,
+    'pre_publication_restored' =>
+        $prePublicationRestored,
+    'post_commit' => $postCommit,
+    'post_commit_restored' => $postCommitRestored,
+    'source_fence' => $sourceFence,
+    'source_fence_restored' => $sourceFenceRestored,
 ], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . PHP_EOL;

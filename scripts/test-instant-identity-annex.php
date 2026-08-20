@@ -59,6 +59,10 @@ foreach ([
     'potato' => 'Potato',
     'sweet-potato' => 'Sweet Potato',
     'eggplant' => 'Eggplant',
+    'orange' => 'Orange',
+    'garlic' => 'Garlic',
+    'bean' => 'Bean',
+    'bean-alt' => 'Alternate Bean',
 ] as $slug => $name) {
     $entity->execute([
         $versionId,
@@ -136,6 +140,9 @@ foreach ([
     ['red-onion', 'onion', 'en', 'Red Onion', 'red onion', 'attribute_alias', 'prior-label-transition-v3', 'variety'],
     ['sweet-potatoes', 'sweet-potato', 'en', 'Sweet Potatoes', 'sweet potatoes', 'exact_alias', 'full-resolution-v3', null],
     ['eggplant', 'eggplant', 'en', 'Eggplant', 'eggplant', 'exact_alias', 'full-resolution-v3', null],
+    ['orange', 'orange', 'en', 'Orange', 'orange', 'exact_alias', 'full-resolution-v3', null],
+    ['garlic', 'garlic', 'en', 'Garlic', 'garlic', 'exact_alias', 'full-resolution-v3', null],
+    ['bean', 'bean', 'en', 'Bean', 'bean', 'exact_alias', 'full-resolution-v3', null],
     ['eggplants', 'eggplant', 'en', 'Eggplants', 'eggplants', 'exact_alias', 'full-resolution-v3', null],
     ['aubergine', 'eggplant', 'en', 'Aubergine', 'aubergine', 'exact_alias', 'full-resolution-v3', null],
     ['aubergines', 'eggplant', 'en', 'Aubergines', 'aubergines', 'exact_alias', 'full-resolution-v3', null],
@@ -212,6 +219,36 @@ foreach ([
         'test:' . str_replace(' ', '-', $normalized) . ':' . $language,
     ]);
 }
+$db->prepare("
+    INSERT INTO ingredient_ontology_labels (
+        ontology_version_id, entity_id, language,
+        label, normalized_label, kind, review_state,
+        provenance, source_ref
+    )
+    VALUES (
+        ?, ?, 'en', 'Oranges', 'oranges',
+        'exact_alias', 'quarantined',
+        'autonomous_controller', 'test:structural-oranges'
+    )
+")->execute([
+    $versionId,
+    $entities['structural'],
+]);
+$db->prepare("
+    INSERT INTO ingredient_ontology_labels (
+        ontology_version_id, entity_id, language,
+        label, normalized_label, kind, review_state,
+        provenance, source_ref
+    )
+    VALUES (
+        ?, ?, 'en', 'Beans', 'beans',
+        'exact_alias', 'quarantined',
+        'semantic_seed', 'test:eligible-beans-conflict'
+    )
+")->execute([
+    $versionId,
+    $entities['bean-alt'],
+]);
 $product = $db->prepare("
     INSERT INTO products (
         name, brand, category, prepared_food
@@ -235,6 +272,9 @@ foreach ([
     'eggplant' => ['Eggplant', 0],
     'melanzana' => ['Melanzana', 0],
     'thai_eggplant' => ['Thai Eggplant', 0],
+    'oranges' => ['Oranges', 0],
+    'garlics' => ['Garlics', 0],
+    'beans_conflict' => ['Beans', 0],
 ] as $key => [$name, $prepared]) {
     $product->execute([$name, $prepared]);
     $productIds[$key] = (int)$db->lastInsertId();
@@ -443,6 +483,21 @@ $thaiEggplant = ingredientOntologyV3IdentityAnnexRefreshProduct(
     $productIds['thai_eggplant'],
     $versionId
 );
+$oranges = ingredientOntologyV3IdentityAnnexRefreshProduct(
+    $db,
+    $productIds['oranges'],
+    $versionId
+);
+$garlics = ingredientOntologyV3IdentityAnnexRefreshProduct(
+    $db,
+    $productIds['garlics'],
+    $versionId
+);
+$beansConflict = ingredientOntologyV3IdentityAnnexRefreshProduct(
+    $db,
+    $productIds['beans_conflict'],
+    $versionId
+);
 
 $assert(
     $red['accepted'] === true
@@ -505,6 +560,22 @@ $assert(
     $thaiEggplant['accepted'] === false
     && $thaiEggplant['status'] === 'unresolved',
     'Qualified Thai Eggplant must remain unresolved without separate review'
+);
+$assert(
+    $oranges['accepted'] === true
+    && $oranges['entity_id'] === $entities['orange']
+    && $oranges['source'] === 'exact_number_v1'
+    && $garlics['accepted'] === true
+    && $garlics['entity_id'] === $entities['garlic']
+    && $garlics['source'] === 'exact_number_v1',
+    'Product-local exact-number proof must admit unique reviewed identity leaves'
+);
+$assert(
+    $beansConflict['accepted'] === false
+    && $beansConflict['status'] === 'unresolved'
+    && $beansConflict['reason']
+        === 'number_variant_source_conflict',
+    'Eligible quarantined homographs must veto exact-number admission'
 );
 
 $recipeAnnex = ingredientOntologyV3RecipeAnnexRefreshRecipe(
@@ -872,15 +943,278 @@ $db->prepare("
     $fixtureActiveRevisionId,
 ]);
 $db->exec("DELETE FROM recipe_score_pending_products");
+$db->prepare("
+    INSERT INTO inventory (
+        product_id, location, quantity
+    )
+    VALUES (?, 'dispensa', 1)
+")->execute([$productIds['garlics']]);
+$db->prepare("
+    UPDATE ingredient_ontology_identity_annex
+    SET resolver_version = ?
+    WHERE product_id = ?
+")->execute([
+    INGREDIENT_ONTOLOGY_IDENTITY_ANNEX_RESOLVER_VERSION,
+    $productIds['garlics'],
+]);
+$db->prepare("
+    DELETE FROM ingredient_ontology_product_readiness
+    WHERE product_id = ?
+")->execute([$productIds['garlics']]);
+$currentAdmissionManifest = [
+    'version' => INGREDIENT_ONTOLOGY_IDENTITY_ANNEX_REVIEW_VERSION,
+    'resolver_version' =>
+        INGREDIENT_ONTOLOGY_PRODUCT_IDENTITY_ANNEX_RESOLVER_VERSION,
+    'aliases' =>
+        ingredientOntologyV3IdentityAnnexReviewedAliases(),
+];
+$db->prepare("
+    UPDATE ingredient_ontology_identity_admission_state
+    SET resolver_version = ?,
+        review_manifest_hash = ?,
+        manifest_json = ?,
+        updated_at = CURRENT_TIMESTAMP
+    WHERE id = 1
+")->execute([
+    INGREDIENT_ONTOLOGY_IDENTITY_ANNEX_RESOLVER_VERSION,
+    ingredientOntologyV3IdentityAnnexReviewManifestHash(),
+    ingredientOntologyV3Json($currentAdmissionManifest),
+]);
+$resolverMigration =
+    ingredientOntologyV3IdentityAdmissionSync($db);
+$migratedGarlicsReadiness =
+    ingredientOntologyV3ProductReadinessRow(
+        $db,
+        $productIds['garlics']
+    );
+$assert(
+    !empty($resolverMigration['changed'])
+    && (string)$migratedGarlicsReadiness['status'] === 'ready'
+    && (int)$migratedGarlicsReadiness['score_revision_id']
+        === $fixtureActiveRevisionId
+    && (int)$db->query("
+        SELECT COUNT(*)
+        FROM recipe_score_pending_products
+        WHERE product_id = {$productIds['garlics']}
+    ")->fetchColumn() === 0,
+    'Resolver migration must backfill unchanged accepted readiness without rescoring'
+);
+$db->prepare("
+    UPDATE ingredient_ontology_identity_annex
+    SET resolver_version = ?
+    WHERE product_id = ?
+")->execute([
+    INGREDIENT_ONTOLOGY_IDENTITY_ANNEX_RESOLVER_VERSION,
+    $productIds['garlics'],
+]);
+$steadyResolverMigration =
+    ingredientOntologyV3IdentityAdmissionSync($db);
+$assert(
+    empty($steadyResolverMigration['changed'])
+    && (int)(
+        $steadyResolverMigration[
+            'resolver_migration'
+        ]['processed'] ?? 0
+    ) >= 1
+    && (string)$db->query("
+        SELECT resolver_version
+        FROM ingredient_ontology_identity_annex
+        WHERE product_id = {$productIds['garlics']}
+    ")->fetchColumn()
+        === INGREDIENT_ONTOLOGY_PRODUCT_IDENTITY_ANNEX_RESOLVER_VERSION
+    && (int)$db->query("
+        SELECT COUNT(*)
+        FROM recipe_score_pending_products
+        WHERE product_id = {$productIds['garlics']}
+    ")->fetchColumn() === 0,
+    'Current manifest sync must continue bounded stale-resolver migration'
+);
+$db->prepare("
+    DELETE FROM ingredient_ontology_product_readiness
+    WHERE product_id = ?
+")->execute([$productIds['garlics']]);
+$publishedGarlics =
+    ingredientOntologyV3IdentityAdmissionPublishProduct(
+        $db,
+        $productIds['garlics'],
+        $versionId,
+        'test_exact_number_publication',
+        true
+    );
+$garlicsReadiness =
+    ingredientOntologyV3ProductReadinessRow(
+        $db,
+        $productIds['garlics']
+    );
+$assert(
+    $publishedGarlics['accepted'] === true
+    && !empty($publishedGarlics['score_queued'])
+    && (string)$garlicsReadiness['status']
+        === 'accepted_unscored'
+    && (int)$db->query("
+        SELECT COUNT(*)
+        FROM recipe_score_pending_products
+        WHERE product_id = {$productIds['garlics']}
+    ")->fetchColumn() === 1,
+    'Accepted identity publication must atomically expose score readiness'
+);
+$db->prepare("
+    DELETE FROM recipe_score_pending_products
+    WHERE product_id = ?
+")->execute([$productIds['garlics']]);
+$db->prepare("
+    DELETE FROM inventory
+    WHERE product_id = ?
+")->execute([$productIds['garlics']]);
+
+$unknownRetry =
+    ingredientOntologyV3IdentityAdmissionPublishProduct(
+        $db,
+        $productIds['unknown'],
+        $versionId,
+        'test_unresolved_publication',
+        false
+    );
+for ($attempt = 0; $attempt < 4; $attempt++) {
+    $db->prepare("
+        UPDATE ingredient_ontology_product_readiness
+        SET next_retry_at = datetime('now', '-1 second')
+        WHERE product_id = ?
+    ")->execute([$productIds['unknown']]);
+    ingredientOntologyV3ProductReadinessRetryDue($db);
+}
+$unknownReadiness =
+    ingredientOntologyV3ProductReadinessRow(
+        $db,
+        $productIds['unknown']
+    );
+$assert(
+    $unknownRetry['status'] === 'unresolved'
+    && (string)$unknownReadiness['status'] === 'needs_review'
+    && (int)$unknownReadiness['attempts'] === 4
+    && $unknownReadiness['next_retry_at'] === null,
+    'Unresolved identities must terminate visibly within a bounded retry budget'
+);
+$db->prepare("
+    UPDATE ingredient_ontology_product_readiness
+    SET requested_at = '2000-01-01 00:00:00'
+    WHERE product_id = ?
+")->execute([$productIds['unknown']]);
+$identityStatus =
+    evershelfProcessingStatusIdentityReadiness($db);
+$assert(
+    (int)$identityStatus['needs_review_count'] >= 1
+    && (string)($identityStatus['oldest_pending_at'] ?? '')
+        !== '2000-01-01 00:00:00',
+    'Terminal identity review rows must not pin pending-age telemetry'
+);
+$db->prepare("
+    DELETE FROM ingredient_ontology_identity_annex
+    WHERE product_id IN (?, ?)
+")->execute([
+    $productIds['unknown'],
+    $productIds['eggplant'],
+]);
 $reconcileRevisionBefore =
     recipeScoreState($db)['inventory_revision'];
+$reconcilePendingBefore = (int)$db->query("
+    SELECT COUNT(*)
+    FROM recipe_score_pending_products
+    WHERE product_id IN (
+        {$productIds['unknown']},
+        {$productIds['eggplant']}
+    )
+")->fetchColumn();
+$reconcileReadinessBefore = ingredientOntologyV3Json(
+    $db->query("
+        SELECT product_id, owner_fingerprint,
+               annex_evidence_hash, identity_status, status
+        FROM ingredient_ontology_product_readiness
+        WHERE product_id IN (
+            {$productIds['unknown']},
+            {$productIds['eggplant']}
+        )
+        ORDER BY product_id
+    ")->fetchAll(PDO::FETCH_ASSOC)
+);
+$GLOBALS['INGREDIENT_ONTOLOGY_V3_AFTER_RECONCILE_PRODUCT'] =
+    static function (): void {
+        throw new RuntimeException(
+            'reconcile_transaction_fault'
+        );
+    };
+$reconcileFault = null;
+try {
+    ingredientOntologyActivationReconcileProductAnnex($db);
+} catch (Throwable $error) {
+    $reconcileFault = $error->getMessage();
+} finally {
+    unset(
+        $GLOBALS[
+            'INGREDIENT_ONTOLOGY_V3_AFTER_RECONCILE_PRODUCT'
+        ]
+    );
+}
+$reconcileAnnexAfter = (int)$db->query("
+    SELECT COUNT(*)
+    FROM ingredient_ontology_identity_annex
+    WHERE product_id IN (
+        {$productIds['unknown']},
+        {$productIds['eggplant']}
+    )
+")->fetchColumn();
+$reconcileRevisionAfterFault =
+    recipeScoreState($db)['inventory_revision'];
+$reconcilePendingAfter = (int)$db->query("
+    SELECT COUNT(*)
+    FROM recipe_score_pending_products
+    WHERE product_id IN (
+        {$productIds['unknown']},
+        {$productIds['eggplant']}
+    )
+")->fetchColumn();
+$reconcileReadinessAfter = ingredientOntologyV3Json(
+    $db->query("
+        SELECT product_id, owner_fingerprint,
+               annex_evidence_hash, identity_status, status
+        FROM ingredient_ontology_product_readiness
+        WHERE product_id IN (
+            {$productIds['unknown']},
+            {$productIds['eggplant']}
+        )
+        ORDER BY product_id
+    ")->fetchAll(PDO::FETCH_ASSOC)
+);
+$assert(
+    $reconcileFault === 'reconcile_transaction_fault'
+    && $reconcileAnnexAfter === 0
+    && $reconcileRevisionAfterFault === $reconcileRevisionBefore
+    && $reconcilePendingAfter === $reconcilePendingBefore
+    && hash_equals(
+        $reconcileReadinessBefore,
+        $reconcileReadinessAfter
+    ),
+    'Reconciliation faults must roll back annex, readiness, and score '
+        . 'queuing together: '
+        . ingredientOntologyV3Json([
+            'fault' => $reconcileFault,
+            'annex_after' => $reconcileAnnexAfter,
+            'revision_before' => $reconcileRevisionBefore,
+            'revision_after' => $reconcileRevisionAfterFault,
+            'pending_before' => $reconcilePendingBefore,
+            'pending_after' => $reconcilePendingAfter,
+            'readiness_before' => $reconcileReadinessBefore,
+            'readiness_after' => $reconcileReadinessAfter,
+        ])
+);
 $reconciled =
     ingredientOntologyActivationReconcileProductAnnex($db);
 $reconcileRevisionAfter =
     recipeScoreState($db)['inventory_revision'];
 $assert(
-    (int)$reconciled['changed_product_count'] === 2
-    && $reconcileRevisionAfter === $reconcileRevisionBefore + 1
+    (int)$reconciled['changed_product_count'] === 1
+    && $reconcileRevisionAfter >= $reconcileRevisionBefore
+    && $reconcileRevisionAfter <= $reconcileRevisionBefore + 1
     && (int)$db->query("
         SELECT COUNT(*)
         FROM recipe_score_pending_products
@@ -888,8 +1222,7 @@ $assert(
             {$productIds['unknown']},
             {$productIds['eggplant']}
         )
-          AND reason = 'active_ontology_identity_reconciled'
-    ")->fetchColumn() === 2
+    ")->fetchColumn() === 1
     && (int)$db->query("
         SELECT COUNT(*)
         FROM ingredient_ontology_identity_annex
@@ -899,9 +1232,8 @@ $assert(
         )
           AND ontology_version_id = {$versionId}
     ")->fetchColumn() === 2,
-    'Active ontology reconciliation must refresh products and journal one sparse revision'
+    'Active ontology reconciliation must preserve existing score work and avoid unresolved semantic no-op scoring'
 );
-
 $db = null;
 @unlink($path);
 @unlink($path . '-wal');

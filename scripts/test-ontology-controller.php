@@ -3241,7 +3241,7 @@ try {
         )
         VALUES (
             'reviewed-admission-fixture',
-            'Reviewed Admission Fixture',
+            'Reviewed Admission Fixtures',
             '', '', 0
         )
     ");
@@ -3253,6 +3253,46 @@ try {
         'product_ingestion',
         1000000
     );
+    $db->exec("
+        INSERT INTO products (
+            barcode, name, brand, category, prepared_food
+        )
+        VALUES (
+            'reviewed-admission-fixture-duplicate',
+            'Reviewed Admission Fixtures',
+            '', '', 0
+        )
+    ");
+    $reviewedAdmissionDuplicateProductId =
+        (int)$db->lastInsertId();
+    $reviewedDuplicateProduct = $db->query("
+        SELECT id, name, brand, category, prepared_food
+        FROM products
+        WHERE id = {$reviewedAdmissionDuplicateProductId}
+    ")->fetch(PDO::FETCH_ASSOC);
+    $db->prepare("
+        INSERT INTO ontology_subject_occurrences (
+            subject_id, owner_type, owner_id,
+            owner_fingerprint, provenance_hash,
+            provenance_json, active
+        )
+        SELECT subject_id, 'product', ?, ?,
+               provenance_hash, provenance_json, 1
+        FROM ontology_subject_occurrences
+        WHERE subject_id = ?
+          AND owner_type = 'product'
+          AND owner_id = ?
+          AND active = 1
+        ORDER BY id DESC
+        LIMIT 1
+    ")->execute([
+        $reviewedAdmissionDuplicateProductId,
+        ingredientOntologyV3ProductOwnerFingerprint(
+            $reviewedDuplicateProduct
+        ),
+        (int)$reviewedObserved['subject']['id'],
+        $reviewedAdmissionProductId,
+    ]);
     $reviewedAdmissionJobId = (int)$reviewedObserved['job']['id'];
     ingredientOntologyControllerRegisterProvider(
         'fake_reviewed_should_not_run',
@@ -3288,6 +3328,20 @@ try {
         && $reviewedAdmissionRun['results'][0][
             'deterministic_admission'
         ]['status'] === 'accepted'
+        && $reviewedAdmissionRun['results'][0][
+            'deterministic_admission'
+        ]['source'] === 'exact_number_v1'
+        && controllerTestCount(
+            $db,
+            "SELECT COUNT(*)
+             FROM ingredient_ontology_identity_annex
+             WHERE product_id IN (?, ?)
+               AND status = 'accepted'",
+            [
+                $reviewedAdmissionProductId,
+                $reviewedAdmissionDuplicateProductId,
+            ]
+        ) === 2
         && controllerTestCount(
             $db,
             "SELECT COUNT(*)
@@ -3315,8 +3369,11 @@ try {
     ")->execute([(int)$reviewedObserved['subject']['id']]);
     $db->prepare("
         DELETE FROM products
-        WHERE id = ?
-    ")->execute([$reviewedAdmissionProductId]);
+        WHERE id IN (?, ?)
+    ")->execute([
+        $reviewedAdmissionProductId,
+        $reviewedAdmissionDuplicateProductId,
+    ]);
 
     $reviewedRecipeIds = [];
     $reviewedIngredientIds = [];
@@ -12015,11 +12072,16 @@ try {
     try {
         $driftReadyGuardWas =
             ingredientOntologyV3ReadyMutationGuardEnabled($db);
+        $driftPublicationGuardWas =
+            ingredientOntologyV3PublicationGuardEnabled($db);
         ingredientOntologyV3SetReadyMutationGuard($db, true);
+        ingredientOntologyV3SetPublicationGuard($db, true);
         $activeDriftVersion =
             ingredientOntologyV3ActiveVersion($db);
         $sealedCorpusHash =
             ingredientOntologyV3CorpusHash($db);
+        $activeDriftScore = recipeScoreActiveRevision($db);
+        $driftScoreState = recipeScoreState($db);
         $db->prepare("
             UPDATE ingredient_ontology_versions
             SET corpus_hash = ?
@@ -12028,6 +12090,31 @@ try {
             $sealedCorpusHash,
             (int)$activeDriftVersion['id'],
         ]);
+        $db->prepare("
+            UPDATE recipe_score_revisions
+            SET ontology_source_revision = ?,
+                ontology_source_hash = ?,
+                ontology_source_lineage_hash = ''
+            WHERE id = ?
+        ")->execute([
+            (int)$driftScoreState['ontology_source_revision'],
+            $sealedCorpusHash,
+            (int)$activeDriftScore['id'],
+        ]);
+        $db->prepare("
+            UPDATE recipe_score_state
+            SET ontology_source_hash = ?,
+                ontology_source_lineage_hash = ''
+            WHERE id = 1
+        ")->execute([$sealedCorpusHash]);
+        $db->prepare("
+            DELETE FROM recipe_score_mutations
+            WHERE domain = 'source' AND revision <= ?
+        ")->execute([
+            (int)$driftScoreState['ontology_source_revision'],
+        ]);
+        $db->exec("DELETE FROM recipe_score_pending_products");
+        $db->exec("DELETE FROM recipe_score_pending_recipes");
         $driftBeforeProduct =
             ingredientOntologyActivationCorpusDrifted(
                 $db
@@ -12043,18 +12130,68 @@ try {
                 0
             )
         ");
+        $driftProductId = (int)$db->lastInsertId();
+        ingredientOntologyV3IdentityAnnexRefreshProduct(
+            $db,
+            $driftProductId,
+            (int)$activeDriftVersion['id']
+        );
         $driftAfterProduct =
             ingredientOntologyActivationCorpusDrifted(
                 $db
             );
+        $driftHandledByAnnex =
+            ingredientOntologyActivationProductDriftHandledByAnnex(
+                $db
+            );
+        $db->exec("
+            UPDATE ontology_generation_intents
+            SET status = 'superseded',
+                finished_at = CURRENT_TIMESTAMP,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE status = 'pending'
+        ");
+        $driftNeedsOntologyBuild =
+            ingredientOntologyActivationNeedsOntologyBuild($db);
         controllerTestAssert(
-            !$driftBeforeProduct && $driftAfterProduct,
-            'Product corpus drift must select a copied ontology refresh'
+            !$driftBeforeProduct
+            && $driftAfterProduct
+            && $driftHandledByAnnex
+            && !$driftNeedsOntologyBuild,
+            'Product-only corpus drift must remain on the annex sparse path: '
+                . ingredientOntologyControllerStableJson([
+                    'before' => $driftBeforeProduct,
+                    'after' => $driftAfterProduct,
+                    'handled' => $driftHandledByAnnex,
+                    'needs_ontology_build' =>
+                        $driftNeedsOntologyBuild,
+                    'active_score' => recipeScoreActiveRevision($db),
+                    'score_state' => recipeScoreState($db),
+                    'pending_products' =>
+                        ingredientOntologyV3IncrementalPendingProducts(
+                            $db
+                        ),
+                    'pending_recipes' =>
+                        ingredientOntologyV3IncrementalPendingRecipes(
+                            $db
+                        ),
+                    'source_mutations' => $db->query("
+                        SELECT revision, owner_type, owner_id,
+                               operation, reason
+                        FROM recipe_score_mutations
+                        WHERE domain = 'source'
+                        ORDER BY revision
+                    ")->fetchAll(PDO::FETCH_ASSOC),
+                ])
         );
     } finally {
         ingredientOntologyV3SetReadyMutationGuard(
             $db,
             $driftReadyGuardWas ?? false
+        );
+        ingredientOntologyV3SetPublicationGuard(
+            $db,
+            $driftPublicationGuardWas ?? false
         );
         $db->exec('ROLLBACK');
     }

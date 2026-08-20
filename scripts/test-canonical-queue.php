@@ -2189,7 +2189,15 @@ try {
         $contendedInventoryMedian
             <= $baselineInventoryMedian + $inventoryAllowance
         && $contendedInventoryP95 <= 100,
-        'Inventory-add contention must preserve median latency and a 100 ms p95 ceiling'
+        'Inventory-add contention must preserve median latency and a 100 ms p95 ceiling: '
+            . json_encode([
+                'baseline_median' => $baselineInventoryMedian,
+                'baseline_p95' => $baselineInventoryP95,
+                'contended_median' => $contendedInventoryMedian,
+                'contended_p95' => $contendedInventoryP95,
+                'allowance' => $inventoryAllowance,
+                'samples' => $contendedInventory,
+            ], JSON_UNESCAPED_SLASHES)
     );
 
     $metrics = [
