@@ -5752,7 +5752,11 @@ try {
         )
         && str_contains(
             $canonicalWorkerSource,
-            "(int)(\$result['pending'] ?? 0) > 0"
+            "(int)(\$result['due'] ?? 0) > 0"
+        )
+        && str_contains(
+            $canonicalWorkerSource,
+            'canonicalIngredientWorkerSleepDelay'
         )
         && !str_contains(
             $canonicalWorkerSource,

@@ -1694,6 +1694,10 @@ function ingredientOntologyControllerSchemaMigrate(PDO $db): void {
             'DATETIME DEFAULT NULL'],
         ['canonical_processing_queue', 'request_fingerprint',
             "TEXT NOT NULL DEFAULT ''"],
+        ['canonical_processing_queue', 'next_retry_at',
+            'DATETIME DEFAULT NULL'],
+        ['canonical_processing_queue', 'last_error_kind',
+            "TEXT NOT NULL DEFAULT ''"],
     ] as [$table, $column, $definition]) {
         ingredientOntologyControllerAddColumn(
             $db,
@@ -1784,6 +1788,8 @@ function ingredientOntologyControllerSchemaMigrate(PDO $db): void {
                 lease_token = NULL,
                 lease_expires_at = NULL,
                 started_at = NULL,
+                next_retry_at = CURRENT_TIMESTAMP,
+                last_error_kind = 'legacy_claim_reclaimed',
                 last_error = 'legacy in-progress row reclaimed',
                 updated_at = CURRENT_TIMESTAMP
             WHERE status = 'in_progress'
@@ -1793,6 +1799,11 @@ function ingredientOntologyControllerSchemaMigrate(PDO $db): void {
             CREATE INDEX IF NOT EXISTS idx_canonical_queue_lease
                 ON canonical_processing_queue(
                     status, lease_expires_at, id
+                );
+            CREATE INDEX IF NOT EXISTS idx_canonical_queue_due
+                ON canonical_processing_queue(
+                    status, next_retry_at, lease_expires_at,
+                    requested_at, id
                 )
         ");
     }

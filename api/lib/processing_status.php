@@ -158,6 +158,266 @@ function evershelfProcessingStatusRecipeQueue(PDO $db): array {
     ];
 }
 
+function evershelfProcessingStatusCanonicalQueue(PDO $db): array {
+    if (
+        !evershelfProcessingStatusTableExists(
+            $db,
+            'canonical_processing_queue'
+        )
+    ) {
+        return [
+            'available' => false,
+            'lock_available' => function_exists(
+                'canonicalIngredientQueueLockAvailable'
+            )
+                ? canonicalIngredientQueueLockAvailable()
+                : false,
+            'open_count' => 0,
+            'active_count' => 0,
+            'pending_count' => 0,
+            'in_progress_count' => 0,
+            'retry_count' => 0,
+            'retry_due_count' => 0,
+            'failed_count' => 0,
+            'exhausted_count' => 0,
+            'exhausted_pending_count' => 0,
+            'failed_24h_count' => 0,
+            'overdue_lease_count' => 0,
+            'oldest_pending_at' => null,
+            'oldest_pending_age_seconds' => null,
+            'oldest_retry_at' => null,
+            'oldest_retry_age_seconds' => null,
+            'oldest_due_at' => null,
+            'oldest_due_age_seconds' => null,
+            'stale_due_seconds' => 300,
+            'stale_due_count' => 0,
+            'oldest_in_progress_at' => null,
+            'oldest_in_progress_age_seconds' => null,
+            'earliest_lease_expires_at' => null,
+            'next_due_at' => null,
+            'oldest_active_at' => null,
+            'last_error_kind' => null,
+            'last_error' => null,
+            'last_error_at' => null,
+        ];
+    }
+    $maxAttempts = max(
+        1,
+        min(
+            20,
+            function_exists('env')
+                ? (int)env('CANONICAL_QUEUE_MAX_ATTEMPTS', '3')
+                : 3
+        )
+    );
+    $stmt = $db->prepare("
+        SELECT
+            COALESCE(SUM(CASE
+                WHEN status IN ('pending', 'failed')
+                 AND attempts < ?
+                THEN 1 ELSE 0 END), 0) AS retryable_count,
+            COALESCE(SUM(CASE
+                WHEN status = 'pending'
+                THEN 1 ELSE 0 END), 0) AS pending_count,
+            COALESCE(SUM(CASE
+                WHEN status = 'in_progress'
+                THEN 1 ELSE 0 END), 0) AS in_progress_count,
+            COALESCE(SUM(CASE
+                WHEN status IN ('pending', 'failed')
+                 AND attempts < ?
+                 AND next_retry_at IS NOT NULL
+                THEN 1 ELSE 0 END), 0) AS retry_count,
+            COALESCE(SUM(CASE
+                WHEN status IN ('pending', 'failed')
+                 AND attempts < ?
+                 AND (
+                    next_retry_at IS NULL
+                    OR next_retry_at <= CURRENT_TIMESTAMP
+                 )
+                THEN 1 ELSE 0 END), 0) AS retry_due_count,
+            COALESCE(SUM(CASE
+                WHEN status = 'failed' AND attempts >= ?
+                THEN 1 ELSE 0 END), 0) AS failed_count,
+            COALESCE(SUM(CASE
+                WHEN status IN ('pending', 'failed')
+                 AND attempts >= ?
+                THEN 1 ELSE 0 END), 0) AS exhausted_count,
+            COALESCE(SUM(CASE
+                WHEN status = 'pending'
+                 AND attempts >= ?
+                THEN 1 ELSE 0 END), 0)
+                AS exhausted_pending_count,
+            COALESCE(SUM(CASE
+                WHEN status = 'failed'
+                 AND attempts >= ?
+                 AND updated_at >= datetime('now', '-24 hours')
+                THEN 1 ELSE 0 END), 0) AS failed_24h_count,
+            COALESCE(SUM(CASE
+                WHEN status = 'in_progress'
+                 AND lease_expires_at <= CURRENT_TIMESTAMP
+                THEN 1 ELSE 0 END), 0) AS overdue_lease_count,
+            MIN(CASE
+                WHEN status IN ('pending', 'failed')
+                 AND attempts < ?
+                THEN requested_at
+                ELSE NULL
+            END) AS oldest_pending_at,
+            MIN(CASE
+                WHEN status IN ('pending', 'failed')
+                 AND attempts < ?
+                 AND next_retry_at IS NOT NULL
+                THEN next_retry_at
+                ELSE NULL
+            END) AS oldest_retry_at,
+            MIN(CASE
+                WHEN status IN ('pending', 'failed')
+                 AND attempts < ?
+                 AND (
+                    next_retry_at IS NULL
+                    OR next_retry_at <= CURRENT_TIMESTAMP
+                 )
+                THEN requested_at
+                ELSE NULL
+            END) AS oldest_due_at,
+            MIN(CASE
+                WHEN status = 'in_progress'
+                THEN started_at
+                ELSE NULL
+            END) AS oldest_in_progress_at,
+            MIN(CASE
+                WHEN status = 'in_progress'
+                THEN lease_expires_at
+                ELSE NULL
+            END) AS earliest_lease_expires_at,
+            MIN(CASE
+                WHEN status IN ('pending', 'failed')
+                 AND attempts < ?
+                 AND next_retry_at > CURRENT_TIMESTAMP
+                THEN next_retry_at
+                ELSE NULL
+            END) AS next_due_at
+        FROM canonical_processing_queue
+    ");
+    $stmt->execute(array_fill(0, 11, $maxAttempts));
+    $row = $stmt->fetch(PDO::FETCH_ASSOC) ?: [];
+    $stmt->closeCursor();
+    $lastErrorStmt = $db->query("
+        SELECT last_error_kind, last_error, updated_at
+        FROM canonical_processing_queue
+        WHERE TRIM(COALESCE(last_error_kind, '')) <> ''
+           OR TRIM(COALESCE(last_error, '')) <> ''
+        ORDER BY updated_at DESC, id DESC
+        LIMIT 1
+    ");
+    $lastError = $lastErrorStmt->fetch(PDO::FETCH_ASSOC) ?: [];
+    $lastErrorStmt->closeCursor();
+    $retryable = (int)($row['retryable_count'] ?? 0);
+    $inProgress = (int)($row['in_progress_count'] ?? 0);
+    $exhausted = (int)($row['exhausted_count'] ?? 0);
+    $exhaustedPending =
+        (int)($row['exhausted_pending_count'] ?? 0);
+    $due = (int)($row['retry_due_count'] ?? 0);
+    $staleDueSeconds = max(
+        30,
+        min(
+            86400,
+            function_exists('env')
+                ? (int)env(
+                    'CANONICAL_QUEUE_STALE_DUE_SECONDS',
+                    '300'
+                )
+                : 300
+        )
+    );
+    $oldestDueAt = trim((string)(
+        $row['oldest_due_at'] ?? ''
+    )) ?: null;
+    $oldestDueAge =
+        evershelfProcessingStatusAgeSeconds($oldestDueAt);
+    $staleDueStmt = $db->prepare("
+        SELECT COUNT(*)
+        FROM canonical_processing_queue
+        WHERE status IN ('pending', 'failed')
+          AND attempts < ?
+          AND (
+              next_retry_at IS NULL
+              OR next_retry_at <= CURRENT_TIMESTAMP
+          )
+          AND requested_at <= datetime(
+              'now',
+              '-' || ? || ' seconds'
+          )
+    ");
+    $staleDueStmt->execute([
+        $maxAttempts,
+        $staleDueSeconds,
+    ]);
+    $staleDueCount = (int)$staleDueStmt->fetchColumn();
+    $staleDueStmt->closeCursor();
+    $lockAvailable = function_exists(
+        'canonicalIngredientQueueLockAvailable'
+    )
+        ? canonicalIngredientQueueLockAvailable()
+        : false;
+    $oldestActiveAt = evershelfProcessingStatusEarliest(
+        $inProgress > 0
+            ? ($row['oldest_in_progress_at'] ?? null)
+            : null,
+        $due > 0
+            ? $oldestDueAt
+            : null
+    );
+    return [
+        'available' => true,
+        'lock_available' => $lockAvailable,
+        'open_count' =>
+            $retryable + $inProgress + $exhaustedPending,
+        'active_count' => $due + $inProgress,
+        'pending_count' => (int)($row['pending_count'] ?? 0),
+        'in_progress_count' => $inProgress,
+        'retry_count' => (int)($row['retry_count'] ?? 0),
+        'retry_due_count' => $due,
+        'failed_count' => (int)($row['failed_count'] ?? 0),
+        'exhausted_count' => $exhausted,
+        'exhausted_pending_count' => $exhaustedPending,
+        'failed_24h_count' =>
+            (int)($row['failed_24h_count'] ?? 0),
+        'overdue_lease_count' =>
+            (int)($row['overdue_lease_count'] ?? 0),
+        'oldest_pending_at' => $row['oldest_pending_at'] ?? null,
+        'oldest_pending_age_seconds' =>
+            evershelfProcessingStatusAgeSeconds(
+                $row['oldest_pending_at'] ?? null
+            ),
+        'oldest_retry_at' => $row['oldest_retry_at'] ?? null,
+        'oldest_retry_age_seconds' =>
+            evershelfProcessingStatusAgeSeconds(
+                $row['oldest_retry_at'] ?? null
+            ),
+        'oldest_due_at' => $oldestDueAt,
+        'oldest_due_age_seconds' => $oldestDueAge,
+        'stale_due_seconds' => $staleDueSeconds,
+        'stale_due_count' => $staleDueCount,
+        'oldest_in_progress_at' =>
+            $row['oldest_in_progress_at'] ?? null,
+        'oldest_in_progress_age_seconds' =>
+            evershelfProcessingStatusAgeSeconds(
+                $row['oldest_in_progress_at'] ?? null
+            ),
+        'earliest_lease_expires_at' =>
+            $row['earliest_lease_expires_at'] ?? null,
+        'next_due_at' => $row['next_due_at'] ?? null,
+        'oldest_active_at' => $oldestActiveAt,
+        'last_error_kind' => trim((string)(
+            $lastError['last_error_kind'] ?? ''
+        )) ?: null,
+        'last_error' => evershelfProcessingStatusPublicError(
+            $lastError['last_error'] ?? null
+        ),
+        'last_error_at' => $lastError['updated_at'] ?? null,
+    ];
+}
+
 function evershelfProcessingStatusOntologyQueue(PDO $db): array {
     if (
         !evershelfProcessingStatusTableExists(
@@ -755,7 +1015,8 @@ function evershelfProcessingStatusWorkPhase(
     array $ontologyQueue,
     array $scores,
     array $activation,
-    array $incremental = []
+    array $incremental = [],
+    array $canonicalQueue = []
 ): string {
     if (in_array(
         (string)($incremental['phase'] ?? 'idle'),
@@ -766,6 +1027,9 @@ function evershelfProcessingStatusWorkPhase(
     }
     if (!empty($activation['running'])) {
         return 'activating';
+    }
+    if ((int)($canonicalQueue['active_count'] ?? 0) > 0) {
+        return 'canonical';
     }
     if (
         !empty($ontologyQueue['runtime_enabled'])
@@ -1074,6 +1338,8 @@ function evershelfProcessingStatusIncrementalScores(PDO $db): array {
 
 function evershelfProcessingStatus(PDO $db): array {
     $recipeQueue = evershelfProcessingStatusRecipeQueue($db);
+    $canonicalQueue =
+        evershelfProcessingStatusCanonicalQueue($db);
     $ontologyQueue = evershelfProcessingStatusOntologyQueue($db);
     $scores = evershelfProcessingStatusScores($db);
     $activation = evershelfProcessingStatusActivation($db);
@@ -1098,6 +1364,15 @@ function evershelfProcessingStatus(PDO $db): array {
     $incrementalProblem =
         (string)($incremental['phase'] ?? '') === 'failed'
         && $incremental['last_error'] !== null;
+    $canonicalProblem =
+        (int)$canonicalQueue['overdue_lease_count'] > 0
+        || (int)$canonicalQueue['failed_24h_count'] > 0
+        || (int)$canonicalQueue['exhausted_pending_count'] > 0
+        || (int)$canonicalQueue['stale_due_count'] > 0
+        || (
+            (int)$canonicalQueue['retry_due_count'] > 0
+            && empty($canonicalQueue['lock_available'])
+        );
     $coverageAdvisory = $ontologyQueue['runtime_enabled']
         && $coverage['available']
         && $coverage['missing_recipe_count'] > 0;
@@ -1106,6 +1381,7 @@ function evershelfProcessingStatus(PDO $db): array {
         || $providerProblem
         || $activationProblem
         || $incrementalProblem
+        || $canonicalProblem
         || $recipeQueue['failed_24h_count'] > 0
         || $ontologyQueue['failed_24h_count'] > 0
         || (
@@ -1122,7 +1398,8 @@ function evershelfProcessingStatus(PDO $db): array {
         $ontologyQueue,
         $scores,
         $activation,
-        $incremental
+        $incremental,
+        $canonicalQueue
     );
     $phase = $workPhase === 'idle' && $problem
         ? 'degraded'
@@ -1130,6 +1407,7 @@ function evershelfProcessingStatus(PDO $db): array {
 
     $oldestAt = evershelfProcessingStatusEarliest(
         $recipeQueue['oldest_at'],
+        $canonicalQueue['oldest_active_at'],
         $ontologyQueue['oldest_at'],
         $scores['stale'] ? $scores['dirty_at'] : null,
         $activation['running'] ? (
@@ -1143,6 +1421,7 @@ function evershelfProcessingStatus(PDO $db): array {
     $pending = [
         'total' =>
             $recipeQueue['open_count']
+            + $canonicalQueue['open_count']
             + $ontologyQueue['intake_open_count']
             + $ontologyQueue['generation_open_count']
             + (int)(
@@ -1152,6 +1431,8 @@ function evershelfProcessingStatus(PDO $db): array {
             + (int)$incremental['pending_product_count']
             + (int)$incremental['pending_recipe_count'],
         'recipe_jobs' => $recipeQueue['open_count'],
+        'canonical_queue' => $canonicalQueue['open_count'],
+        'canonical_due' => $canonicalQueue['retry_due_count'],
         'ontology_intake_jobs' =>
             $ontologyQueue['intake_open_count'],
         'ontology_generation_jobs' =>
@@ -1178,7 +1459,10 @@ function evershelfProcessingStatus(PDO $db): array {
         'score_recipes' =>
             (int)$incremental['pending_recipe_count'],
     ];
-    $lastError = $incremental['last_error']
+    $lastError = $canonicalProblem
+        ? $canonicalQueue['last_error']
+        : null;
+    $lastError ??= $incremental['last_error']
         ?? $activation['last_error']
         ?? $logging['last_error']
         ?? null;
@@ -1197,6 +1481,7 @@ function evershelfProcessingStatus(PDO $db): array {
             ? mb_substr((string)$lastError, 0, 300, 'UTF-8')
             : null,
         'recipe_queue' => $recipeQueue,
+        'canonical_queue' => $canonicalQueue,
         'ontology_queue' => $ontologyQueue,
         'recipe_scores' => $scores,
         'incremental_scores' => $incremental,

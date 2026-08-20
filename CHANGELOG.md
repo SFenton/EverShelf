@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.14.0] - 2026-08-20
+
+### Added
+- Canonical queue due scheduling, adaptive wake timing, and bounded processing
+  health for pending retries, active/overdue leases, and terminal failures.
+
+### Changed
+- Canonical enrichment now computes provider evidence outside SQLite and
+  atomically commits fingerprint-fenced mappings, queue completion, and
+  taxonomy-score enqueue in one short transaction.
+- Retryable SQLite contention reuses the prepared result, explicitly requeues
+  handled failures with attempt-aware backoff (2s and 8s for the default three
+  executions; 30s only with at least four), and reserves the tunable
+  120-second crash lease for process recovery.
+- Provider work now has a lease-derived deadline with a reserved atomic-apply
+  window. Budget exhaustion is explicitly requeued instead of becoming an
+  expired healthy claim.
+- FoodOn and USDA caches now serialize full read-modify-write publication,
+  merge different-key writers, track atomic-renamed files in resident state,
+  and continue valid classification when persistence is busy or fails without
+  waiting behind another publisher. FoodOn hierarchy failures retain no partial
+  record, cannot replace a fresh positive, and use a separate short transient
+  TTL.
+
+### Fixed
+- A failure-state `SQLITE_BUSY` can no longer mask the primary canonical error
+  or leave handled work leased until crash recovery.
+- Canonical processors fail closed when their shared queue lock is unavailable;
+  rate-limited diagnostics and processing status expose blocked/stale due
+  work while historical terminal failures remain diagnostic rather than
+  permanently unhealthy. Container startup repairs only the dedicated
+  queue/provider-cache lock files without traversing the database volume.
+- Stale request generations and expired leases cannot write canonical product
+  data before their completion fence is rejected. Direct non-queue syncs also
+  recheck and rebuild once before writing.
+
 ## [1.13.19] - 2026-08-19
 
 ### Fixed

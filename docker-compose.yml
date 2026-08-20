@@ -122,6 +122,9 @@ services:
     environment:
       - TZ=Europe/Rome
       - CANONICAL_QUEUE_WAKE_SOCKET=/var/www/html/data/canonical-queue.sock
+      - CANONICAL_QUEUE_BUSY_TIMEOUT_MS=${CANONICAL_QUEUE_BUSY_TIMEOUT_MS:-250}
+      - CANONICAL_QUEUE_APPLY_RETRY_SECONDS=${CANONICAL_QUEUE_APPLY_RETRY_SECONDS:-20}
+      - CANONICAL_QUEUE_RELEASE_RETRY_SECONDS=${CANONICAL_QUEUE_RELEASE_RETRY_SECONDS:-45}
     depends_on:
       - evershelf
     restart: unless-stopped

@@ -214,14 +214,36 @@ Canonical enrichment is asynchronous and wake-driven in Docker:
 CANONICAL_QUEUE_WORKER_LIMIT=5
 CANONICAL_QUEUE_WORKER_MAX_BATCHES=100
 CANONICAL_QUEUE_MAX_ATTEMPTS=3
-CANONICAL_QUEUE_LEASE_SECONDS=600
+CANONICAL_QUEUE_CRASH_LEASE_SECONDS=120
+CANONICAL_QUEUE_APPLY_RESERVE_SECONDS=30
+CANONICAL_QUEUE_BUSY_TIMEOUT_MS=250
+CANONICAL_QUEUE_APPLY_RETRY_SECONDS=20
+CANONICAL_QUEUE_RELEASE_RETRY_SECONDS=45
+CANONICAL_QUEUE_STALE_DUE_SECONDS=300
+CANONICAL_QUEUE_LOCK_WARNING_INTERVAL_SECONDS=60
 CANONICAL_QUEUE_WAKE_SOCKET=/var/www/html/data/canonical-queue.sock
 CANONICAL_QUEUE_SAFETY_POLL_SECONDS=30
+FOODON_HIERARCHY_FAILURE_CACHE_TTL_SECONDS=900
 ```
 
 Product commits send a nonblocking local datagram after commit. The resident
-worker retains the existing request-generation, fingerprint and lease CAS, and
-the five-minute smart-shopping cron remains a dropped-wake/restart fallback.
+worker computes enrichment without a database transaction, then applies
+canonical rows, queue completion, and taxonomy-score enqueue in one short
+fingerprint- and lease-fenced transaction. SQLite contention retries the
+already-computed result. With the default three total executions, failures
+retry after 2 and 8 seconds and then terminate; a 30-second third backoff is
+used only when `CANONICAL_QUEUE_MAX_ATTEMPTS` is at least four. Provider work
+has a deadline derived from the crash lease minus the apply reserve, so slow
+healthy enrichment is explicitly requeued instead of expiring its lease.
+Only a true process crash waits for the 120-second lease. The deprecated
+`CANONICAL_QUEUE_LEASE_SECONDS` is honored only for non-600 legacy values;
+deliberate 600-second configuration now uses
+`CANONICAL_QUEUE_CRASH_LEASE_SECONDS`. The five-minute
+smart-shopping cron remains a dropped-wake/restart fallback.
+FoodOn hierarchy failures use the short seconds-based TTL; positive and
+definitive no-match entries retain the day-based cache TTL. Provider cache
+publication is best-effort and never waits behind another publisher; a valid
+result remains resident when persistence is busy or unavailable.
 Non-Docker installations should run exactly one
 `scripts/canonical-queue-worker.php --db=/path/to/evershelf.db
 --allow-active-db --loop` process.

@@ -36,6 +36,9 @@ jobs:
       - name: Test category refinement server contract
         run: php scripts/test-category-refinement.php
 
+      - name: Test database migration runtime
+        run: php scripts/test-database-runtime.php
+
       - name: Test shopping classification contract
         run: php scripts/test-shopping-classification.php
 
@@ -44,6 +47,9 @@ jobs:
 
       - name: Test processing status and contention contract
         run: php scripts/test-processing-status.php
+
+      - name: Test canonical queue contention and recovery contract
+        run: php scripts/test-canonical-queue.php
 
       - name: Test sparse score invalidation contract
         run: php scripts/test-score-invalidation-phase0.php

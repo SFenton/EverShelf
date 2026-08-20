@@ -52,7 +52,7 @@ try {
         'Database migration must create API idempotency receipts'
     );
     $assert(
-        $db->query("
+        (int)$db->query("
             SELECT barcode IS NULL
             FROM products
             WHERE name = 'Empty barcode migration fixture'
@@ -101,6 +101,7 @@ try {
             ingredient_ontology_ready_mutation_guard() AS ready_guard,
             ingredient_ontology_publication_guard() AS publication_guard
     ")->fetch(PDO::FETCH_ASSOC);
+    $guards = array_map('intval', $guards);
     $assert(
         $guards === [
             'prune_guard' => 0,
@@ -178,6 +179,54 @@ try {
             'canonical_processing_queue'
         ),
         'Migration must recreate missing core tables in a partial database'
+    );
+
+    $canonicalUpgradeDb = new PDO('sqlite::memory:');
+    $canonicalUpgradeDb->setAttribute(
+        PDO::ATTR_ERRMODE,
+        PDO::ERRMODE_EXCEPTION
+    );
+    $canonicalUpgradeDb->setAttribute(
+        PDO::ATTR_DEFAULT_FETCH_MODE,
+        PDO::FETCH_ASSOC
+    );
+    initializeDB($canonicalUpgradeDb);
+    $canonicalUpgradeDb->exec("
+        DROP TABLE canonical_processing_queue;
+        CREATE TABLE canonical_processing_queue (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            product_id INTEGER NOT NULL UNIQUE,
+            reason TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'pending',
+            attempts INTEGER NOT NULL DEFAULT 0,
+            last_error TEXT DEFAULT '',
+            requested_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            started_at DATETIME DEFAULT NULL,
+            processed_at DATETIME DEFAULT NULL,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            request_generation INTEGER NOT NULL DEFAULT 1,
+            lease_token TEXT DEFAULT NULL,
+            lease_generation INTEGER NOT NULL DEFAULT 0,
+            lease_expires_at DATETIME DEFAULT NULL,
+            request_fingerprint TEXT NOT NULL DEFAULT ''
+        )
+    ");
+    migrateDB($canonicalUpgradeDb);
+    $canonicalColumns = array_column(
+        $canonicalUpgradeDb->query("
+            PRAGMA table_info(canonical_processing_queue)
+        ")->fetchAll(PDO::FETCH_ASSOC),
+        'name'
+    );
+    $canonicalDueIndex = (bool)$canonicalUpgradeDb->query("
+        SELECT 1 FROM sqlite_master
+        WHERE type = 'index' AND name = 'idx_canonical_queue_due'
+    ")->fetchColumn();
+    $assert(
+        in_array('next_retry_at', $canonicalColumns, true)
+        && in_array('last_error_kind', $canonicalColumns, true)
+        && $canonicalDueIndex,
+        'Canonical retry scheduling must upgrade legacy queue tables idempotently'
     );
 
     $legacyDb = new PDO('sqlite::memory:');

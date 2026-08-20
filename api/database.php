@@ -11,7 +11,7 @@ require_once __DIR__ . '/lib/recipes/schema.php';
 
 define('DB_PATH', __DIR__ . '/../data/evershelf.db');
 // Bump whenever migrateDB() or a nested schema migration changes.
-const EVERSHELF_DATABASE_SCHEMA_VERSION = 2026081704;
+const EVERSHELF_DATABASE_SCHEMA_VERSION = 2026082001;
 
 /**
  * Ensure the data directory exists and is writable by the web-server user.
@@ -513,6 +513,8 @@ function initializeDB(PDO $db): void {
             lease_generation INTEGER NOT NULL DEFAULT 0,
             lease_expires_at DATETIME DEFAULT NULL,
             request_fingerprint TEXT NOT NULL DEFAULT '',
+            next_retry_at DATETIME DEFAULT NULL,
+            last_error_kind TEXT NOT NULL DEFAULT '',
             FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE CASCADE
         );
 
@@ -605,7 +607,9 @@ function migratePreparedFoodAggregateSemantics(PDO $db): void {
                             CURRENT_TIMESTAMP, NULL, NULL, CURRENT_TIMESTAMP)
                     ON CONFLICT(product_id) DO UPDATE SET
                         reason = excluded.reason, status = 'pending', attempts = 0,
-                        last_error = '', requested_at = CURRENT_TIMESTAMP,
+                        last_error = '', last_error_kind = '',
+                        next_retry_at = NULL,
+                        requested_at = CURRENT_TIMESTAMP,
                         started_at = NULL, processed_at = NULL, updated_at = CURRENT_TIMESTAMP
                 ")->execute([$productId]);
             }
@@ -752,6 +756,8 @@ function migrateDB(PDO $db): void {
         'lease_generation' => 'INTEGER NOT NULL DEFAULT 0',
         'lease_expires_at' => 'DATETIME DEFAULT NULL',
         'request_fingerprint' => "TEXT NOT NULL DEFAULT ''",
+        'next_retry_at' => 'DATETIME DEFAULT NULL',
+        'last_error_kind' => "TEXT NOT NULL DEFAULT ''",
     ] as $column => $definition) {
         databaseAddColumnIfMissing(
             $db,
@@ -760,6 +766,12 @@ function migrateDB(PDO $db): void {
             $definition
         );
     }
+    $db->exec("
+        CREATE INDEX IF NOT EXISTS idx_canonical_queue_due
+            ON canonical_processing_queue(
+                status, next_retry_at, lease_expires_at, requested_at, id
+            )
+    ");
 
     // Add package_unit column if missing
     $cols = $db->query("PRAGMA table_info(products)")->fetchAll();
@@ -1264,6 +1276,8 @@ function migrateDB(PDO $db): void {
             lease_generation INTEGER NOT NULL DEFAULT 0,
             lease_expires_at DATETIME DEFAULT NULL,
             request_fingerprint TEXT NOT NULL DEFAULT '',
+            next_retry_at DATETIME DEFAULT NULL,
+            last_error_kind TEXT NOT NULL DEFAULT '',
             FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE CASCADE
         );
 
