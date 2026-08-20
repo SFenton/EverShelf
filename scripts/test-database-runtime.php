@@ -258,6 +258,35 @@ try {
         && str_contains($legacySql, "'waste'"),
         'Migration must atomically recover rows from transactions_old'
     );
+
+    $workerSources = [
+        'incremental-score-worker.php' =>
+            (string)file_get_contents(
+                __DIR__ . '/incremental-score-worker.php'
+            ),
+        'canonical-queue-worker.php' =>
+            (string)file_get_contents(
+                __DIR__ . '/canonical-queue-worker.php'
+            ),
+        'ontology-controller.php' =>
+            (string)file_get_contents(
+                __DIR__ . '/ontology-controller.php'
+            ),
+    ];
+    $workersUseSharedMigration = true;
+    foreach ($workerSources as $source) {
+        $workersUseSharedMigration =
+            $workersUseSharedMigration
+            && str_contains($source, 'databaseEnsureMigrated(')
+            && str_contains(
+                $source,
+                "\$databasePath . '.migration.lock'"
+            );
+    }
+    $assert(
+        $workersUseSharedMigration,
+        'All long-running workers must use the shared schema marker and migration lock'
+    );
 } finally {
     @unlink($lockPath);
     @unlink($reopenLockPath);

@@ -37,8 +37,10 @@ if ($databasePath === '') {
     $db->setAttribute(PDO::ATTR_DEFAULT_FETCH_MODE, PDO::FETCH_ASSOC);
     $db->exec('PRAGMA foreign_keys=ON');
     $db->exec('PRAGMA busy_timeout=10000');
-    ingredientOntologyV3SchemaMigrate($db);
-    recipeSchemaMigrate($db);
+    databaseEnsureMigrated(
+        $db,
+        $databasePath . '.migration.lock'
+    );
 }
 
 $running = true;

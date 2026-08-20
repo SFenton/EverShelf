@@ -141,7 +141,10 @@ if ($databasePath === '') {
     $db->setAttribute(PDO::ATTR_DEFAULT_FETCH_MODE, PDO::FETCH_ASSOC);
     $db->exec('PRAGMA foreign_keys=ON');
     $db->exec('PRAGMA busy_timeout=10000');
-    migrateDB($db);
+    databaseEnsureMigrated(
+        $db,
+        $databasePath . '.migration.lock'
+    );
 }
 $cycle = 0;
 $lockUnavailableStreak = 0;

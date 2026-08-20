@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.15.1] - 2026-08-20
+
+### Fixed
+- Ontology, recipe-score, and canonical workers now use the shared
+  schema-version marker and migration lock. Simultaneous container restarts
+  no longer rerun idempotent schema writes against the 49 GB live database or
+  crash-loop with `database is locked` after the web service has migrated it.
+
 ## [1.15.0] - 2026-08-20
 
 ### Added
