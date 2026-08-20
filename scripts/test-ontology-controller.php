@@ -10765,6 +10765,11 @@ try {
                 'status' => 'retry',
                 'reason' => 'expand_search',
             ],
+            [
+                'job_id' => 25,
+                'status' => 'retry',
+                'reason' => 'bounded_controller_retry',
+            ],
         ])
         && !ingredientOntologyControllerResultsAreRetryPending([
             [

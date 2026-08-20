@@ -23371,17 +23371,6 @@ function ingredientOntologyControllerResultsAreRetryPending(
         ) {
             return false;
         }
-        $reason = (string)(
-            $result['error']
-                ?? $result['reason']
-                ?? ''
-        );
-        if (!in_array($reason, [
-            'controller_generation_in_flight_retryable',
-            'expand_search',
-        ], true)) {
-            return false;
-        }
     }
     return true;
 }
