@@ -11935,6 +11935,24 @@ try {
             . '\) \{$/m',
         $activationWorkerSource
     ) === 1;
+    $noWorkBranch = strpos(
+        $activationSource,
+        "if (!empty(\$built['no_work']))"
+    );
+    $scoreRefreshPriority = is_int($noWorkBranch)
+        ? strpos(
+            $activationSource,
+            'ingredientOntologyActivationNeedsScoreBuild($db)',
+            $noWorkBranch
+        )
+        : false;
+    $policyDeferredRecord = is_int($noWorkBranch)
+        ? strpos(
+            $activationSource,
+            "'record_policy_deferred'",
+            $noWorkBranch
+        )
+        : false;
     controllerTestAssert(
         str_contains($cronSource, "'intake_only' => true")
         && str_contains(
@@ -11982,6 +12000,13 @@ try {
         && str_contains(
             $activationSource,
             'ingredientOntologyActivationWithLiveReservation'
+        )
+        && is_int($scoreRefreshPriority)
+        && is_int($policyDeferredRecord)
+        && $scoreRefreshPriority < $policyDeferredRecord
+        && str_contains(
+            $activationSource,
+            'ingredientOntologyActivationStartScoreRefresh'
         ),
         'Production cron and live worker CLI must remain priority-fenced and reject active-database generation'
     );
