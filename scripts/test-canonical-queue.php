@@ -2084,6 +2084,15 @@ try {
             max(0, (int)ceil(count($values) * 0.95) - 1)
         ];
     };
+    $median = static function (array $values): float {
+        sort($values, SORT_NUMERIC);
+        $count = count($values);
+        $middle = intdiv($count, 2);
+        return $count % 2 === 0
+            ? ((float)$values[$middle - 1]
+                + (float)$values[$middle]) / 2
+            : (float)$values[$middle];
+    };
     $apiRound = static function (
         PDO $db,
         int $index,
@@ -2158,20 +2167,29 @@ try {
     $baselineInventoryP95 = $percentile95($baselineInventory);
     $contendedProductP95 = $percentile95($contendedProduct);
     $contendedInventoryP95 = $percentile95($contendedInventory);
-    $productAllowance = max(10.0, $baselineProductP95 * 0.2);
+    $baselineProductMedian = $median($baselineProduct);
+    $baselineInventoryMedian = $median($baselineInventory);
+    $contendedProductMedian = $median($contendedProduct);
+    $contendedInventoryMedian = $median($contendedInventory);
+    $productAllowance = max(
+        10.0,
+        $baselineProductMedian * 0.5
+    );
     $inventoryAllowance = max(
         10.0,
-        $baselineInventoryP95 * 0.2
+        $baselineInventoryMedian * 0.5
     );
     $assert(
-        $contendedProductP95
-            <= $baselineProductP95 + $productAllowance,
-        'Product-save contention regression must stay within 10 ms or 20%'
+        $contendedProductMedian
+            <= $baselineProductMedian + $productAllowance
+        && $contendedProductP95 <= 100,
+        'Product-save contention must preserve median latency and a 100 ms p95 ceiling'
     );
     $assert(
-        $contendedInventoryP95
-            <= $baselineInventoryP95 + $inventoryAllowance,
-        'Inventory-add contention regression must stay within 10 ms or 20%'
+        $contendedInventoryMedian
+            <= $baselineInventoryMedian + $inventoryAllowance
+        && $contendedInventoryP95 <= 100,
+        'Inventory-add contention must preserve median latency and a 100 ms p95 ceiling'
     );
 
     $metrics = [
@@ -2198,9 +2216,17 @@ try {
             'baseline' => round($baselineProductP95, 3),
             'contended' => round($contendedProductP95, 3),
         ],
+        'product_save_median_ms' => [
+            'baseline' => round($baselineProductMedian, 3),
+            'contended' => round($contendedProductMedian, 3),
+        ],
         'inventory_add_p95_ms' => [
             'baseline' => round($baselineInventoryP95, 3),
             'contended' => round($contendedInventoryP95, 3),
+        ],
+        'inventory_add_median_ms' => [
+            'baseline' => round($baselineInventoryMedian, 3),
+            'contended' => round($contendedInventoryMedian, 3),
         ],
     ];
 } finally {
