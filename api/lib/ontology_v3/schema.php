@@ -2091,6 +2091,61 @@ function ingredientOntologyV3SchemaMigrate(PDO $db): void {
                 REFERENCES ingredient_ontology_entities(id) ON DELETE SET NULL
         );
 
+        CREATE TABLE IF NOT EXISTS ingredient_ontology_product_readiness (
+            product_id INTEGER PRIMARY KEY,
+            ontology_version_id INTEGER NOT NULL,
+            ontology_content_hash TEXT NOT NULL
+                CHECK(length(ontology_content_hash) = 64),
+            ontology_seal_hash TEXT NOT NULL
+                CHECK(length(ontology_seal_hash) = 64),
+            owner_fingerprint TEXT NOT NULL
+                CHECK(length(owner_fingerprint) = 64),
+            annex_evidence_hash TEXT NOT NULL
+                CHECK(length(annex_evidence_hash) = 64),
+            identity_status TEXT NOT NULL
+                CHECK(identity_status IN (
+                    'accepted', 'rejected', 'unresolved'
+                )),
+            status TEXT NOT NULL
+                CHECK(status IN (
+                    'retry', 'accepted_unscored', 'scoring',
+                    'ready', 'needs_review', 'non_satisfying',
+                    'failed'
+                )),
+            attempts INTEGER NOT NULL DEFAULT 0
+                CHECK(attempts >= 0),
+            max_attempts INTEGER NOT NULL DEFAULT 4
+                CHECK(max_attempts BETWEEN 1 AND 20),
+            score_attempts INTEGER NOT NULL DEFAULT 0
+                CHECK(score_attempts >= 0),
+            next_retry_at DATETIME DEFAULT NULL,
+            requested_inventory_revision INTEGER DEFAULT NULL
+                CHECK(
+                    requested_inventory_revision IS NULL
+                    OR requested_inventory_revision > 0
+                ),
+            requested_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            started_at DATETIME DEFAULT NULL,
+            ready_at DATETIME DEFAULT NULL,
+            failed_at DATETIME DEFAULT NULL,
+            score_revision_id INTEGER DEFAULT NULL
+                CHECK(score_revision_id IS NULL OR score_revision_id > 0),
+            affected_recipe_count INTEGER NOT NULL DEFAULT 0
+                CHECK(affected_recipe_count >= 0),
+            visible_ms REAL DEFAULT NULL
+                CHECK(visible_ms IS NULL OR visible_ms >= 0),
+            last_error_kind TEXT NOT NULL DEFAULT ''
+                CHECK(length(last_error_kind) <= 160),
+            last_error TEXT NOT NULL DEFAULT ''
+                CHECK(length(last_error) <= 1000),
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (product_id)
+                REFERENCES products(id) ON DELETE CASCADE,
+            FOREIGN KEY (ontology_version_id)
+                REFERENCES ingredient_ontology_versions(id) ON DELETE CASCADE
+        );
+
         CREATE TABLE IF NOT EXISTS ingredient_ontology_resolution_manifests (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             ontology_version_id INTEGER NOT NULL,
@@ -3066,6 +3121,10 @@ function ingredientOntologyV3SchemaMigrate(PDO $db): void {
         CREATE INDEX IF NOT EXISTS idx_ontology_identity_annex_owner
             ON ingredient_ontology_identity_annex(
                 product_id, owner_fingerprint, status
+            );
+        CREATE INDEX IF NOT EXISTS idx_ontology_product_readiness_due
+            ON ingredient_ontology_product_readiness(
+                status, next_retry_at, requested_at, product_id
             );
         CREATE INDEX IF NOT EXISTS idx_ontology_disposition_scope
             ON ingredient_ontology_disposition_scopes(

@@ -3,8 +3,13 @@ declare(strict_types=1);
 
 const INGREDIENT_ONTOLOGY_IDENTITY_ANNEX_RESOLVER_VERSION =
     'identity-annex-r0-v1';
+const INGREDIENT_ONTOLOGY_PRODUCT_IDENTITY_ANNEX_RESOLVER_VERSION =
+    'identity-annex-product-r0-v2';
 const INGREDIENT_ONTOLOGY_IDENTITY_ANNEX_REVIEW_VERSION =
     'operator-reviewed-aliases-2026-08-18-v2';
+const INGREDIENT_ONTOLOGY_PRODUCT_IDENTITY_MIGRATION_BATCH_SIZE = 25;
+const INGREDIENT_ONTOLOGY_PRODUCT_READINESS_MAX_ATTEMPTS = 4;
+const INGREDIENT_ONTOLOGY_PRODUCT_READINESS_DEADLINE_SECONDS = 30;
 
 function ingredientOntologyV3IdentityAnnexReviewedAliases(): array {
     $aliases = [
@@ -200,7 +205,7 @@ function ingredientOntologyV3IdentityAdmissionState(PDO $db): array {
             'available' => false,
             'revision' => 0,
             'resolver_version' =>
-                INGREDIENT_ONTOLOGY_IDENTITY_ANNEX_RESOLVER_VERSION,
+                INGREDIENT_ONTOLOGY_PRODUCT_IDENTITY_ANNEX_RESOLVER_VERSION,
             'review_manifest_hash' =>
                 ingredientOntologyV3IdentityAnnexReviewManifestHash(),
             'last_changed_label_count' => 0,
@@ -227,6 +232,202 @@ function ingredientOntologyV3IdentityAdmissionState(PDO $db): array {
     ];
 }
 
+function ingredientOntologyV3IdentityAdmissionMigrateProductBatch(
+    PDO $db,
+    int $limit =
+        INGREDIENT_ONTOLOGY_PRODUCT_IDENTITY_MIGRATION_BATCH_SIZE
+): array {
+    if (
+        !ingredientOntologyV3TableExists($db, 'recipe_score_state')
+        || !ingredientOntologyV3TableExists(
+            $db,
+            'recipe_score_pending_products'
+        )
+        || !ingredientOntologyV3IdentityAnnexTableExists($db)
+    ) {
+        return [
+            'available' => false,
+            'processed' => 0,
+            'changed_product_ids' => [],
+            'backfilled_product_ids' => [],
+            'remaining' => 0,
+        ];
+    }
+    $activeScore = recipeScoreActiveRevision($db);
+    if (
+        $activeScore === null
+        || $activeScore['ontology_version_id'] === null
+    ) {
+        return [
+            'available' => false,
+            'processed' => 0,
+            'changed_product_ids' => [],
+            'backfilled_product_ids' => [],
+            'remaining' => 0,
+        ];
+    }
+    $limit = max(1, min(100, $limit));
+    $versionId = (int)$activeScore['ontology_version_id'];
+    $manifestHash =
+        ingredientOntologyV3IdentityAnnexReviewManifestHash();
+    $products = $db->prepare("
+        SELECT product.id
+        FROM products product
+        LEFT JOIN ingredient_ontology_identity_annex annex
+          ON annex.product_id = product.id
+        WHERE EXISTS (
+            SELECT 1
+            FROM inventory stock
+            WHERE stock.product_id = product.id
+              AND stock.quantity > 0
+        )
+          AND (
+              annex.product_id IS NULL
+              OR annex.ontology_version_id <> ?
+              OR COALESCE(annex.resolver_version, '') <> ?
+              OR COALESCE(annex.review_manifest_hash, '') <> ?
+          )
+        ORDER BY product.id
+        LIMIT {$limit}
+    ");
+    $products->execute([
+        $versionId,
+        INGREDIENT_ONTOLOGY_PRODUCT_IDENTITY_ANNEX_RESOLVER_VERSION,
+        $manifestHash,
+    ]);
+    $productIds = array_map(
+        'intval',
+        $products->fetchAll(PDO::FETCH_COLUMN)
+    );
+    if (!$productIds) {
+        return [
+            'available' => true,
+            'processed' => 0,
+            'changed_product_ids' => [],
+            'backfilled_product_ids' => [],
+            'remaining' => 0,
+        ];
+    }
+    $changed = [];
+    $backfilled = [];
+    foreach ($productIds as $productId) {
+        $nested = $db->inTransaction();
+        $savepoint = 'identity_product_migration_' . $productId;
+        if ($nested) {
+            $db->exec("SAVEPOINT {$savepoint}");
+        } else {
+            dbBeginImmediateWithRetry($db);
+        }
+        try {
+            $currentActive = recipeScoreActiveRevision($db);
+            if (
+                $currentActive === null
+                || (int)($currentActive['id'] ?? 0)
+                    !== (int)$activeScore['id']
+                || (int)($currentActive['ontology_version_id'] ?? 0)
+                    !== $versionId
+            ) {
+                throw new RuntimeException(
+                    'product identity migration score fence changed'
+                );
+            }
+            $refreshed =
+                ingredientOntologyV3IdentityAdmissionPublishProduct(
+                    $db,
+                    $productId,
+                    $versionId,
+                    'product_identity_resolver_migration',
+                    false
+                );
+            if (!empty($refreshed['semantic_changed'])) {
+                    $pending = $db->prepare("
+                        SELECT latest_inventory_revision
+                        FROM recipe_score_pending_products
+                        WHERE product_id = ?
+                    ");
+                    $pending->execute([$productId]);
+                    if ((int)($pending->fetchColumn() ?: 0) <= 0) {
+                        recipeScoreMarkProductDirty(
+                            $db,
+                            $productId,
+                            'product_identity_resolver_migration'
+                        );
+                    }
+                    ingredientOntologyV3IdentityAdmissionPublishProduct(
+                    $db,
+                    $productId,
+                    $versionId,
+                    'product_identity_resolver_migration',
+                    true
+                );
+                $changed[] = $productId;
+            } elseif (
+                !empty($refreshed['accepted'])
+                && ingredientOntologyV3ProductReadinessBackfillReady(
+                    $db,
+                    $refreshed,
+                    $activeScore
+                )
+            ) {
+                $backfilled[] = $productId;
+            }
+            $db->exec(
+                $nested
+                    ? "RELEASE SAVEPOINT {$savepoint}"
+                    : 'COMMIT'
+            );
+        } catch (Throwable $error) {
+            if ($nested) {
+                try {
+                    $db->exec(
+                        "ROLLBACK TO SAVEPOINT {$savepoint}"
+                    );
+                    $db->exec(
+                        "RELEASE SAVEPOINT {$savepoint}"
+                    );
+                } catch (Throwable $ignored) {
+                }
+            } else {
+                try {
+                    $db->exec('ROLLBACK');
+                } catch (Throwable $ignored) {
+                }
+            }
+            throw $error;
+        }
+    }
+    $remaining = $db->prepare("
+        SELECT COUNT(*)
+        FROM products product
+        LEFT JOIN ingredient_ontology_identity_annex annex
+          ON annex.product_id = product.id
+        WHERE EXISTS (
+            SELECT 1
+            FROM inventory stock
+            WHERE stock.product_id = product.id
+              AND stock.quantity > 0
+        )
+          AND (
+              annex.product_id IS NULL
+              OR annex.ontology_version_id <> ?
+              OR COALESCE(annex.resolver_version, '') <> ?
+              OR COALESCE(annex.review_manifest_hash, '') <> ?
+          )
+    ");
+    $remaining->execute([
+        $versionId,
+        INGREDIENT_ONTOLOGY_PRODUCT_IDENTITY_ANNEX_RESOLVER_VERSION,
+        $manifestHash,
+    ]);
+    return [
+        'available' => true,
+        'processed' => count($productIds),
+        'changed_product_ids' => $changed,
+        'backfilled_product_ids' => $backfilled,
+        'remaining' => (int)$remaining->fetchColumn(),
+    ];
+}
+
 function ingredientOntologyV3IdentityAdmissionSync(
     PDO $db,
     int $attempt = 0
@@ -244,7 +445,7 @@ function ingredientOntologyV3IdentityAdmissionSync(
     $manifest = [
         'version' => INGREDIENT_ONTOLOGY_IDENTITY_ANNEX_REVIEW_VERSION,
         'resolver_version' =>
-            INGREDIENT_ONTOLOGY_IDENTITY_ANNEX_RESOLVER_VERSION,
+            INGREDIENT_ONTOLOGY_PRODUCT_IDENTITY_ANNEX_RESOLVER_VERSION,
         'aliases' => $aliases,
     ];
     $manifestJson = ingredientOntologyV3Json($manifest);
@@ -256,11 +457,14 @@ function ingredientOntologyV3IdentityAdmissionSync(
             $manifestHash
         )
         && (string)$state['resolver_version']
-            === INGREDIENT_ONTOLOGY_IDENTITY_ANNEX_RESOLVER_VERSION
+            === INGREDIENT_ONTOLOGY_PRODUCT_IDENTITY_ANNEX_RESOLVER_VERSION
     ) {
+        $migration =
+            ingredientOntologyV3IdentityAdmissionMigrateProductBatch($db);
         return $state + [
             'changed' => false,
             'changed_labels' => [],
+            'resolver_migration' => $migration,
         ];
     }
     $previous = json_decode(
@@ -306,8 +510,11 @@ function ingredientOntologyV3IdentityAdmissionSync(
     $productIds = [];
     $recipeIds = [];
     $discoveryActiveScoreId = 0;
+    $discoveryActiveScore = null;
+    $resolverChanged = (string)($state['resolver_version'] ?? '')
+        !== INGREDIENT_ONTOLOGY_PRODUCT_IDENTITY_ANNEX_RESOLVER_VERSION;
     if (
-        $changedLabels
+        ($changedLabels || $resolverChanged)
         && ingredientOntologyV3TableExists($db, 'recipe_score_state')
         && ingredientOntologyV3TableExists(
             $db,
@@ -319,8 +526,12 @@ function ingredientOntologyV3IdentityAdmissionSync(
         )
     ) {
         $products = $db->query("
-            SELECT product.id, product.name
+            SELECT product.id, product.name,
+                   product.prepared_food,
+                   annex.status AS annex_status
             FROM products product
+            LEFT JOIN ingredient_ontology_identity_annex annex
+              ON annex.product_id = product.id
             WHERE EXISTS (
                 SELECT 1 FROM inventory stock
                 WHERE stock.product_id = product.id
@@ -330,18 +541,23 @@ function ingredientOntologyV3IdentityAdmissionSync(
         ")->fetchAll(PDO::FETCH_ASSOC);
         $changedSet = array_fill_keys($changedLabels, true);
         foreach ($products as $product) {
-            if (isset($changedSet[
-                ingredientOntologyV3NormalizeLabel(
-                    (string)$product['name']
-                )
-            ])) {
+            if (
+                isset($changedSet[
+                    ingredientOntologyV3NormalizeLabel(
+                        (string)$product['name']
+                    )
+                ])
+            ) {
                 $productIds[] = (int)$product['id'];
             }
         }
-        $active = recipeScoreActiveRevision($db);
-        $discoveryActiveScoreId = (int)($active['id'] ?? 0);
-        $versionId = (int)($active['ontology_version_id'] ?? 0);
-        if ($versionId > 0) {
+        $discoveryActiveScore = recipeScoreActiveRevision($db);
+        $discoveryActiveScoreId =
+            (int)($discoveryActiveScore['id'] ?? 0);
+        $versionId = (int)(
+            $discoveryActiveScore['ontology_version_id'] ?? 0
+        );
+        if ($versionId > 0 && $changedLabels) {
             $placeholders = implode(
                 ',',
                 array_fill(0, count($changedLabels), '?')
@@ -420,7 +636,7 @@ function ingredientOntologyV3IdentityAdmissionSync(
               AND review_manifest_hash = ?
         ");
         $manifestUpdate->execute([
-            INGREDIENT_ONTOLOGY_IDENTITY_ANNEX_RESOLVER_VERSION,
+            INGREDIENT_ONTOLOGY_PRODUCT_IDENTITY_ANNEX_RESOLVER_VERSION,
             $manifestHash,
             $manifestJson,
             count($changedLabels),
@@ -436,7 +652,7 @@ function ingredientOntologyV3IdentityAdmissionSync(
             );
         }
         if (
-            $changedLabels
+            ($changedLabels || $resolverChanged)
             && ingredientOntologyV3TableExists($db, 'recipe_score_state')
             && ingredientOntologyV3TableExists(
                 $db,
@@ -527,12 +743,23 @@ function ingredientOntologyV3IdentityAdmissionSync(
         }
         throw $error;
     }
+    $migration =
+        ingredientOntologyV3IdentityAdmissionMigrateProductBatch($db);
+    $productIds = array_values(array_unique(array_merge(
+        array_map('intval', $productIds),
+        array_map(
+            'intval',
+            (array)($migration['changed_product_ids'] ?? [])
+        )
+    )));
+    sort($productIds, SORT_NUMERIC);
     $current = ingredientOntologyV3IdentityAdmissionState($db);
     return $current + [
         'changed' => true,
         'changed_labels' => $changedLabels,
         'queued_product_ids' => $productIds,
         'queued_recipe_ids' => $recipeIds,
+        'resolver_migration' => $migration,
     ];
 }
 
@@ -1295,6 +1522,115 @@ function ingredientOntologyV3IdentityAnnexLabelCandidates(
     return array_values($byLabel);
 }
 
+function ingredientOntologyV3IdentityAnnexEligibleLabelConflicts(
+    PDO $db,
+    int $versionId,
+    string $normalizedLabel
+): array {
+    $stmt = $db->prepare("
+        SELECT label.id AS label_id, label.entity_id,
+               label.review_state, label.kind,
+               entity.slug AS entity_slug
+        FROM ingredient_ontology_labels label
+        JOIN ingredient_ontology_entities entity
+          ON entity.id = label.entity_id
+         AND entity.ontology_version_id = label.ontology_version_id
+        WHERE label.ontology_version_id = ?
+          AND label.normalized_label = ?
+          AND entity.active = 1
+          AND entity.entity_kind = 'ingredient'
+          AND entity.identity_role = 'identity_leaf'
+          AND entity.provenance <> 'autonomous_controller'
+          AND entity.slug NOT LIKE 'provisional-subject-%'
+        ORDER BY label.id
+    ");
+    $stmt->execute([$versionId, $normalizedLabel]);
+    return array_map(
+        static fn(array $row): array => [
+            'label_id' => (int)$row['label_id'],
+            'entity_id' => (int)$row['entity_id'],
+            'entity_slug' => (string)$row['entity_slug'],
+            'review_state' => (string)$row['review_state'],
+            'kind' => (string)$row['kind'],
+        ],
+        $stmt->fetchAll(PDO::FETCH_ASSOC)
+    );
+}
+
+function ingredientOntologyV3IdentityAnnexExactNumberProof(
+    PDO $db,
+    int $versionId,
+    string $normalizedLabel,
+    string $language
+): array {
+    if (
+        ingredientOntologyV3NormalizeLanguage($language) !== 'en'
+        || mb_strlen($normalizedLabel, 'UTF-8') < 4
+        || !str_ends_with($normalizedLabel, 's')
+    ) {
+        return [
+            'candidates' => [],
+            'reason' => 'number_variant_not_applicable',
+            'proof' => null,
+        ];
+    }
+    $singular = mb_substr(
+        $normalizedLabel,
+        0,
+        mb_strlen($normalizedLabel, 'UTF-8') - 1,
+        'UTF-8'
+    );
+    if ($singular === '' || $singular . 's' !== $normalizedLabel) {
+        return [
+            'candidates' => [],
+            'reason' => 'number_variant_not_reversible',
+            'proof' => null,
+        ];
+    }
+    $conflicts =
+        ingredientOntologyV3IdentityAnnexEligibleLabelConflicts(
+            $db,
+            $versionId,
+            $normalizedLabel
+        );
+    if ($conflicts) {
+        return [
+            'candidates' => [],
+            'reason' => 'number_variant_source_conflict',
+            'proof' => [
+                'algorithm' => 'exact-number-v1',
+                'source' => $normalizedLabel,
+                'target' => $singular,
+                'conflicts' => $conflicts,
+            ],
+        ];
+    }
+    $candidates = array_values(array_filter(
+        ingredientOntologyV3IdentityAnnexLabelCandidates(
+            $db,
+            $versionId,
+            $singular,
+            $language
+        ),
+        static fn(array $candidate): bool =>
+            (string)$candidate['kind'] === 'exact_alias'
+            && (array)$candidate['attributes'] === []
+            && (string)$candidate['normalized_label'] === $singular
+    ));
+    return [
+        'candidates' => $candidates,
+        'reason' => $candidates
+            ? 'exact_number_v1'
+            : 'number_variant_target_missing',
+        'proof' => [
+            'algorithm' => 'exact-number-v1',
+            'source' => $normalizedLabel,
+            'target' => $singular,
+            'language' => 'en',
+        ],
+    ];
+}
+
 function ingredientOntologyV3IdentityAnnexResolution(
     PDO $db,
     array $version,
@@ -1337,6 +1673,7 @@ function ingredientOntologyV3IdentityAnnexResolution(
     );
     $admissionSource = 'accepted_label';
     $review = null;
+    $unresolvedReason = 'no_reviewed_exact_alias';
     if (!$candidates) {
         $review = ingredientOntologyV3IdentityAnnexReviewedAliases()[
             $normalizedLabel
@@ -1359,6 +1696,21 @@ function ingredientOntologyV3IdentityAnnexResolution(
             $admissionSource = 'reviewed_alias';
         }
     }
+    if (!$candidates && $review === null) {
+        $numberProof =
+            ingredientOntologyV3IdentityAnnexExactNumberProof(
+                $db,
+                (int)$version['id'],
+                $normalizedLabel,
+                $language
+            );
+        $candidates = (array)$numberProof['candidates'];
+        $unresolvedReason = (string)$numberProof['reason'];
+        if ($candidates) {
+            $admissionSource = 'exact_number_v1';
+            $review = $numberProof['proof'];
+        }
+    }
 
     $entities = [];
     foreach ($candidates as $candidate) {
@@ -1367,7 +1719,7 @@ function ingredientOntologyV3IdentityAnnexResolution(
     if (!$candidates) {
         return [
             'status' => 'unresolved',
-            'reason' => 'no_reviewed_exact_alias',
+            'reason' => $unresolvedReason,
             'admission_source' => 'none',
             'label_id' => null,
             'entity_id' => null,
@@ -1379,7 +1731,9 @@ function ingredientOntologyV3IdentityAnnexResolution(
     if (count($entities) !== 1) {
         return [
             'status' => 'rejected',
-            'reason' => 'reviewed_alias_collision',
+            'reason' => $admissionSource === 'exact_number_v1'
+                ? 'number_variant_collision'
+                : 'reviewed_alias_collision',
             'admission_source' => 'none',
             'label_id' => null,
             'entity_id' => null,
@@ -1475,7 +1829,7 @@ function ingredientOntologyV3IdentityAnnexRefreshProduct(
     ksort($attributes, SORT_STRING);
     $evidence = [
         'resolver_version' =>
-            INGREDIENT_ONTOLOGY_IDENTITY_ANNEX_RESOLVER_VERSION,
+            INGREDIENT_ONTOLOGY_PRODUCT_IDENTITY_ANNEX_RESOLVER_VERSION,
         'review_manifest_hash' => $reviewManifestHash,
         'ontology_version_id' => (int)$version['id'],
         'ontology_content_hash' => (string)$version['content_hash'],
@@ -1496,7 +1850,7 @@ function ingredientOntologyV3IdentityAnnexRefreshProduct(
     $evidenceHash = ingredientOntologyV3Hash($evidence);
     $previousStmt = $db->prepare("
         SELECT owner_fingerprint, ontology_version_id,
-               status, entity_id, evidence_hash
+               status, entity_id, attributes_json, evidence_hash
         FROM ingredient_ontology_identity_annex
         WHERE product_id = ?
     ");
@@ -1549,7 +1903,7 @@ function ingredientOntologyV3IdentityAnnexRefreshProduct(
         (string)$resolution['status'],
         (string)$resolution['admission_source'],
         ingredientOntologyV3Json($attributes),
-        INGREDIENT_ONTOLOGY_IDENTITY_ANNEX_RESOLVER_VERSION,
+        INGREDIENT_ONTOLOGY_PRODUCT_IDENTITY_ANNEX_RESOLVER_VERSION,
         $reviewManifestHash,
         $evidenceHash,
         mb_substr((string)$resolution['reason'], 0, 240, 'UTF-8'),
@@ -1559,6 +1913,28 @@ function ingredientOntologyV3IdentityAnnexRefreshProduct(
         && $previous['entity_id'] !== null
             ? (int)$previous['entity_id']
             : null;
+    $previousAttributes = $previous !== null
+        ? json_decode((string)$previous['attributes_json'], true)
+        : [];
+    $previousAttributes = is_array($previousAttributes)
+        ? $previousAttributes
+        : [];
+    ksort($previousAttributes, SORT_STRING);
+    $semanticChanged = $previous === null
+        ? in_array(
+            (string)$resolution['status'],
+            ['accepted', 'rejected'],
+            true
+        )
+        : (
+            (string)$previous['status']
+                !== (string)$resolution['status']
+            || $previousEntityId !== $resolution['entity_id']
+            || !hash_equals(
+                ingredientOntologyV3Hash($previousAttributes),
+                ingredientOntologyV3Hash($attributes)
+            )
+        );
     $changed = $previous === null
         || (int)$previous['ontology_version_id'] !== (int)$version['id']
         || !hash_equals(
@@ -1602,19 +1978,849 @@ function ingredientOntologyV3IdentityAnnexRefreshProduct(
         'available' => true,
         'accepted' => (string)$resolution['status'] === 'accepted',
         'changed' => $changed,
+        'semantic_changed' => $semanticChanged,
         'product_id' => $productId,
         'owner_fingerprint' => $ownerFingerprint,
         'ontology_version_id' => (int)$version['id'],
+        'ontology_content_hash' => (string)$version['content_hash'],
+        'ontology_seal_hash' => (string)$version['seal_hash'],
         'label_id' => $resolution['label_id'],
         'entity_id' => $resolution['entity_id'],
         'previous_entity_id' => $previousEntityId,
+        'previous_status' => $previous['status'] ?? null,
         'entity_slug' => $resolution['entity_slug'] ?? null,
         'attributes' => $attributes,
         'status' => (string)$resolution['status'],
         'source' => (string)$resolution['admission_source'],
         'reason' => (string)$resolution['reason'],
         'evidence_hash' => $evidenceHash,
+        'review_manifest_hash' => $reviewManifestHash,
     ];
+}
+
+function ingredientOntologyV3ProductReadinessTableExists(
+    PDO $db
+): bool {
+    return ingredientOntologyV3TableExists(
+        $db,
+        'ingredient_ontology_product_readiness'
+    );
+}
+
+function ingredientOntologyV3ProductReadinessRetryDelaySeconds(
+    int $attempts
+): int {
+    return match (max(1, $attempts)) {
+        1 => 1,
+        2 => 2,
+        3 => 5,
+        default => 10,
+    };
+}
+
+function ingredientOntologyV3ProductReadinessRow(
+    PDO $db,
+    int $productId
+): ?array {
+    if (
+        $productId <= 0
+        || !ingredientOntologyV3ProductReadinessTableExists($db)
+    ) {
+        return null;
+    }
+    $stmt = $db->prepare("
+        SELECT *
+        FROM ingredient_ontology_product_readiness
+        WHERE product_id = ?
+    ");
+    $stmt->execute([$productId]);
+    $row = $stmt->fetch(PDO::FETCH_ASSOC);
+    return $row ?: null;
+}
+
+function ingredientOntologyV3ProductHasActiveInventory(
+    PDO $db,
+    int $productId
+): bool {
+    $stmt = $db->prepare("
+        SELECT 1
+        FROM inventory
+        WHERE product_id = ? AND quantity > 0
+        LIMIT 1
+    ");
+    $stmt->execute([$productId]);
+    return $stmt->fetchColumn() !== false;
+}
+
+function ingredientOntologyV3ProductReadinessRecordResolution(
+    PDO $db,
+    array $admission,
+    string $trigger,
+    bool $incrementAttempt = false
+): array {
+    $productId = (int)($admission['product_id'] ?? 0);
+    if (
+        $productId <= 0
+        || empty($admission['available'])
+        || !ingredientOntologyV3ProductReadinessTableExists($db)
+    ) {
+        return [
+            'available' => false,
+            'product_id' => $productId,
+        ];
+    }
+    $previous =
+        ingredientOntologyV3ProductReadinessRow($db, $productId);
+    $ownerFingerprint = (string)$admission['owner_fingerprint'];
+    $evidenceHash = (string)$admission['evidence_hash'];
+    $identityStatus = (string)$admission['status'];
+    $sameOwner = $previous !== null
+        && hash_equals(
+            (string)$previous['owner_fingerprint'],
+            $ownerFingerprint
+        );
+    $sameEvidence = $sameOwner
+        && hash_equals(
+            (string)$previous['annex_evidence_hash'],
+            $evidenceHash
+        );
+    $now = gmdate('Y-m-d H:i:s');
+    $requestedAt = $sameEvidence
+        ? (string)$previous['requested_at']
+        : $now;
+    $attempts = $sameEvidence
+        ? (int)$previous['attempts']
+        : 0;
+    $scoreAttempts = $sameEvidence
+        ? (int)$previous['score_attempts']
+        : 0;
+    $requestedInventoryRevision = $sameEvidence
+        && $previous['requested_inventory_revision'] !== null
+            ? (int)$previous['requested_inventory_revision']
+            : null;
+    $status = 'retry';
+    $nextRetryAt = null;
+    $startedAt = null;
+    $readyAt = null;
+    $failedAt = null;
+    $scoreRevisionId = null;
+    $affectedRecipeCount = 0;
+    $visibleMs = null;
+    $lastErrorKind = '';
+    $lastError = '';
+
+    if ($identityStatus === 'accepted') {
+        $preserveState = $sameEvidence
+            || (
+                empty($admission['semantic_changed'])
+                && $sameOwner
+            );
+        $previousStatus = $preserveState
+            ? (string)($previous['status'] ?? '')
+            : '';
+        $status = in_array(
+            $previousStatus,
+            ['accepted_unscored', 'scoring', 'ready'],
+            true
+        ) ? $previousStatus : 'accepted_unscored';
+        $attempts = 0;
+        $scoreAttempts = $status === 'ready'
+            ? (int)($previous['score_attempts'] ?? 0)
+            : 0;
+        $startedAt = $status === 'scoring'
+            ? ($previous['started_at'] ?? $now)
+            : null;
+        $readyAt = $status === 'ready'
+            ? ($previous['ready_at'] ?? $now)
+            : null;
+        $scoreRevisionId = $status === 'ready'
+            && $previous['score_revision_id'] !== null
+                ? (int)$previous['score_revision_id']
+                : null;
+        $affectedRecipeCount = $status === 'ready'
+            ? (int)($previous['affected_recipe_count'] ?? 0)
+            : 0;
+        $visibleMs = $status === 'ready'
+            && $previous['visible_ms'] !== null
+                ? (float)$previous['visible_ms']
+                : null;
+    } elseif ($identityStatus === 'rejected') {
+        $status = 'non_satisfying';
+        $attempts = 0;
+        $scoreAttempts = 0;
+        $lastErrorKind = (string)$admission['reason'];
+        $lastError = 'Product is intentionally non-satisfying.';
+    } else {
+        if ($incrementAttempt) {
+            $attempts++;
+        }
+        $requestedTimestamp = strtotime($requestedAt . ' UTC');
+        $ageSeconds = $requestedTimestamp === false
+            ? 0
+            : max(0, time() - $requestedTimestamp);
+        $terminal = $attempts
+                >= INGREDIENT_ONTOLOGY_PRODUCT_READINESS_MAX_ATTEMPTS
+            || $ageSeconds
+                >= INGREDIENT_ONTOLOGY_PRODUCT_READINESS_DEADLINE_SECONDS;
+        $status = $terminal ? 'needs_review' : 'retry';
+        $nextRetryAt = $terminal
+            ? null
+            : gmdate(
+                'Y-m-d H:i:s',
+                time()
+                    + ingredientOntologyV3ProductReadinessRetryDelaySeconds(
+                        $attempts + 1
+                    )
+            );
+        $failedAt = $terminal ? $now : null;
+        $lastErrorKind = (string)$admission['reason'];
+        $lastError = mb_substr(
+            'Identity unresolved after ' . trim($trigger) . '.',
+            0,
+            1000,
+            'UTF-8'
+        );
+    }
+
+    $db->prepare("
+        INSERT INTO ingredient_ontology_product_readiness (
+            product_id, ontology_version_id,
+            ontology_content_hash, ontology_seal_hash,
+            owner_fingerprint, annex_evidence_hash,
+            identity_status, status, attempts, max_attempts,
+            score_attempts, next_retry_at,
+            requested_inventory_revision, requested_at,
+            started_at, ready_at, failed_at,
+            score_revision_id, affected_recipe_count,
+            visible_ms, last_error_kind, last_error,
+            created_at, updated_at
+        )
+        VALUES (
+            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+            CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+        )
+        ON CONFLICT(product_id) DO UPDATE SET
+            ontology_version_id = excluded.ontology_version_id,
+            ontology_content_hash = excluded.ontology_content_hash,
+            ontology_seal_hash = excluded.ontology_seal_hash,
+            owner_fingerprint = excluded.owner_fingerprint,
+            annex_evidence_hash = excluded.annex_evidence_hash,
+            identity_status = excluded.identity_status,
+            status = excluded.status,
+            attempts = excluded.attempts,
+            max_attempts = excluded.max_attempts,
+            score_attempts = excluded.score_attempts,
+            next_retry_at = excluded.next_retry_at,
+            requested_inventory_revision =
+                excluded.requested_inventory_revision,
+            requested_at = excluded.requested_at,
+            started_at = excluded.started_at,
+            ready_at = excluded.ready_at,
+            failed_at = excluded.failed_at,
+            score_revision_id = excluded.score_revision_id,
+            affected_recipe_count = excluded.affected_recipe_count,
+            visible_ms = excluded.visible_ms,
+            last_error_kind = excluded.last_error_kind,
+            last_error = excluded.last_error,
+            updated_at = CURRENT_TIMESTAMP
+    ")->execute([
+        $productId,
+        (int)$admission['ontology_version_id'],
+        (string)$admission['ontology_content_hash'],
+        (string)$admission['ontology_seal_hash'],
+        $ownerFingerprint,
+        $evidenceHash,
+        $identityStatus,
+        $status,
+        $attempts,
+        INGREDIENT_ONTOLOGY_PRODUCT_READINESS_MAX_ATTEMPTS,
+        $scoreAttempts,
+        $nextRetryAt,
+        $requestedInventoryRevision,
+        $requestedAt,
+        $startedAt,
+        $readyAt,
+        $failedAt,
+        $scoreRevisionId,
+        $affectedRecipeCount,
+        $visibleMs,
+        mb_substr($lastErrorKind, 0, 160, 'UTF-8'),
+        $lastError,
+    ]);
+    return [
+        'available' => true,
+        'product_id' => $productId,
+        'identity_status' => $identityStatus,
+        'status' => $status,
+        'attempts' => $attempts,
+        'max_attempts' =>
+            INGREDIENT_ONTOLOGY_PRODUCT_READINESS_MAX_ATTEMPTS,
+        'next_retry_at' => $nextRetryAt,
+        'terminal' => in_array(
+            $status,
+            ['needs_review', 'non_satisfying', 'failed'],
+            true
+        ),
+    ];
+}
+
+function ingredientOntologyV3IdentityAdmissionPublishProduct(
+    PDO $db,
+    int $productId,
+    ?int $versionId = null,
+    string $trigger = 'identity_refresh',
+    bool $queueScore = true,
+    bool $incrementAttempt = false,
+    bool $resolveCoverageGaps = true
+): array {
+    $admission = ingredientOntologyV3IdentityAnnexRefreshProduct(
+        $db,
+        $productId,
+        $versionId,
+        $resolveCoverageGaps
+    );
+    if (empty($admission['available'])) {
+        return $admission + [
+            'readiness' => ['available' => false],
+            'score_required' => false,
+            'score_queued' => false,
+        ];
+    }
+    $readiness =
+        ingredientOntologyV3ProductReadinessRecordResolution(
+            $db,
+            $admission,
+            $trigger,
+            $incrementAttempt
+        );
+    $activeInventory =
+        ingredientOntologyV3ProductHasActiveInventory(
+            $db,
+            $productId
+        );
+    $pendingRevision = 0;
+    if (ingredientOntologyV3TableExists(
+        $db,
+        'recipe_score_pending_products'
+    )) {
+        $pending = $db->prepare("
+            SELECT latest_inventory_revision
+            FROM recipe_score_pending_products
+            WHERE product_id = ?
+        ");
+        $pending->execute([$productId]);
+        $pendingRevision = (int)($pending->fetchColumn() ?: 0);
+    }
+    $scoreRequired = $activeInventory && (
+        !empty($admission['semantic_changed'])
+        || (
+            (string)$admission['status'] === 'accepted'
+            && !in_array(
+                (string)($readiness['status'] ?? ''),
+                ['scoring', 'ready'],
+                true
+            )
+        )
+        || (
+            (int)($admission['previous_entity_id'] ?? 0) > 0
+            && (string)$admission['status'] !== 'accepted'
+        )
+    );
+    if (
+        $queueScore
+        && $scoreRequired
+        && $pendingRevision <= 0
+        && function_exists('recipeScoreMarkProductDirty')
+    ) {
+        $pendingRevision = recipeScoreMarkProductDirty(
+            $db,
+            $productId,
+            mb_substr(trim($trigger), 0, 160, 'UTF-8')
+        );
+        $pending = $db->prepare("
+            SELECT latest_inventory_revision
+            FROM recipe_score_pending_products
+            WHERE product_id = ?
+        ");
+        $pending->execute([$productId]);
+        $pendingRevision = (int)($pending->fetchColumn() ?: 0);
+    }
+    if (
+        $activeInventory
+        && $pendingRevision > 0
+        && ingredientOntologyV3ProductReadinessTableExists($db)
+    ) {
+        $db->prepare("
+            UPDATE ingredient_ontology_product_readiness
+            SET requested_inventory_revision = ?,
+                requested_at = CASE
+                    WHEN requested_inventory_revision IS NULL
+                      OR requested_inventory_revision < ?
+                    THEN CURRENT_TIMESTAMP
+                    ELSE requested_at
+                END,
+                status = CASE
+                    WHEN identity_status = 'accepted'
+                    THEN 'accepted_unscored'
+                    ELSE status
+                END,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE product_id = ?
+              AND owner_fingerprint = ?
+              AND annex_evidence_hash = ?
+        ")->execute([
+            $pendingRevision,
+            $pendingRevision,
+            $productId,
+            (string)$admission['owner_fingerprint'],
+            (string)$admission['evidence_hash'],
+        ]);
+        $readiness =
+            ingredientOntologyV3ProductReadinessRow(
+                $db,
+                $productId
+            ) ?? $readiness;
+    }
+    return $admission + [
+        'readiness' => $readiness,
+        'score_required' => $scoreRequired,
+        'score_queued' =>
+            $queueScore && $scoreRequired && $pendingRevision > 0,
+        'score_inventory_revision' =>
+            $pendingRevision > 0 ? $pendingRevision : null,
+    ];
+}
+
+function ingredientOntologyV3ProductReadinessBeginScoring(
+    PDO $db,
+    array $admissions
+): void {
+    if (!ingredientOntologyV3ProductReadinessTableExists($db)) {
+        return;
+    }
+    $stmt = $db->prepare("
+        UPDATE ingredient_ontology_product_readiness
+        SET status = 'scoring',
+            started_at = CURRENT_TIMESTAMP,
+            failed_at = NULL,
+            last_error_kind = '',
+            last_error = '',
+            updated_at = CURRENT_TIMESTAMP
+        WHERE product_id = ?
+          AND owner_fingerprint = ?
+          AND annex_evidence_hash = ?
+          AND identity_status = 'accepted'
+    ");
+    foreach ($admissions as $admission) {
+        if ((string)($admission['status'] ?? '') !== 'accepted') {
+            continue;
+        }
+        $stmt->execute([
+            (int)$admission['product_id'],
+            (string)$admission['owner_fingerprint'],
+            (string)$admission['evidence_hash'],
+        ]);
+    }
+}
+
+function ingredientOntologyV3ProductReadinessMarkReady(
+    PDO $db,
+    array $admissions,
+    int $scoreRevisionId,
+    int $inventoryRevision,
+    int $affectedRecipeCount
+): void {
+    if (!ingredientOntologyV3ProductReadinessTableExists($db)) {
+        return;
+    }
+    $stmt = $db->prepare("
+        UPDATE ingredient_ontology_product_readiness
+        SET status = 'ready',
+            attempts = 0,
+            score_attempts = 0,
+            next_retry_at = NULL,
+            ready_at = CURRENT_TIMESTAMP,
+            failed_at = NULL,
+            score_revision_id = ?,
+            affected_recipe_count = ?,
+            last_error_kind = '',
+            last_error = '',
+            updated_at = CURRENT_TIMESTAMP
+        WHERE product_id = ?
+          AND owner_fingerprint = ?
+          AND annex_evidence_hash = ?
+          AND identity_status = 'accepted'
+          AND NOT EXISTS (
+              SELECT 1
+              FROM recipe_score_pending_products pending
+              WHERE pending.product_id =
+                    ingredient_ontology_product_readiness.product_id
+                AND pending.latest_inventory_revision > ?
+          )
+    ");
+    foreach ($admissions as $admission) {
+        if ((string)($admission['status'] ?? '') !== 'accepted') {
+            continue;
+        }
+        $stmt->execute([
+            $scoreRevisionId,
+            $affectedRecipeCount,
+            (int)$admission['product_id'],
+            (string)$admission['owner_fingerprint'],
+            (string)$admission['evidence_hash'],
+            $inventoryRevision,
+        ]);
+    }
+}
+
+function ingredientOntologyV3ProductReadinessBackfillReady(
+    PDO $db,
+    array $admission,
+    array $activeScore
+): bool {
+    if (
+        !ingredientOntologyV3ProductReadinessTableExists($db)
+        || (string)($admission['status'] ?? '') !== 'accepted'
+        || (int)($activeScore['id'] ?? 0) <= 0
+        || (int)($activeScore['ontology_version_id'] ?? 0)
+            !== (int)($admission['ontology_version_id'] ?? 0)
+    ) {
+        return false;
+    }
+    $affectedRecipeCount = 0;
+    if (
+        ingredientOntologyV3TableExists(
+            $db,
+            'recipe_score_match_contributors'
+        )
+        && ingredientOntologyV3TableExists(
+            $db,
+            'recipe_score_effective_sources'
+        )
+    ) {
+        $count = $db->prepare("
+            SELECT COUNT(DISTINCT contributor.recipe_id)
+            FROM recipe_score_match_contributors contributor
+            JOIN recipe_score_effective_sources source
+              ON source.recipe_id = contributor.recipe_id
+             AND source.score_revision_id =
+                 contributor.score_revision_id
+            WHERE contributor.product_id = ?
+        ");
+        $count->execute([(int)$admission['product_id']]);
+        $affectedRecipeCount = (int)$count->fetchColumn();
+    }
+    $stmt = $db->prepare("
+        UPDATE ingredient_ontology_product_readiness
+        SET status = 'ready',
+            attempts = 0,
+            score_attempts = 0,
+            next_retry_at = NULL,
+            requested_inventory_revision = ?,
+            ready_at = CURRENT_TIMESTAMP,
+            failed_at = NULL,
+            score_revision_id = ?,
+            affected_recipe_count = ?,
+            visible_ms = COALESCE(visible_ms, 0),
+            last_error_kind = '',
+            last_error = '',
+            updated_at = CURRENT_TIMESTAMP
+        WHERE product_id = ?
+          AND owner_fingerprint = ?
+          AND annex_evidence_hash = ?
+          AND identity_status = 'accepted'
+          AND NOT EXISTS (
+              SELECT 1
+              FROM recipe_score_pending_products pending
+              WHERE pending.product_id =
+                    ingredient_ontology_product_readiness.product_id
+          )
+    ");
+    $stmt->execute([
+        (int)$activeScore['inventory_revision'],
+        (int)$activeScore['id'],
+        $affectedRecipeCount,
+        (int)$admission['product_id'],
+        (string)$admission['owner_fingerprint'],
+        (string)$admission['evidence_hash'],
+    ]);
+    return $stmt->rowCount() === 1;
+}
+
+function ingredientOntologyV3ProductReadinessRecordVisibleMs(
+    PDO $db,
+    int $scoreRevisionId,
+    float $visibleMs
+): void {
+    if (!ingredientOntologyV3ProductReadinessTableExists($db)) {
+        return;
+    }
+    $db->prepare("
+        UPDATE ingredient_ontology_product_readiness
+        SET visible_ms = ?,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE score_revision_id = ? AND status = 'ready'
+    ")->execute([
+        max(0.0, $visibleMs),
+        $scoreRevisionId,
+    ]);
+}
+
+function ingredientOntologyV3ProductReadinessScoreFailed(
+    PDO $db,
+    array $admissions,
+    string $error
+): void {
+    if (!ingredientOntologyV3ProductReadinessTableExists($db)) {
+        return;
+    }
+    $admissions = array_values(array_filter(
+        $admissions,
+        static fn(mixed $admission): bool =>
+            is_array($admission)
+            && (int)($admission['product_id'] ?? 0) > 0
+            && strlen((string)($admission['owner_fingerprint'] ?? ''))
+                === 64
+            && strlen((string)($admission['evidence_hash'] ?? ''))
+                === 64
+    ));
+    if (!$admissions) {
+        return;
+    }
+    $stmt = $db->prepare("
+        UPDATE ingredient_ontology_product_readiness
+        SET status = CASE
+                WHEN identity_status = 'accepted'
+                THEN 'accepted_unscored'
+                ELSE status
+            END,
+            score_attempts = score_attempts + 1,
+            last_error_kind = 'score_publication_failed',
+            last_error = ?,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE product_id = ?
+          AND owner_fingerprint = ?
+          AND annex_evidence_hash = ?
+    ");
+    $error = mb_substr($error, 0, 1000, 'UTF-8');
+    foreach ($admissions as $admission) {
+        $stmt->execute([
+            $error,
+            (int)$admission['product_id'],
+            (string)$admission['owner_fingerprint'],
+            (string)$admission['evidence_hash'],
+        ]);
+    }
+}
+
+function ingredientOntologyV3ProductReadinessRetryDue(
+    PDO $db,
+    int $limit = 25
+): array {
+    if (!ingredientOntologyV3ProductReadinessTableExists($db)) {
+        return [
+            'available' => false,
+            'processed' => 0,
+            'accepted' => 0,
+            'terminal' => 0,
+            'errors' => [],
+        ];
+    }
+    $limit = max(1, min(100, $limit));
+    $due = $db->query("
+        SELECT 1
+        FROM ingredient_ontology_product_readiness
+        WHERE status = 'retry'
+          AND next_retry_at IS NOT NULL
+          AND next_retry_at <= CURRENT_TIMESTAMP
+        LIMIT 1
+    ")->fetchColumn();
+    if ($due === false) {
+        return [
+            'available' => true,
+            'processed' => 0,
+            'accepted' => 0,
+            'terminal' => 0,
+            'errors' => [],
+        ];
+    }
+    $processed = 0;
+    $accepted = 0;
+    $terminal = 0;
+    $errors = [];
+    dbBeginImmediateWithRetry($db);
+    try {
+        $rows = $db->query("
+            SELECT product_id, owner_fingerprint,
+                   annex_evidence_hash
+            FROM ingredient_ontology_product_readiness
+            WHERE status = 'retry'
+              AND next_retry_at IS NOT NULL
+              AND next_retry_at <= CURRENT_TIMESTAMP
+            ORDER BY next_retry_at, product_id
+            LIMIT {$limit}
+        ")->fetchAll(PDO::FETCH_ASSOC);
+        if (!$rows) {
+            $db->exec('COMMIT');
+            return [
+                'available' => true,
+                'processed' => 0,
+                'accepted' => 0,
+                'terminal' => 0,
+                'errors' => [],
+            ];
+        }
+        $activeScore = function_exists('recipeScoreActiveRevision')
+            ? recipeScoreActiveRevision($db)
+            : null;
+        $versionId = $activeScore !== null
+            && $activeScore['ontology_version_id'] !== null
+                ? (int)$activeScore['ontology_version_id']
+                : null;
+        foreach ($rows as $retryRow) {
+            $productId = (int)$retryRow['product_id'];
+            $savepoint = 'identity_readiness_retry_' . $productId;
+            $db->exec("SAVEPOINT {$savepoint}");
+            try {
+                $result =
+                    ingredientOntologyV3IdentityAdmissionPublishProduct(
+                        $db,
+                        $productId,
+                        $versionId,
+                        'bounded_identity_retry',
+                        true,
+                        true
+                    );
+                $db->exec("RELEASE SAVEPOINT {$savepoint}");
+                $processed++;
+                $accepted += !empty($result['accepted']) ? 1 : 0;
+                $terminal += !empty(
+                    $result['readiness']['terminal']
+                ) ? 1 : 0;
+            } catch (Throwable $error) {
+                $db->exec("ROLLBACK TO SAVEPOINT {$savepoint}");
+                $db->exec("RELEASE SAVEPOINT {$savepoint}");
+                $current =
+                    ingredientOntologyV3ProductReadinessRow(
+                        $db,
+                        $productId
+                    );
+                $attempts = (int)($current['attempts'] ?? 0) + 1;
+                $isTerminal = $attempts
+                    >= INGREDIENT_ONTOLOGY_PRODUCT_READINESS_MAX_ATTEMPTS;
+                $db->prepare("
+                    UPDATE ingredient_ontology_product_readiness
+                    SET status = ?,
+                        attempts = ?,
+                        next_retry_at = ?,
+                        failed_at = CASE
+                            WHEN ? = 1 THEN CURRENT_TIMESTAMP
+                            ELSE NULL
+                        END,
+                        last_error_kind =
+                            'identity_retry_exception',
+                        last_error = ?,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE product_id = ?
+                      AND status = 'retry'
+                      AND owner_fingerprint = ?
+                      AND annex_evidence_hash = ?
+                      AND next_retry_at <= CURRENT_TIMESTAMP
+                ")->execute([
+                    $isTerminal ? 'failed' : 'retry',
+                    $attempts,
+                    $isTerminal
+                        ? null
+                        : gmdate(
+                            'Y-m-d H:i:s',
+                            time()
+                                + ingredientOntologyV3ProductReadinessRetryDelaySeconds(
+                                    $attempts + 1
+                                )
+                        ),
+                    $isTerminal ? 1 : 0,
+                    mb_substr(
+                        $error->getMessage(),
+                        0,
+                        1000,
+                        'UTF-8'
+                    ),
+                    $productId,
+                    (string)$retryRow['owner_fingerprint'],
+                    (string)$retryRow['annex_evidence_hash'],
+                ]);
+                $processed++;
+                $terminal += $isTerminal ? 1 : 0;
+                $errors[$productId] = mb_substr(
+                    $error->getMessage(),
+                    0,
+                    300,
+                    'UTF-8'
+                );
+            }
+        }
+        $db->exec('COMMIT');
+    } catch (Throwable $error) {
+        try {
+            $db->exec('ROLLBACK');
+        } catch (Throwable $ignored) {
+        }
+        throw $error;
+    }
+    return [
+        'available' => true,
+        'processed' => $processed,
+        'accepted' => $accepted,
+        'terminal' => $terminal,
+        'errors' => $errors,
+    ];
+}
+
+function ingredientOntologyV3IdentityAnnexSemanticHash(
+    PDO $db,
+    int $versionId
+): string {
+    $version = ingredientOntologyV3Version($db, $versionId);
+    if ($version === null || (string)$version['status'] !== 'ready') {
+        return '';
+    }
+    $products = $db->query("
+        SELECT id, name, brand, category, prepared_food
+        FROM products
+        ORDER BY id
+    ");
+    $rows = [];
+    while ($product = $products->fetch(PDO::FETCH_ASSOC)) {
+        $resolution = ingredientOntologyV3IdentityAnnexResolution(
+            $db,
+            $version,
+            $product
+        );
+        $attributes = (array)($resolution['attributes'] ?? []);
+        ksort($attributes, SORT_STRING);
+        $rows[] = [
+            'product_id' => (int)$product['id'],
+            'owner_fingerprint' =>
+                ingredientOntologyV3ProductOwnerFingerprint(
+                    $product
+                ),
+            'status' => (string)$resolution['status'],
+            'entity_slug' =>
+                (string)($resolution['entity_slug'] ?? ''),
+            'attributes' => $attributes,
+        ];
+    }
+    return ingredientOntologyV3Hash([
+        'algorithm' => 'product-identity-semantic-v1',
+        'resolver_version' =>
+            INGREDIENT_ONTOLOGY_PRODUCT_IDENTITY_ANNEX_RESOLVER_VERSION,
+        'review_manifest_hash' =>
+            ingredientOntologyV3IdentityAnnexReviewManifestHash(),
+        'ontology_content_hash' => (string)$version['content_hash'],
+        'ontology_seal_hash' => (string)$version['seal_hash'],
+        'products' => $rows,
+    ]);
 }
 
 function ingredientOntologyV3IdentityAnnexMapping(
@@ -1674,7 +2880,7 @@ function ingredientOntologyV3IdentityAnnexMapping(
         $productId,
         $versionId,
         $ownerFingerprint,
-        INGREDIENT_ONTOLOGY_IDENTITY_ANNEX_RESOLVER_VERSION,
+        INGREDIENT_ONTOLOGY_PRODUCT_IDENTITY_ANNEX_RESOLVER_VERSION,
         ingredientOntologyV3IdentityAnnexReviewManifestHash(),
     ]);
     $row = $stmt->fetch(PDO::FETCH_ASSOC);
@@ -1770,7 +2976,7 @@ function ingredientOntologyV3IdentityAnnexResolvedMapping(
         }
         $evidenceHash = ingredientOntologyV3Hash([
             'resolver_version' =>
-                INGREDIENT_ONTOLOGY_IDENTITY_ANNEX_RESOLVER_VERSION,
+                INGREDIENT_ONTOLOGY_PRODUCT_IDENTITY_ANNEX_RESOLVER_VERSION,
             'review_manifest_hash' =>
                 ingredientOntologyV3IdentityAnnexReviewManifestHash(),
             'ontology_version_id' => (int)$version['id'],

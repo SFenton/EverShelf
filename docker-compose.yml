@@ -38,10 +38,6 @@ services:
       - --critic-model=claude-sonnet-5
       - --minimum-priority=50
       - --allow-network
-      - --copy-generation
-      - --run-generation
-      - --promote
-      - --allow-active-generation
     volumes:
       - evershelf_data:/var/www/html/data
       - ./.env:/var/www/html/.env:ro

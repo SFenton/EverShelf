@@ -160,7 +160,7 @@ function ingredientOntologyV3Inventory(
                 $productId,
                 $versionId,
                 $ownerFingerprints[$productId],
-                INGREDIENT_ONTOLOGY_IDENTITY_ANNEX_RESOLVER_VERSION,
+                INGREDIENT_ONTOLOGY_PRODUCT_IDENTITY_ANNEX_RESOLVER_VERSION,
                 ingredientOntologyV3IdentityAnnexReviewManifestHash(),
             ]);
             $annexStatus = $annexDecisionStmt->fetchColumn();

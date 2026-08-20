@@ -3214,6 +3214,18 @@ function canonicalIngredientApplyQueueResultOnce(
             'after_canonical_writes',
             $claim
         );
+        $identityAdmission = function_exists(
+            'ingredientOntologyV3IdentityAdmissionPublishProduct'
+        ) ? ingredientOntologyV3IdentityAdmissionPublishProduct(
+            $db,
+            (int)$claim['product_id'],
+            null,
+            'canonical_result_applied',
+            true
+        ) : [
+            'available' => false,
+            'reason' => 'identity_admission_unavailable',
+        ];
         $complete = $db->prepare("
             UPDATE canonical_processing_queue
             SET status = 'done',
@@ -3264,7 +3276,10 @@ function canonicalIngredientApplyQueueResultOnce(
         );
         $db->exec('COMMIT');
         $transactionStarted = false;
-        return ['status' => 'done'];
+        return [
+            'status' => 'done',
+            'identity_admission' => $identityAdmission,
+        ];
     } catch (Throwable $error) {
         if ($transactionStarted) {
             try {

@@ -368,10 +368,18 @@ for ($run = 0; $run < $runs; $run++) {
         500
     );
     unset($GLOBALS['INGREDIENT_ONTOLOGY_V3_AFTER_OVERLAY_PUBLICATION']);
-    if (empty($score['rebuilt'])) {
+    if (
+        empty($score['rebuilt'])
+        || !empty($score['cleanup_warning'])
+    ) {
         throw new RuntimeException(
             'incremental score publication failed: '
-            . (string)($score['error'] ?? $score['reason'] ?? '')
+            . (string)(
+                $score['error']
+                    ?? $score['reason']
+                    ?? $score['cleanup_warning']
+                    ?? ''
+            )
         );
     }
     $visibleMs = (float)($score['visible_ms'] ?? PHP_FLOAT_MAX);

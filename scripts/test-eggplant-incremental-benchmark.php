@@ -749,6 +749,18 @@ try {
 
     $eggplantP95 = $percentile($eggplantLatencies, 0.95);
     $unknownP95 = $percentile($unknownLatencies, 0.95);
+    $eggplantReadiness =
+        ingredientOntologyV3ProductReadinessRow(
+            $db,
+            $eggplantProductId
+        );
+    $eggplantReadinessRevision = is_array($eggplantReadiness)
+        && (int)($eggplantReadiness['score_revision_id'] ?? 0) > 0
+            ? recipeScoreRevision(
+                $db,
+                (int)$eggplantReadiness['score_revision_id']
+            )
+            : null;
     $assert(
         count(array_filter(
             $eggplantResults,
@@ -758,6 +770,20 @@ try {
         )) === $runs
         && $eggplantP95 < 2000,
         'Reviewed Eggplant sparse cohort must remain below 2 seconds p95'
+    );
+    $assert(
+        is_array($eggplantReadiness)
+        && (string)$eggplantReadiness['status'] === 'ready'
+        && (int)$eggplantReadiness['affected_recipe_count']
+            >= $eggplantRecipeCount
+        && (float)$eggplantReadiness['visible_ms'] > 0
+        && (string)($eggplantReadinessRevision['status'] ?? '')
+            === 'ready',
+        'Sparse publication must atomically mark accepted product readiness: '
+            . json_encode([
+                'readiness' => $eggplantReadiness,
+                'revision' => $eggplantReadinessRevision,
+            ], JSON_UNESCAPED_SLASHES)
     );
     $assert(
         count(array_filter(
