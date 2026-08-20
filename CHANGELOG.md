@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.14.1] - 2026-08-20
+
+### Fixed
+- A required copied score refresh now takes priority when ontology generation
+  claims only policy-deferred/no-work intents, preventing daily score-date
+  rollover or inventory changes from remaining stale behind that backlog.
+
 ## [1.14.0] - 2026-08-20
 
 ### Added

@@ -7557,6 +7557,51 @@ function ingredientOntologyActivationAssertActiveDatabase(PDO $db): void {
         }
     }
 
+    function ingredientOntologyActivationStartScoreRefresh(
+        PDO $db,
+        array $options
+    ): array {
+        $activeVersion = ingredientOntologyV3ActiveVersion($db);
+        $scoreBundle = ingredientOntologyActivationBuildScoreRefresh(
+            $db,
+            (int)$activeVersion['id'],
+            [],
+            $options
+        );
+        $directory = ingredientOntologyActivationWorkDirectory();
+        $verifiedPayloadPath =
+            ingredientOntologyActivationResolvePayload(
+                $scoreBundle,
+                $directory
+            );
+        $import =
+            ingredientOntologyActivationWithLiveReservation(
+                $options,
+                'register_score_import',
+                static fn(): array =>
+                    ingredientOntologyActivationRegisterImport(
+                        $db,
+                        $scoreBundle,
+                        $directory,
+                        $verifiedPayloadPath
+                    )
+            );
+        if (!empty($options['yield_after_live_reservation'])) {
+            return [
+                'action' => 'refresh_score',
+                'import' => $import,
+            ];
+        }
+        return [
+            'action' => 'refresh_score',
+            'import' => ingredientOntologyActivationDriveImport(
+                $db,
+                (int)$import['id'],
+                $options
+            ),
+        ];
+    }
+
     function ingredientOntologyActivationRunOnce(
         PDO $db,
         array $options = []
@@ -7723,6 +7768,29 @@ function ingredientOntologyActivationAssertActiveDatabase(PDO $db): void {
                 $noWorkReason = (string)(
                     $built['reason'] ?? 'no_due_generation_work'
                 );
+                if (ingredientOntologyActivationNeedsScoreBuild($db)) {
+                    return ingredientOntologyActivationStartScoreRefresh(
+                        $db,
+                        $options
+                    ) + [
+                        'generation_deferred' => [
+                            'claimed_intents' =>
+                                (int)(
+                                    $built['claimed_intents'] ?? 0
+                                ),
+                            'reason' => $noWorkReason,
+                            'superseded_source_job_ids' =>
+                                array_map(
+                                    'intval',
+                                    (array)($built[
+                                        'superseded_source_job_ids'
+                                    ] ?? [])
+                                ),
+                        ],
+                        'work_cleanup' => $workCleanup,
+                        'cdc_pruned' => $cdcPruned,
+                    ];
+                }
                 ingredientOntologyActivationWithLiveReservation(
                     $options,
                     'record_policy_deferred',
@@ -7897,53 +7965,10 @@ function ingredientOntologyActivationAssertActiveDatabase(PDO $db): void {
         }
 
         if (ingredientOntologyActivationNeedsScoreBuild($db)) {
-            $activeVersion = ingredientOntologyV3ActiveVersion($db);
-            $scoreBundle = ingredientOntologyActivationBuildScoreRefresh(
+            return ingredientOntologyActivationStartScoreRefresh(
                 $db,
-                (int)$activeVersion['id'],
-                [],
                 $options
-            );
-            try {
-                $directory =
-                    ingredientOntologyActivationWorkDirectory();
-                $verifiedPayloadPath =
-                    ingredientOntologyActivationResolvePayload(
-                        $scoreBundle,
-                        $directory
-                    );
-                $import =
-                    ingredientOntologyActivationWithLiveReservation(
-                        $options,
-                        'register_score_import',
-                        static fn(): array =>
-                            ingredientOntologyActivationRegisterImport(
-                                $db,
-                                $scoreBundle,
-                                $directory,
-                                $verifiedPayloadPath
-                            )
-                    );
-                if (!empty(
-                    $options['yield_after_live_reservation']
-                )) {
-                    return [
-                        'action' => 'refresh_score',
-                        'import' => $import,
-                        'work_cleanup' => $workCleanup,
-                        'cdc_pruned' => $cdcPruned,
-                    ];
-                }
-            } catch (Throwable $error) {
-                throw $error;
-            }
-            return [
-                'action' => 'refresh_score',
-                'import' => ingredientOntologyActivationDriveImport(
-                    $db,
-                    (int)$import['id'],
-                    $options
-                ),
+            ) + [
                 'work_cleanup' => $workCleanup,
                 'cdc_pruned' => $cdcPruned,
             ];
