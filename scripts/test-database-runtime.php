@@ -52,7 +52,7 @@ try {
         'Database migration must create API idempotency receipts'
     );
     $assert(
-        $db->query("
+        (int)$db->query("
             SELECT barcode IS NULL
             FROM products
             WHERE name = 'Empty barcode migration fixture'
@@ -101,6 +101,7 @@ try {
             ingredient_ontology_ready_mutation_guard() AS ready_guard,
             ingredient_ontology_publication_guard() AS publication_guard
     ")->fetch(PDO::FETCH_ASSOC);
+    $guards = array_map('intval', $guards);
     $assert(
         $guards === [
             'prune_guard' => 0,
