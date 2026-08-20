@@ -92,8 +92,10 @@ $db->setAttribute(PDO::ATTR_DEFAULT_FETCH_MODE, PDO::FETCH_ASSOC);
 $db->exec('PRAGMA foreign_keys=ON');
 $db->exec('PRAGMA busy_timeout=10000');
 if ($mutating) {
-    recipeSchemaMigrate($db);
-    ingredientOntologyControllerSchemaMigrate($db);
+    databaseEnsureMigrated(
+        $db,
+        $databasePath . '.migration.lock'
+    );
 } elseif ($command !== 'backfill') {
     $db->exec('PRAGMA query_only=ON');
 }
