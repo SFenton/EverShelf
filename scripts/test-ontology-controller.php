@@ -12011,6 +12011,54 @@ try {
         'Production cron and live worker CLI must remain priority-fenced and reject active-database generation'
     );
 
+    $db->exec('BEGIN IMMEDIATE');
+    try {
+        $driftReadyGuardWas =
+            ingredientOntologyV3ReadyMutationGuardEnabled($db);
+        ingredientOntologyV3SetReadyMutationGuard($db, true);
+        $activeDriftVersion =
+            ingredientOntologyV3ActiveVersion($db);
+        $sealedCorpusHash =
+            ingredientOntologyV3CorpusHash($db);
+        $db->prepare("
+            UPDATE ingredient_ontology_versions
+            SET corpus_hash = ?
+            WHERE id = ?
+        ")->execute([
+            $sealedCorpusHash,
+            (int)$activeDriftVersion['id'],
+        ]);
+        $driftBeforeProduct =
+            ingredientOntologyActivationCorpusDrifted(
+                $db
+            );
+        $db->exec("
+            INSERT INTO products (
+                name, brand, category, prepared_food
+            )
+            VALUES (
+                'Activation corpus drift fixture',
+                '',
+                '',
+                0
+            )
+        ");
+        $driftAfterProduct =
+            ingredientOntologyActivationCorpusDrifted(
+                $db
+            );
+        controllerTestAssert(
+            !$driftBeforeProduct && $driftAfterProduct,
+            'Product corpus drift must select a copied ontology refresh'
+        );
+    } finally {
+        ingredientOntologyV3SetReadyMutationGuard(
+            $db,
+            $driftReadyGuardWas ?? false
+        );
+        $db->exec('ROLLBACK');
+    }
+
     $epochBeforeAvailabilityOnly = (int)$db->query("
         SELECT constraint_epoch
         FROM ontology_controller_state WHERE id = 1
