@@ -85,7 +85,8 @@ function ingredientOntologyV3MappingFromRow(array $row): ?array {
 function ingredientOntologyV3Inventory(
     PDO $db,
     int $versionId,
-    ?string $scoreDate = null
+    ?string $scoreDate = null,
+    ?int $identityExtensionRevision = null
 ): array {
     $inventoryOptions = ['exclude_expired' => true];
     if ($scoreDate !== null) {
@@ -93,6 +94,11 @@ function ingredientOntologyV3Inventory(
     }
     $inventory = recipeInventoryCandidates($db, $inventoryOptions);
     $version = ingredientOntologyV3Version($db, $versionId);
+    $identityExtensionRevision ??=
+        ingredientOntologyV3IdentityExtensionSnapshot(
+            $db,
+            $versionId
+        )['revision'];
     $productStmt = $db->prepare("
         SELECT id, name, brand, category, prepared_food
         FROM products
@@ -111,6 +117,23 @@ function ingredientOntologyV3Inventory(
           AND annex.owner_fingerprint = ?
           AND annex.resolver_version = ?
           AND annex.review_manifest_hash = ?
+          AND (
+              annex.extension_entity_id IS NULL
+              OR EXISTS (
+                  SELECT 1
+                  FROM ingredient_ontology_identity_extension_entities
+                      extension
+                  WHERE extension.id = annex.extension_entity_id
+                    AND extension.ontology_version_id =
+                        annex.ontology_version_id
+                    AND extension.ontology_content_hash =
+                        annex.ontology_content_hash
+                    AND extension.ontology_seal_hash =
+                        annex.ontology_seal_hash
+                    AND extension.created_revision <= ?
+                    AND extension.status = 'active'
+              )
+          )
         LIMIT 1
     ");
     $mappingStmt = $db->prepare("
@@ -131,7 +154,8 @@ function ingredientOntologyV3Inventory(
                ) AS subject_id,
                m.source_label, m.attributes_json,
                m.is_staple AS mapping_is_staple,
-               e.slug AS entity_slug, e.canonical_name AS entity_name
+               e.slug AS entity_slug,
+               e.canonical_name AS entity_name
         FROM ingredient_ontology_mappings m
         LEFT JOIN ingredient_ontology_entities e ON e.id = m.entity_id
         WHERE m.ontology_version_id = ?
@@ -160,8 +184,9 @@ function ingredientOntologyV3Inventory(
                 $productId,
                 $versionId,
                 $ownerFingerprints[$productId],
-                INGREDIENT_ONTOLOGY_PRODUCT_IDENTITY_ANNEX_RESOLVER_VERSION,
+                ingredientOntologyV3ProductIdentityResolverVersion(),
                 ingredientOntologyV3IdentityAnnexReviewManifestHash(),
+                max(0, $identityExtensionRevision),
             ]);
             $annexStatus = $annexDecisionStmt->fetchColumn();
             $annexAuthoritative = in_array(
@@ -174,7 +199,8 @@ function ingredientOntologyV3Inventory(
                     $db,
                     $versionId,
                     $productId,
-                    $ownerFingerprints[$productId]
+                    $ownerFingerprints[$productId],
+                    $identityExtensionRevision
                 );
             } elseif (
                 $annexStatus === false
@@ -193,7 +219,8 @@ function ingredientOntologyV3Inventory(
                             $db,
                             $version,
                             $products[$productId],
-                            $resolution
+                            $resolution,
+                            $identityExtensionRevision
                         );
                     $annexAuthoritative = $mapping !== null;
                 } elseif ((string)$resolution['status'] === 'rejected') {
@@ -417,6 +444,36 @@ function ingredientOntologyV3RevisionIntegrityAudit(
         );
     if (!$mappingAttributeIntegrity['valid']) {
         $errors[] = 'mapping attribute companion integrity failed';
+    }
+    $identityExtensionRevision = (int)(
+        $revision['identity_extension_revision'] ?? 0
+    );
+    $identityExtensionHash = (string)(
+        $revision['identity_extension_hash']
+            ?? ingredientOntologyV3IdentityExtensionZeroHash()
+    );
+    if ($identityExtensionRevision === 0) {
+        if (!hash_equals(
+            ingredientOntologyV3IdentityExtensionZeroHash(),
+            $identityExtensionHash
+        )) {
+            $errors[] = 'identity extension zero revision hash changed';
+        }
+    } else {
+        $extensionIntegrity =
+            ingredientOntologyV3IdentityExtensionIntegrityAudit(
+                $db,
+                $versionId,
+                $identityExtensionRevision,
+                $identityExtensionHash
+            );
+        if (empty($extensionIntegrity['valid'])) {
+            $errors[] = 'identity extension chain integrity failed: '
+                . implode(
+                    ', ',
+                    (array)$extensionIntegrity['errors']
+                );
+        }
     }
     $scoreState = recipeScoreState($db);
     $sparseRevision = recipeScoreRevisionIsSparseDelta($revision);
@@ -723,7 +780,8 @@ function ingredientOntologyV3LoadRecipeBatch(
     PDO $db,
     int $versionId,
     array $recipeIds,
-    bool $allowRecipeAnnex = false
+    bool $allowRecipeAnnex = false,
+    ?int $identityExtensionRevision = null
 ): array {
     $recipeIds = array_values(array_unique(array_filter(
         array_map('intval', $recipeIds),
@@ -732,6 +790,11 @@ function ingredientOntologyV3LoadRecipeBatch(
     if (!$recipeIds) {
         return [];
     }
+    $identityExtensionRevision ??=
+        ingredientOntologyV3IdentityExtensionSnapshot(
+            $db,
+            $versionId
+        )['revision'];
     $placeholders = implode(',', array_fill(0, count($recipeIds), '?'));
     $summary = $db->prepare("
         SELECT c.id, c.primary_connector,
@@ -783,8 +846,10 @@ function ingredientOntologyV3LoadRecipeBatch(
             $versionId,
             $versionId,
             $allowRecipeAnnex ? 1 : 0,
-            INGREDIENT_ONTOLOGY_IDENTITY_ANNEX_RESOLVER_VERSION,
+            ingredientOntologyV3RecipeIdentityResolverVersion(),
             ingredientOntologyV3IdentityAnnexReviewManifestHash(),
+            max(0, $identityExtensionRevision),
+            max(0, $identityExtensionRevision),
         ],
         $recipeIds
     );
@@ -806,7 +871,11 @@ function ingredientOntologyV3LoadRecipeBatch(
                    WHEN annex.recipe_ingredient_id IS NOT NULL
                    THEN NULL ELSE m.id
                END AS mapping_id,
-               COALESCE(annex.entity_id, m.entity_id) AS entity_id,
+               CASE
+                   WHEN annex.extension_entity_id IS NOT NULL
+                   THEN -annex.extension_entity_id
+                   ELSE COALESCE(annex.entity_id, m.entity_id)
+               END AS entity_id,
                COALESCE(annex.status, m.status) AS mapping_status,
                COALESCE(annex.confidence, m.confidence, 0)
                    AS mapping_confidence_v3,
@@ -839,7 +908,11 @@ function ingredientOntologyV3LoadRecipeBatch(
                    WHEN annex.recipe_ingredient_id IS NOT NULL
                    THEN 0 ELSE COALESCE(m.is_staple, 0)
                END AS mapping_is_staple,
-               e.slug AS entity_slug, e.canonical_name AS entity_name
+               COALESCE(extension.slug, e.slug) AS entity_slug,
+               COALESCE(
+                   extension.canonical_name,
+                   e.canonical_name
+               ) AS entity_name
         FROM recipe_ingredients ri
         LEFT JOIN ingredient_ontology_mappings m
           ON m.ontology_version_id = ?
@@ -868,8 +941,35 @@ function ingredientOntologyV3LoadRecipeBatch(
          AND annex.ontology_seal_hash = annex_version.seal_hash
          AND annex.resolver_version = ?
          AND annex.review_manifest_hash = ?
+         AND (
+             annex.extension_entity_id IS NULL
+             OR EXISTS (
+                 SELECT 1
+                 FROM ingredient_ontology_identity_extension_entities
+                     extension_fence
+                 WHERE extension_fence.id =
+                     annex.extension_entity_id
+                   AND extension_fence.ontology_version_id =
+                       annex.ontology_version_id
+                   AND extension_fence.ontology_content_hash =
+                       annex.ontology_content_hash
+                   AND extension_fence.ontology_seal_hash =
+                       annex.ontology_seal_hash
+                   AND extension_fence.created_revision <= ?
+                   AND extension_fence.status = 'active'
+             )
+         )
         LEFT JOIN ingredient_ontology_entities e
           ON e.id = COALESCE(annex.entity_id, m.entity_id)
+        LEFT JOIN ingredient_ontology_identity_extension_entities
+            extension
+          ON extension.id = annex.extension_entity_id
+         AND extension.ontology_version_id = annex.ontology_version_id
+         AND extension.ontology_content_hash =
+             annex.ontology_content_hash
+         AND extension.ontology_seal_hash = annex.ontology_seal_hash
+         AND extension.created_revision <= ?
+         AND extension.status = 'active'
         WHERE ri.recipe_id IN ({$placeholders})
         ORDER BY ri.recipe_id, ri.position
     ");
@@ -1631,10 +1731,58 @@ function ingredientOntologyV3BuildShadow(
         $catalogFingerprint = recipeScoreCatalogFingerprint($db);
         $ontologySourceHash = ingredientOntologyV3CorpusHash($db);
         $scoreDate = recipeScoreCurrentDate();
+        if (ingredientOntologyV3ExactSelfIdentityEnabled()) {
+            $prehydrateLastId = 0;
+            while (true) {
+                $prehydrate = $db->prepare("
+                    SELECT id
+                    FROM recipe_catalog
+                    WHERE deleted_at IS NULL
+                      AND id > ?
+                      AND id <= ?
+                    ORDER BY id
+                    LIMIT 1000
+                ");
+                $prehydrate->execute([
+                    $prehydrateLastId,
+                    $catalogMaxId,
+                ]);
+                $prehydrateIds = array_map(
+                    'intval',
+                    $prehydrate->fetchAll(PDO::FETCH_COLUMN)
+                );
+                if (!$prehydrateIds) {
+                    break;
+                }
+                dbBeginImmediateWithRetry($db);
+                try {
+                    ingredientOntologyV3RecipeAnnexRefreshBatch(
+                        $db,
+                        $prehydrateIds,
+                        $versionId,
+                        false
+                    );
+                    $db->exec('COMMIT');
+                } catch (Throwable $error) {
+                    try {
+                        $db->exec('ROLLBACK');
+                    } catch (Throwable $ignored) {
+                    }
+                    throw $error;
+                }
+                $prehydrateLastId = max($prehydrateIds);
+            }
+        }
+        $identityExtension =
+            ingredientOntologyV3IdentityExtensionSnapshot(
+                $db,
+                $versionId
+            );
         $inventory = ingredientOntologyV3Inventory(
             $db,
             $versionId,
-            $scoreDate
+            $scoreDate,
+            (int)$identityExtension['revision']
         );
         $fingerprint = ingredientOntologyV3InventoryFingerprint(
             $inventory,
@@ -1651,10 +1799,11 @@ function ingredientOntologyV3BuildShadow(
                 ontology_content_hash, ontology_portable_content_hash,
                 ontology_review_manifest_hash,
                 ontology_resolution_gold_hash, ontology_seal_hash,
-                ontology_source_revision, ontology_source_hash
+                ontology_source_revision, ontology_source_hash,
+                identity_extension_revision, identity_extension_hash
             )
             VALUES (?, ?, ?, ?, ?, 'building', ?,
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ");
         $insert->execute([
             $state['inventory_revision'],
@@ -1678,6 +1827,8 @@ function ingredientOntologyV3BuildShadow(
             $version['seal_hash'],
             $state['ontology_source_revision'],
             $ontologySourceHash,
+            (int)$identityExtension['revision'],
+            (string)$identityExtension['hash'],
         ]);
         $revisionId = (int)$db->lastInsertId();
         $sourceIntegrity = ingredientOntologyV3OwnerFingerprintAudit(
@@ -1724,7 +1875,11 @@ function ingredientOntologyV3BuildShadow(
                 ])
             );
         }
-        $context = new IngredientOntologyV3MatcherContext($db, $versionId);
+        $context = new IngredientOntologyV3MatcherContext(
+            $db,
+            $versionId,
+            (int)$identityExtension['revision']
+        );
         $batchSize = max(1, min(500, $batchSize));
         $lastId = 0;
         $written = 0;
@@ -1754,7 +1909,7 @@ function ingredientOntologyV3BuildShadow(
             if (!$recipeIds) {
                 break;
             }
-            $db->beginTransaction();
+            dbBeginImmediateWithRetry($db);
             try {
                 $annex =
                     ingredientOntologyV3RecipeAnnexRefreshBatch(
@@ -1768,11 +1923,21 @@ function ingredientOntologyV3BuildShadow(
                         'recipe annex batch is incomplete'
                     );
                 }
+                if (!ingredientOntologyV3IdentityExtensionSnapshotMatches(
+                    $db,
+                    $versionId,
+                    $identityExtension
+                )) {
+                    throw new RuntimeException(
+                        'identity extension score prefix changed'
+                    );
+                }
                 $recipes = ingredientOntologyV3LoadRecipeBatch(
                     $db,
                     $versionId,
                     $recipeIds,
-                    true
+                    true,
+                    (int)$identityExtension['revision']
                 );
                 $scores = [];
                 $matches = [];
@@ -1792,7 +1957,7 @@ function ingredientOntologyV3BuildShadow(
                     $scores,
                     $matches
                 );
-                $db->commit();
+                $db->exec('COMMIT');
                 $annexMetrics['batch_count']++;
                 $annexMetrics['transaction_count']++;
                 foreach ([
@@ -1808,8 +1973,9 @@ function ingredientOntologyV3BuildShadow(
                         (int)($annex[$field] ?? 0);
                 }
             } catch (Throwable $e) {
-                if ($db->inTransaction()) {
-                    $db->rollBack();
+                try {
+                    $db->exec('ROLLBACK');
+                } catch (Throwable $ignored) {
                 }
                 throw $e;
             }
@@ -2012,6 +2178,10 @@ function ingredientOntologyV3BuildShadow(
                 'ontology_source_revision' =>
                     $state['ontology_source_revision'],
                 'ontology_source_hash' => $ontologySourceHash,
+                'identity_extension_revision' =>
+                    (int)$identityExtension['revision'],
+                'identity_extension_hash' =>
+                    (string)$identityExtension['hash'],
                 'active_score_revision_id_before' => $parentRevisionId,
                 'recipe_identity_annex' => $annexMetrics,
                 'materialized_id_sets' => $idSetAudit,
@@ -3199,7 +3369,8 @@ function ingredientOntologyV3ActivationSnapshot(
     $inventory = ingredientOntologyV3Inventory(
         $db,
         $versionId,
-        (string)$revision['score_date']
+        (string)$revision['score_date'],
+        (int)($revision['identity_extension_revision'] ?? 0)
     );
     $pending = $db->prepare("
         SELECT COUNT(*)

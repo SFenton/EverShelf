@@ -827,10 +827,16 @@ function ingredientOntologyV3BuildRequirementShadow(
             );
         }
         $scoreDate = recipeScoreCurrentDate();
+        $identityExtension =
+            ingredientOntologyV3IdentityExtensionSnapshot(
+                $db,
+                $versionId
+            );
         $inventory = ingredientOntologyV3Inventory(
             $db,
             $versionId,
-            $scoreDate
+            $scoreDate,
+            (int)$identityExtension['revision']
         );
         $inventoryFingerprint =
             ingredientOntologyV3InventoryFingerprint(
@@ -862,11 +868,12 @@ function ingredientOntologyV3BuildRequirementShadow(
                 ontology_review_manifest_hash,
                 ontology_resolution_gold_hash, ontology_seal_hash,
                 ontology_source_revision, ontology_source_hash,
+                identity_extension_revision, identity_extension_hash,
                 requirement_revision_id,
                 requirement_model, parity_baseline_score_revision_id
             )
             VALUES (?, ?, ?, ?, ?, 'building', ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ");
         $insert->execute([
             $state['inventory_revision'],
@@ -890,6 +897,8 @@ function ingredientOntologyV3BuildRequirementShadow(
             $version['seal_hash'],
             $state['ontology_source_revision'],
             $ontologySourceHash,
+            (int)$identityExtension['revision'],
+            (string)$identityExtension['hash'],
             $requirementRevisionId,
             INGREDIENT_ONTOLOGY_V3_REQUIREMENT_MODEL,
             $parityBaselineId,
@@ -918,7 +927,8 @@ function ingredientOntologyV3BuildRequirementShadow(
         }
         $context = new IngredientOntologyV3MatcherContext(
             $db,
-            $versionId
+            $versionId,
+            (int)$identityExtension['revision']
         );
         $candidateCache = [];
         $lastId = 0;
@@ -1003,7 +1013,8 @@ function ingredientOntologyV3BuildRequirementShadow(
         $currentInventory = ingredientOntologyV3Inventory(
             $db,
             $versionId,
-            $scoreDate
+            $scoreDate,
+            (int)$identityExtension['revision']
         );
         $currentInventoryFingerprint =
             ingredientOntologyV3InventoryFingerprint(
@@ -1164,6 +1175,10 @@ function ingredientOntologyV3BuildRequirementShadow(
                     'ontology_source_revision' =>
                         $state['ontology_source_revision'],
                     'ontology_source_hash' => $ontologySourceHash,
+                    'identity_extension_revision' =>
+                        (int)$identityExtension['revision'],
+                    'identity_extension_hash' =>
+                        (string)$identityExtension['hash'],
                     'materialized_id_sets' => $idSetAudit,
                     'materialized_values' => $valueAudit,
                     'legacy_parity' => $parity,

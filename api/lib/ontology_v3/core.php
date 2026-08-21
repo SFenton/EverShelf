@@ -518,7 +518,9 @@ function ingredientOntologyV3ActiveVersion(PDO $db): ?array {
         return null;
     }
     $row = $db->query("
-        SELECT v.*, r.id AS score_revision_id
+        SELECT v.*, r.id AS score_revision_id,
+               r.identity_extension_revision,
+               r.identity_extension_hash
         FROM recipe_score_state s
         JOIN recipe_score_revisions r
           ON r.id = s.active_score_revision_id
@@ -534,6 +536,8 @@ function ingredientOntologyV3ActiveVersion(PDO $db): ?array {
     }
     $row['id'] = (int)$row['id'];
     $row['score_revision_id'] = (int)$row['score_revision_id'];
+    $row['identity_extension_revision'] =
+        (int)($row['identity_extension_revision'] ?? 0);
     $row['effective_status'] = 'active';
     return $row;
 }

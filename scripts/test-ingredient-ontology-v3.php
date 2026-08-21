@@ -353,6 +353,9 @@ try {
             'match_rows_hash',
             'materialization_hash' => $hashValue($name . '-' . $rowId),
             'ontology_source_revision' => 50 + $rowId,
+            'identity_extension_revision' => 0,
+            'identity_extension_hash' =>
+                ingredientOntologyV3IdentityExtensionZeroHash(),
             'catalog_fingerprint' => 'catalog-' . $rowId,
             'requirement_model' => null,
             'parity_baseline_score_revision_id' =>

@@ -126,7 +126,7 @@ function ingredientOntologyActivationProductDriftHandledByAnnex(
                     (string)$annexRow['owner_fingerprint']
                 )
                 || (string)$annexRow['resolver_version']
-                    !== INGREDIENT_ONTOLOGY_PRODUCT_IDENTITY_ANNEX_RESOLVER_VERSION
+                    !== ingredientOntologyV3ProductIdentityResolverVersion()
                 || !hash_equals(
                     ingredientOntologyV3IdentityAnnexReviewManifestHash(),
                     (string)$annexRow['review_manifest_hash']

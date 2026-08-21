@@ -362,7 +362,8 @@ function ingredientOntologyV3IncrementalScopedInputHash(
         );
         $stmt = $db->prepare("
             SELECT product_id, owner_fingerprint,
-                   status, entity_id, evidence_hash
+                   status, entity_id, extension_entity_id,
+                   evidence_hash
             FROM ingredient_ontology_identity_annex
             WHERE product_id IN ({$placeholders})
             ORDER BY product_id
@@ -381,6 +382,7 @@ function ingredientOntologyV3IncrementalScopedInputHash(
                    annex.recipe_ingredient_id,
                    annex.owner_fingerprint,
                    annex.status, annex.entity_id,
+                   annex.extension_entity_id,
                    annex.evidence_hash
             FROM ingredient_ontology_recipe_identity_annex annex
             JOIN recipe_ingredients ingredient
@@ -807,12 +809,24 @@ function ingredientOntologyV3IncrementalRelatedEntityIds(
 ): array {
     $inventoryEntityIds = array_values(array_unique(array_filter(
         array_map('intval', $inventoryEntityIds),
-        static fn(int $id): bool => $id > 0
+        static fn(int $id): bool => $id !== 0
     )));
     $related = [];
+    foreach ($inventoryEntityIds as $inventoryEntityId) {
+        if (isset($context->entities[$inventoryEntityId])) {
+            $related[$inventoryEntityId] = true;
+        }
+    }
+    $nativeInventoryEntityIds = array_values(array_filter(
+        $inventoryEntityIds,
+        static fn(int $entityId): bool => $entityId > 0
+    ));
     foreach (array_keys($context->entities) as $requiredEntityId) {
         $requiredEntityId = (int)$requiredEntityId;
-        foreach ($inventoryEntityIds as $inventoryEntityId) {
+        if ($requiredEntityId < 0) {
+            continue;
+        }
+        foreach ($nativeInventoryEntityIds as $inventoryEntityId) {
             if (
                 $inventoryEntityId === $requiredEntityId
                 || isset(
@@ -1020,14 +1034,14 @@ function ingredientOntologyV3IncrementalAffectedRecipeIds(
 
     $inventoryEntityIds = array_values(array_unique(array_filter(
         array_map('intval', $additionalEntityIds),
-        static fn(int $id): bool => $id > 0
+        static fn(int $id): bool => $id !== 0
     )));
     foreach ($productIds as $productId) {
         $mapping = $inventory['by_product'][$productId] ?? null;
         if (
             is_array($mapping)
             && (string)($mapping['status'] ?? '') === 'accepted'
-            && (int)($mapping['entity_id'] ?? 0) > 0
+            && (int)($mapping['entity_id'] ?? 0) !== 0
         ) {
             $inventoryEntityIds[] = (int)$mapping['entity_id'];
         }
@@ -1055,10 +1069,14 @@ function ingredientOntologyV3IncrementalAffectedRecipeIds(
             $context,
             $inventoryEntityIds
         );
-    if ($relatedEntityIds) {
+    $nativeEntityIds = array_values(array_filter(
+        $relatedEntityIds,
+        static fn(int $entityId): bool => $entityId > 0
+    ));
+    if ($nativeEntityIds) {
         $entityPlaceholders = implode(
             ',',
-            array_fill(0, count($relatedEntityIds), '?')
+            array_fill(0, count($nativeEntityIds), '?')
         );
         $current = $db->prepare("
             SELECT DISTINCT ingredient.recipe_id
@@ -1075,7 +1093,7 @@ function ingredientOntologyV3IncrementalAffectedRecipeIds(
         ");
         $current->execute(array_merge(
             [$versionId],
-            $relatedEntityIds
+            $nativeEntityIds
         ));
         foreach ($current->fetchAll(PDO::FETCH_COLUMN) as $recipeId) {
             $recipeIds[(int)$recipeId] = true;
@@ -1094,9 +1112,45 @@ function ingredientOntologyV3IncrementalAffectedRecipeIds(
         ");
         $annex->execute(array_merge(
             [$versionId],
-            $relatedEntityIds
+            $nativeEntityIds
         ));
         foreach ($annex->fetchAll(PDO::FETCH_COLUMN) as $recipeId) {
+            $recipeIds[(int)$recipeId] = true;
+        }
+    }
+    $extensionEntityIds = array_values(array_map(
+        static fn(int $entityId): int => -$entityId,
+        array_filter(
+            $relatedEntityIds,
+            static fn(int $entityId): bool => $entityId < 0
+        )
+    ));
+    if ($extensionEntityIds) {
+        $extensionPlaceholders = implode(
+            ',',
+            array_fill(0, count($extensionEntityIds), '?')
+        );
+        $extensionAnnex = $db->prepare("
+            SELECT DISTINCT ingredient.recipe_id
+            FROM ingredient_ontology_recipe_identity_annex annex
+            JOIN recipe_ingredients ingredient
+              ON ingredient.id = annex.recipe_ingredient_id
+            JOIN recipe_catalog recipe
+              ON recipe.id = ingredient.recipe_id
+             AND recipe.deleted_at IS NULL
+            WHERE annex.ontology_version_id = ?
+              AND annex.status = 'accepted'
+              AND annex.extension_entity_id
+                  IN ({$extensionPlaceholders})
+        ");
+        $extensionAnnex->execute(array_merge(
+            [$versionId],
+            $extensionEntityIds
+        ));
+        foreach (
+            $extensionAnnex->fetchAll(PDO::FETCH_COLUMN)
+            as $recipeId
+        ) {
             $recipeIds[(int)$recipeId] = true;
         }
     }
@@ -1110,7 +1164,8 @@ function ingredientOntologyV3IncrementalInsertRevision(
     array $parent,
     array $state,
     string $inventoryFingerprint,
-    string $ontologySourceHash
+    string $ontologySourceHash,
+    array $identityExtension
 ): int {
     $insert = $db->prepare("
         INSERT INTO recipe_score_revisions (
@@ -1125,6 +1180,7 @@ function ingredientOntologyV3IncrementalInsertRevision(
             ontology_review_manifest_hash,
             ontology_resolution_gold_hash, ontology_seal_hash,
             ontology_source_revision, ontology_source_hash,
+            identity_extension_revision, identity_extension_hash,
             requirement_revision_id, requirement_model,
             parity_baseline_score_revision_id,
             catalog_id_set_hash, ingredient_id_set_hash,
@@ -1133,7 +1189,7 @@ function ingredientOntologyV3IncrementalInsertRevision(
         )
         VALUES (
             ?, ?, ?, ?, ?, 'building', ?, ?, ?, ?, ?, ?, ?, ?, ?,
-            ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?, ?, NULL, NULL
+            ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?, ?, NULL, NULL
         )
     ");
     $insert->execute([
@@ -1158,6 +1214,8 @@ function ingredientOntologyV3IncrementalInsertRevision(
         (string)$parent['ontology_seal_hash'],
         (int)$state['ontology_source_revision'],
         $ontologySourceHash,
+        (int)$identityExtension['revision'],
+        (string)$identityExtension['hash'],
         (string)$parent['catalog_id_set_hash'],
         (string)$parent['ingredient_id_set_hash'],
     ]);
@@ -2185,11 +2243,21 @@ function ingredientOntologyV3IncrementalRebuild(
                 foreach (
                     ['entity_id', 'previous_entity_id'] as $key
                 ) {
-                    if ((int)($identity[$key] ?? 0) > 0) {
+                    if ((int)($identity[$key] ?? 0) !== 0) {
                         $identityEntityIds[] =
                             (int)$identity[$key];
                     }
                 }
+            }
+            foreach (
+                ingredientOntologyV3IdentityExtensionRecipeIdsForProducts(
+                    $db,
+                    $versionId,
+                    $productIds
+                ) as $recipeId
+            ) {
+                $recipeOperations[$recipeId] =
+                    $recipeOperations[$recipeId] ?? 'replace';
             }
             ingredientOntologyV3ProductReadinessBeginScoring(
                 $db,
@@ -2221,11 +2289,17 @@ function ingredientOntologyV3IncrementalRebuild(
                     );
                 }
             }
+            $identityExtension =
+                ingredientOntologyV3IdentityExtensionSnapshot(
+                    $db,
+                    $versionId
+                );
             $scoreDate = (string)$parent['score_date'];
             $inventory = ingredientOntologyV3Inventory(
                 $db,
                 $versionId,
-                $scoreDate
+                $scoreDate,
+                (int)$identityExtension['revision']
             );
             $inventoryFingerprint =
                 ingredientOntologyV3InventoryFingerprint(
@@ -2316,7 +2390,8 @@ function ingredientOntologyV3IncrementalRebuild(
             $catalogMaxId = recipeScoreCatalogMaxId($db);
             $context = new IngredientOntologyV3MatcherContext(
                 $db,
-                $versionId
+                $versionId,
+                (int)$identityExtension['revision']
             );
             $inventoryAffectedRecipeIds =
                 ingredientOntologyV3IncrementalAffectedRecipeIds(
@@ -2330,7 +2405,8 @@ function ingredientOntologyV3IncrementalRebuild(
                 );
             $affectedRecipeIds = array_values(array_unique(array_merge(
                 $inventoryAffectedRecipeIds,
-                $pendingRecipeIds
+                $pendingRecipeIds,
+                array_map('intval', array_keys($recipeOperations))
             )));
             sort($affectedRecipeIds, SORT_NUMERIC);
             $operations = [];
@@ -2387,7 +2463,8 @@ function ingredientOntologyV3IncrementalRebuild(
                 $parent,
                 $state,
                 $inventoryFingerprint,
-                $ontologySourceHash
+                $ontologySourceHash,
+                $identityExtension
             );
         $db->prepare("
             UPDATE recipe_score_revisions
@@ -2433,7 +2510,8 @@ function ingredientOntologyV3IncrementalRebuild(
                 $db,
                 $versionId,
                 $recipeIds,
-                true
+                true,
+                (int)$identityExtension['revision']
             );
             if (count($recipes) !== count($recipeIds)) {
                 throw new RuntimeException(
@@ -2662,6 +2740,10 @@ function ingredientOntologyV3IncrementalRebuild(
             'ontology_source_scope' => $ontologySourceScope,
             'product_identity_semantic_hash' =>
                 $productIdentitySemanticHash,
+            'identity_extension_revision' =>
+                (int)$identityExtension['revision'],
+            'identity_extension_hash' =>
+                (string)$identityExtension['hash'],
             'active_score_revision_id_before' =>
                 (int)$parent['id'],
             'scoring_configuration' => array_merge(
@@ -2670,7 +2752,7 @@ function ingredientOntologyV3IncrementalRebuild(
             ),
             'identity_annex_overlay' => [
                 'resolver_version' =>
-                    INGREDIENT_ONTOLOGY_PRODUCT_IDENTITY_ANNEX_RESOLVER_VERSION,
+                    ingredientOntologyV3ProductIdentityResolverVersion(),
                 'review_manifest_hash' =>
                     ingredientOntologyV3IdentityAnnexReviewManifestHash(),
                 'admission_revision' =>
@@ -3187,11 +3269,12 @@ function ingredientOntologyV3CompactActiveScores(
                 ontology_resolution_gold_hash, ontology_seal_hash,
                 ontology_source_revision, ontology_source_hash,
                 ontology_source_lineage_hash,
+                identity_extension_revision, identity_extension_hash,
                 catalog_id_set_hash, ingredient_id_set_hash
             )
             VALUES (
                 ?, ?, ?, ?, ?, 'building', ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
             )
         ");
         $insert->execute([
@@ -3218,6 +3301,11 @@ function ingredientOntologyV3CompactActiveScores(
             (int)$parent['ontology_source_revision'],
             $sourceHash,
             $sourceLineageHash,
+            (int)($parent['identity_extension_revision'] ?? 0),
+            (string)(
+                $parent['identity_extension_hash']
+                    ?? ingredientOntologyV3IdentityExtensionZeroHash()
+            ),
             (string)$idSetHashes['catalog_id_set_hash'],
             (string)$idSetHashes['ingredient_id_set_hash'],
         ]);

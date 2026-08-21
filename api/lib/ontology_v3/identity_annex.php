@@ -2,14 +2,151 @@
 declare(strict_types=1);
 
 const INGREDIENT_ONTOLOGY_IDENTITY_ANNEX_RESOLVER_VERSION =
-    'identity-annex-r0-v1';
+    'identity-annex-r0-v3';
 const INGREDIENT_ONTOLOGY_PRODUCT_IDENTITY_ANNEX_RESOLVER_VERSION =
-    'identity-annex-product-r0-v2';
+    'identity-annex-product-r0-v5';
 const INGREDIENT_ONTOLOGY_IDENTITY_ANNEX_REVIEW_VERSION =
     'operator-reviewed-aliases-2026-08-18-v2';
+const INGREDIENT_ONTOLOGY_IDENTITY_EXTENSION_NORMALIZER_VERSION =
+    'identity-exact-lexeme-v1';
 const INGREDIENT_ONTOLOGY_PRODUCT_IDENTITY_MIGRATION_BATCH_SIZE = 25;
 const INGREDIENT_ONTOLOGY_PRODUCT_READINESS_MAX_ATTEMPTS = 4;
 const INGREDIENT_ONTOLOGY_PRODUCT_READINESS_DEADLINE_SECONDS = 30;
+const INGREDIENT_ONTOLOGY_PRODUCT_READINESS_MAX_RETRY_SECONDS = 3600;
+
+function ingredientOntologyV3IdentityFeatureEnabled(
+    string $environmentKey,
+    string $testOverrideKey
+): bool {
+    if (
+        defined('RECIPE_BACKEND_TEST_MODE')
+        && RECIPE_BACKEND_TEST_MODE
+        && array_key_exists($testOverrideKey, $GLOBALS)
+    ) {
+        return !empty($GLOBALS[$testOverrideKey]);
+    }
+    $raw = function_exists('env')
+        ? env($environmentKey, 'false')
+        : (getenv($environmentKey) ?: 'false');
+    return in_array(
+        strtolower(trim((string)$raw)),
+        ['1', 'true', 'yes', 'on'],
+        true
+    );
+}
+
+function ingredientOntologyV3ExactSelfIdentityEnabled(): bool {
+    return ingredientOntologyV3IdentityFeatureEnabled(
+        'INGREDIENT_ONTOLOGY_EXACT_SELF_IDENTITY_ENABLED',
+        'INGREDIENT_ONTOLOGY_EXACT_SELF_IDENTITY_ENABLED_OVERRIDE'
+    );
+}
+
+function ingredientOntologyV3IdentityRoleWideningEnabled(): bool {
+    return ingredientOntologyV3IdentityFeatureEnabled(
+        'INGREDIENT_ONTOLOGY_IDENTITY_ROLE_WIDENING_ENABLED',
+        'INGREDIENT_ONTOLOGY_IDENTITY_ROLE_WIDENING_ENABLED_OVERRIDE'
+    );
+}
+
+function ingredientOntologyV3IdentityReadinessV2Enabled(): bool {
+    return ingredientOntologyV3IdentityFeatureEnabled(
+        'INGREDIENT_ONTOLOGY_IDENTITY_READINESS_V2_ENABLED',
+        'INGREDIENT_ONTOLOGY_IDENTITY_READINESS_V2_ENABLED_OVERRIDE'
+    );
+}
+
+function ingredientOntologyV3IdentityLanguageKey(
+    string $language
+): string {
+    $language = ingredientOntologyV3NormalizeLanguage($language);
+    return $language === 'und'
+        ? 'und'
+        : explode('-', $language, 2)[0];
+}
+
+function ingredientOntologyV3ProductIdentityLanguage(): string {
+    if (
+        defined('RECIPE_BACKEND_TEST_MODE')
+        && RECIPE_BACKEND_TEST_MODE
+        && array_key_exists(
+            'INGREDIENT_ONTOLOGY_PRODUCT_LANGUAGE_OVERRIDE',
+            $GLOBALS
+        )
+    ) {
+        return ingredientOntologyV3IdentityLanguageKey(
+            (string)$GLOBALS[
+                'INGREDIENT_ONTOLOGY_PRODUCT_LANGUAGE_OVERRIDE'
+            ]
+        );
+    }
+    $defaultLanguage = 'en';
+    $raw = function_exists('env')
+        ? env(
+            'INGREDIENT_ONTOLOGY_PRODUCT_LANGUAGE',
+            $defaultLanguage
+        )
+        : (
+            getenv('INGREDIENT_ONTOLOGY_PRODUCT_LANGUAGE')
+                ?: $defaultLanguage
+        );
+    return ingredientOntologyV3IdentityLanguageKey((string)$raw);
+}
+
+function ingredientOntologyV3ProductIdentityResolverVersion(): string {
+    return implode(':', [
+        INGREDIENT_ONTOLOGY_PRODUCT_IDENTITY_ANNEX_RESOLVER_VERSION,
+        ingredientOntologyV3ExactSelfIdentityEnabled()
+            ? 'exact-on'
+            : 'exact-off',
+        ingredientOntologyV3IdentityRoleWideningEnabled()
+            ? 'roles-on'
+            : 'roles-off',
+        ingredientOntologyV3IdentityReadinessV2Enabled()
+            ? 'readiness-v2'
+            : 'readiness-v1',
+        ingredientOntologyV3ProductIdentityLanguage(),
+    ]);
+}
+
+function ingredientOntologyV3RecipeIdentityResolverVersion(): string {
+    return implode(':', [
+        INGREDIENT_ONTOLOGY_IDENTITY_ANNEX_RESOLVER_VERSION,
+        ingredientOntologyV3ExactSelfIdentityEnabled()
+            ? 'exact-on'
+            : 'exact-off',
+        ingredientOntologyV3IdentityRoleWideningEnabled()
+            ? 'roles-on'
+            : 'roles-off',
+    ]);
+}
+
+function ingredientOntologyV3IdentityEligibleRolesSql(): string {
+    return ingredientOntologyV3IdentityRoleWideningEnabled()
+        ? "('identity_leaf', 'prepared_identity', 'composite_identity')"
+        : "('identity_leaf')";
+}
+
+function ingredientOntologyV3IdentityExtensionZeroHash(): string {
+    return str_repeat('0', 64);
+}
+
+function ingredientOntologyV3IdentityExtensionRuntimeEntityId(
+    int $extensionEntityId
+): int {
+    if ($extensionEntityId <= 0) {
+        throw new InvalidArgumentException(
+            'identity extension entity id must be positive'
+        );
+    }
+    return -$extensionEntityId;
+}
+
+function ingredientOntologyV3IdentityExtensionDatabaseId(
+    int $runtimeEntityId
+): ?int {
+    return $runtimeEntityId < 0 ? -$runtimeEntityId : null;
+}
 
 function ingredientOntologyV3IdentityAnnexReviewedAliases(): array {
     $aliases = [
@@ -205,7 +342,7 @@ function ingredientOntologyV3IdentityAdmissionState(PDO $db): array {
             'available' => false,
             'revision' => 0,
             'resolver_version' =>
-                INGREDIENT_ONTOLOGY_PRODUCT_IDENTITY_ANNEX_RESOLVER_VERSION,
+                ingredientOntologyV3ProductIdentityResolverVersion(),
             'review_manifest_hash' =>
                 ingredientOntologyV3IdentityAnnexReviewManifestHash(),
             'last_changed_label_count' => 0,
@@ -292,7 +429,7 @@ function ingredientOntologyV3IdentityAdmissionMigrateProductBatch(
     ");
     $products->execute([
         $versionId,
-        INGREDIENT_ONTOLOGY_PRODUCT_IDENTITY_ANNEX_RESOLVER_VERSION,
+        ingredientOntologyV3ProductIdentityResolverVersion(),
         $manifestHash,
     ]);
     $productIds = array_map(
@@ -416,7 +553,7 @@ function ingredientOntologyV3IdentityAdmissionMigrateProductBatch(
     ");
     $remaining->execute([
         $versionId,
-        INGREDIENT_ONTOLOGY_PRODUCT_IDENTITY_ANNEX_RESOLVER_VERSION,
+        ingredientOntologyV3ProductIdentityResolverVersion(),
         $manifestHash,
     ]);
     return [
@@ -445,7 +582,7 @@ function ingredientOntologyV3IdentityAdmissionSync(
     $manifest = [
         'version' => INGREDIENT_ONTOLOGY_IDENTITY_ANNEX_REVIEW_VERSION,
         'resolver_version' =>
-            INGREDIENT_ONTOLOGY_PRODUCT_IDENTITY_ANNEX_RESOLVER_VERSION,
+            ingredientOntologyV3ProductIdentityResolverVersion(),
         'aliases' => $aliases,
     ];
     $manifestJson = ingredientOntologyV3Json($manifest);
@@ -457,7 +594,7 @@ function ingredientOntologyV3IdentityAdmissionSync(
             $manifestHash
         )
         && (string)$state['resolver_version']
-            === INGREDIENT_ONTOLOGY_PRODUCT_IDENTITY_ANNEX_RESOLVER_VERSION
+            === ingredientOntologyV3ProductIdentityResolverVersion()
     ) {
         $migration =
             ingredientOntologyV3IdentityAdmissionMigrateProductBatch($db);
@@ -512,7 +649,7 @@ function ingredientOntologyV3IdentityAdmissionSync(
     $discoveryActiveScoreId = 0;
     $discoveryActiveScore = null;
     $resolverChanged = (string)($state['resolver_version'] ?? '')
-        !== INGREDIENT_ONTOLOGY_PRODUCT_IDENTITY_ANNEX_RESOLVER_VERSION;
+        !== ingredientOntologyV3ProductIdentityResolverVersion();
     if (
         ($changedLabels || $resolverChanged)
         && ingredientOntologyV3TableExists($db, 'recipe_score_state')
@@ -636,7 +773,7 @@ function ingredientOntologyV3IdentityAdmissionSync(
               AND review_manifest_hash = ?
         ");
         $manifestUpdate->execute([
-            INGREDIENT_ONTOLOGY_PRODUCT_IDENTITY_ANNEX_RESOLVER_VERSION,
+            ingredientOntologyV3ProductIdentityResolverVersion(),
             $manifestHash,
             $manifestJson,
             count($changedLabels),
@@ -763,11 +900,666 @@ function ingredientOntologyV3IdentityAdmissionSync(
     ];
 }
 
+function ingredientOntologyV3IdentityExtensionSnapshot(
+    PDO $db,
+    int $versionId
+): array {
+    $zeroHash = ingredientOntologyV3IdentityExtensionZeroHash();
+    if (
+        $versionId <= 0
+        || !ingredientOntologyV3TableExists(
+            $db,
+            'ingredient_ontology_identity_extension_state'
+        )
+    ) {
+        return [
+            'revision' => 0,
+            'hash' => $zeroHash,
+        ];
+    }
+    $stmt = $db->prepare("
+        SELECT state.head_revision, state.head_hash,
+               state.ontology_content_hash,
+               state.ontology_seal_hash,
+               version.content_hash,
+               version.seal_hash
+        FROM ingredient_ontology_identity_extension_state state
+        JOIN ingredient_ontology_versions version
+          ON version.id = state.ontology_version_id
+        WHERE state.ontology_version_id = ?
+    ");
+    $stmt->execute([$versionId]);
+    $row = $stmt->fetch(PDO::FETCH_ASSOC);
+    if (!$row) {
+        return [
+            'revision' => 0,
+            'hash' => $zeroHash,
+        ];
+    }
+    if (
+        !hash_equals(
+            (string)$row['content_hash'],
+            (string)$row['ontology_content_hash']
+        )
+        || !hash_equals(
+            (string)$row['seal_hash'],
+            (string)$row['ontology_seal_hash']
+        )
+    ) {
+        throw new RuntimeException(
+            'identity extension state ontology fence is stale'
+        );
+    }
+    return [
+        'revision' => (int)$row['head_revision'],
+        'hash' => (string)$row['head_hash'],
+    ];
+}
+
+function ingredientOntologyV3IdentityExtensionSnapshotMatches(
+    PDO $db,
+    int $versionId,
+    array $snapshot
+): bool {
+    $revision = max(0, (int)($snapshot['revision'] ?? 0));
+    $hash = (string)($snapshot['hash'] ?? '');
+    if ($revision === 0) {
+        return hash_equals(
+            ingredientOntologyV3IdentityExtensionZeroHash(),
+            $hash
+        );
+    }
+    $stmt = $db->prepare("
+        SELECT content_hash
+        FROM ingredient_ontology_identity_extension_entities
+        WHERE ontology_version_id = ?
+          AND created_revision = ?
+        LIMIT 1
+    ");
+    $stmt->execute([$versionId, $revision]);
+    $storedHash = $stmt->fetchColumn();
+    return $storedHash !== false
+        && hash_equals((string)$storedHash, $hash);
+}
+
+function ingredientOntologyV3IdentityExtensionIntegrityAudit(
+    PDO $db,
+    int $versionId,
+    int $throughRevision,
+    string $expectedHash
+): array {
+    $throughRevision = max(0, $throughRevision);
+    $zeroHash = ingredientOntologyV3IdentityExtensionZeroHash();
+    if ($throughRevision === 0) {
+        $valid = hash_equals($zeroHash, $expectedHash);
+        return [
+            'valid' => $valid,
+            'revision' => 0,
+            'hash' => $zeroHash,
+            'row_count' => 0,
+            'errors' => $valid
+                ? []
+                : ['zero revision hash changed'],
+        ];
+    }
+    $version = ingredientOntologyV3Version($db, $versionId);
+    if ($version === null) {
+        return [
+            'valid' => false,
+            'revision' => $throughRevision,
+            'hash' => '',
+            'row_count' => 0,
+            'errors' => ['ontology version unavailable'],
+        ];
+    }
+    $stmt = $db->prepare("
+        SELECT ontology_content_hash, ontology_seal_hash,
+               created_revision, previous_hash, content_hash,
+               identity_key_hash, identity_domain,
+               normalizer_version, normalized_label, language,
+               context_signature, display_label, slug
+        FROM ingredient_ontology_identity_extension_entities
+        WHERE ontology_version_id = ?
+          AND created_revision <= ?
+        ORDER BY created_revision
+    ");
+    $stmt->execute([$versionId, $throughRevision]);
+    $errors = [];
+    $expectedRevision = 1;
+    $previousHash = $zeroHash;
+    $rowCount = 0;
+    while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
+        $rowCount++;
+        $revision = (int)$row['created_revision'];
+        if ($revision !== $expectedRevision) {
+            $errors[] = 'identity extension revision gap';
+            break;
+        }
+        if (
+            !hash_equals(
+                (string)$version['content_hash'],
+                (string)$row['ontology_content_hash']
+            )
+            || !hash_equals(
+                (string)$version['seal_hash'],
+                (string)$row['ontology_seal_hash']
+            )
+        ) {
+            $errors[] = 'identity extension ontology fence changed';
+            break;
+        }
+        if (!hash_equals($previousHash, (string)$row['previous_hash'])) {
+            $errors[] = 'identity extension previous hash changed';
+            break;
+        }
+        $identityKeyHash =
+            ingredientOntologyV3IdentityExtensionKeyHash(
+                (string)$row['normalizer_version'],
+                (string)$row['identity_domain'],
+                (string)$row['normalized_label'],
+                (string)$row['language'],
+                (string)$row['context_signature']
+            );
+        if (!hash_equals(
+            $identityKeyHash,
+            (string)$row['identity_key_hash']
+        )) {
+            $errors[] = 'identity extension key hash changed';
+            break;
+        }
+        $contentHash =
+            ingredientOntologyV3IdentityExtensionContentHash(
+                $versionId,
+                $revision,
+                $previousHash,
+                $identityKeyHash,
+                (string)$row['identity_domain'],
+                (string)$row['normalizer_version'],
+                (string)$row['normalized_label'],
+                (string)$row['language'],
+                (string)$row['context_signature'],
+                (string)$row['display_label'],
+                (string)$row['slug']
+            );
+        if (!hash_equals($contentHash, (string)$row['content_hash'])) {
+            $errors[] = 'identity extension content hash changed';
+            break;
+        }
+        $previousHash = $contentHash;
+        $expectedRevision++;
+    }
+    if (!$errors && $rowCount !== $throughRevision) {
+        $errors[] = 'identity extension revision count changed';
+    }
+    if (!$errors && !hash_equals($previousHash, $expectedHash)) {
+        $errors[] = 'identity extension head hash changed';
+    }
+    return [
+        'valid' => !$errors,
+        'revision' => $throughRevision,
+        'hash' => $previousHash,
+        'row_count' => $rowCount,
+        'errors' => $errors,
+    ];
+}
+
+function ingredientOntologyV3IdentityExtensionRow(array $row): array {
+    $extensionEntityId = (int)$row['id'];
+    return [
+        'id' => $extensionEntityId,
+        'runtime_entity_id' =>
+            ingredientOntologyV3IdentityExtensionRuntimeEntityId(
+                $extensionEntityId
+            ),
+        'ontology_version_id' => (int)$row['ontology_version_id'],
+        'created_revision' => (int)$row['created_revision'],
+        'content_hash' => (string)$row['content_hash'],
+        'identity_key_hash' => (string)$row['identity_key_hash'],
+        'identity_domain' => (string)$row['identity_domain'],
+        'normalizer_version' => (string)$row['normalizer_version'],
+        'normalized_label' => (string)$row['normalized_label'],
+        'language' => (string)$row['language'],
+        'context_signature' => (string)$row['context_signature'],
+        'display_label' => (string)$row['display_label'],
+        'slug' => (string)$row['slug'],
+        'canonical_name' => (string)$row['canonical_name'],
+        'status' => (string)$row['status'],
+        'resolver_version' => (string)$row['resolver_version'],
+    ];
+}
+
+function ingredientOntologyV3IdentityExtensionLookup(
+    PDO $db,
+    array $version,
+    string $normalizedLabel,
+    string $language,
+    string $contextSignature = '',
+    ?int $throughRevision = null
+): ?array {
+    if (!ingredientOntologyV3TableExists(
+        $db,
+        'ingredient_ontology_identity_extension_entities'
+    )) {
+        return null;
+    }
+    $normalizedLabel = ingredientOntologyV3NormalizeLabel(
+        $normalizedLabel
+    );
+    $language = ingredientOntologyV3NormalizeLanguage($language);
+    $contextSignature = trim($contextSignature);
+    if ($normalizedLabel === '') {
+        return null;
+    }
+    $revisionSql = $throughRevision !== null
+        ? ' AND created_revision <= ?'
+        : '';
+    $stmt = $db->prepare("
+        SELECT *
+        FROM ingredient_ontology_identity_extension_entities
+        WHERE ontology_version_id = ?
+          AND ontology_content_hash = ?
+          AND ontology_seal_hash = ?
+          AND identity_domain = 'food'
+          AND normalized_label = ?
+          AND language = ?
+          AND context_signature = ?
+          AND status = 'active'
+          {$revisionSql}
+        LIMIT 1
+    ");
+    $params = [
+        (int)$version['id'],
+        (string)$version['content_hash'],
+        (string)$version['seal_hash'],
+        $normalizedLabel,
+        $language,
+        $contextSignature,
+    ];
+    if ($throughRevision !== null) {
+        $params[] = max(0, $throughRevision);
+    }
+    $stmt->execute($params);
+    $row = $stmt->fetch(PDO::FETCH_ASSOC);
+    return $row
+        ? ingredientOntologyV3IdentityExtensionRow($row)
+        : null;
+}
+
+function ingredientOntologyV3IdentityExtensionEligibility(
+    array $version,
+    string $sourceLabel,
+    string $language
+): array {
+    $normalizedLabel = ingredientOntologyV3NormalizeLabel($sourceLabel);
+    $language = ingredientOntologyV3IdentityLanguageKey($language);
+    if (!ingredientOntologyV3ExactSelfIdentityEnabled()) {
+        return [
+            'eligible' => false,
+            'reason' => 'exact_self_identity_disabled',
+            'normalized_label' => $normalizedLabel,
+            'language' => $language,
+        ];
+    }
+    if (
+        (string)($version['status'] ?? '') !== 'ready'
+        || !is_string($version['content_hash'] ?? null)
+        || !is_string($version['seal_hash'] ?? null)
+    ) {
+        return [
+            'eligible' => false,
+            'reason' => 'exact_self_ontology_unavailable',
+            'normalized_label' => $normalizedLabel,
+            'language' => $language,
+        ];
+    }
+    if ($normalizedLabel === '') {
+        return [
+            'eligible' => false,
+            'reason' => 'empty_label',
+            'normalized_label' => '',
+            'language' => $language,
+        ];
+    }
+    if (mb_strlen($normalizedLabel, 'UTF-8') > 200) {
+        return [
+            'eligible' => false,
+            'reason' => 'exact_self_label_too_long',
+            'normalized_label' => $normalizedLabel,
+            'language' => $language,
+        ];
+    }
+    return [
+        'eligible' => true,
+        'reason' => 'exact_self_identity',
+        'normalized_label' => $normalizedLabel,
+        'language' => $language,
+    ];
+}
+
+function ingredientOntologyV3IdentityExtensionKeyHash(
+    string $normalizerVersion,
+    string $identityDomain,
+    string $normalizedLabel,
+    string $language,
+    string $contextSignature
+): string {
+    return ingredientOntologyV3Hash([
+        'schema' => 'identity-exact-lexeme-key-v1',
+        'normalizer_version' => $normalizerVersion,
+        'identity_domain' => $identityDomain,
+        'language' => $language,
+        'normalized_label' => $normalizedLabel,
+        'context_signature' => $contextSignature,
+    ]);
+}
+
+function ingredientOntologyV3IdentityExtensionContentHash(
+    int $ontologyVersionId,
+    int $revision,
+    string $previousHash,
+    string $identityKeyHash,
+    string $identityDomain,
+    string $normalizerVersion,
+    string $normalizedLabel,
+    string $language,
+    string $contextSignature,
+    string $displayLabel,
+    string $slug
+): string {
+    return ingredientOntologyV3Hash([
+        'schema' => 'identity-exact-lexeme-chain-v1',
+        'previous_hash' => $previousHash,
+        'revision' => $revision,
+        'ontology_version_id' => $ontologyVersionId,
+        'identity_key_hash' => $identityKeyHash,
+        'identity_domain' => $identityDomain,
+        'normalizer_version' => $normalizerVersion,
+        'normalized_label' => $normalizedLabel,
+        'language' => $language,
+        'context_signature' => $contextSignature,
+        'display_label' => $displayLabel,
+        'slug' => $slug,
+    ]);
+}
+
+function ingredientOntologyV3IdentityExtensionClaim(
+    PDO $db,
+    array $version,
+    string $sourceLabel,
+    string $language,
+    string $contextSignature = '',
+    bool $create = true,
+    bool $lookup = true
+): ?array {
+    if (!$lookup) {
+        return null;
+    }
+    $eligibility =
+        ingredientOntologyV3IdentityExtensionEligibility(
+            $version,
+            $sourceLabel,
+            $language
+        );
+    if (empty($eligibility['eligible'])) {
+        return null;
+    }
+    $normalizedLabel = (string)$eligibility['normalized_label'];
+    $language = (string)$eligibility['language'];
+    $contextSignature = mb_substr(
+        trim($contextSignature),
+        0,
+        120,
+        'UTF-8'
+    );
+    $existing = ingredientOntologyV3IdentityExtensionLookup(
+        $db,
+        $version,
+        $normalizedLabel,
+        $language,
+        $contextSignature
+    );
+    if ($existing !== null || !$create) {
+        return $existing;
+    }
+
+    static $savepointSequence = 0;
+    $ownsTransaction = false;
+    $savepoint = 'identity_extension_claim_'
+        . (++$savepointSequence);
+    $nestedTransaction = $db->inTransaction();
+    if (!$nestedTransaction) {
+        try {
+            dbBeginImmediateWithRetry($db);
+            $ownsTransaction = true;
+        } catch (PDOException $error) {
+            if (!str_contains(
+                strtolower($error->getMessage()),
+                'within a transaction'
+            )) {
+                throw $error;
+            }
+            $nestedTransaction = true;
+        }
+    }
+    if ($nestedTransaction) {
+        $db->exec("SAVEPOINT {$savepoint}");
+    }
+    try {
+        $existing = ingredientOntologyV3IdentityExtensionLookup(
+            $db,
+            $version,
+            $normalizedLabel,
+            $language,
+            $contextSignature
+        );
+        if ($existing !== null) {
+            if ($ownsTransaction) {
+                $db->exec('COMMIT');
+            } else {
+                $db->exec("RELEASE SAVEPOINT {$savepoint}");
+            }
+            return $existing;
+        }
+        $db->prepare("
+            INSERT OR IGNORE INTO
+                ingredient_ontology_identity_extension_state (
+                ontology_version_id, ontology_content_hash,
+                ontology_seal_hash, head_revision, head_hash,
+                updated_at
+            )
+            VALUES (?, ?, ?, 0, ?, CURRENT_TIMESTAMP)
+        ")->execute([
+            (int)$version['id'],
+            (string)$version['content_hash'],
+            (string)$version['seal_hash'],
+            ingredientOntologyV3IdentityExtensionZeroHash(),
+        ]);
+        $stateStmt = $db->prepare("
+            SELECT head_revision, head_hash,
+                   ontology_content_hash, ontology_seal_hash
+            FROM ingredient_ontology_identity_extension_state
+            WHERE ontology_version_id = ?
+        ");
+        $stateStmt->execute([(int)$version['id']]);
+        $state = $stateStmt->fetch(PDO::FETCH_ASSOC);
+        if (
+            !$state
+            || !hash_equals(
+                (string)$version['content_hash'],
+                (string)$state['ontology_content_hash']
+            )
+            || !hash_equals(
+                (string)$version['seal_hash'],
+                (string)$state['ontology_seal_hash']
+            )
+        ) {
+            throw new RuntimeException(
+                'identity extension state fence changed'
+            );
+        }
+        $revision = (int)$state['head_revision'] + 1;
+        $previousHash = (string)$state['head_hash'];
+        $displayLabel = mb_substr(
+            trim($sourceLabel),
+            0,
+            200,
+            'UTF-8'
+        );
+        if ($displayLabel === '') {
+            $displayLabel = $normalizedLabel;
+        }
+        $identityKeyHash =
+            ingredientOntologyV3IdentityExtensionKeyHash(
+                INGREDIENT_ONTOLOGY_IDENTITY_EXTENSION_NORMALIZER_VERSION,
+                'food',
+                $normalizedLabel,
+                $language,
+                $contextSignature
+            );
+        $slug = 'exact-self-' . substr($identityKeyHash, 0, 24);
+        $contentHash =
+            ingredientOntologyV3IdentityExtensionContentHash(
+                (int)$version['id'],
+                $revision,
+                $previousHash,
+                $identityKeyHash,
+                'food',
+                INGREDIENT_ONTOLOGY_IDENTITY_EXTENSION_NORMALIZER_VERSION,
+                $normalizedLabel,
+                $language,
+                $contextSignature,
+                $displayLabel,
+                $slug
+            );
+        $db->prepare("
+            INSERT INTO ingredient_ontology_identity_extension_entities (
+                ontology_version_id, ontology_content_hash,
+                ontology_seal_hash, created_revision,
+                previous_hash, content_hash, identity_key_hash,
+                identity_domain, normalizer_version,
+                normalized_label, language, context_signature,
+                display_label, slug, canonical_name,
+                status, resolver_version, created_at
+            )
+            VALUES (
+                ?, ?, ?, ?, ?, ?, ?, 'food', ?, ?, ?, ?, ?, ?, ?,
+                'active', ?, CURRENT_TIMESTAMP
+            )
+        ")->execute([
+            (int)$version['id'],
+            (string)$version['content_hash'],
+            (string)$version['seal_hash'],
+            $revision,
+            $previousHash,
+            $contentHash,
+            $identityKeyHash,
+            INGREDIENT_ONTOLOGY_IDENTITY_EXTENSION_NORMALIZER_VERSION,
+            $normalizedLabel,
+            $language,
+            $contextSignature,
+            $displayLabel,
+            $slug,
+            $displayLabel,
+            INGREDIENT_ONTOLOGY_IDENTITY_EXTENSION_NORMALIZER_VERSION,
+        ]);
+        $extensionEntityId = (int)$db->lastInsertId();
+        $update = $db->prepare("
+            UPDATE ingredient_ontology_identity_extension_state
+            SET head_revision = ?,
+                head_hash = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE ontology_version_id = ?
+              AND head_revision = ?
+              AND head_hash = ?
+        ");
+        $update->execute([
+            $revision,
+            $contentHash,
+            (int)$version['id'],
+            $revision - 1,
+            $previousHash,
+        ]);
+        if ($update->rowCount() !== 1) {
+            throw new RuntimeException(
+                'identity extension revision compare-and-swap failed'
+            );
+        }
+        if ($ownsTransaction) {
+            $db->exec('COMMIT');
+        } else {
+            $db->exec("RELEASE SAVEPOINT {$savepoint}");
+        }
+        return ingredientOntologyV3IdentityExtensionRow([
+            'id' => $extensionEntityId,
+            'ontology_version_id' => (int)$version['id'],
+            'created_revision' => $revision,
+            'content_hash' => $contentHash,
+            'identity_key_hash' => $identityKeyHash,
+            'identity_domain' => 'food',
+            'normalizer_version' =>
+                INGREDIENT_ONTOLOGY_IDENTITY_EXTENSION_NORMALIZER_VERSION,
+            'normalized_label' => $normalizedLabel,
+            'language' => $language,
+            'context_signature' => $contextSignature,
+            'display_label' => $displayLabel,
+            'slug' => $slug,
+            'canonical_name' => $displayLabel,
+            'status' => 'active',
+            'resolver_version' =>
+                INGREDIENT_ONTOLOGY_IDENTITY_EXTENSION_NORMALIZER_VERSION,
+        ]);
+    } catch (Throwable $error) {
+        if ($ownsTransaction) {
+            try {
+                $db->exec('ROLLBACK');
+            } catch (Throwable $ignored) {
+            }
+        } else {
+            try {
+                $db->exec("ROLLBACK TO SAVEPOINT {$savepoint}");
+                $db->exec("RELEASE SAVEPOINT {$savepoint}");
+            } catch (Throwable $ignored) {
+            }
+        }
+        try {
+            $existing = ingredientOntologyV3IdentityExtensionLookup(
+                $db,
+                $version,
+                $normalizedLabel,
+                $language,
+                $contextSignature
+            );
+        } catch (Throwable $lookupError) {
+            $existing = null;
+        }
+        $contention = $error instanceof PDOException
+            && (
+                str_contains(
+                    strtolower($error->getMessage()),
+                    'unique constraint'
+                )
+                || (
+                    function_exists('databaseIsLockError')
+                    && databaseIsLockError($error)
+                )
+            );
+        if (
+            $existing !== null
+            && $contention
+        ) {
+            return $existing;
+        }
+        throw $error;
+    }
+}
+
 function ingredientOntologyV3RecipeAnnexResolution(
     PDO $db,
     array $version,
     string $sourceLabel,
-    string $language
+    string $language,
+    bool $createExtension = false,
+    bool $lookupExtension = true
 ): array {
     $normalizedLabel = ingredientOntologyV3NormalizeLabel(
         $sourceLabel
@@ -780,6 +1572,8 @@ function ingredientOntologyV3RecipeAnnexResolution(
             'admission_source' => 'none',
             'label_id' => null,
             'entity_id' => null,
+            'extension_entity_id' => null,
+            'effective_entity_id' => null,
             'attributes' => [],
             'normalized_label' => '',
             'language' => $language,
@@ -793,6 +1587,7 @@ function ingredientOntologyV3RecipeAnnexResolution(
     );
     $admissionSource = 'accepted_label';
     $review = null;
+    $unresolvedReason = 'no_reviewed_exact_alias';
     if (!$candidates) {
         $review = ingredientOntologyV3IdentityAnnexReviewedAliases()[
             $normalizedLabel
@@ -815,29 +1610,104 @@ function ingredientOntologyV3RecipeAnnexResolution(
             $admissionSource = 'reviewed_alias';
         }
     }
+    if (!$candidates && $review === null) {
+        $numberProof =
+            ingredientOntologyV3IdentityAnnexExactNumberProof(
+                $db,
+                (int)$version['id'],
+                $normalizedLabel,
+                $language
+            );
+        $candidates = (array)$numberProof['candidates'];
+            if (
+        (string)$numberProof['reason']
+            === 'number_variant_source_conflict'
+            ) {
+        $unresolvedReason = (string)$numberProof['reason'];
+            }
+            if ($candidates) {
+            $admissionSource = 'exact_number_v1';
+            $review = $numberProof['proof'];
+        }
+    }
     $entities = [];
     foreach ($candidates as $candidate) {
         $entities[(int)$candidate['entity_id']] = true;
     }
-    if (!$candidates) {
+    $candidateCollision = $candidates && count($entities) !== 1;
+    if (!$candidates || $candidateCollision) {
+        $extension = ingredientOntologyV3IdentityExtensionClaim(
+            $db,
+            $version,
+            $sourceLabel,
+            $language,
+            '',
+            $createExtension,
+            $lookupExtension
+        );
+        if ($extension !== null) {
+            return [
+                'status' => 'accepted',
+                'reason' => 'exact_self_identity',
+                'admission_source' => 'exact_self_identity',
+                'label_id' => null,
+                'entity_id' => null,
+                'extension_entity_id' => (int)$extension['id'],
+                'effective_entity_id' =>
+                    (int)$extension['runtime_entity_id'],
+                'entity_slug' => (string)$extension['slug'],
+                'entity_name' =>
+                    (string)$extension['canonical_name'],
+                'attributes' => [],
+                'normalized_label' => $normalizedLabel,
+                'language' => (string)$extension['language'],
+                'extension_revision' =>
+                    (int)$extension['created_revision'],
+                'extension_hash' => (string)$extension['content_hash'],
+                'review' => null,
+            ];
+        }
+        if (
+            $candidateCollision
+            && !ingredientOntologyV3ExactSelfIdentityEnabled()
+        ) {
+            return [
+                'status' => 'rejected',
+                'reason' => 'reviewed_alias_collision',
+                'admission_source' => 'none',
+                'label_id' => null,
+                'entity_id' => null,
+                'extension_entity_id' => null,
+                'effective_entity_id' => null,
+                'attributes' => [],
+                'normalized_label' => $normalizedLabel,
+                'language' => $language,
+            ];
+        }
+        if ($candidateCollision) {
+            $unresolvedReason =
+                'reviewed_alias_collision_exact_self_pending';
+        }
+        $eligibility =
+            ingredientOntologyV3IdentityExtensionEligibility(
+                $version,
+                $sourceLabel,
+                $language
+            );
+        if (
+            (string)$eligibility['reason']
+                === 'exact_self_label_too_long'
+        ) {
+            $unresolvedReason = (string)$eligibility['reason'];
+        }
         return [
             'status' => 'unresolved',
-            'reason' => 'no_reviewed_exact_alias',
+            'reason' => $unresolvedReason,
             'admission_source' => 'none',
             'label_id' => null,
             'entity_id' => null,
-            'attributes' => [],
-            'normalized_label' => $normalizedLabel,
-            'language' => $language,
-        ];
-    }
-    if (count($entities) !== 1) {
-        return [
-            'status' => 'rejected',
-            'reason' => 'reviewed_alias_collision',
-            'admission_source' => 'none',
-            'label_id' => null,
-            'entity_id' => null,
+            'extension_entity_id' => null,
+            'effective_entity_id' => null,
             'attributes' => [],
             'normalized_label' => $normalizedLabel,
             'language' => $language,
@@ -850,6 +1720,10 @@ function ingredientOntologyV3RecipeAnnexResolution(
         'admission_source' => $admissionSource,
         'label_id' => (int)$candidate['label_id'],
         'entity_id' => (int)$candidate['entity_id'],
+        'extension_entity_id' => null,
+        'effective_entity_id' => (int)$candidate['entity_id'],
+        'entity_slug' => (string)$candidate['entity_slug'],
+        'entity_name' => (string)$candidate['entity_name'],
         'attributes' => (array)$candidate['attributes'],
         'normalized_label' => $normalizedLabel,
         'language' => $language,
@@ -929,6 +1803,8 @@ function ingredientOntologyV3RecipeAnnexBatchSourceRows(
                annex.language AS annex_language,
                annex.label_id AS annex_label_id,
                annex.entity_id AS annex_entity_id,
+               annex.extension_entity_id
+                   AS annex_extension_entity_id,
                annex.status AS annex_status,
                annex.confidence AS annex_confidence,
                annex.admission_source AS annex_admission_source,
@@ -975,6 +1851,7 @@ function ingredientOntologyV3RecipeAnnexExistingMatches(
         'ontology_version_id',
         'label_id',
         'entity_id',
+        'extension_entity_id',
     ] as $field) {
         $existing = $row['annex_' . $field];
         $expected = $desired[$field];
@@ -1077,7 +1954,7 @@ function ingredientOntologyV3RecipeAnnexResolveCoverageForRecipes(
         (int)$version['id'],
         (string)$version['content_hash'],
         (string)$version['seal_hash'],
-        INGREDIENT_ONTOLOGY_IDENTITY_ANNEX_RESOLVER_VERSION,
+        ingredientOntologyV3RecipeIdentityResolverVersion(),
         ingredientOntologyV3IdentityAnnexReviewManifestHash(),
         (int)$version['id'],
     ], $recipeIds));
@@ -1170,7 +2047,8 @@ function ingredientOntologyV3RecipeAnnexRefreshBatch(
                     $db,
                     $version,
                     (string)$row['source_label'],
-                    (string)$row['language']
+                    (string)$row['language'],
+                    true
                 );
         }
         $resolution = $resolutionCache[$cacheKey];
@@ -1191,7 +2069,7 @@ function ingredientOntologyV3RecipeAnnexRefreshBatch(
         $attributesJson = ingredientOntologyV3Json($attributes);
         $evidence = [
             'resolver_version' =>
-                INGREDIENT_ONTOLOGY_IDENTITY_ANNEX_RESOLVER_VERSION,
+                ingredientOntologyV3RecipeIdentityResolverVersion(),
             'review_manifest_hash' => $reviewManifestHash,
             'ontology_version_id' => $versionId,
             'ontology_content_hash' =>
@@ -1208,6 +2086,12 @@ function ingredientOntologyV3RecipeAnnexRefreshBatch(
                 (string)$resolution['admission_source'],
             'label_id' => $resolution['label_id'],
             'entity_id' => $resolution['entity_id'],
+            'extension_entity_id' =>
+                $resolution['extension_entity_id'] ?? null,
+            'extension_revision' =>
+                $resolution['extension_revision'] ?? null,
+            'extension_hash' =>
+                $resolution['extension_hash'] ?? null,
             'attributes' => $attributes,
             'review' => $resolution['review'] ?? null,
         ];
@@ -1223,6 +2107,8 @@ function ingredientOntologyV3RecipeAnnexRefreshBatch(
             'language' => (string)$resolution['language'],
             'label_id' => $resolution['label_id'],
             'entity_id' => $resolution['entity_id'],
+            'extension_entity_id' =>
+                $resolution['extension_entity_id'] ?? null,
             'status' => (string)$resolution['status'],
             'confidence' =>
                 (string)$resolution['status'] === 'accepted'
@@ -1232,7 +2118,7 @@ function ingredientOntologyV3RecipeAnnexRefreshBatch(
                 (string)$resolution['admission_source'],
             'attributes_json' => $attributesJson,
             'resolver_version' =>
-                INGREDIENT_ONTOLOGY_IDENTITY_ANNEX_RESOLVER_VERSION,
+                ingredientOntologyV3RecipeIdentityResolverVersion(),
             'review_manifest_hash' => $reviewManifestHash,
             'evidence_hash' => ingredientOntologyV3Hash($evidence),
             'reason' => (string)$resolution['reason'],
@@ -1281,6 +2167,7 @@ function ingredientOntologyV3RecipeAnnexRefreshBatch(
             'language',
             'label_id',
             'entity_id',
+            'extension_entity_id',
             'status',
             'confidence',
             'admission_source',
@@ -1323,6 +2210,8 @@ function ingredientOntologyV3RecipeAnnexRefreshBatch(
                     language = excluded.language,
                     label_id = excluded.label_id,
                     entity_id = excluded.entity_id,
+                    extension_entity_id =
+                        excluded.extension_entity_id,
                     status = excluded.status,
                     confidence = excluded.confidence,
                     admission_source = excluded.admission_source,
@@ -1416,6 +2305,7 @@ function ingredientOntologyV3IdentityAnnexLabelCandidates(
     string $normalizedLabel,
     string $language
 ): array {
+    $eligibleRoles = ingredientOntologyV3IdentityEligibleRolesSql();
     $stmt = $db->prepare("
         SELECT label.id AS label_id, label.entity_id,
                label.normalized_label, label.language,
@@ -1445,7 +2335,7 @@ function ingredientOntologyV3IdentityAnnexLabelCandidates(
           AND label.kind IN ('exact_alias', 'attribute_alias')
           AND entity.active = 1
           AND entity.entity_kind = 'ingredient'
-          AND entity.identity_role = 'identity_leaf'
+          AND entity.identity_role IN {$eligibleRoles}
           AND entity.provenance <> 'autonomous_controller'
           AND entity.slug NOT LIKE 'provisional-subject-%'
         ORDER BY label.id, facet.facet_key
@@ -1527,6 +2417,7 @@ function ingredientOntologyV3IdentityAnnexEligibleLabelConflicts(
     int $versionId,
     string $normalizedLabel
 ): array {
+    $eligibleRoles = ingredientOntologyV3IdentityEligibleRolesSql();
     $stmt = $db->prepare("
         SELECT label.id AS label_id, label.entity_id,
                label.review_state, label.kind,
@@ -1539,7 +2430,7 @@ function ingredientOntologyV3IdentityAnnexEligibleLabelConflicts(
           AND label.normalized_label = ?
           AND entity.active = 1
           AND entity.entity_kind = 'ingredient'
-          AND entity.identity_role = 'identity_leaf'
+          AND entity.identity_role IN {$eligibleRoles}
           AND entity.provenance <> 'autonomous_controller'
           AND entity.slug NOT LIKE 'provisional-subject-%'
         ORDER BY label.id
@@ -1564,7 +2455,7 @@ function ingredientOntologyV3IdentityAnnexExactNumberProof(
     string $language
 ): array {
     if (
-        ingredientOntologyV3NormalizeLanguage($language) !== 'en'
+        ingredientOntologyV3IdentityLanguageKey($language) !== 'en'
         || mb_strlen($normalizedLabel, 'UTF-8') < 4
         || !str_ends_with($normalizedLabel, 's')
     ) {
@@ -1634,12 +2525,14 @@ function ingredientOntologyV3IdentityAnnexExactNumberProof(
 function ingredientOntologyV3IdentityAnnexResolution(
     PDO $db,
     array $version,
-    array $product
+    array $product,
+    bool $createExtension = false,
+    bool $lookupExtension = true
 ): array {
     $normalizedLabel = ingredientOntologyV3NormalizeLabel(
         (string)$product['name']
     );
-    $language = 'en';
+    $language = ingredientOntologyV3ProductIdentityLanguage();
     if (!empty($product['prepared_food'])) {
         return [
             'status' => 'rejected',
@@ -1647,6 +2540,8 @@ function ingredientOntologyV3IdentityAnnexResolution(
             'admission_source' => 'none',
             'label_id' => null,
             'entity_id' => null,
+            'extension_entity_id' => null,
+            'effective_entity_id' => null,
             'attributes' => [],
             'normalized_label' => $normalizedLabel,
             'language' => $language,
@@ -1659,6 +2554,8 @@ function ingredientOntologyV3IdentityAnnexResolution(
             'admission_source' => 'none',
             'label_id' => null,
             'entity_id' => null,
+            'extension_entity_id' => null,
+            'effective_entity_id' => null,
             'attributes' => [],
             'normalized_label' => '',
             'language' => $language,
@@ -1705,8 +2602,13 @@ function ingredientOntologyV3IdentityAnnexResolution(
                 $language
             );
         $candidates = (array)$numberProof['candidates'];
-        $unresolvedReason = (string)$numberProof['reason'];
-        if ($candidates) {
+            if (
+                (string)$numberProof['reason']
+                    === 'number_variant_source_conflict'
+            ) {
+                $unresolvedReason = (string)$numberProof['reason'];
+            }
+            if ($candidates) {
             $admissionSource = 'exact_number_v1';
             $review = $numberProof['proof'];
         }
@@ -1716,27 +2618,130 @@ function ingredientOntologyV3IdentityAnnexResolution(
     foreach ($candidates as $candidate) {
         $entities[(int)$candidate['entity_id']] = true;
     }
-    if (!$candidates) {
+    $candidateCollision = $candidates && count($entities) !== 1;
+    if (!$candidates || $candidateCollision) {
+        $sealedMappingPreserved = false;
+        $productId = (int)($product['id'] ?? 0);
+        if (
+            ($createExtension || $lookupExtension)
+            && $productId > 0
+        ) {
+            $sealedAccepted = $db->prepare("
+                SELECT 1
+                FROM ingredient_ontology_mappings
+                WHERE ontology_version_id = ?
+                  AND owner_type = 'product'
+                  AND owner_id = ?
+                  AND owner_fingerprint = ?
+                  AND status = 'accepted'
+                  AND entity_id IS NOT NULL
+                LIMIT 1
+            ");
+            $sealedAccepted->execute([
+                (int)$version['id'],
+                $productId,
+                ingredientOntologyV3ProductOwnerFingerprint($product),
+            ]);
+            if ($sealedAccepted->fetchColumn() !== false) {
+                $createExtension = false;
+                $lookupExtension = false;
+                $sealedMappingPreserved = true;
+            }
+        }
+        $collisionReason = $admissionSource === 'exact_number_v1'
+            ? 'number_variant_collision'
+            : 'reviewed_alias_collision';
+        $extension = ingredientOntologyV3IdentityExtensionClaim(
+            $db,
+            $version,
+            (string)$product['name'],
+            $language,
+            '',
+            $createExtension,
+            $lookupExtension
+        );
+        if ($extension !== null) {
+            $extensionSource = $candidateCollision
+                ? $collisionReason . '_exact_self_identity'
+                : 'exact_self_identity';
+            return [
+                'status' => 'accepted',
+                'reason' => $extensionSource,
+                'admission_source' => $extensionSource,
+                'label_id' => null,
+                'entity_id' => null,
+                'extension_entity_id' => (int)$extension['id'],
+                'effective_entity_id' =>
+                    (int)$extension['runtime_entity_id'],
+                'entity_slug' => (string)$extension['slug'],
+                'entity_name' =>
+                    (string)$extension['canonical_name'],
+                'attributes' => [],
+                'normalized_label' => $normalizedLabel,
+                'language' => (string)$extension['language'],
+                'extension_revision' =>
+                    (int)$extension['created_revision'],
+                'extension_hash' => (string)$extension['content_hash'],
+                'label' => null,
+                'review' => null,
+            ];
+        }
+        if ($sealedMappingPreserved) {
+            return [
+                'status' => 'unresolved',
+                'reason' => 'sealed_mapping_preserved',
+                'admission_source' => 'none',
+                'label_id' => null,
+                'entity_id' => null,
+                'extension_entity_id' => null,
+                'effective_entity_id' => null,
+                'attributes' => [],
+                'normalized_label' => $normalizedLabel,
+                'language' => $language,
+                'sealed_mapping_preserved' => true,
+            ];
+        }
+        if (
+            $candidateCollision
+            && !ingredientOntologyV3ExactSelfIdentityEnabled()
+        ) {
+            return [
+                'status' => 'rejected',
+                'reason' => $collisionReason,
+                'admission_source' => 'none',
+                'label_id' => null,
+                'entity_id' => null,
+                'extension_entity_id' => null,
+                'effective_entity_id' => null,
+                'attributes' => [],
+                'normalized_label' => $normalizedLabel,
+                'language' => $language,
+            ];
+        }
+        if ($candidateCollision) {
+            $unresolvedReason =
+                $collisionReason . '_exact_self_pending';
+        }
+        $eligibility =
+            ingredientOntologyV3IdentityExtensionEligibility(
+                $version,
+                (string)$product['name'],
+                $language
+            );
+        if (
+            (string)$eligibility['reason']
+                === 'exact_self_label_too_long'
+        ) {
+            $unresolvedReason = (string)$eligibility['reason'];
+        }
         return [
             'status' => 'unresolved',
             'reason' => $unresolvedReason,
             'admission_source' => 'none',
             'label_id' => null,
             'entity_id' => null,
-            'attributes' => [],
-            'normalized_label' => $normalizedLabel,
-            'language' => $language,
-        ];
-    }
-    if (count($entities) !== 1) {
-        return [
-            'status' => 'rejected',
-            'reason' => $admissionSource === 'exact_number_v1'
-                ? 'number_variant_collision'
-                : 'reviewed_alias_collision',
-            'admission_source' => 'none',
-            'label_id' => null,
-            'entity_id' => null,
+            'extension_entity_id' => null,
+            'effective_entity_id' => null,
             'attributes' => [],
             'normalized_label' => $normalizedLabel,
             'language' => $language,
@@ -1750,6 +2755,8 @@ function ingredientOntologyV3IdentityAnnexResolution(
         'admission_source' => $admissionSource,
         'label_id' => (int)$candidate['label_id'],
         'entity_id' => (int)$candidate['entity_id'],
+        'extension_entity_id' => null,
+        'effective_entity_id' => (int)$candidate['entity_id'],
         'entity_slug' => (string)$candidate['entity_slug'],
         'entity_name' => (string)$candidate['entity_name'],
         'attributes' => (array)$candidate['attributes'],
@@ -1764,7 +2771,9 @@ function ingredientOntologyV3IdentityAnnexRefreshProduct(
     PDO $db,
     int $productId,
     ?int $versionId = null,
-    bool $resolveCoverageGaps = true
+    bool $resolveCoverageGaps = true,
+    bool $createExtension = true,
+    bool $lookupExtension = true
 ): array {
     if (
         $productId <= 0
@@ -1815,7 +2824,9 @@ function ingredientOntologyV3IdentityAnnexRefreshProduct(
     $resolution = ingredientOntologyV3IdentityAnnexResolution(
         $db,
         $version,
-        $product
+        $product,
+        $createExtension,
+        $lookupExtension
     );
     $persistedNormalizedLabel = mb_substr(
         (string)$resolution['normalized_label'],
@@ -1827,9 +2838,11 @@ function ingredientOntologyV3IdentityAnnexRefreshProduct(
         ingredientOntologyV3IdentityAnnexReviewManifestHash();
     $attributes = (array)($resolution['attributes'] ?? []);
     ksort($attributes, SORT_STRING);
+    $sealedMappingPreserved =
+        !empty($resolution['sealed_mapping_preserved']);
     $evidence = [
         'resolver_version' =>
-            INGREDIENT_ONTOLOGY_PRODUCT_IDENTITY_ANNEX_RESOLVER_VERSION,
+            ingredientOntologyV3ProductIdentityResolverVersion(),
         'review_manifest_hash' => $reviewManifestHash,
         'ontology_version_id' => (int)$version['id'],
         'ontology_content_hash' => (string)$version['content_hash'],
@@ -1844,13 +2857,23 @@ function ingredientOntologyV3IdentityAnnexRefreshProduct(
             (string)$resolution['admission_source'],
         'label_id' => $resolution['label_id'],
         'entity_id' => $resolution['entity_id'],
+        'extension_entity_id' =>
+            $resolution['extension_entity_id'] ?? null,
+        'extension_revision' =>
+            $resolution['extension_revision'] ?? null,
+        'extension_hash' =>
+            $resolution['extension_hash'] ?? null,
+        'sealed_mapping_preserved' =>
+            $sealedMappingPreserved
+            && (string)$resolution['status'] === 'unresolved',
         'attributes' => $attributes,
         'review' => $resolution['review'] ?? null,
     ];
     $evidenceHash = ingredientOntologyV3Hash($evidence);
     $previousStmt = $db->prepare("
         SELECT owner_fingerprint, ontology_version_id,
-               status, entity_id, attributes_json, evidence_hash
+               status, entity_id, extension_entity_id,
+               attributes_json, evidence_hash
         FROM ingredient_ontology_identity_annex
         WHERE product_id = ?
     ");
@@ -1862,13 +2885,14 @@ function ingredientOntologyV3IdentityAnnexRefreshProduct(
             product_id, ontology_version_id,
             ontology_content_hash, ontology_seal_hash,
             owner_fingerprint, source_label, normalized_label,
-            language, label_id, entity_id, status,
+            language, label_id, entity_id, extension_entity_id,
+            status,
             admission_source, attributes_json,
             resolver_version, review_manifest_hash,
             evidence_hash, reason, created_at, updated_at
         )
         VALUES (
-            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
             CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
         )
         ON CONFLICT(product_id) DO UPDATE SET
@@ -1881,6 +2905,7 @@ function ingredientOntologyV3IdentityAnnexRefreshProduct(
             language = excluded.language,
             label_id = excluded.label_id,
             entity_id = excluded.entity_id,
+            extension_entity_id = excluded.extension_entity_id,
             status = excluded.status,
             admission_source = excluded.admission_source,
             attributes_json = excluded.attributes_json,
@@ -1900,10 +2925,11 @@ function ingredientOntologyV3IdentityAnnexRefreshProduct(
         (string)$resolution['language'],
         $resolution['label_id'],
         $resolution['entity_id'],
+        $resolution['extension_entity_id'] ?? null,
         (string)$resolution['status'],
         (string)$resolution['admission_source'],
         ingredientOntologyV3Json($attributes),
-        INGREDIENT_ONTOLOGY_PRODUCT_IDENTITY_ANNEX_RESOLVER_VERSION,
+        ingredientOntologyV3ProductIdentityResolverVersion(),
         $reviewManifestHash,
         $evidenceHash,
         mb_substr((string)$resolution['reason'], 0, 240, 'UTF-8'),
@@ -1913,6 +2939,20 @@ function ingredientOntologyV3IdentityAnnexRefreshProduct(
         && $previous['entity_id'] !== null
             ? (int)$previous['entity_id']
             : null;
+    $previousExtensionEntityId = $previous !== null
+        && $previous['extension_entity_id'] !== null
+            ? (int)$previous['extension_entity_id']
+            : null;
+    $previousEffectiveEntityId = $previousEntityId;
+    if ($previousExtensionEntityId !== null) {
+        $previousEffectiveEntityId =
+            ingredientOntologyV3IdentityExtensionRuntimeEntityId(
+                $previousExtensionEntityId
+            );
+    }
+    $effectiveEntityId =
+        $resolution['effective_entity_id']
+            ?? $resolution['entity_id'];
     $previousAttributes = $previous !== null
         ? json_decode((string)$previous['attributes_json'], true)
         : [];
@@ -1929,7 +2969,7 @@ function ingredientOntologyV3IdentityAnnexRefreshProduct(
         : (
             (string)$previous['status']
                 !== (string)$resolution['status']
-            || $previousEntityId !== $resolution['entity_id']
+            || $previousEffectiveEntityId !== $effectiveEntityId
             || !hash_equals(
                 ingredientOntologyV3Hash($previousAttributes),
                 ingredientOntologyV3Hash($attributes)
@@ -1942,7 +2982,7 @@ function ingredientOntologyV3IdentityAnnexRefreshProduct(
             $ownerFingerprint
         )
         || (string)$previous['status'] !== (string)$resolution['status']
-        || $previousEntityId !== $resolution['entity_id']
+        || $previousEffectiveEntityId !== $effectiveEntityId
         || !hash_equals(
             (string)$previous['evidence_hash'],
             $evidenceHash
@@ -1972,6 +3012,15 @@ function ingredientOntologyV3IdentityAnnexRefreshProduct(
                 $db,
                 $subjectId
             );
+            if (function_exists(
+                'ingredientOntologyControllerSupersedeResolvedIdentityWork'
+            )) {
+                ingredientOntologyControllerSupersedeResolvedIdentityWork(
+                    $db,
+                    $subjectId,
+                    0
+                );
+            }
         }
     }
     return [
@@ -1985,8 +3034,11 @@ function ingredientOntologyV3IdentityAnnexRefreshProduct(
         'ontology_content_hash' => (string)$version['content_hash'],
         'ontology_seal_hash' => (string)$version['seal_hash'],
         'label_id' => $resolution['label_id'],
-        'entity_id' => $resolution['entity_id'],
-        'previous_entity_id' => $previousEntityId,
+        'entity_id' => $effectiveEntityId,
+        'ontology_entity_id' => $resolution['entity_id'],
+        'extension_entity_id' =>
+            $resolution['extension_entity_id'] ?? null,
+        'previous_entity_id' => $previousEffectiveEntityId,
         'previous_status' => $previous['status'] ?? null,
         'entity_slug' => $resolution['entity_slug'] ?? null,
         'attributes' => $attributes,
@@ -1995,7 +3047,102 @@ function ingredientOntologyV3IdentityAnnexRefreshProduct(
         'reason' => (string)$resolution['reason'],
         'evidence_hash' => $evidenceHash,
         'review_manifest_hash' => $reviewManifestHash,
+        'sealed_mapping_preserved' =>
+            $sealedMappingPreserved
+            && (string)$resolution['status'] === 'unresolved',
     ];
+}
+
+function ingredientOntologyV3IdentityExtensionRecipeIdsForProducts(
+    PDO $db,
+    int $versionId,
+    array $productIds
+): array {
+    $productIds = array_values(array_unique(array_filter(
+        array_map('intval', $productIds),
+        static fn(int $productId): bool => $productId > 0
+    )));
+    if (
+        !$productIds
+        || !ingredientOntologyV3ExactSelfIdentityEnabled()
+        || !ingredientOntologyV3TableExists(
+            $db,
+            'ingredient_ontology_identity_extension_entities'
+        )
+    ) {
+        return [];
+    }
+    $placeholders = implode(
+        ',',
+        array_fill(0, count($productIds), '?')
+    );
+    $stmt = $db->prepare("
+        SELECT DISTINCT ingredient.recipe_id
+        FROM ingredient_ontology_identity_annex product_annex
+        JOIN ingredient_ontology_identity_extension_entities extension
+          ON extension.id = product_annex.extension_entity_id
+         AND extension.ontology_version_id =
+             product_annex.ontology_version_id
+         AND extension.ontology_content_hash =
+             product_annex.ontology_content_hash
+         AND extension.ontology_seal_hash =
+             product_annex.ontology_seal_hash
+         AND extension.status = 'active'
+        JOIN ingredient_ontology_mappings mapping
+          ON mapping.ontology_version_id =
+             product_annex.ontology_version_id
+         AND mapping.owner_type = 'recipe_ingredient'
+         AND mapping.normalized_label = extension.normalized_label
+         AND (
+             CASE
+                 WHEN lower(replace(mapping.language, '_', '-')) = 'und'
+                 THEN 'und'
+                 ELSE substr(
+                     lower(replace(mapping.language, '_', '-')) || '-',
+                     1,
+                     instr(
+                         lower(replace(mapping.language, '_', '-')) || '-',
+                         '-'
+                     ) - 1
+                 )
+             END
+         ) = (
+             CASE
+                 WHEN lower(replace(extension.language, '_', '-')) = 'und'
+                 THEN 'und'
+                 ELSE substr(
+                     lower(replace(extension.language, '_', '-')) || '-',
+                     1,
+                     instr(
+                         lower(replace(extension.language, '_', '-')) || '-',
+                         '-'
+                     ) - 1
+                 )
+             END
+         )
+        JOIN recipe_ingredients ingredient
+          ON ingredient.id = mapping.owner_id
+        JOIN recipe_catalog recipe
+          ON recipe.id = ingredient.recipe_id
+         AND recipe.deleted_at IS NULL
+        WHERE product_annex.ontology_version_id = ?
+          AND product_annex.product_id IN ({$placeholders})
+          AND product_annex.status = 'accepted'
+          AND product_annex.extension_entity_id IS NOT NULL
+          AND product_annex.resolver_version = ?
+          AND product_annex.review_manifest_hash = ?
+        ORDER BY ingredient.recipe_id
+    ");
+    $stmt->execute([
+        $versionId,
+        ...$productIds,
+        ingredientOntologyV3ProductIdentityResolverVersion(),
+        ingredientOntologyV3IdentityAnnexReviewManifestHash(),
+    ]);
+    return array_map(
+        'intval',
+        $stmt->fetchAll(PDO::FETCH_COLUMN)
+    );
 }
 
 function ingredientOntologyV3ProductReadinessTableExists(
@@ -2010,12 +3157,19 @@ function ingredientOntologyV3ProductReadinessTableExists(
 function ingredientOntologyV3ProductReadinessRetryDelaySeconds(
     int $attempts
 ): int {
-    return match (max(1, $attempts)) {
+    return min(
+        INGREDIENT_ONTOLOGY_PRODUCT_READINESS_MAX_RETRY_SECONDS,
+        match (max(1, $attempts)) {
         1 => 1,
-        2 => 2,
-        3 => 5,
-        default => 10,
-    };
+        2 => 5,
+        3 => 30,
+        4 => 120,
+        5 => 600,
+        6 => 1800,
+        default =>
+            INGREDIENT_ONTOLOGY_PRODUCT_READINESS_MAX_RETRY_SECONDS,
+        }
+    );
 }
 
 function ingredientOntologyV3ProductReadinessRow(
@@ -2074,6 +3228,7 @@ function ingredientOntologyV3ProductReadinessRecordResolution(
     $ownerFingerprint = (string)$admission['owner_fingerprint'];
     $evidenceHash = (string)$admission['evidence_hash'];
     $identityStatus = (string)$admission['status'];
+    $storedIdentityStatus = $identityStatus;
     $sameOwner = $previous !== null
         && hash_equals(
             (string)$previous['owner_fingerprint'],
@@ -2109,7 +3264,13 @@ function ingredientOntologyV3ProductReadinessRecordResolution(
     $lastErrorKind = '';
     $lastError = '';
 
-    if ($identityStatus === 'accepted') {
+    if (!empty($admission['sealed_mapping_preserved'])) {
+        $storedIdentityStatus = 'accepted';
+        $status = 'ready';
+        $attempts = 0;
+        $scoreAttempts = 0;
+        $readyAt = $now;
+    } elseif ($identityStatus === 'accepted') {
         $preserveState = $sameEvidence
             || (
                 empty($admission['semantic_changed'])
@@ -2151,35 +3312,57 @@ function ingredientOntologyV3ProductReadinessRecordResolution(
         $lastErrorKind = (string)$admission['reason'];
         $lastError = 'Product is intentionally non-satisfying.';
     } else {
-        if ($incrementAttempt) {
-            $attempts++;
-        }
-        $requestedTimestamp = strtotime($requestedAt . ' UTC');
-        $ageSeconds = $requestedTimestamp === false
-            ? 0
-            : max(0, time() - $requestedTimestamp);
-        $terminal = $attempts
-                >= INGREDIENT_ONTOLOGY_PRODUCT_READINESS_MAX_ATTEMPTS
-            || $ageSeconds
-                >= INGREDIENT_ONTOLOGY_PRODUCT_READINESS_DEADLINE_SECONDS;
-        $status = $terminal ? 'needs_review' : 'retry';
-        $nextRetryAt = $terminal
-            ? null
-            : gmdate(
-                'Y-m-d H:i:s',
-                time()
-                    + ingredientOntologyV3ProductReadinessRetryDelaySeconds(
-                        $attempts + 1
-                    )
+        $reason = (string)$admission['reason'];
+        $permanentUnsupported =
+            ingredientOntologyV3IdentityReadinessV2Enabled()
+            && in_array(
+                $reason,
+                ['empty_label', 'exact_self_label_too_long'],
+                true
             );
-        $failedAt = $terminal ? $now : null;
-        $lastErrorKind = (string)$admission['reason'];
-        $lastError = mb_substr(
-            'Identity unresolved after ' . trim($trigger) . '.',
-            0,
-            1000,
-            'UTF-8'
-        );
+        if ($permanentUnsupported) {
+            $storedIdentityStatus = 'rejected';
+            $status = 'non_satisfying';
+            $attempts = 0;
+            $scoreAttempts = 0;
+            $failedAt = $now;
+            $lastErrorKind = $reason;
+            $lastError = 'Product label cannot represent a food identity.';
+        } else {
+            if ($incrementAttempt) {
+                $attempts = min(20, $attempts + 1);
+            }
+            $requestedTimestamp = strtotime($requestedAt . ' UTC');
+            $ageSeconds = $requestedTimestamp === false
+                ? 0
+                : max(0, time() - $requestedTimestamp);
+            $terminal =
+                !ingredientOntologyV3IdentityReadinessV2Enabled()
+                && (
+                    $attempts
+                        >= INGREDIENT_ONTOLOGY_PRODUCT_READINESS_MAX_ATTEMPTS
+                    || $ageSeconds
+                        >= INGREDIENT_ONTOLOGY_PRODUCT_READINESS_DEADLINE_SECONDS
+                );
+            $status = $terminal ? 'needs_review' : 'retry';
+            $nextRetryAt = $terminal
+                ? null
+                : gmdate(
+                    'Y-m-d H:i:s',
+                    time()
+                        + ingredientOntologyV3ProductReadinessRetryDelaySeconds(
+                            $attempts + 1
+                        )
+                );
+            $failedAt = $terminal ? $now : null;
+            $lastErrorKind = $reason;
+            $lastError = mb_substr(
+                'Identity unresolved after ' . trim($trigger) . '.',
+                0,
+                1000,
+                'UTF-8'
+            );
+        }
     }
 
     $db->prepare("
@@ -2231,7 +3414,7 @@ function ingredientOntologyV3ProductReadinessRecordResolution(
         (string)$admission['ontology_seal_hash'],
         $ownerFingerprint,
         $evidenceHash,
-        $identityStatus,
+        $storedIdentityStatus,
         $status,
         $attempts,
         INGREDIENT_ONTOLOGY_PRODUCT_READINESS_MAX_ATTEMPTS,
@@ -2251,7 +3434,7 @@ function ingredientOntologyV3ProductReadinessRecordResolution(
     return [
         'available' => true,
         'product_id' => $productId,
-        'identity_status' => $identityStatus,
+        'identity_status' => $storedIdentityStatus,
         'status' => $status,
         'attempts' => $attempts,
         'max_attempts' =>
@@ -2272,13 +3455,17 @@ function ingredientOntologyV3IdentityAdmissionPublishProduct(
     string $trigger = 'identity_refresh',
     bool $queueScore = true,
     bool $incrementAttempt = false,
-    bool $resolveCoverageGaps = true
+    bool $resolveCoverageGaps = true,
+    bool $createExtension = true,
+    bool $lookupExtension = true
 ): array {
     $admission = ingredientOntologyV3IdentityAnnexRefreshProduct(
         $db,
         $productId,
         $versionId,
-        $resolveCoverageGaps
+        $resolveCoverageGaps,
+        $createExtension,
+        $lookupExtension
     );
     if (empty($admission['available'])) {
         return $admission + [
@@ -2323,7 +3510,7 @@ function ingredientOntologyV3IdentityAdmissionPublishProduct(
             )
         )
         || (
-            (int)($admission['previous_entity_id'] ?? 0) > 0
+            (int)($admission['previous_entity_id'] ?? 0) !== 0
             && (string)$admission['status'] !== 'accepted'
         )
     );
@@ -2706,9 +3893,14 @@ function ingredientOntologyV3ProductReadinessRetryDue(
                         $db,
                         $productId
                     );
-                $attempts = (int)($current['attempts'] ?? 0) + 1;
-                $isTerminal = $attempts
-                    >= INGREDIENT_ONTOLOGY_PRODUCT_READINESS_MAX_ATTEMPTS;
+                $attempts = min(
+                    20,
+                    (int)($current['attempts'] ?? 0) + 1
+                );
+                $isTerminal =
+                    !ingredientOntologyV3IdentityReadinessV2Enabled()
+                    && $attempts
+                        >= INGREDIENT_ONTOLOGY_PRODUCT_READINESS_MAX_ATTEMPTS;
                 $db->prepare("
                     UPDATE ingredient_ontology_product_readiness
                     SET status = ?,
@@ -2814,7 +4006,7 @@ function ingredientOntologyV3IdentityAnnexSemanticHash(
     return ingredientOntologyV3Hash([
         'algorithm' => 'product-identity-semantic-v1',
         'resolver_version' =>
-            INGREDIENT_ONTOLOGY_PRODUCT_IDENTITY_ANNEX_RESOLVER_VERSION,
+            ingredientOntologyV3ProductIdentityResolverVersion(),
         'review_manifest_hash' =>
             ingredientOntologyV3IdentityAnnexReviewManifestHash(),
         'ontology_content_hash' => (string)$version['content_hash'],
@@ -2827,18 +4019,33 @@ function ingredientOntologyV3IdentityAnnexMapping(
     PDO $db,
     int $versionId,
     int $productId,
-    string $ownerFingerprint
+    string $ownerFingerprint,
+    ?int $identityExtensionRevision = null
 ): ?array {
     if (!ingredientOntologyV3IdentityAnnexTableExists($db)) {
         return null;
     }
+    $identityExtensionRevision ??=
+        ingredientOntologyV3IdentityExtensionSnapshot(
+            $db,
+            $versionId
+        )['revision'];
+    $eligibleRoles = ingredientOntologyV3IdentityEligibleRolesSql();
     $stmt = $db->prepare("
         SELECT annex.id AS annex_id, annex.owner_fingerprint,
                annex.source_label, annex.attributes_json,
                annex.label_id, annex.entity_id,
+               annex.extension_entity_id,
                annex.admission_source, annex.evidence_hash,
-               entity.slug AS entity_slug,
-               entity.canonical_name AS entity_name,
+               CASE
+                   WHEN extension.id IS NOT NULL THEN -extension.id
+                   ELSE entity.id
+               END AS effective_entity_id,
+               COALESCE(extension.slug, entity.slug) AS entity_slug,
+               COALESCE(
+                   extension.canonical_name,
+                   entity.canonical_name
+               ) AS entity_name,
                (
                    SELECT occurrence.subject_id
                    FROM ontology_subject_occurrences occurrence
@@ -2856,31 +4063,52 @@ function ingredientOntologyV3IdentityAnnexMapping(
          AND version.status = 'ready'
          AND version.content_hash = annex.ontology_content_hash
          AND version.seal_hash = annex.ontology_seal_hash
-        JOIN ingredient_ontology_entities entity
+        LEFT JOIN ingredient_ontology_entities entity
           ON entity.id = annex.entity_id
          AND entity.ontology_version_id = annex.ontology_version_id
          AND entity.active = 1
          AND entity.entity_kind = 'ingredient'
-         AND entity.identity_role = 'identity_leaf'
-        JOIN ingredient_ontology_labels label
+         AND entity.identity_role IN {$eligibleRoles}
+        LEFT JOIN ingredient_ontology_labels label
           ON label.id = annex.label_id
          AND label.ontology_version_id = annex.ontology_version_id
          AND label.entity_id = annex.entity_id
          AND label.review_state = 'accepted'
          AND label.kind IN ('exact_alias', 'attribute_alias')
+        LEFT JOIN ingredient_ontology_identity_extension_entities
+            extension
+          ON extension.id = annex.extension_entity_id
+         AND extension.ontology_version_id = annex.ontology_version_id
+         AND extension.ontology_content_hash =
+             annex.ontology_content_hash
+         AND extension.ontology_seal_hash = annex.ontology_seal_hash
+         AND extension.created_revision <= ?
+         AND extension.status = 'active'
         WHERE annex.product_id = ?
           AND annex.ontology_version_id = ?
           AND annex.owner_fingerprint = ?
           AND annex.status = 'accepted'
           AND annex.resolver_version = ?
           AND annex.review_manifest_hash = ?
+          AND (
+              (
+                  annex.entity_id IS NOT NULL
+                  AND entity.id IS NOT NULL
+                  AND label.id IS NOT NULL
+              )
+              OR (
+                  annex.extension_entity_id IS NOT NULL
+                  AND extension.id IS NOT NULL
+              )
+          )
         LIMIT 1
     ");
     $stmt->execute([
+        max(0, $identityExtensionRevision),
         $productId,
         $versionId,
         $ownerFingerprint,
-        INGREDIENT_ONTOLOGY_PRODUCT_IDENTITY_ANNEX_RESOLVER_VERSION,
+        ingredientOntologyV3ProductIdentityResolverVersion(),
         ingredientOntologyV3IdentityAnnexReviewManifestHash(),
     ]);
     $row = $stmt->fetch(PDO::FETCH_ASSOC);
@@ -2912,7 +4140,14 @@ function ingredientOntologyV3IdentityAnnexMapping(
         'subject_id' => $row['subject_id'] !== null
             ? (int)$row['subject_id']
             : null,
-        'entity_id' => (int)$row['entity_id'],
+        'entity_id' => (int)$row['effective_entity_id'],
+        'ontology_entity_id' => $row['entity_id'] !== null
+            ? (int)$row['entity_id']
+            : null,
+        'extension_entity_id' =>
+            $row['extension_entity_id'] !== null
+                ? (int)$row['extension_entity_id']
+                : null,
         'entity_slug' => (string)$row['entity_slug'],
         'entity_name' => (string)$row['entity_name'],
         'status' => 'accepted',
@@ -2921,7 +4156,9 @@ function ingredientOntologyV3IdentityAnnexMapping(
         'source_label' => (string)$row['source_label'],
         'attributes' => $normalizedAttributes,
         'is_staple' => false,
-        'label_id' => (int)$row['label_id'],
+        'label_id' => $row['label_id'] !== null
+            ? (int)$row['label_id']
+            : null,
         'evidence_hash' => (string)$row['evidence_hash'],
         'admission_source' => (string)$row['admission_source'],
     ];
@@ -2931,13 +4168,38 @@ function ingredientOntologyV3IdentityAnnexResolvedMapping(
         PDO $db,
         array $version,
         array $product,
-        array $resolution
+        array $resolution,
+        ?int $identityExtensionRevision = null
     ): ?array {
+        $nativeEntityId = (int)($resolution['entity_id'] ?? 0);
+        $extensionEntityId = (int)(
+            $resolution['extension_entity_id'] ?? 0
+        );
+        $effectiveEntityId = (int)(
+            $resolution['effective_entity_id']
+                ?? $nativeEntityId
+        );
+        $identityExtensionRevision ??=
+            ingredientOntologyV3IdentityExtensionSnapshot(
+                $db,
+                (int)($version['id'] ?? 0)
+            )['revision'];
         if (
             (string)($version['status'] ?? '') !== 'ready'
             || (string)($resolution['status'] ?? '') !== 'accepted'
-            || (int)($resolution['label_id'] ?? 0) <= 0
-            || (int)($resolution['entity_id'] ?? 0) <= 0
+            || $effectiveEntityId === 0
+            || (
+                $nativeEntityId > 0
+                && (int)($resolution['label_id'] ?? 0) <= 0
+            )
+            || (
+                $nativeEntityId <= 0
+                && (
+                    $extensionEntityId <= 0
+                    || (int)($resolution['extension_revision'] ?? 0)
+                        > $identityExtensionRevision
+                )
+            )
             || !is_string($version['content_hash'] ?? null)
             || !is_string($version['seal_hash'] ?? null)
         ) {
@@ -2976,7 +4238,7 @@ function ingredientOntologyV3IdentityAnnexResolvedMapping(
         }
         $evidenceHash = ingredientOntologyV3Hash([
             'resolver_version' =>
-                INGREDIENT_ONTOLOGY_PRODUCT_IDENTITY_ANNEX_RESOLVER_VERSION,
+                ingredientOntologyV3ProductIdentityResolverVersion(),
             'review_manifest_hash' =>
                 ingredientOntologyV3IdentityAnnexReviewManifestHash(),
             'ontology_version_id' => (int)$version['id'],
@@ -2984,8 +4246,13 @@ function ingredientOntologyV3IdentityAnnexResolvedMapping(
             'ontology_seal_hash' => (string)$version['seal_hash'],
             'product_id' => (int)$product['id'],
             'owner_fingerprint' => $ownerFingerprint,
-            'label_id' => (int)$resolution['label_id'],
-            'entity_id' => (int)$resolution['entity_id'],
+            'label_id' => $resolution['label_id'] ?? null,
+            'entity_id' => $nativeEntityId > 0
+                ? $nativeEntityId
+                : null,
+            'extension_entity_id' => $extensionEntityId > 0
+                ? $extensionEntityId
+                : null,
             'attributes' => $attributes,
             'admission_source' =>
                 (string)$resolution['admission_source'],
@@ -2997,7 +4264,13 @@ function ingredientOntologyV3IdentityAnnexResolvedMapping(
             'subject_id' => $subjectId !== false
                 ? (int)$subjectId
                 : null,
-            'entity_id' => (int)$resolution['entity_id'],
+            'entity_id' => $effectiveEntityId,
+            'ontology_entity_id' => $nativeEntityId > 0
+                ? $nativeEntityId
+                : null,
+            'extension_entity_id' => $extensionEntityId > 0
+                ? $extensionEntityId
+                : null,
             'entity_slug' => (string)$resolution['entity_slug'],
             'entity_name' => (string)$resolution['entity_name'],
             'status' => 'accepted',
@@ -3006,7 +4279,9 @@ function ingredientOntologyV3IdentityAnnexResolvedMapping(
             'source_label' => (string)$product['name'],
             'attributes' => $normalizedAttributes,
             'is_staple' => false,
-            'label_id' => (int)$resolution['label_id'],
+            'label_id' => $resolution['label_id'] !== null
+                ? (int)$resolution['label_id']
+                : null,
             'evidence_hash' => $evidenceHash,
             'admission_source' =>
                 (string)$resolution['admission_source'],

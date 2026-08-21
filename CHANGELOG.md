@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.16.0] - 2026-08-21
+
+### Added
+- Exact lexical self-identities admit well-formed product and recipe
+  ingredients even when reviewed taxonomy coverage does not yet exist, while
+  keeping distinct labels separate until evidence proves a relationship.
+- Product identity readiness v2 exposes deterministic admission, asynchronous
+  enrichment, recipe hydration, scoring progress, and bounded retry state.
+- Append-only, hash-audited identity extensions and score-revision pins preserve
+  the exact identity chain used by each published recipe score.
+
+### Changed
+- Product saves publish only the minimum product-local identity work needed for
+  low latency; taxonomy classification and recipe discovery continue in the
+  existing background workers.
+- English locale variants share a language identity key, while undefined and
+  unrelated language families remain isolated.
+- Legitimate unresolved foods retry indefinitely with bounded backoff instead
+  of terminating in `needs_review`; malformed or intentionally non-satisfying
+  labels retain explicit terminal outcomes.
+
+### Fixed
+- Curated accepted product mappings can no longer be shadowed by a same-label
+  recipe-created extension during foreground refresh, scoring fallback, or
+  background publication.
+- Nested SQLite writer transactions, short lock contention, extension-chain
+  validation, and stale resolver decisions now recover without losing identity
+  publication or recipe-score work.
+- Collision-isolated exact identities now retain an explicit admission reason,
+  making conservative non-equivalence decisions observable.
+
 ## [1.15.3] - 2026-08-20
 
 ### Fixed
