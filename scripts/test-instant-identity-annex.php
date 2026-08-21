@@ -1637,6 +1637,27 @@ $assert(
     'Extension hash chains must be audited and published rows immutable'
 );
 
+$db->prepare("
+    DELETE FROM ingredient_ontology_identity_extension_state
+    WHERE ontology_version_id = ?
+")->execute([$versionId]);
+$reconciledExtensionState =
+    ingredientOntologyV3IdentityExtensionReconcileState(
+        $db,
+        $versionId,
+        (int)$pinnedExtensionSnapshot['revision'],
+        (string)$pinnedExtensionSnapshot['hash']
+    );
+$assert(
+    (int)$reconciledExtensionState['revision']
+        === (int)$advancedExtensionSnapshot['revision']
+    && hash_equals(
+        (string)$reconciledExtensionState['hash'],
+        (string)$advancedExtensionSnapshot['hash']
+    ),
+    'Imported extension rows must rebuild missing state while preserving an older pinned prefix'
+);
+
 $nestedSnapshotBefore =
     ingredientOntologyV3IdentityExtensionSnapshot(
         $db,

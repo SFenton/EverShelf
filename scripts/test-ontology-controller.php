@@ -9613,7 +9613,7 @@ try {
         $bundleSet['schema_version']
             === 'ontology-activation-bundle-set-v2'
         && count($bundleSet['ontology']['tables']) === 32
-        && count($bundleSet['score']['tables']) === 5
+        && count($bundleSet['score']['tables']) === 6
         && $bundleSet['ontology']['database_lineage_uuid']
             === ingredientOntologyActivationLineageUuid($db)
         && $bundleSet['ontology']['candidate']['ontology_version_id']
@@ -10362,6 +10362,28 @@ try {
             'A retained score attestation must resume without rebuilding '
                 . 'the validation copy'
         );
+        $GLOBALS[
+            'INGREDIENT_ONTOLOGY_EXACT_SELF_IDENTITY_ENABLED_OVERRIDE'
+        ] = true;
+        $postValidationVersion = ingredientOntologyV3Version(
+            $activationTarget,
+            (int)$scoreImport['candidate_ontology_version_id']
+        );
+        $postValidationExtension =
+            ingredientOntologyV3IdentityExtensionClaim(
+                $activationTarget,
+                $postValidationVersion,
+                'Activation Post Validation Identity',
+                'en',
+                'post-validation',
+                true,
+                true
+            );
+        unset(
+            $GLOBALS[
+                'INGREDIENT_ONTOLOGY_EXACT_SELF_IDENTITY_ENABLED_OVERRIDE'
+            ]
+        );
         recipeScoreFailAbandonedBuilds($activationTarget);
         recipeScorePruneRevisions($activationTarget);
         $importCandidateProtected = recipeScoreRevision(
@@ -10433,7 +10455,16 @@ try {
             $activationTarget
         )['id'] === (int)$bundleSet['ontology']['candidate'][
             'ontology_version_id'
-        ],
+        ]
+        && is_array($postValidationExtension)
+        && (int)$postValidationExtension['created_revision'] > 0
+        && ingredientOntologyV3IdentityExtensionSnapshot(
+            $activationTarget,
+            (int)$bundleSet['ontology']['candidate'][
+                'ontology_version_id'
+            ]
+        )['revision']
+            >= (int)$postValidationExtension['created_revision'],
         'Score activation must atomically publish ranking and consume intents'
     );
     controllerTestAssert(
@@ -11355,6 +11386,22 @@ try {
     );
     $refreshSnapshot =
         ingredientOntologyActivationCaptureBuildSnapshot($scoreRefreshDb);
+    $GLOBALS[
+        'INGREDIENT_ONTOLOGY_EXACT_SELF_IDENTITY_ENABLED_OVERRIDE'
+    ] = true;
+    $scoreRefreshVersion = ingredientOntologyV3ActiveVersion(
+        $scoreRefreshDb
+    );
+    $transportedExtension =
+        ingredientOntologyV3IdentityExtensionClaim(
+            $scoreRefreshDb,
+            $scoreRefreshVersion,
+            'Activation Transported Identity',
+            'en',
+            'activation-transport',
+            true,
+            true
+        );
     $refreshBundle = ingredientOntologyActivationBuildScoreBundle(
         $scoreRefreshDb,
         (int)ingredientOntologyV3ActiveVersion($scoreRefreshDb)['id'],
@@ -11369,6 +11416,24 @@ try {
     $scoreRefreshDb = null;
     $cleanup[] = $payloadDirectory . '/'
         . $refreshBundle['payload']['file'];
+    $extensionPayloadTable = null;
+    foreach ($refreshBundle['tables'] as $payloadTable) {
+        if (
+            (string)$payloadTable['table']
+                === 'ingredient_ontology_identity_extension_entities'
+        ) {
+            $extensionPayloadTable = $payloadTable;
+            break;
+        }
+    }
+    controllerTestAssert(
+        is_array($transportedExtension)
+        && is_array($extensionPayloadTable)
+        && (int)$extensionPayloadTable['row_count'] >= 1
+        && (int)$extensionPayloadTable['minimum_cursor']
+            > (int)$extensionPayloadTable['baseline_sequence'],
+        'Score activation payloads must carry only the copied identity-extension suffix'
+    );
     $GLOBALS['ONTOLOGY_CONTROLLER_ACTIVE_DB_PATH_OVERRIDE'] =
         $activationTargetDbPath;
     try {
@@ -11377,6 +11442,22 @@ try {
             $refreshBundle,
             $payloadDirectory
         );
+        $extensionFenceRejected = false;
+        try {
+            ingredientOntologyV3IdentityExtensionClaim(
+                $activationTarget,
+                ingredientOntologyV3ActiveVersion($activationTarget),
+                'Activation Concurrent Identity',
+                'en',
+                'activation-concurrent',
+                true,
+                true
+            );
+        } catch (RuntimeException $error) {
+            $extensionFenceRejected =
+                $error->getMessage()
+                    === 'identity extension activation import is in progress';
+        }
         $refreshImport = ingredientOntologyActivationRunImport(
             $activationTarget,
             (int)$refreshImport['id'],
@@ -11386,6 +11467,11 @@ try {
             $activationTarget,
             (int)$refreshImport['id']
         );
+        $transportedState =
+            ingredientOntologyV3IdentityExtensionSnapshot(
+                $activationTarget,
+                (int)$scoreRefreshVersion['id']
+            );
         $refreshAttestation =
             ingredientOntologyActivationValidationCopy(
                 $activationTarget,
@@ -11442,6 +11528,7 @@ try {
     }
     controllerTestAssert(
         $corruptionRejected
+        && $extensionFenceRejected
         && $cleanupRootSurvived
         && $refreshImport['status'] === 'cleaned'
         && recipeScoreRevision(
@@ -11450,8 +11537,22 @@ try {
         ) === null
         && recipeScoreState($activationTarget)[
             'active_score_revision_id'
-        ] === $activatedScoreId,
-        'Failed score imports must drain children before the root without moving the active pointer'
+        ] === $activatedScoreId
+        && controllerTestCount(
+            $activationTarget,
+            "SELECT COUNT(*)
+             FROM ingredient_ontology_identity_extension_entities
+             WHERE id = ?",
+            [(int)$transportedExtension['id']]
+        ) === 1
+        && (int)$transportedState['revision']
+            >= (int)$transportedExtension['created_revision'],
+        'Failed score imports must retain transported identity extensions, drain other children before the root, and preserve the active pointer'
+    );
+    unset(
+        $GLOBALS[
+            'INGREDIENT_ONTOLOGY_EXACT_SELF_IDENTITY_ENABLED_OVERRIDE'
+        ]
     );
     $cdcHighWaterBefore =
         ingredientOntologyActivationCdcSnapshot($activationTarget);

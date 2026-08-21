@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.16.2] - 2026-08-21
+
+### Fixed
+- Copied score activations now transport newly created exact-identity extension
+  rows, rebuild their chain state incrementally, and retain that verified
+  append-only prefix across score rebases.
+- Live identity claims pause only while an extension suffix is being imported;
+  newer identities appended after verification remain valid beyond the score's
+  pinned prefix.
+- Score activation no longer fails repeatedly with `identity extension
+  revision count changed` after shadow scoring hydrates previously unseen
+  recipe ingredients.
+
 ## [1.16.1] - 2026-08-21
 
 ### Fixed
