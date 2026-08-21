@@ -63,14 +63,29 @@ do {
             $force
         );
     } catch (Throwable $error) {
-        $reason = databaseIsLockError($error)
-            ? 'locked'
-            : 'worker_exception';
+        $rollbackError = null;
+        try {
+            databaseRollbackDanglingTransaction($db);
+        } catch (Throwable $cleanupError) {
+            $rollbackError = $cleanupError;
+        }
+        $reason = $rollbackError !== null
+            ? 'worker_exception'
+            : (
+                databaseIsLockError($error)
+                    ? 'locked'
+                    : 'worker_exception'
+            );
+        $message = $error->getMessage();
+        if ($rollbackError !== null) {
+            $message .= '; connection rollback failed: '
+                . $rollbackError->getMessage();
+        }
         $result = [
             'rebuilt' => false,
             'reason' => $reason,
             'error' => mb_substr(
-                $error->getMessage(),
+                $message,
                 0,
                 1000,
                 'UTF-8'

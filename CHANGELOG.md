@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.16.1] - 2026-08-21
+
+### Fixed
+- The persistent recipe-score worker now rolls back any raw SQLite transaction
+  left behind by a failed cycle before retrying, so startup contention cannot
+  poison the connection with repeated `cannot start a transaction within a
+  transaction` failures.
+
 ## [1.16.0] - 2026-08-21
 
 ### Added

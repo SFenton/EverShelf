@@ -232,6 +232,21 @@ function databaseIsLockError(Throwable $error): bool {
     );
 }
 
+function databaseRollbackDanglingTransaction(PDO $db): bool {
+    try {
+        $db->exec('ROLLBACK');
+        return true;
+    } catch (PDOException $error) {
+        if (str_contains(
+            strtolower($error->getMessage()),
+            'cannot rollback - no transaction is active'
+        )) {
+            return false;
+        }
+        throw $error;
+    }
+}
+
 /**
  * Retry a DB write when SQLite returns SQLITE_BUSY/SQLITE_LOCKED.
  *
