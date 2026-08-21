@@ -1,0 +1,71 @@
+{
+  "schema_version": "ontology-admission-gold-v1",
+  "language": "en",
+  "minimum_generated_food_cases": 400,
+  "minimum_false_equivalence_pairs": 200,
+  "food_groups": [
+    {
+      "id": "produce",
+      "templates": ["%s", "fresh %s", "frozen %s", "chopped %s"],
+      "bases": [
+        "eggplant", "zucchini", "yellow squash", "butternut squash",
+        "acorn squash", "tomato", "cherry tomato", "cucumber",
+        "carrot", "parsnip", "turnip", "rutabaga", "beet", "radish",
+        "potato", "sweet potato", "onion", "red onion", "shallot",
+        "leek", "garlic", "celery", "fennel", "broccoli",
+        "cauliflower", "cabbage", "kale", "spinach", "lettuce",
+        "arugula", "asparagus", "green bean", "snap pea", "corn",
+        "bell pepper", "jalapeno pepper", "mushroom", "artichoke",
+        "avocado", "okra"
+      ]
+    },
+    {
+      "id": "protein",
+      "templates": ["%s", "fresh %s", "frozen %s", "cooked %s"],
+      "bases": [
+        "chicken breast", "chicken thigh", "chicken drumstick",
+        "whole chicken", "turkey breast", "ground turkey", "pork chop",
+        "pork tenderloin", "pork shoulder", "sliced ham", "bacon",
+        "ground beef", "beef chuck", "beef brisket", "flank steak",
+        "lamb chop", "lamb shoulder", "salmon fillet", "cod fillet",
+        "tuna steak", "shrimp", "scallop", "crab meat", "firm tofu",
+        "tempeh"
+      ]
+    },
+    {
+      "id": "dairy",
+      "templates": ["%s", "organic %s", "store brand %s", "family size %s"],
+      "bases": [
+        "whole milk", "skim milk", "heavy cream", "sour cream",
+        "ricotta", "cottage cheese", "cream cheese", "plain yogurt",
+        "greek yogurt", "cheddar cheese", "mozzarella cheese",
+        "parmesan cheese", "goat cheese", "salted butter",
+        "unsalted butter"
+      ]
+    },
+    {
+      "id": "pantry",
+      "templates": ["%s", "organic %s", "store brand %s", "family size %s"],
+      "bases": [
+        "all purpose flour", "bread flour", "cornmeal", "rolled oats",
+        "white rice", "brown rice", "quinoa", "couscous", "lentils",
+        "chickpeas", "black beans", "kidney beans", "olive oil",
+        "canola oil", "sesame oil", "tomato paste", "chicken stock",
+        "vegetable stock", "peanut butter", "almond butter"
+      ]
+    }
+  ],
+  "prepared_products": [
+    "lasagna", "pepperoni pizza", "chicken pot pie", "beef stew",
+    "vegetable soup", "macaroni and cheese", "chicken curry",
+    "fried rice", "bean burrito", "turkey sandwich", "caesar salad",
+    "pasta primavera", "shepherds pie", "chicken noodle soup",
+    "beef enchiladas", "vegetable stir fry", "tuna casserole",
+    "breakfast burrito", "cheese quesadilla", "meatloaf",
+    "chicken parmesan", "fish tacos", "pulled pork sandwich",
+    "mushroom risotto", "spinach quiche", "chili con carne",
+    "egg salad sandwich", "sausage casserole", "stuffed peppers",
+    "roast chicken dinner"
+  ],
+  "empty_or_invalid_labels": ["", "---", "///", "''", "..."]
+}

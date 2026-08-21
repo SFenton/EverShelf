@@ -105,6 +105,26 @@ function ingredientOntologyControllerPromotionEnabled(): bool {
         );
 }
 
+function ingredientOntologyControllerAbstentionFollowupEnabled(): bool {
+    if (
+        defined('RECIPE_BACKEND_TEST_MODE')
+        && RECIPE_BACKEND_TEST_MODE
+        && array_key_exists(
+            'ONTOLOGY_ABSTENTION_FOLLOWUP_ENABLED_OVERRIDE',
+            $GLOBALS
+        )
+    ) {
+        return !empty(
+            $GLOBALS['ONTOLOGY_ABSTENTION_FOLLOWUP_ENABLED_OVERRIDE']
+        );
+    }
+    return function_exists('env')
+        && canonicalIngredientEnvBool(
+            'INGREDIENT_ONTOLOGY_ABSTENTION_FOLLOWUP_ENABLED',
+            false
+        );
+}
+
 function ingredientOntologyControllerCriticProvider(): string {
     return function_exists('env')
         ? trim((string)env(
@@ -7216,14 +7236,18 @@ function ingredientOntologyControllerStreamEpoch(
                     ingredientOntologyV3IdentityAnnexResolution(
                         $db,
                         $version,
-                        $row
+                        $row,
+                        true
                     );
                 if ((string)$resolution['status'] !== 'accepted') {
                     return null;
                 }
                 $candidateSemanticHash =
                     ingredientOntologyV3Hash([
-                        'entity_id' => (int)$resolution['entity_id'],
+                        'entity_id' => (int)(
+                            $resolution['effective_entity_id']
+                                ?? $resolution['entity_id']
+                        ),
                         'attributes' =>
                             (array)$resolution['attributes'],
                     ]);
@@ -7327,7 +7351,8 @@ function ingredientOntologyControllerStreamEpoch(
                         $db,
                         $version,
                         (string)$row['source_label'],
-                        (string)$row['language']
+                        (string)$row['language'],
+                        true
                     );
                 if ((string)$resolution['status'] !== 'accepted') {
                     return null;
@@ -16735,9 +16760,14 @@ function ingredientOntologyControllerResumeDurableJob(
                                     $occurrenceFenceMatched =
                                         !empty($published['accepted'])
                                         && (int)$published['entity_id']
-                                            === (int)$expectedAdmission[
-                                                'entity_id'
-                                            ]
+                                            === (int)(
+                                                $expectedAdmission[
+                                                    'effective_entity_id'
+                                                ]
+                                                    ?? $expectedAdmission[
+                                                        'entity_id'
+                                                    ]
+                                            )
                                         && hash_equals(
                                             (string)$published[
                                                 'owner_fingerprint'
@@ -16925,6 +16955,25 @@ function ingredientOntologyControllerResumeDurableJob(
                                 $candidateShard,
                                 $gapReason
                             );
+                        $followupQueue = ['queued' => false];
+                        $followupIntent = null;
+                        if (
+                            ingredientOntologyControllerAbstentionFollowupEnabled()
+                        ) {
+                            $followupQueue =
+                                ingredientOntologyControllerQueueProvisionalIntent(
+                                    $db,
+                                    $lease,
+                                    'retry',
+                                    'Candidate search ended without a trusted identity; retain a durable enrichment retry.'
+                                );
+                            $followupIntent =
+                                ingredientOntologyControllerStoreGenerationIntent(
+                                    $db,
+                                    $lease,
+                                    'provisional'
+                                );
+                        }
                         ingredientOntologyControllerTransitionJob(
                             $db,
                             $lease,
@@ -16944,6 +16993,11 @@ function ingredientOntologyControllerResumeDurableJob(
                             'reason' => $gapReason,
                             'coverage_gap_id' => (int)$gap['id'],
                             'model_called' => false,
+                            'provisional_queue' => $followupQueue,
+                            'generation_intent_id' =>
+                                $followupIntent !== null
+                                    ? (int)$followupIntent['id']
+                                    : null,
                         ];
                     }
                     $artifact = ingredientOntologyControllerBuildPrompt(
@@ -17109,6 +17163,27 @@ function ingredientOntologyControllerResumeDurableJob(
                                 $gapReason,
                                 (int)$response['id']
                             );
+                        $followupQueue = ['queued' => false];
+                        $followupIntent = null;
+                        if (
+                            ingredientOntologyControllerAbstentionFollowupEnabled()
+                        ) {
+                            $followupQueue =
+                                ingredientOntologyControllerQueueProvisionalIntent(
+                                    $db,
+                                    $lease,
+                                    'retry',
+                                    'Candidate search exhausted; retain a durable enrichment retry.',
+                                    (int)$response['id']
+                                );
+                            $followupIntent =
+                                ingredientOntologyControllerStoreGenerationIntent(
+                                    $db,
+                                    $lease,
+                                    'provisional',
+                                    (int)$response['id']
+                                );
+                        }
                         ingredientOntologyControllerTransitionJob(
                             $db,
                             $lease,
@@ -17131,6 +17206,11 @@ function ingredientOntologyControllerResumeDurableJob(
                             'coverage_gap_id' => (int)$gap['id'],
                             'response_artifact_id' =>
                                 (int)$response['id'],
+                            'provisional_queue' => $followupQueue,
+                            'generation_intent_id' =>
+                                $followupIntent !== null
+                                    ? (int)$followupIntent['id']
+                                    : null,
                         ];
                     }
                     $queue =

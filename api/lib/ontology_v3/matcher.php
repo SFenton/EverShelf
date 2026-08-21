@@ -9,8 +9,14 @@ final class IngredientOntologyV3MatcherContext {
     public array $relations = [];
     public array $ancestry = [];
     public array $pairConstraints = [];
+    public int $identityExtensionRevision = 0;
+    public string $identityExtensionHash = '';
 
-    public function __construct(PDO $db, int $versionId) {
+    public function __construct(
+        PDO $db,
+        int $versionId,
+        ?int $identityExtensionRevision = null
+    ) {
         $this->versionId = $versionId;
         $version = ingredientOntologyV3Version($db, $versionId);
         if ($version === null) {
@@ -30,6 +36,74 @@ final class IngredientOntologyV3MatcherContext {
                 'kind' => (string)$row['entity_kind'],
                 'identity_role' => (string)$row['identity_role'],
             ];
+        }
+        $snapshot = ingredientOntologyV3IdentityExtensionSnapshot(
+            $db,
+            $versionId
+        );
+        $this->identityExtensionRevision =
+            $identityExtensionRevision !== null
+                ? max(0, $identityExtensionRevision)
+                : (int)$snapshot['revision'];
+        if ($this->identityExtensionRevision === 0) {
+            $this->identityExtensionHash =
+                ingredientOntologyV3IdentityExtensionZeroHash();
+        } elseif (
+            $this->identityExtensionRevision === (int)$snapshot['revision']
+        ) {
+            $this->identityExtensionHash = (string)$snapshot['hash'];
+        } else {
+            $extensionHash = $db->prepare("
+                SELECT content_hash
+                FROM ingredient_ontology_identity_extension_entities
+                WHERE ontology_version_id = ?
+                  AND created_revision = ?
+            ");
+            $extensionHash->execute([
+                $versionId,
+                $this->identityExtensionRevision,
+            ]);
+            $hash = $extensionHash->fetchColumn();
+            if ($hash === false) {
+                throw new RuntimeException(
+                    'identity extension revision is unavailable'
+                );
+            }
+            $this->identityExtensionHash = (string)$hash;
+        }
+        if (
+            $this->identityExtensionRevision > 0
+            && ingredientOntologyV3TableExists(
+                $db,
+                'ingredient_ontology_identity_extension_entities'
+            )
+        ) {
+            $extensions = $db->prepare("
+                SELECT id, slug, canonical_name
+                FROM ingredient_ontology_identity_extension_entities
+                WHERE ontology_version_id = ?
+                  AND created_revision <= ?
+                  AND status = 'active'
+                ORDER BY created_revision
+            ");
+            $extensions->execute([
+                $versionId,
+                $this->identityExtensionRevision,
+            ]);
+            while ($row = $extensions->fetch(PDO::FETCH_ASSOC)) {
+                $runtimeEntityId =
+                    ingredientOntologyV3IdentityExtensionRuntimeEntityId(
+                        (int)$row['id']
+                    );
+                $this->entities[$runtimeEntityId] = [
+                    'id' => $runtimeEntityId,
+                    'slug' => (string)$row['slug'],
+                    'name' => (string)$row['canonical_name'],
+                    'kind' => 'ingredient',
+                    'identity_role' => 'identity_leaf',
+                    'extension' => true,
+                ];
+            }
         }
         $facetMap = ingredientOntologyV3FacetMap($db, $versionId);
         foreach ($facetMap as $facet => $definition) {

@@ -3413,7 +3413,8 @@ function productSaveTestHook(string $name, array $context = []): void {
 function productSaveRefreshIdentity(
     PDO $db,
     int $productId,
-    bool $scoreAlreadyQueued = false
+    bool $scoreAlreadyQueued = false,
+    bool $lookupExistingExtension = true
 ): array {
     if (!function_exists(
         'ingredientOntologyV3IdentityAdmissionPublishProduct'
@@ -3431,7 +3432,11 @@ function productSaveRefreshIdentity(
         $productId,
         null,
         'product_identity_changed',
-        false
+        false,
+        false,
+        true,
+        false,
+        $lookupExistingExtension
     );
     if (
         !$scoreAlreadyQueued
@@ -3451,7 +3456,11 @@ function productSaveRefreshIdentity(
                 $productId,
                 null,
                 'product_identity_changed',
-                false
+                false,
+                false,
+                true,
+                false,
+                $lookupExistingExtension
             );
         $admission['score_queued'] = true;
     }
@@ -3810,7 +3819,8 @@ function saveProduct(PDO $db): void {
         $identityAdmission = productSaveRefreshIdentity(
                 $db,
                 $id,
-                array_key_exists('prepared_food', $input)
+                array_key_exists('prepared_food', $input),
+                $existing !== null
         );
         productSaveTestHook(
                 'before_commit',
@@ -3946,6 +3956,9 @@ function setProductPreparedFood(PDO $db): void {
                     $id,
                     null,
                     'product_prepared_food_flag',
+                    false,
+                    false,
+                    true,
                     false
                 );
             $db->commit();

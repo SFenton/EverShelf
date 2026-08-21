@@ -780,6 +780,7 @@ function recipeSchemaMigrate(PDO $db): void {
                 CHECK(length(language) BETWEEN 2 AND 35),
             label_id INTEGER DEFAULT NULL,
             entity_id INTEGER DEFAULT NULL,
+            extension_entity_id INTEGER DEFAULT NULL,
             status TEXT NOT NULL
                 CHECK(status IN ('accepted', 'unresolved', 'rejected')),
             confidence REAL NOT NULL DEFAULT 0
@@ -805,6 +806,9 @@ function recipeSchemaMigrate(PDO $db): void {
                     ON DELETE CASCADE,
             FOREIGN KEY (entity_id)
                 REFERENCES ingredient_ontology_entities(id)
+                    ON DELETE SET NULL,
+            FOREIGN KEY (extension_entity_id)
+                REFERENCES ingredient_ontology_identity_extension_entities(id)
                     ON DELETE SET NULL
         );
 
@@ -910,6 +914,11 @@ function recipeSchemaMigrate(PDO $db): void {
             ontology_content_hash TEXT DEFAULT NULL,
             ontology_source_revision INTEGER NOT NULL DEFAULT 1,
             ontology_source_hash TEXT NOT NULL DEFAULT '',
+            identity_extension_revision INTEGER NOT NULL DEFAULT 0
+                CHECK(identity_extension_revision >= 0),
+            identity_extension_hash TEXT NOT NULL
+                DEFAULT '0000000000000000000000000000000000000000000000000000000000000000'
+                CHECK(length(identity_extension_hash) = 64),
             ontology_source_lineage_hash TEXT NOT NULL DEFAULT ''
                 CHECK(
                     ontology_source_lineage_hash = ''

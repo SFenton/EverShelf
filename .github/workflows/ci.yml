@@ -174,6 +174,8 @@ jobs:
         run: |
           php scripts/test-location-suggestions.php
           php scripts/test-instant-identity-annex.php
+          php scripts/test-ontology-admission-coverage.php
+          php scripts/test-exact-identity-product-save.php
           php scripts/test-incremental-score-overlay.php
 
       - name: Test recipe backend

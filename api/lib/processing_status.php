@@ -1086,7 +1086,7 @@ function evershelfProcessingStatusEffectiveIdentityCounts(
                 (string)$row['owner_fingerprint']
             )
             && (string)$row['resolver_version'] ===
-                INGREDIENT_ONTOLOGY_PRODUCT_IDENTITY_ANNEX_RESOLVER_VERSION
+                ingredientOntologyV3ProductIdentityResolverVersion()
             && hash_equals(
                 ingredientOntologyV3IdentityAnnexReviewManifestHash(),
                 (string)$row['review_manifest_hash']

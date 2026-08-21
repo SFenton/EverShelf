@@ -89,6 +89,17 @@ $db->prepare("
         canonical_name, entity_kind, identity_role,
         provenance
     )
+    VALUES (?, 'test:ketchup', 'ketchup',
+            'Ketchup', 'ingredient',
+            'prepared_identity', 'full-resolution-v3')
+")->execute([$versionId]);
+$entities['ketchup'] = (int)$db->lastInsertId();
+$db->prepare("
+    INSERT INTO ingredient_ontology_entities (
+        ontology_version_id, local_key, slug,
+        canonical_name, entity_kind, identity_role,
+        provenance
+    )
     VALUES (?, 'test:provisional', 'provisional-subject-test',
             'Provisional Root', 'ingredient',
             'identity_leaf', 'autonomous_controller')
@@ -143,6 +154,7 @@ foreach ([
     ['orange', 'orange', 'en', 'Orange', 'orange', 'exact_alias', 'full-resolution-v3', null],
     ['garlic', 'garlic', 'en', 'Garlic', 'garlic', 'exact_alias', 'full-resolution-v3', null],
     ['bean', 'bean', 'en', 'Bean', 'bean', 'exact_alias', 'full-resolution-v3', null],
+    ['ketchup', 'ketchup', 'en', 'Ketchup', 'ketchup', 'exact_alias', 'full-resolution-v3', null],
     ['eggplants', 'eggplant', 'en', 'Eggplants', 'eggplants', 'exact_alias', 'full-resolution-v3', null],
     ['aubergine', 'eggplant', 'en', 'Aubergine', 'aubergine', 'exact_alias', 'full-resolution-v3', null],
     ['aubergines', 'eggplant', 'en', 'Aubergines', 'aubergines', 'exact_alias', 'full-resolution-v3', null],
@@ -546,7 +558,8 @@ $assert(
 );
 $assert(
     $unknown['accepted'] === false
-    && $unknown['status'] === 'unresolved',
+    && $unknown['status'] === 'unresolved'
+    && $unknown['reason'] === 'no_reviewed_exact_alias',
     'Unknown foods must remain non-satisfying'
 );
 $assert(
@@ -964,7 +977,7 @@ $db->prepare("
 $currentAdmissionManifest = [
     'version' => INGREDIENT_ONTOLOGY_IDENTITY_ANNEX_REVIEW_VERSION,
     'resolver_version' =>
-        INGREDIENT_ONTOLOGY_PRODUCT_IDENTITY_ANNEX_RESOLVER_VERSION,
+        ingredientOntologyV3ProductIdentityResolverVersion(),
     'aliases' =>
         ingredientOntologyV3IdentityAnnexReviewedAliases(),
 ];
@@ -1021,7 +1034,7 @@ $assert(
         FROM ingredient_ontology_identity_annex
         WHERE product_id = {$productIds['garlics']}
     ")->fetchColumn()
-        === INGREDIENT_ONTOLOGY_PRODUCT_IDENTITY_ANNEX_RESOLVER_VERSION
+        === ingredientOntologyV3ProductIdentityResolverVersion()
     && (int)$db->query("
         SELECT COUNT(*)
         FROM recipe_score_pending_products
@@ -1233,6 +1246,524 @@ $assert(
           AND ontology_version_id = {$versionId}
     ")->fetchColumn() === 2,
     'Active ontology reconciliation must preserve existing score work and avoid unresolved semantic no-op scoring'
+);
+
+$recipeNumberProof = ingredientOntologyV3RecipeAnnexResolution(
+    $db,
+    ingredientOntologyV3Version($db, $versionId),
+    'Garlics',
+    'en'
+);
+$assert(
+    (string)$recipeNumberProof['status'] === 'accepted'
+    && (string)$recipeNumberProof['admission_source']
+        === 'exact_number_v1'
+    && (int)$recipeNumberProof['entity_id'] === $entities['garlic'],
+    'Recipe admission must share the product-local exact-number proof'
+);
+
+$product->execute(['Legacy Sliced Ham', 0]);
+$legacySlicedHamProductId = (int)$db->lastInsertId();
+$legacySlicedHam =
+    ingredientOntologyV3IdentityAdmissionPublishProduct(
+        $db,
+        $legacySlicedHamProductId,
+        $versionId,
+        'legacy_exact_identity_fixture',
+        false
+    );
+for ($attempt = 0; $attempt < 4; $attempt++) {
+    $db->prepare("
+        UPDATE ingredient_ontology_product_readiness
+        SET next_retry_at = datetime('now', '-1 second')
+        WHERE product_id = ?
+    ")->execute([$legacySlicedHamProductId]);
+    ingredientOntologyV3ProductReadinessRetryDue($db);
+}
+$legacySlicedHamReadiness =
+    ingredientOntologyV3ProductReadinessRow(
+        $db,
+        $legacySlicedHamProductId
+    );
+$assert(
+    $legacySlicedHam['status'] === 'unresolved'
+    && (string)$legacySlicedHamReadiness['status']
+        === 'needs_review',
+    'Legacy unknown-food behavior must be reproduced before exact fallback'
+);
+
+$GLOBALS[
+    'INGREDIENT_ONTOLOGY_EXACT_SELF_IDENTITY_ENABLED_OVERRIDE'
+] = true;
+$GLOBALS[
+    'INGREDIENT_ONTOLOGY_IDENTITY_ROLE_WIDENING_ENABLED_OVERRIDE'
+] = true;
+$GLOBALS[
+    'INGREDIENT_ONTOLOGY_IDENTITY_READINESS_V2_ENABLED_OVERRIDE'
+] = true;
+$GLOBALS['INGREDIENT_ONTOLOGY_PRODUCT_LANGUAGE_OVERRIDE'] = 'en';
+
+$sealedRecipeExtension = ingredientOntologyV3RecipeAnnexResolution(
+    $db,
+    ingredientOntologyV3Version($db, $versionId),
+    'Curated Oyster Sauce',
+    'en-US',
+    true
+);
+$sealedWithExactFallback =
+    ingredientOntologyV3IdentityAnnexRefreshProduct(
+        $db,
+        $productIds['sealed'],
+        $versionId
+    );
+$sealedLookupOnly =
+    ingredientOntologyV3IdentityAnnexRefreshProduct(
+        $db,
+        $productIds['sealed'],
+        $versionId,
+        true,
+        false,
+        true
+    );
+$sealedReadOnlyResolution =
+    ingredientOntologyV3IdentityAnnexResolution(
+        $db,
+        ingredientOntologyV3Version($db, $versionId),
+        $sealedProduct
+    );
+$sealedPublished =
+    ingredientOntologyV3IdentityAdmissionPublishProduct(
+        $db,
+        $productIds['sealed'],
+        $versionId,
+        'sealed_mapping_identity_fixture',
+        false
+    );
+$assert(
+    (string)$sealedRecipeExtension['status'] === 'accepted'
+    && (int)$sealedRecipeExtension['effective_entity_id'] < 0
+    && (string)$sealedWithExactFallback['status'] === 'unresolved'
+    && $sealedWithExactFallback['extension_entity_id'] === null
+    && !empty($sealedWithExactFallback['sealed_mapping_preserved'])
+    && (string)$sealedLookupOnly['status'] === 'unresolved'
+    && $sealedLookupOnly['extension_entity_id'] === null
+    && !empty($sealedLookupOnly['sealed_mapping_preserved'])
+    && $sealedLookupOnly['changed'] === false
+    && (string)$sealedReadOnlyResolution['status'] === 'unresolved'
+    && !empty(
+        $sealedReadOnlyResolution['sealed_mapping_preserved']
+    )
+    && (string)($sealedPublished['readiness']['status'] ?? '')
+        === 'ready',
+    'Every exact-self entry point must preserve an accepted sealed mapping'
+);
+$db->prepare("
+    DELETE FROM ingredient_ontology_identity_annex
+    WHERE product_id = ?
+")->execute([$productIds['sealed']]);
+$db->prepare("
+    INSERT INTO inventory (
+        product_id, location, quantity
+    )
+    VALUES (?, 'dispensa', 1)
+")->execute([$productIds['sealed']]);
+$sealedFallbackInventory = ingredientOntologyV3Inventory(
+    $db,
+    $versionId
+);
+$assert(
+    (int)(
+        $sealedFallbackInventory['by_product'][
+            $productIds['sealed']
+        ]['entity_id'] ?? 0
+    ) === $entities['potato'],
+    'Read-only scoring fallback must retain the sealed product identity'
+);
+$db->prepare("
+    DELETE FROM inventory
+    WHERE product_id = ?
+")->execute([$productIds['sealed']]);
+$sealedPublished =
+    ingredientOntologyV3IdentityAdmissionPublishProduct(
+        $db,
+        $productIds['sealed'],
+        $versionId,
+        'sealed_mapping_identity_fixture',
+        false,
+        false,
+        true,
+        false,
+        true
+    );
+$assert(
+    (string)($sealedPublished['readiness']['status'] ?? '') === 'ready'
+    && (int)($sealedPublished['readiness']['attempts'] ?? -1) === 0,
+    'Foreground lookup-only admission must keep sealed mappings ready'
+);
+
+$resolvedAmbiguous = ingredientOntologyV3IdentityAnnexRefreshProduct(
+    $db,
+    $productIds['ambiguous'],
+    $versionId
+);
+$assert(
+    $resolvedAmbiguous['accepted'] === true
+    && (string)$resolvedAmbiguous['source']
+        === 'reviewed_alias_collision_exact_self_identity'
+    && (int)$resolvedAmbiguous['entity_id'] < 0,
+    'Conflicting reviewed candidates must use an observable isolated exact '
+        . 'identity instead of needs_review'
+);
+
+$recoveredLegacySlicedHam =
+    ingredientOntologyV3IdentityAdmissionPublishProduct(
+        $db,
+        $legacySlicedHamProductId,
+        $versionId,
+        'exact_identity_recovery',
+        false
+    );
+$recoveredLegacyReadiness =
+    ingredientOntologyV3ProductReadinessRow(
+        $db,
+        $legacySlicedHamProductId
+    );
+$assert(
+    $recoveredLegacySlicedHam['accepted'] === true
+    && (string)$recoveredLegacySlicedHam['source']
+        === 'exact_self_identity'
+    && (int)$recoveredLegacySlicedHam['entity_id'] < 0
+    && !in_array(
+        (string)$recoveredLegacyReadiness['status'],
+        ['needs_review', 'failed'],
+        true
+    )
+    && (int)$recoveredLegacyReadiness['attempts'] === 0,
+    'Exact fallback must recover a legacy needs_review food without model or provider calls'
+);
+
+$product->execute(['Sliced Ham', 0]);
+$slicedHamProductId = (int)$db->lastInsertId();
+$product->execute(['Ham', 0]);
+$hamProductId = (int)$db->lastInsertId();
+$product->execute(['Ketchup', 0]);
+$ketchupProductId = (int)$db->lastInsertId();
+$db->prepare("
+    INSERT INTO inventory (product_id, location, quantity)
+    VALUES (?, 'frigo', 1)
+")->execute([$slicedHamProductId]);
+
+$db->prepare("
+    INSERT INTO recipe_catalog (
+        title, primary_connector, language
+    )
+    VALUES ('Sliced ham exact identity fixture', 'manual', 'en-US')
+")->execute();
+$slicedHamRecipeId = (int)$db->lastInsertId();
+$recipeIngredient->execute([
+    $slicedHamRecipeId,
+    0,
+    'Sliced ham',
+    'sliced ham',
+]);
+$slicedHamIngredientId = (int)$db->lastInsertId();
+$recipeOwner->execute([$slicedHamIngredientId]);
+$slicedHamOwner = $recipeOwner->fetch(PDO::FETCH_ASSOC);
+ingredientOntologyV3SetReadyMutationGuard($db, true);
+$sealedRecipeMapping->execute([
+    $versionId,
+    $slicedHamIngredientId,
+    ingredientOntologyV3RecipeOwnerFingerprint(
+        'recipe_ingredient',
+        $slicedHamOwner
+    ),
+    'Sliced ham',
+    'sliced ham',
+    'en-US',
+    'unresolved',
+]);
+ingredientOntologyV3SetReadyMutationGuard($db, false);
+$contentHashBeforeExactExtensions =
+    ingredientOntologyV3ContentHash($db, $versionId);
+
+$slicedHamAdmission =
+    ingredientOntologyV3IdentityAnnexRefreshProduct(
+        $db,
+        $slicedHamProductId,
+        $versionId
+    );
+$extensionBeforeRepeat =
+    ingredientOntologyV3IdentityExtensionSnapshot(
+        $db,
+        $versionId
+    );
+$slicedHamRepeat =
+    ingredientOntologyV3IdentityAnnexRefreshProduct(
+        $db,
+        $slicedHamProductId,
+        $versionId
+    );
+$slicedHamAffectedRecipes =
+    ingredientOntologyV3IdentityExtensionRecipeIdsForProducts(
+        $db,
+        $versionId,
+        [$slicedHamProductId]
+    );
+$extensionAfterRepeat =
+    ingredientOntologyV3IdentityExtensionSnapshot(
+        $db,
+        $versionId
+    );
+$slicedHamRecipeAnnex =
+    ingredientOntologyV3RecipeAnnexRefreshRecipe(
+        $db,
+        $slicedHamRecipeId,
+        $versionId
+    );
+$slicedHamRecipeLanguage = (string)$db->query("
+    SELECT language
+    FROM ingredient_ontology_recipe_identity_annex
+    WHERE recipe_ingredient_id = {$slicedHamIngredientId}
+")->fetchColumn();
+$extensionSnapshot =
+    ingredientOntologyV3IdentityExtensionSnapshot(
+        $db,
+        $versionId
+    );
+$slicedHamInventory = ingredientOntologyV3Inventory(
+    $db,
+    $versionId,
+    null,
+    (int)$extensionSnapshot['revision']
+);
+$slicedHamRecipeBatch = ingredientOntologyV3LoadRecipeBatch(
+    $db,
+    $versionId,
+    [$slicedHamRecipeId],
+    true,
+    (int)$extensionSnapshot['revision']
+);
+$slicedHamProductMapping =
+    $slicedHamInventory['by_product'][$slicedHamProductId] ?? null;
+$slicedHamRecipeMapping =
+    $slicedHamRecipeBatch[$slicedHamRecipeId]['ingredients'][0][
+        'mapping'
+    ] ?? null;
+$slicedHamMatch = ingredientOntologyV3MatchWithContext(
+    new IngredientOntologyV3MatcherContext(
+        $db,
+        $versionId,
+        (int)$extensionSnapshot['revision']
+    ),
+    $slicedHamRecipeMapping,
+    $slicedHamProductMapping
+);
+$assert(
+    $slicedHamAdmission['accepted'] === true
+    && $slicedHamAdmission['source'] === 'exact_self_identity'
+    && (int)$slicedHamAdmission['entity_id'] < 0
+    && (int)$slicedHamRepeat['entity_id']
+        === (int)$slicedHamAdmission['entity_id']
+    && (int)$extensionAfterRepeat['revision']
+        === (int)$extensionBeforeRepeat['revision']
+    && in_array(
+        $slicedHamRecipeId,
+        $slicedHamAffectedRecipes,
+        true
+    )
+    && !empty($slicedHamRecipeAnnex['ready'])
+    && $slicedHamRecipeLanguage === 'en'
+    && (int)$slicedHamRecipeMapping['entity_id']
+        === (int)$slicedHamProductMapping['entity_id']
+    && !empty($slicedHamMatch['satisfies_required'])
+    && (string)$slicedHamMatch['outcome'] === 'exact',
+    'Sliced Ham product and en-US recipe labels must converge on one '
+        . 'idempotent exact self identity'
+);
+
+$pinnedExtensionSnapshot =
+    ingredientOntologyV3IdentityExtensionSnapshot(
+        $db,
+        $versionId
+    );
+$futureExtension = ingredientOntologyV3RecipeAnnexResolution(
+    $db,
+    ingredientOntologyV3Version($db, $versionId),
+    'Future extension prefix fixture',
+    'en-US',
+    true
+);
+$advancedExtensionSnapshot =
+    ingredientOntologyV3IdentityExtensionSnapshot(
+        $db,
+        $versionId
+    );
+$assert(
+    (string)$futureExtension['status'] === 'accepted'
+    && (int)$advancedExtensionSnapshot['revision']
+        === (int)$pinnedExtensionSnapshot['revision'] + 1
+    && ingredientOntologyV3IdentityExtensionSnapshotMatches(
+        $db,
+        $versionId,
+        $pinnedExtensionSnapshot
+    ),
+    'A newer append-only extension head must preserve an older score prefix'
+);
+
+$extensionIntegrity =
+    ingredientOntologyV3IdentityExtensionIntegrityAudit(
+        $db,
+        $versionId,
+        (int)$advancedExtensionSnapshot['revision'],
+        (string)$advancedExtensionSnapshot['hash']
+    );
+$immutableExtensionError = '';
+try {
+    $db->prepare("
+        UPDATE ingredient_ontology_identity_extension_entities
+        SET display_label = 'mutated'
+        WHERE ontology_version_id = ?
+          AND created_revision = 1
+    ")->execute([$versionId]);
+} catch (Throwable $error) {
+    $immutableExtensionError = $error->getMessage();
+}
+$assert(
+    !empty($extensionIntegrity['valid'])
+    && str_contains(
+        $immutableExtensionError,
+        'identity extension entities are immutable'
+    ),
+    'Extension hash chains must be audited and published rows immutable'
+);
+
+$nestedSnapshotBefore =
+    ingredientOntologyV3IdentityExtensionSnapshot(
+        $db,
+        $versionId
+    );
+dbBeginImmediateWithRetry($db);
+$db->exec("
+    CREATE TEMP TRIGGER identity_extension_claim_failure
+    BEFORE UPDATE OF head_revision
+    ON ingredient_ontology_identity_extension_state
+    BEGIN
+        SELECT RAISE(ABORT, 'forced identity extension claim failure');
+    END
+");
+$nestedClaimError = '';
+try {
+    ingredientOntologyV3IdentityExtensionClaim(
+        $db,
+        ingredientOntologyV3Version($db, $versionId),
+        'Nested rollback identity fixture',
+        'en-US',
+        '',
+        true,
+        true
+    );
+} catch (Throwable $error) {
+    $nestedClaimError = $error->getMessage();
+}
+$nestedClaimRows = (int)$db->query("
+    SELECT COUNT(*)
+    FROM ingredient_ontology_identity_extension_entities
+    WHERE ontology_version_id = {$versionId}
+      AND normalized_label = 'nested rollback identity fixture'
+")->fetchColumn();
+$nestedSnapshotAfter =
+    ingredientOntologyV3IdentityExtensionSnapshot(
+        $db,
+        $versionId
+    );
+$db->exec('DROP TRIGGER identity_extension_claim_failure');
+$db->exec('COMMIT');
+$assert(
+    str_contains(
+        $nestedClaimError,
+        'forced identity extension claim failure'
+    )
+    && $nestedClaimRows === 0
+    && $nestedSnapshotAfter === $nestedSnapshotBefore,
+    'A failed nested extension claim must roll back its entity and chain '
+        . 'state without aborting the caller transaction'
+);
+
+$hamAdmission = ingredientOntologyV3IdentityAnnexRefreshProduct(
+    $db,
+    $hamProductId,
+    $versionId
+);
+$assert(
+    $hamAdmission['accepted'] === true
+    && (int)$hamAdmission['entity_id'] < 0
+    && (int)$hamAdmission['entity_id']
+        !== (int)$slicedHamAdmission['entity_id'],
+    'Exact self identities must preserve modifiers and never equate Sliced Ham with Ham'
+);
+
+$ketchupAdmission = ingredientOntologyV3IdentityAnnexRefreshProduct(
+    $db,
+    $ketchupProductId,
+    $versionId
+);
+$assert(
+    $ketchupAdmission['accepted'] === true
+    && (int)$ketchupAdmission['entity_id'] === $entities['ketchup']
+    && (string)$ketchupAdmission['source'] === 'accepted_label',
+    'Prepared and composite identity roles must be eligible only through exact accepted labels'
+);
+
+$undSlicedHam = ingredientOntologyV3RecipeAnnexResolution(
+    $db,
+    ingredientOntologyV3Version($db, $versionId),
+    'Sliced ham',
+    'und',
+    true
+);
+$assert(
+    $undSlicedHam['status'] === 'accepted'
+    && (int)$undSlicedHam['effective_entity_id']
+        !== (int)$slicedHamAdmission['entity_id'],
+    'Undetermined language must not silently merge with an English exact identity'
+);
+
+$publishedSlicedHam =
+    ingredientOntologyV3IdentityAdmissionPublishProduct(
+        $db,
+        $slicedHamProductId,
+        $versionId,
+        'test_exact_self_publication',
+        false
+    );
+$assert(
+    $publishedSlicedHam['accepted'] === true
+    && !in_array(
+        (string)($publishedSlicedHam['readiness']['status'] ?? ''),
+        ['needs_review', 'failed'],
+        true
+    ),
+    'Exact self identity publication must never route a legitimate food to needs_review'
+);
+$assert(
+    hash_equals(
+        $contentHashBeforeExactExtensions,
+        ingredientOntologyV3ContentHash($db, $versionId)
+    ),
+    'Exact identity extensions must not mutate the sealed ontology hash'
+);
+
+unset(
+    $GLOBALS[
+        'INGREDIENT_ONTOLOGY_EXACT_SELF_IDENTITY_ENABLED_OVERRIDE'
+    ],
+    $GLOBALS[
+        'INGREDIENT_ONTOLOGY_IDENTITY_ROLE_WIDENING_ENABLED_OVERRIDE'
+    ],
+    $GLOBALS[
+        'INGREDIENT_ONTOLOGY_IDENTITY_READINESS_V2_ENABLED_OVERRIDE'
+    ],
+    $GLOBALS['INGREDIENT_ONTOLOGY_PRODUCT_LANGUAGE_OVERRIDE']
 );
 $db = null;
 @unlink($path);

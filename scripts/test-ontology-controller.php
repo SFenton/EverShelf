@@ -2956,6 +2956,9 @@ try {
         },
         ['strict_schema' => true]
     );
+    $GLOBALS[
+        'ONTOLOGY_ABSTENTION_FOLLOWUP_ENABLED_OVERRIDE'
+    ] = true;
     $coverageGapRun = ingredientOntologyControllerProcessQueue(
         $db,
         1,
@@ -2968,6 +2971,11 @@ try {
             'minimum_priority' => 1000000,
             'enforce_low_signal_shortcut' => true,
             'force_low_signal_coverage_gap' => true,
+        ]
+    );
+    unset(
+        $GLOBALS[
+            'ONTOLOGY_ABSTENTION_FOLLOWUP_ENABLED_OVERRIDE'
         ]
     );
     controllerTestAssert(
@@ -2994,7 +3002,14 @@ try {
              FROM ontology_generation_intents
              WHERE source_job_id = ?",
             [$coverageGapJobId]
-        ) === 0
+        ) === 1
+        && controllerTestCount(
+            $db,
+            "SELECT COUNT(*)
+             FROM ontology_provisional_queue
+             WHERE source_job_id = ? AND status = 'retry'",
+            [$coverageGapJobId]
+        ) === 1
         && controllerTestCount(
             $db,
             "SELECT COUNT(*)
@@ -3002,7 +3017,7 @@ try {
              WHERE subject_id = ? AND status = 'accepted'",
             [(int)$coverageObserved['subject']['id']]
         ) === 0,
-        'Low-signal unauthorized identity intake must produce one non-satisfying review artifact without a model call: '
+        'Low-signal unauthorized identity intake must preserve a durable follow-up without a model call: '
             . ingredientOntologyControllerStableJson([
                 'run' => $coverageGapRun,
                 'gap_count' => controllerTestCount(
@@ -3075,6 +3090,10 @@ try {
     ")->execute([$coverageGapJobId]);
     $db->prepare("
         DELETE FROM ontology_provisional_queue
+        WHERE source_job_id = ?
+    ")->execute([$coverageGapJobId]);
+    $db->prepare("
+        DELETE FROM ontology_generation_intents
         WHERE source_job_id = ?
     ")->execute([$coverageGapJobId]);
     $db->prepare("
@@ -3374,6 +3393,89 @@ try {
         $reviewedAdmissionProductId,
         $reviewedAdmissionDuplicateProductId,
     ]);
+
+    $GLOBALS[
+        'INGREDIENT_ONTOLOGY_EXACT_SELF_IDENTITY_ENABLED_OVERRIDE'
+    ] = true;
+    $GLOBALS[
+        'INGREDIENT_ONTOLOGY_IDENTITY_READINESS_V2_ENABLED_OVERRIDE'
+    ] = true;
+    $GLOBALS['INGREDIENT_ONTOLOGY_PRODUCT_LANGUAGE_OVERRIDE'] = 'en';
+    $db->exec("
+        INSERT INTO products (
+            name, brand, category, barcode, prepared_food
+        )
+        VALUES (
+            'Controller Exact Self Fixture',
+            'Controller Fixtures', '', '', 0
+        )
+    ");
+    $exactSelfProductId = (int)$db->lastInsertId();
+    $exactSelfObserved = ingredientOntologyControllerObserveProduct(
+        $db,
+        $exactSelfProductId,
+        null,
+        'product_ingestion',
+        1000000
+    );
+    $exactSelfJobId = (int)$exactSelfObserved['job']['id'];
+    $exactSelfRun = ingredientOntologyControllerProcessQueue(
+        $db,
+        1,
+        [
+            'provider' => 'fake_reviewed_should_not_run',
+            'model' => 'fake-reviewed-model',
+            'job_types' => ['subject_resolution'],
+            'intake_only' => true,
+            'minimum_priority' => 1000000,
+        ]
+    );
+    controllerTestAssert(
+        $exactSelfRun['results'][0]['status'] === 'promoted'
+        && empty($exactSelfRun['results'][0]['model_called'])
+        && (string)$exactSelfRun['results'][0][
+            'deterministic_admission'
+        ]['source'] === 'exact_self_identity'
+        && (int)$exactSelfRun['results'][0][
+            'deterministic_admission'
+        ]['entity_id'] < 0
+        && controllerTestCount(
+            $db,
+            "SELECT COUNT(*)
+             FROM ontology_controller_prompts
+             WHERE job_id = ?",
+            [$exactSelfJobId]
+        ) === 0,
+        'Exact self identity admission must bypass provider/model intake: '
+            . ingredientOntologyControllerStableJson([
+                'run' => $exactSelfRun,
+                'prompt_count' => controllerTestCount(
+                    $db,
+                    "SELECT COUNT(*)
+                     FROM ontology_controller_prompts
+                     WHERE job_id = ?",
+                    [$exactSelfJobId]
+                ),
+            ])
+    );
+    $db->prepare("
+        UPDATE ontology_subject_occurrences
+        SET active = 0,
+            last_seen_at = CURRENT_TIMESTAMP
+        WHERE subject_id = ?
+    ")->execute([(int)$exactSelfObserved['subject']['id']]);
+    $db->prepare("
+        DELETE FROM products WHERE id = ?
+    ")->execute([$exactSelfProductId]);
+    unset(
+        $GLOBALS[
+            'INGREDIENT_ONTOLOGY_EXACT_SELF_IDENTITY_ENABLED_OVERRIDE'
+        ],
+        $GLOBALS[
+            'INGREDIENT_ONTOLOGY_IDENTITY_READINESS_V2_ENABLED_OVERRIDE'
+        ],
+        $GLOBALS['INGREDIENT_ONTOLOGY_PRODUCT_LANGUAGE_OVERRIDE']
+    );
 
     $reviewedRecipeIds = [];
     $reviewedIngredientIds = [];

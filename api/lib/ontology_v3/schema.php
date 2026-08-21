@@ -1,7 +1,7 @@
 <?php
 declare(strict_types=1);
 
-const INGREDIENT_ONTOLOGY_V3_SCHEMA_VERSION = 'ingredient-ontology-v3.18';
+const INGREDIENT_ONTOLOGY_V3_SCHEMA_VERSION = 'ingredient-ontology-v3.19';
 const INGREDIENT_ONTOLOGY_V3_PROMPT_SCHEMA_VERSION =
     'ingredient_topology_benchmark_v3';
 const INGREDIENT_ONTOLOGY_V3_DEFAULT_MODEL = 'gemini-3.5-flash';
@@ -2048,6 +2048,97 @@ function ingredientOntologyV3SchemaMigrate(PDO $db): void {
                 REFERENCES ingredient_ontology_entities(id) ON DELETE CASCADE
         );
 
+        CREATE TABLE IF NOT EXISTS
+            ingredient_ontology_identity_extension_state (
+            ontology_version_id INTEGER PRIMARY KEY,
+            ontology_content_hash TEXT NOT NULL
+                CHECK(length(ontology_content_hash) = 64),
+            ontology_seal_hash TEXT NOT NULL
+                CHECK(length(ontology_seal_hash) = 64),
+            head_revision INTEGER NOT NULL DEFAULT 0
+                CHECK(head_revision >= 0),
+            head_hash TEXT NOT NULL
+                DEFAULT '0000000000000000000000000000000000000000000000000000000000000000'
+                CHECK(length(head_hash) = 64),
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (ontology_version_id)
+                REFERENCES ingredient_ontology_versions(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS
+            ingredient_ontology_identity_extension_entities (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ontology_version_id INTEGER NOT NULL,
+            ontology_content_hash TEXT NOT NULL
+                CHECK(length(ontology_content_hash) = 64),
+            ontology_seal_hash TEXT NOT NULL
+                CHECK(length(ontology_seal_hash) = 64),
+            created_revision INTEGER NOT NULL
+                CHECK(created_revision > 0),
+            previous_hash TEXT NOT NULL
+                CHECK(length(previous_hash) = 64),
+            content_hash TEXT NOT NULL
+                CHECK(length(content_hash) = 64),
+            identity_key_hash TEXT NOT NULL
+                CHECK(length(identity_key_hash) = 64),
+            identity_domain TEXT NOT NULL DEFAULT 'food'
+                CHECK(length(identity_domain) BETWEEN 1 AND 40),
+            normalizer_version TEXT NOT NULL
+                CHECK(length(normalizer_version) BETWEEN 1 AND 80),
+            normalized_label TEXT NOT NULL
+                CHECK(
+                    length(normalized_label) BETWEEN 1 AND 200
+                ),
+            language TEXT NOT NULL DEFAULT 'und'
+                CHECK(length(language) BETWEEN 2 AND 35),
+            context_signature TEXT NOT NULL DEFAULT ''
+                CHECK(length(context_signature) <= 120),
+            display_label TEXT NOT NULL
+                CHECK(length(display_label) BETWEEN 1 AND 200),
+            slug TEXT NOT NULL
+                CHECK(length(slug) BETWEEN 1 AND 160),
+            canonical_name TEXT NOT NULL
+                CHECK(length(canonical_name) BETWEEN 1 AND 200),
+            status TEXT NOT NULL DEFAULT 'active'
+                CHECK(status IN ('active', 'retired')),
+            resolver_version TEXT NOT NULL
+                CHECK(length(resolver_version) BETWEEN 1 AND 120),
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(
+                ontology_version_id, identity_domain,
+                normalized_label, language, context_signature
+            ),
+            UNIQUE(ontology_version_id, created_revision),
+            UNIQUE(ontology_version_id, identity_key_hash),
+            FOREIGN KEY (ontology_version_id)
+                REFERENCES ingredient_ontology_versions(id) ON DELETE CASCADE
+        );
+
+        CREATE TRIGGER IF NOT EXISTS
+            ingredient_ontology_identity_extension_immutable_update
+        BEFORE UPDATE ON ingredient_ontology_identity_extension_entities
+        BEGIN
+            SELECT RAISE(
+                ABORT,
+                'identity extension entities are immutable'
+            );
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS
+            ingredient_ontology_identity_extension_immutable_delete
+        BEFORE DELETE ON ingredient_ontology_identity_extension_entities
+        WHEN EXISTS (
+            SELECT 1
+            FROM ingredient_ontology_versions version
+            WHERE version.id = OLD.ontology_version_id
+        )
+        BEGIN
+            SELECT RAISE(
+                ABORT,
+                'identity extension entities are append-only'
+            );
+        END;
+
         CREATE TABLE IF NOT EXISTS ingredient_ontology_identity_annex (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             product_id INTEGER NOT NULL UNIQUE,
@@ -2062,10 +2153,11 @@ function ingredientOntologyV3SchemaMigrate(PDO $db): void {
                 CHECK(length(source_label) <= 200),
             normalized_label TEXT NOT NULL DEFAULT ''
                 CHECK(length(normalized_label) <= 200),
-            language TEXT NOT NULL DEFAULT 'en'
+            language TEXT NOT NULL DEFAULT 'und'
                 CHECK(length(language) BETWEEN 2 AND 35),
             label_id INTEGER DEFAULT NULL,
             entity_id INTEGER DEFAULT NULL,
+            extension_entity_id INTEGER DEFAULT NULL,
             status TEXT NOT NULL
                 CHECK(status IN ('accepted', 'rejected', 'unresolved')),
             admission_source TEXT NOT NULL DEFAULT 'none'
@@ -2088,7 +2180,10 @@ function ingredientOntologyV3SchemaMigrate(PDO $db): void {
             FOREIGN KEY (label_id)
                 REFERENCES ingredient_ontology_labels(id) ON DELETE SET NULL,
             FOREIGN KEY (entity_id)
-                REFERENCES ingredient_ontology_entities(id) ON DELETE SET NULL
+                REFERENCES ingredient_ontology_entities(id) ON DELETE SET NULL,
+            FOREIGN KEY (extension_entity_id)
+                REFERENCES ingredient_ontology_identity_extension_entities(id)
+                    ON DELETE SET NULL
         );
 
         CREATE TABLE IF NOT EXISTS ingredient_ontology_product_readiness (
@@ -3114,9 +3209,19 @@ function ingredientOntologyV3SchemaMigrate(PDO $db): void {
             );
         CREATE INDEX IF NOT EXISTS idx_ontology_mapping_attributes_mapping
             ON ingredient_ontology_mapping_attributes(mapping_id, facet_id);
+        CREATE INDEX IF NOT EXISTS idx_ontology_identity_extension_lexeme
+            ON ingredient_ontology_identity_extension_entities(
+                ontology_version_id, identity_domain,
+                normalized_label, language, context_signature, status
+            );
+        CREATE INDEX IF NOT EXISTS idx_ontology_identity_extension_revision
+            ON ingredient_ontology_identity_extension_entities(
+                ontology_version_id, created_revision, status
+            );
         CREATE INDEX IF NOT EXISTS idx_ontology_identity_annex_version
             ON ingredient_ontology_identity_annex(
-                ontology_version_id, status, entity_id
+                ontology_version_id, status,
+                entity_id, extension_entity_id
             );
         CREATE INDEX IF NOT EXISTS idx_ontology_identity_annex_owner
             ON ingredient_ontology_identity_annex(
@@ -3450,6 +3555,35 @@ function ingredientOntologyV3SchemaMigrate(PDO $db): void {
 
     ingredientOntologyV3AddColumn(
         $db,
+        'ingredient_ontology_identity_annex',
+        'extension_entity_id',
+        'INTEGER DEFAULT NULL REFERENCES '
+            . 'ingredient_ontology_identity_extension_entities(id) '
+            . 'ON DELETE SET NULL'
+    );
+    if (ingredientOntologyV3TableExists(
+        $db,
+        'ingredient_ontology_recipe_identity_annex'
+    )) {
+        ingredientOntologyV3AddColumn(
+            $db,
+            'ingredient_ontology_recipe_identity_annex',
+            'extension_entity_id',
+            'INTEGER DEFAULT NULL REFERENCES '
+                . 'ingredient_ontology_identity_extension_entities(id) '
+                . 'ON DELETE SET NULL'
+        );
+        $db->exec("
+            CREATE INDEX IF NOT EXISTS
+                idx_recipe_annex_extension_entity
+                ON ingredient_ontology_recipe_identity_annex(
+                    ontology_version_id, extension_entity_id, status
+                )
+        ");
+    }
+
+    ingredientOntologyV3AddColumn(
+        $db,
         'ingredient_ontology_shadow_matches',
         'recipe_id',
         'INTEGER DEFAULT NULL'
@@ -3769,6 +3903,21 @@ function ingredientOntologyV3SchemaMigrate(PDO $db): void {
             'recipe_score_revisions',
             'ontology_source_hash',
             "TEXT NOT NULL DEFAULT ''"
+        );
+        ingredientOntologyV3AddColumn(
+            $db,
+            'recipe_score_revisions',
+            'identity_extension_revision',
+            'INTEGER NOT NULL DEFAULT 0 '
+                . 'CHECK(identity_extension_revision >= 0)'
+        );
+        ingredientOntologyV3AddColumn(
+            $db,
+            'recipe_score_revisions',
+            'identity_extension_hash',
+            "TEXT NOT NULL DEFAULT '"
+                . str_repeat('0', 64)
+                . "' CHECK(length(identity_extension_hash) = 64)"
         );
         foreach ([
             'ontology_schema_hash',
