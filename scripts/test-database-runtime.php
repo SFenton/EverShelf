@@ -120,6 +120,21 @@ try {
         !databaseIsLockError(new RuntimeException('database is locked')),
         'Non-PDO errors must not be treated as SQLite busy errors'
     );
+    $rawTransactionDb = new PDO('sqlite::memory:');
+    $rawTransactionDb->setAttribute(
+        PDO::ATTR_ERRMODE,
+        PDO::ERRMODE_EXCEPTION
+    );
+    $rawTransactionDb->exec('BEGIN IMMEDIATE');
+    $rolledBack =
+        databaseRollbackDanglingTransaction($rawTransactionDb);
+    $rawTransactionDb->exec('BEGIN IMMEDIATE');
+    $rawTransactionDb->exec('COMMIT');
+    $assert(
+        $rolledBack
+        && !databaseRollbackDanglingTransaction($rawTransactionDb),
+        'Raw SQLite transactions must be recoverable on reused connections'
+    );
 
     $emptyDb = new PDO('sqlite::memory:');
     $emptyDb->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
@@ -303,6 +318,13 @@ try {
             "&& isset(\$result['error'])"
         ),
         'Incremental worker SQLite contention must use the short locked retry path'
+    );
+    $assert(
+        str_contains(
+            $incrementalWorkerSource,
+            'databaseRollbackDanglingTransaction($db)'
+        ),
+        'Incremental worker failures must reset raw SQLite transactions before retry'
     );
 } finally {
     @unlink($lockPath);
