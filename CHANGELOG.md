@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.15.3] - 2026-08-20
+
+### Fixed
+- The incremental score worker now classifies transient SQLite writer
+  contention as `locked` and retries after 250 ms instead of reporting a
+  generic worker exception and sleeping for 30 seconds.
+
 ## [1.15.2] - 2026-08-20
 
 ### Fixed

@@ -63,9 +63,12 @@ do {
             $force
         );
     } catch (Throwable $error) {
+        $reason = databaseIsLockError($error)
+            ? 'locked'
+            : 'worker_exception';
         $result = [
             'rebuilt' => false,
-            'reason' => 'worker_exception',
+            'reason' => $reason,
             'error' => mb_substr(
                 $error->getMessage(),
                 0,
@@ -99,6 +102,10 @@ do {
             ],
             true
         )
+        || (
+            (string)($result['reason'] ?? '') === 'locked'
+            && isset($result['error'])
+        )
     ) {
         $payload = ['success' => true, 'cycle' => $cycle] + $result;
         echo $json
@@ -130,7 +137,7 @@ do {
             $sleepMs,
             min(5000, (int)($result['retry_after_ms'] ?? $sleepMs))
         ),
-        'locked' => max($sleepMs, 1000),
+        'locked' => max($sleepMs, 250),
         'full_rebuild_required',
         'active_revision_missing',
         'worker_exception',

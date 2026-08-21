@@ -287,6 +287,23 @@ try {
         $workersUseSharedMigration,
         'All long-running workers must use the shared schema marker and migration lock'
     );
+    $incrementalWorkerSource =
+        $workerSources['incremental-score-worker.php'];
+    $assert(
+        str_contains(
+            $incrementalWorkerSource,
+            'databaseIsLockError($error)'
+        )
+        && str_contains(
+            $incrementalWorkerSource,
+            "'locked' => max(\$sleepMs, 250)"
+        )
+        && str_contains(
+            $incrementalWorkerSource,
+            "&& isset(\$result['error'])"
+        ),
+        'Incremental worker SQLite contention must use the short locked retry path'
+    );
 } finally {
     @unlink($lockPath);
     @unlink($reopenLockPath);
