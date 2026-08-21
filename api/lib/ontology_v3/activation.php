@@ -1690,6 +1690,31 @@ function ingredientOntologyActivationQuoteIdentifier(
                 'selector_kind' => 'score_revision',
                 'root' => false,
             ],
+            [
+                'phase' => 5,
+                'table' =>
+                    'ingredient_ontology_identity_extension_entities',
+                'cursor' => 'id',
+                'selector' => '
+                    EXISTS (
+                        SELECT 1
+                        FROM main.recipe_score_revisions score
+                        WHERE score.id = ?
+                          AND score.ontology_version_id =
+                              ingredient_ontology_identity_extension_entities
+                                  .ontology_version_id
+                          AND
+                              ingredient_ontology_identity_extension_entities
+                                  .created_revision
+                              <= score.identity_extension_revision
+                    )
+                ',
+                'selector_kind' => 'score_revision',
+                'root' => false,
+                'after_snapshot_sequence' => true,
+                'append_only' => true,
+                'retain_on_cleanup' => true,
+            ],
         ];
     }
 
@@ -1893,10 +1918,16 @@ function ingredientOntologyActivationQuoteIdentifier(
         string $table,
         string $cursor,
         string $selector,
-        int $candidateId
+        int $candidateId,
+        ?int $minimumCursorExclusive = null
     ): array {
         $tableName = ingredientOntologyActivationQuoteIdentifier($table);
         $cursorName = ingredientOntologyActivationQuoteIdentifier($cursor);
+        $parameters = [$candidateId];
+        if ($minimumCursorExclusive !== null) {
+            $selector = "({$selector}) AND {$cursorName} > ?";
+            $parameters[] = $minimumCursorExclusive;
+        }
         $summaryStmt = $db->prepare("
             SELECT COUNT(*) AS row_count,
                    MIN({$cursorName}) AS minimum_cursor,
@@ -1904,7 +1935,7 @@ function ingredientOntologyActivationQuoteIdentifier(
             FROM {$tableName}
             WHERE {$selector}
         ");
-        $summaryStmt->execute([$candidateId]);
+        $summaryStmt->execute($parameters);
         $summary = $summaryStmt->fetch(PDO::FETCH_ASSOC) ?: [];
         $rowHash = hash_init('sha256');
         $idHash = hash_init('sha256');
@@ -1913,7 +1944,7 @@ function ingredientOntologyActivationQuoteIdentifier(
             WHERE {$selector}
             ORDER BY {$cursorName}
         ");
-        $stmt->execute([$candidateId]);
+        $stmt->execute($parameters);
         while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
             hash_update(
                 $rowHash,
@@ -2070,6 +2101,20 @@ function ingredientOntologyActivationQuoteIdentifier(
                     ingredientOntologyActivationQuoteIdentifier($table);
                 $cursorName =
                     ingredientOntologyActivationQuoteIdentifier($cursor);
+                $selector = (string)$spec['selector'];
+                $parameters = [$candidateId];
+                if (!empty($spec['after_snapshot_sequence'])) {
+                    $baseline = $snapshot['sequences'][$table] ?? null;
+                    if ($baseline === null) {
+                        throw new RuntimeException(
+                            "ontology activation payload {$table} "
+                            . 'requires a sequence fence'
+                        );
+                    }
+                    $selector =
+                        "({$selector}) AND {$cursorName} > ?";
+                    $parameters[] = (int)$baseline;
+                }
                 $payloadDb->exec("
                     CREATE TABLE activation_payload.{$tableName}
                     AS SELECT * FROM main.{$tableName} WHERE 0
@@ -2077,9 +2122,9 @@ function ingredientOntologyActivationQuoteIdentifier(
                 $insert = $payloadDb->prepare("
                     INSERT INTO activation_payload.{$tableName}
                     SELECT * FROM main.{$tableName}
-                    WHERE {$spec['selector']}
+                    WHERE {$selector}
                 ");
-                $insert->execute([$candidateId]);
+                $insert->execute($parameters);
                 $insert->closeCursor();
                 $insert = null;
                 $index = ingredientOntologyActivationQuoteIdentifier(
@@ -3835,6 +3880,29 @@ function ingredientOntologyActivationAssertActiveDatabase(PDO $db): void {
         );
     }
 
+    function ingredientOntologyActivationReconcileScoreIdentityExtension(
+        PDO $db,
+        int $scoreRevisionId,
+        bool $requireScorePrefix
+    ): array {
+        $score = recipeScoreRevision($db, $scoreRevisionId);
+        if ($score === null) {
+            throw new RuntimeException(
+                'score identity extension root is unavailable'
+            );
+        }
+        return ingredientOntologyV3IdentityExtensionReconcileState(
+            $db,
+            (int)$score['ontology_version_id'],
+            $requireScorePrefix
+                ? (int)$score['identity_extension_revision']
+                : null,
+            $requireScorePrefix
+                ? (string)$score['identity_extension_hash']
+                : null
+        );
+    }
+
     function ingredientOntologyActivationImportRow(
         PDO $db,
         int $importId
@@ -4435,6 +4503,15 @@ function ingredientOntologyActivationAssertActiveDatabase(PDO $db): void {
                 if (!$table) {
                     dbBeginImmediateWithRetry($db);
                     try {
+                        if (
+                            (string)$row['bundle_kind'] === 'score'
+                        ) {
+                            ingredientOntologyActivationReconcileScoreIdentityExtension(
+                                $db,
+                                $candidateId,
+                                true
+                            );
+                        }
                         $done = $db->prepare("
                             UPDATE ontology_activation_imports
                             SET status = 'verifying',
@@ -4550,6 +4627,16 @@ function ingredientOntologyActivationAssertActiveDatabase(PDO $db): void {
                             $insert = null;
                             $newCursor = (int)$upperCursor;
                         }
+                    }
+                    if (
+                        $tableName ===
+                            'ingredient_ontology_identity_extension_entities'
+                    ) {
+                        ingredientOntologyActivationReconcileScoreIdentityExtension(
+                            $db,
+                            $candidateId,
+                            false
+                        );
                     }
                     $complete = (
                         (int)$table['rows_imported'] + $inserted
@@ -4714,7 +4801,10 @@ function ingredientOntologyActivationAssertActiveDatabase(PDO $db): void {
                 $tableName,
                 (string)$table['cursor_column'],
                 (string)$spec['selector'],
-                $candidateId
+                $candidateId,
+                !empty($spec['after_snapshot_sequence'])
+                    ? (int)$table['baseline_sequence']
+                    : null
             );
             if (
                 (int)($actual['row_count'] ?? -1)
@@ -4748,8 +4838,17 @@ function ingredientOntologyActivationAssertActiveDatabase(PDO $db): void {
             }
             if (
                 $table['expected_post_sequence'] !== null
-                && ingredientOntologyActivationSequence($db, $tableName)
-                    !== (int)$table['expected_post_sequence']
+                && (
+                    !empty($spec['append_only'])
+                        ? ingredientOntologyActivationSequence(
+                            $db,
+                            $tableName
+                        ) < (int)$table['expected_post_sequence']
+                        : ingredientOntologyActivationSequence(
+                            $db,
+                            $tableName
+                        ) !== (int)$table['expected_post_sequence']
+                )
             ) {
                 $errors[] = "{$tableName} sequence fence changed";
             }
@@ -5361,17 +5460,28 @@ function ingredientOntologyActivationAssertActiveDatabase(PDO $db): void {
             WHERE import_id = ?
         ");
         $tables->execute([(int)$row['id']]);
+        $specs = ingredientOntologyActivationSpecsForKind(
+            (string)$row['bundle_kind']
+        );
         foreach ($tables->fetchAll(PDO::FETCH_ASSOC) as $table) {
+            $spec = $specs[(string)$table['table_name']] ?? [];
             if ((string)$table['status'] !== 'complete') {
                 $errors[] = 'activation table is incomplete: '
                     . (string)$table['table_name'];
             }
             if (
                 $table['expected_post_sequence'] !== null
-                && ingredientOntologyActivationSequence(
-                        $db,
-                        (string)$table['table_name']
-                    ) !== (int)$table['expected_post_sequence']
+                && (
+                    !empty($spec['append_only'])
+                        ? ingredientOntologyActivationSequence(
+                            $db,
+                            (string)$table['table_name']
+                        ) < (int)$table['expected_post_sequence']
+                        : ingredientOntologyActivationSequence(
+                            $db,
+                            (string)$table['table_name']
+                        ) !== (int)$table['expected_post_sequence']
+                )
             ) {
                 $errors[] = 'activation sequence changed: '
                     . (string)$table['table_name'];
@@ -5911,6 +6021,16 @@ function ingredientOntologyActivationAssertActiveDatabase(PDO $db): void {
             }
             $tableName = (string)$table['table_name'];
             $spec = $specs[$tableName];
+            if (!empty($spec['retain_on_cleanup'])) {
+                $db->prepare("
+                    UPDATE ontology_activation_import_tables
+                    SET status = 'purged',
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE import_id = ? AND table_name = ?
+                ")->execute([$importId, $tableName]);
+                $chunks++;
+                continue;
+            }
             $target = ingredientOntologyActivationQuoteIdentifier($tableName);
             if (!empty($spec['root'])) {
                 $children = $db->prepare("

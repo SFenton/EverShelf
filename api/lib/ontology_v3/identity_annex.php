@@ -1103,6 +1103,155 @@ function ingredientOntologyV3IdentityExtensionIntegrityAudit(
     ];
 }
 
+function ingredientOntologyV3IdentityExtensionReconcileState(
+    PDO $db,
+    int $versionId,
+    ?int $requiredRevision = null,
+    ?string $requiredHash = null
+): array {
+    $version = ingredientOntologyV3Version($db, $versionId);
+    if ($version === null) {
+        throw new RuntimeException(
+            'identity extension state ontology version is unavailable'
+        );
+    }
+    $headStmt = $db->prepare("
+        SELECT created_revision, content_hash
+        FROM ingredient_ontology_identity_extension_entities
+        WHERE ontology_version_id = ?
+        ORDER BY created_revision DESC
+        LIMIT 1
+    ");
+    $headStmt->execute([$versionId]);
+    $head = $headStmt->fetch(PDO::FETCH_ASSOC);
+    $headRevision = $head
+        ? (int)$head['created_revision']
+        : 0;
+    $headHash = $head
+        ? (string)$head['content_hash']
+        : ingredientOntologyV3IdentityExtensionZeroHash();
+    $integrity = ingredientOntologyV3IdentityExtensionIntegrityAudit(
+        $db,
+        $versionId,
+        $headRevision,
+        $headHash
+    );
+    if (empty($integrity['valid'])) {
+        throw new RuntimeException(
+            'identity extension imported chain is invalid: '
+            . implode(', ', (array)$integrity['errors'])
+        );
+    }
+    if ($requiredRevision !== null) {
+        $requiredRevision = max(0, $requiredRevision);
+        $requiredHash ??=
+            ingredientOntologyV3IdentityExtensionZeroHash();
+        if ($requiredRevision > $headRevision) {
+            throw new RuntimeException(
+                'identity extension imported chain is incomplete'
+            );
+        }
+        $requiredIntegrity =
+            ingredientOntologyV3IdentityExtensionIntegrityAudit(
+                $db,
+                $versionId,
+                $requiredRevision,
+                $requiredHash
+            );
+        if (empty($requiredIntegrity['valid'])) {
+            throw new RuntimeException(
+                'identity extension imported prefix is invalid: '
+                . implode(
+                    ', ',
+                    (array)$requiredIntegrity['errors']
+                )
+            );
+        }
+    }
+    $stateStmt = $db->prepare("
+        SELECT ontology_content_hash, ontology_seal_hash,
+               head_revision, head_hash
+        FROM ingredient_ontology_identity_extension_state
+        WHERE ontology_version_id = ?
+    ");
+    $stateStmt->execute([$versionId]);
+    $state = $stateStmt->fetch(PDO::FETCH_ASSOC);
+    if ($state) {
+        if (
+            !hash_equals(
+                (string)$version['content_hash'],
+                (string)$state['ontology_content_hash']
+            )
+            || !hash_equals(
+                (string)$version['seal_hash'],
+                (string)$state['ontology_seal_hash']
+            )
+        ) {
+            throw new RuntimeException(
+                'identity extension imported state ontology fence changed'
+            );
+        }
+        $stateRevision = (int)$state['head_revision'];
+        if ($stateRevision > $headRevision) {
+            throw new RuntimeException(
+                'identity extension imported state references missing rows'
+            );
+        }
+        $stateIntegrity =
+            ingredientOntologyV3IdentityExtensionIntegrityAudit(
+                $db,
+                $versionId,
+                $stateRevision,
+                (string)$state['head_hash']
+            );
+        if (empty($stateIntegrity['valid'])) {
+            throw new RuntimeException(
+                'identity extension imported state prefix is invalid'
+            );
+        }
+    }
+    $db->prepare("
+        INSERT INTO ingredient_ontology_identity_extension_state (
+            ontology_version_id, ontology_content_hash,
+            ontology_seal_hash, head_revision, head_hash,
+            updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(ontology_version_id) DO UPDATE SET
+            head_revision = excluded.head_revision,
+            head_hash = excluded.head_hash,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE
+            ingredient_ontology_identity_extension_state
+                .ontology_content_hash =
+                    excluded.ontology_content_hash
+            AND ingredient_ontology_identity_extension_state
+                .ontology_seal_hash =
+                    excluded.ontology_seal_hash
+            AND ingredient_ontology_identity_extension_state
+                .head_revision <= excluded.head_revision
+    ")->execute([
+        $versionId,
+        (string)$version['content_hash'],
+        (string)$version['seal_hash'],
+        $headRevision,
+        $headHash,
+    ]);
+    $reconciled = ingredientOntologyV3IdentityExtensionSnapshot(
+        $db,
+        $versionId
+    );
+    if (
+        (int)$reconciled['revision'] !== $headRevision
+        || !hash_equals((string)$reconciled['hash'], $headHash)
+    ) {
+        throw new RuntimeException(
+            'identity extension imported state reconciliation failed'
+        );
+    }
+    return $reconciled;
+}
+
 function ingredientOntologyV3IdentityExtensionRow(array $row): array {
     $extensionEntityId = (int)$row['id'];
     return [
@@ -1282,6 +1431,35 @@ function ingredientOntologyV3IdentityExtensionContentHash(
     ]);
 }
 
+function ingredientOntologyV3IdentityExtensionImportInProgress(
+    PDO $db,
+    int $versionId
+): bool {
+    if (
+        $versionId <= 0
+        || !function_exists(
+            'ingredientOntologyControllerDatabaseIsActive'
+        )
+        || !ingredientOntologyControllerDatabaseIsActive($db)
+        || !ingredientOntologyV3TableExists(
+            $db,
+            'ontology_activation_imports'
+        )
+    ) {
+        return false;
+    }
+    $stmt = $db->prepare("
+        SELECT 1
+        FROM ontology_activation_imports
+        WHERE bundle_kind = 'score'
+          AND candidate_ontology_version_id = ?
+          AND status IN ('staging', 'importing')
+        LIMIT 1
+    ");
+    $stmt->execute([$versionId]);
+    return $stmt->fetchColumn() !== false;
+}
+
 function ingredientOntologyV3IdentityExtensionClaim(
     PDO $db,
     array $version,
@@ -1320,6 +1498,14 @@ function ingredientOntologyV3IdentityExtensionClaim(
     );
     if ($existing !== null || !$create) {
         return $existing;
+    }
+    if (ingredientOntologyV3IdentityExtensionImportInProgress(
+        $db,
+        (int)$version['id']
+    )) {
+        throw new RuntimeException(
+            'identity extension activation import is in progress'
+        );
     }
 
     static $savepointSequence = 0;
