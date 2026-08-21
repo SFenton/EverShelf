@@ -6898,6 +6898,7 @@ function ingredientOntologyV3FinalizeTerminalDispositions(
                         'taxonomy_rule', 'taxonomy_rule_evidence',
                         'quarantined_model_evidence', 'model',
                         'model_proposal', 'lexical', 'normalized_name',
+                        'foodon_hierarchy',
                     ],
                     true
                 );
@@ -7247,7 +7248,7 @@ function ingredientOntologyV3DispositionAudit(
           AND mapping_source IN (
               'taxonomy_rule', 'taxonomy_rule_evidence',
               'quarantined_model_evidence', 'model', 'model_proposal',
-              'lexical', 'normalized_name'
+              'lexical', 'normalized_name', 'foodon_hierarchy'
           )
     ");
     $stmt->execute([$versionId]);

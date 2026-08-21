@@ -6,6 +6,13 @@ define('CRON_MODE', true);
 define('RECIPE_BACKEND_TEST_MODE', true);
 require_once __DIR__ . '/../api/bootstrap.php';
 
+$GLOBALS[
+    'INGREDIENT_ONTOLOGY_EXACT_SELF_IDENTITY_ENABLED_OVERRIDE'
+] = false;
+$GLOBALS[
+    'INGREDIENT_ONTOLOGY_IDENTITY_READINESS_V2_ENABLED_OVERRIDE'
+] = false;
+
 $assertions = 0;
 $assert = static function (bool $condition, string $message) use (
     &$assertions
@@ -1103,10 +1110,24 @@ $unknownReadiness =
     );
 $assert(
     $unknownRetry['status'] === 'unresolved'
-    && (string)$unknownReadiness['status'] === 'needs_review'
+    && (string)$unknownReadiness['status'] === 'retry'
     && (int)$unknownReadiness['attempts'] === 4
-    && $unknownReadiness['next_retry_at'] === null,
-    'Unresolved identities must terminate visibly within a bounded retry budget'
+    && $unknownReadiness['next_retry_at'] !== null,
+    'Unresolved food identities must remain retryable without needs_review'
+);
+$db->prepare("
+    UPDATE ingredient_ontology_product_readiness
+    SET status = 'needs_review',
+        next_retry_at = NULL
+    WHERE product_id = ?
+")->execute([$productIds['unknown']]);
+ingredientOntologyV3ProductReadinessRetryDue($db);
+$assert(
+    (string)ingredientOntologyV3ProductReadinessRow(
+        $db,
+        $productIds['unknown']
+    )['status'] === 'retry',
+    'Historical needs_review identity work must be requeued'
 );
 $db->prepare("
     UPDATE ingredient_ontology_product_readiness
@@ -1116,10 +1137,11 @@ $db->prepare("
 $identityStatus =
     evershelfProcessingStatusIdentityReadiness($db);
 $assert(
-    (int)$identityStatus['needs_review_count'] >= 1
+    (int)$identityStatus['needs_review_count'] === 0
+    && (int)$identityStatus['retry_count'] >= 1
     && (string)($identityStatus['oldest_pending_at'] ?? '')
-        !== '2000-01-01 00:00:00',
-    'Terminal identity review rows must not pin pending-age telemetry'
+        === '2000-01-01 00:00:00',
+    'Retryable identity work must remain visible in pending-age telemetry'
 );
 $db->prepare("
     DELETE FROM ingredient_ontology_identity_annex
@@ -1288,8 +1310,8 @@ $legacySlicedHamReadiness =
 $assert(
     $legacySlicedHam['status'] === 'unresolved'
     && (string)$legacySlicedHamReadiness['status']
-        === 'needs_review',
-    'Legacy unknown-food behavior must be reproduced before exact fallback'
+        === 'retry',
+    'Emergency-disabled exact identity must still avoid needs_review'
 );
 
 $GLOBALS[

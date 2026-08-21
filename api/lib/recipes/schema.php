@@ -8,7 +8,56 @@
 require_once __DIR__ . '/../ontology_v3/schema.php';
 
 const RECIPE_MAX_FACTUAL_DURATION_SECONDS = 366 * 24 * 60 * 60;
+const RECIPE_SCHEMA_VERSION = 31601;
 const RECIPE_ONTOLOGY_SOURCE_TRIGGER_VERSION = 31502;
+
+function recipeSchemaTestHook(
+    string $stage,
+    array $context = []
+): void {
+    if (
+        defined('RECIPE_BACKEND_TEST_MODE')
+        && RECIPE_BACKEND_TEST_MODE
+        && is_callable($GLOBALS['RECIPE_SCHEMA_TEST_HOOK'] ?? null)
+    ) {
+        ($GLOBALS['RECIPE_SCHEMA_TEST_HOOK'])($stage, $context);
+    }
+}
+
+function recipeSchemaRunOnce(
+    PDO $db,
+    string $migrationKey,
+    callable $migration
+): bool {
+    static $savepointSequence = 0;
+    $savepoint = 'recipe_schema_once_' . (++$savepointSequence);
+    $db->exec("SAVEPOINT {$savepoint}");
+    try {
+        $marker = $db->prepare("
+            INSERT OR IGNORE INTO recipe_schema_migrations (
+                migration_key, schema_version
+            )
+            VALUES (?, ?)
+        ");
+        $marker->execute([$migrationKey, RECIPE_SCHEMA_VERSION]);
+        $applied = $marker->rowCount() === 1;
+        if ($applied) {
+            recipeSchemaTestHook('after_marker_insert', [
+                'migration_key' => $migrationKey,
+            ]);
+            $migration();
+        }
+        $db->exec("RELEASE SAVEPOINT {$savepoint}");
+        return $applied;
+    } catch (Throwable $error) {
+        try {
+            $db->exec("ROLLBACK TO SAVEPOINT {$savepoint}");
+            $db->exec("RELEASE SAVEPOINT {$savepoint}");
+        } catch (Throwable $ignored) {
+        }
+        throw $error;
+    }
+}
 
 function recipeArrayIsList(array $value): bool {
     $expected = 0;
@@ -124,6 +173,8 @@ function recipeSchemaMigrate(PDO $db): void {
                 CHECK(metadata_failure_count BETWEEN 0 AND 255),
             metadata_next_probe_at DATETIME DEFAULT NULL,
             metadata_failure_schema_version TEXT DEFAULT NULL,
+            last_applied_request_epoch INTEGER NOT NULL DEFAULT 0
+                CHECK(last_applied_request_epoch >= 0),
             first_seen_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
             last_seen_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
             availability TEXT NOT NULL DEFAULT 'available',
@@ -656,12 +707,43 @@ function recipeSchemaMigrate(PDO $db): void {
             next_retry_at DATETIME DEFAULT NULL,
             last_error TEXT NOT NULL DEFAULT '',
             last_result_json TEXT DEFAULT NULL,
+            request_epoch INTEGER NOT NULL DEFAULT 0
+                CHECK(request_epoch >= 0),
+            request_generation INTEGER NOT NULL DEFAULT 1
+                CHECK(request_generation > 0),
+            request_hash TEXT NOT NULL DEFAULT '',
+            lease_token TEXT DEFAULT NULL,
+            lease_generation INTEGER NOT NULL DEFAULT 0
+                CHECK(lease_generation >= 0),
+            lease_expires_at DATETIME DEFAULT NULL,
             created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
             updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
             started_at DATETIME DEFAULT NULL,
             finished_at DATETIME DEFAULT NULL,
             FOREIGN KEY (ingredient_id) REFERENCES canonical_ingredients(id) ON DELETE SET NULL,
             FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS recipe_job_request_epoch (
+            id INTEGER PRIMARY KEY CHECK(id = 1),
+            next_epoch INTEGER NOT NULL DEFAULT 1
+                CHECK(next_epoch > 0)
+        );
+
+        CREATE TABLE IF NOT EXISTS recipe_schema_migrations (
+            migration_key TEXT PRIMARY KEY,
+            schema_version INTEGER NOT NULL,
+            applied_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE IF NOT EXISTS recipe_worker_leases (
+            lease_name TEXT PRIMARY KEY,
+            lease_token TEXT DEFAULT NULL,
+            lease_generation INTEGER NOT NULL DEFAULT 0
+                CHECK(lease_generation >= 0),
+            lease_expires_at DATETIME DEFAULT NULL,
+            owner_started_at DATETIME DEFAULT NULL,
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
 
         CREATE TABLE IF NOT EXISTS recipe_score_state (
@@ -978,6 +1060,8 @@ function recipeSchemaMigrate(PDO $db): void {
             last_error TEXT NOT NULL DEFAULT '',
             failure_count INTEGER NOT NULL DEFAULT 0,
             circuit_open_until DATETIME DEFAULT NULL,
+            last_outcome_request_epoch INTEGER NOT NULL DEFAULT 0
+                CHECK(last_outcome_request_epoch >= 0),
             quota_json TEXT NOT NULL DEFAULT '{}',
             quota_reset_at DATETIME DEFAULT NULL,
             updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -1263,6 +1347,8 @@ function recipeSchemaMigrate(PDO $db): void {
         'metadata_failure_count' => 'INTEGER NOT NULL DEFAULT 0',
         'metadata_next_probe_at' => 'DATETIME DEFAULT NULL',
         'metadata_failure_schema_version' => 'TEXT DEFAULT NULL',
+        'last_applied_request_epoch' =>
+            'INTEGER NOT NULL DEFAULT 0',
     ] as $column => $definition) {
         if (in_array($column, $originColumns, true)) {
             continue;
@@ -1586,11 +1672,96 @@ function recipeSchemaMigrate(PDO $db): void {
         $db->query("PRAGMA table_info(recipe_jobs)")->fetchAll(PDO::FETCH_ASSOC),
         'name'
     );
-    if (!in_array('priority', $jobColumns, true)) {
+    foreach ([
+        'priority' => 'INTEGER NOT NULL DEFAULT 0',
+        'request_epoch' => 'INTEGER NOT NULL DEFAULT 0',
+        'request_generation' => 'INTEGER NOT NULL DEFAULT 1',
+        'request_hash' => "TEXT NOT NULL DEFAULT ''",
+        'lease_token' => 'TEXT DEFAULT NULL',
+        'lease_generation' => 'INTEGER NOT NULL DEFAULT 0',
+        'lease_expires_at' => 'DATETIME DEFAULT NULL',
+    ] as $column => $definition) {
+        if (in_array($column, $jobColumns, true)) {
+            continue;
+        }
         try {
-            $db->exec("ALTER TABLE recipe_jobs ADD COLUMN priority INTEGER NOT NULL DEFAULT 0");
+            $db->exec("
+                ALTER TABLE recipe_jobs
+                ADD COLUMN {$column} {$definition}
+            ");
         } catch (PDOException $e) {
             if (!str_contains(strtolower($e->getMessage()), 'duplicate column')) {
+                throw $e;
+            }
+        }
+    }
+    $db->exec("
+        CREATE TABLE IF NOT EXISTS recipe_job_request_epoch (
+            id INTEGER PRIMARY KEY CHECK(id = 1),
+            next_epoch INTEGER NOT NULL DEFAULT 1
+                CHECK(next_epoch > 0)
+        );
+        INSERT OR IGNORE INTO recipe_job_request_epoch (id, next_epoch)
+        VALUES (
+            1,
+            COALESCE(
+                (SELECT MAX(request_epoch) + 1 FROM recipe_jobs),
+                1
+            )
+        );
+        UPDATE recipe_jobs
+        SET request_epoch = id
+        WHERE request_epoch <= 0;
+        UPDATE recipe_job_request_epoch
+        SET next_epoch = MAX(
+            next_epoch,
+            COALESCE(
+                (SELECT MAX(request_epoch) + 1 FROM recipe_jobs),
+                1
+            )
+        )
+        WHERE id = 1;
+        UPDATE recipe_jobs
+        SET status = 'retry',
+            next_retry_at = CURRENT_TIMESTAMP,
+            last_error = 'legacy lease reclaimed during migration',
+            lease_token = NULL,
+            lease_expires_at = NULL,
+            started_at = NULL,
+            finished_at = NULL,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE status = 'in_progress'
+          AND (
+              lease_token IS NULL
+              OR TRIM(lease_token) = ''
+              OR lease_expires_at IS NULL
+          );
+    ");
+    $db->exec("
+        CREATE INDEX IF NOT EXISTS idx_recipe_jobs_lease
+            ON recipe_jobs(status, lease_expires_at, id)
+    ");
+    $connectorStateColumns = array_column(
+        $db->query("PRAGMA table_info(recipe_connector_state)")
+            ->fetchAll(PDO::FETCH_ASSOC),
+        'name'
+    );
+    if (!in_array(
+        'last_outcome_request_epoch',
+        $connectorStateColumns,
+        true
+    )) {
+        try {
+            $db->exec("
+                ALTER TABLE recipe_connector_state
+                ADD COLUMN last_outcome_request_epoch
+                    INTEGER NOT NULL DEFAULT 0
+            ");
+        } catch (PDOException $e) {
+            if (!str_contains(
+                strtolower($e->getMessage()),
+                'duplicate column'
+            )) {
                 throw $e;
             }
         }
@@ -1599,11 +1770,18 @@ function recipeSchemaMigrate(PDO $db): void {
         SELECT sql FROM sqlite_master
         WHERE type = 'index' AND name = 'idx_recipe_jobs_ready'
     ")->fetchColumn() ?: '');
-    if ($jobIndexSql === '' || !str_contains(strtolower($jobIndexSql), 'priority')) {
+    if (
+        $jobIndexSql === ''
+        || !str_contains(strtolower($jobIndexSql), 'priority')
+        || !str_contains(strtolower($jobIndexSql), 'lease_expires_at')
+    ) {
         $db->exec("
             DROP INDEX IF EXISTS idx_recipe_jobs_ready;
             CREATE INDEX idx_recipe_jobs_ready
-                ON recipe_jobs(status, priority DESC, next_retry_at, created_at);
+                ON recipe_jobs(
+                    status, priority DESC, next_retry_at,
+                    lease_expires_at, created_at
+                );
         ");
     }
     $scoreRevisionColumns = array_column(
@@ -1787,7 +1965,8 @@ function recipeSchemaMigrate(PDO $db): void {
         )
         && !$ontologySourceTriggersCurrent
     ) {
-        $ownsOntologySourceTransaction = !$db->inTransaction();
+        $ownsOntologySourceTransaction =
+            !databaseTransactionIsActive($db);
         $ontologySourceTransactionStarted = false;
         try {
             if ($ownsOntologySourceTransaction) {
@@ -2382,15 +2561,112 @@ function recipeSchemaMigrate(PDO $db): void {
         'local' => '1',
         'generated' => '1',
         'manual' => '1',
-        'cookidoo' => 'metadata-v2',
+        'cookidoo' => 'metadata-v3-operator-enabled',
     ] as $connector => $policyVersion) {
         $connectorSeed->execute([$connector, $policyVersion]);
     }
     $db->exec("
         UPDATE recipe_connector_state
-        SET policy_version = 'metadata-v2', updated_at = CURRENT_TIMESTAMP
-        WHERE connector = 'cookidoo' AND policy_version <> 'metadata-v2'
+        SET policy_version = 'metadata-v3-operator-enabled',
+            updated_at = CURRENT_TIMESTAMP
+        WHERE connector = 'cookidoo'
+          AND policy_version IN (
+              'metadata-v1',
+              'metadata-v2',
+              'metadata-v2-detail-disabled',
+              'metadata-v2-allowlisted-opt-in'
+          )
     ");
+
+    $db->exec("
+        CREATE TABLE IF NOT EXISTS recipe_schema_migrations (
+            migration_key TEXT PRIMARY KEY,
+            schema_version INTEGER NOT NULL,
+            applied_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+    ");
+    recipeSchemaRunOnce(
+        $db,
+        'cookidoo_discovery_policy_v3_v1',
+        static function () use ($db): void {
+            $db->exec("
+                UPDATE recipe_jobs
+                SET payload_json = json_set(
+                        payload_json,
+                        '$._detail_policy_version',
+                        'metadata-v3-operator-enabled'
+                    ),
+                    request_generation = request_generation + 1,
+                    request_hash = '',
+                    status = CASE
+                        WHEN status = 'in_progress' THEN 'retry'
+                        ELSE status
+                    END,
+                    next_retry_at = CASE
+                        WHEN status = 'in_progress'
+                        THEN CURRENT_TIMESTAMP
+                        ELSE next_retry_at
+                    END,
+                    last_error = CASE
+                        WHEN status = 'in_progress'
+                        THEN 'policy migration reclaimed active discovery job'
+                        ELSE last_error
+                    END,
+                    lease_token = NULL,
+                    lease_expires_at = NULL,
+                    started_at = CASE
+                        WHEN status = 'in_progress' THEN NULL
+                        ELSE started_at
+                    END,
+                    finished_at = CASE
+                        WHEN status = 'in_progress' THEN NULL
+                        ELSE finished_at
+                    END,
+                    updated_at = CASE
+                        WHEN status = 'in_progress'
+                        THEN CURRENT_TIMESTAMP
+                        ELSE updated_at
+                    END
+                WHERE connector = 'cookidoo'
+                  AND job_type = 'connector_discovery'
+                  AND CASE
+                      WHEN json_valid(payload_json) = 0 THEN 0
+                      WHEN json_extract(
+                          payload_json,
+                          '$._detail_policy_version'
+                      ) IN (
+                          'metadata-v2-detail-disabled',
+                          'metadata-v2-allowlisted-opt-in'
+                      ) THEN 1
+                      WHEN json_type(
+                          payload_json,
+                          '$._detail_policy_version'
+                      ) IS NULL
+                      AND json_type(payload_json, '$.locale') = 'text'
+                      AND (
+                          json_type(payload_json, '$.query') = 'text'
+                          OR json_type(
+                              payload_json,
+                              '$.ingredients'
+                          ) = 'array'
+                      ) THEN 1
+                      ELSE 0
+                  END = 1
+            ");
+        }
+    );
+    recipeSchemaRunOnce(
+        $db,
+        'recipe_stale_while_revalidate_v1',
+        static function () use ($db): void {
+            $db->exec("
+            UPDATE recipe_score_state
+            SET cursor_revision = cursor_revision + 1,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = 1
+            ");
+        }
+    );
 
     ingredientOntologyV3SchemaMigrate($db);
 }

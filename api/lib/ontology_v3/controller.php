@@ -8694,14 +8694,15 @@ function ingredientOntologyControllerStreamEpoch(
             );
         }
         $repair = (string)($plan['repair_kind'] ?? 'abstain');
-        $risk = ingredientOntologyControllerEffectivePlanRisk(
+        $authorization = ingredientOntologyControllerEffectivePlanRisk(
             $db,
             $versionId,
             $plan,
             $job['subject_id'] !== null
                 ? (int)$job['subject_id']
                 : null
-        )['risk'];
+        );
+        $risk = (string)$authorization['risk'];
         $jobInput = json_decode(
             (string)$job['input_json'],
             true
@@ -8718,6 +8719,10 @@ function ingredientOntologyControllerStreamEpoch(
                 $jobInput['target_owner_fingerprint'] ?? null,
             'constraint_ledger_id' =>
                 $jobInput['constraint_ledger_id'] ?? null,
+            'identity_authorization' =>
+                $authorization['foodon_hierarchy_proof'] !== null
+                    ? 'foodon_hierarchy_forbidden'
+                    : 'ordinary_policy',
         ];
         $planJson = ingredientOntologyControllerStableJson($plan);
         $planHash = hash('sha256', $planJson);
@@ -10160,7 +10165,6 @@ function ingredientOntologyControllerStreamEpoch(
             && empty($plan['attributes'])
             && empty($plan['relations'])
             && empty($plan['optional_deltas'])
-            && (float)($plan['confidence'] ?? 0) >= 0.9
         ) {
             $foodOnProof =
                 ingredientOntologyControllerFoodOnHierarchyProof(
@@ -10171,11 +10175,122 @@ function ingredientOntologyControllerStreamEpoch(
                 );
         }
         return [
-            'risk' => $foodOnProof !== null ? 'R0' : $baseRisk,
+            'risk' => $baseRisk,
             'base_risk' => $baseRisk,
             'entity_id' => $entityId,
             'subject_id' => $subjectId,
             'foodon_hierarchy_proof' => $foodOnProof,
+        ];
+    }
+
+    function ingredientOntologyV3FoodOnHierarchyIdentityAudit(
+        PDO $db,
+        int $limit = 100,
+        bool $remediate = false
+    ): array {
+        $limit = max(1, min(1000, $limit));
+        $rows = $db->query("
+            SELECT mapping.id AS mapping_id,
+                   mapping.ontology_version_id,
+                   version.status AS version_status,
+                   mapping.owner_type, mapping.owner_id,
+                   mapping.owner_fingerprint,
+                   mapping.entity_id, mapping.status,
+                   mapping.mapping_source
+            FROM ingredient_ontology_mappings mapping
+            JOIN ingredient_ontology_versions version
+              ON version.id = mapping.ontology_version_id
+            WHERE mapping.status = 'accepted'
+              AND mapping.mapping_source = 'foodon_hierarchy'
+            ORDER BY mapping.ontology_version_id, mapping.id
+            LIMIT {$limit}
+        ")->fetchAll(PDO::FETCH_ASSOC);
+        $requeued = [];
+        if ($remediate) {
+            foreach ($rows as $row) {
+                if ((string)$row['owner_type'] !== 'product') {
+                    continue;
+                }
+                $productId = (int)$row['owner_id'];
+                $product = $db->prepare("
+                    SELECT id
+                    FROM products
+                    WHERE id = ?
+                ");
+                $product->execute([$productId]);
+                if ($product->fetchColumn() === false) {
+                    continue;
+                }
+                $savepoint = 'foodon_identity_remediation_'
+                    . $productId;
+                $db->exec("SAVEPOINT {$savepoint}");
+                try {
+                    canonicalIngredientEnqueueProduct(
+                        $db,
+                        $productId,
+                        'foodon_hierarchy_identity_remediation'
+                    );
+                    $admission =
+                        ingredientOntologyV3IdentityAdmissionPublishProduct(
+                            $db,
+                            $productId,
+                            null,
+                            'foodon_hierarchy_identity_remediation',
+                            true,
+                            false,
+                            true,
+                            true,
+                            true,
+                            false
+                        );
+                    if (
+                        empty($admission['accepted'])
+                        || !str_contains(
+                            (string)($admission['source'] ?? ''),
+                            'exact_self_identity'
+                        )
+                    ) {
+                        throw new RuntimeException(
+                            'FoodOn remediation could not publish exact-self identity'
+                        );
+                    }
+                    $db->exec("RELEASE SAVEPOINT {$savepoint}");
+                } catch (Throwable $error) {
+                    $db->exec(
+                        "ROLLBACK TO SAVEPOINT {$savepoint}"
+                    );
+                    $db->exec("RELEASE SAVEPOINT {$savepoint}");
+                    throw $error;
+                }
+                $requeued[] = [
+                    'product_id' => $productId,
+                    'accepted' => !empty($admission['accepted']),
+                    'source' => (string)($admission['source'] ?? ''),
+                    'entity_id' =>
+                        (int)($admission['entity_id'] ?? 0),
+                ];
+            }
+        }
+        return [
+            'unsafe_mapping_count' => count($rows),
+            'truncated' => count($rows) === $limit,
+            'rows' => array_map(
+                static fn(array $row): array => [
+                    'mapping_id' => (int)$row['mapping_id'],
+                    'ontology_version_id' =>
+                        (int)$row['ontology_version_id'],
+                    'version_status' =>
+                        (string)$row['version_status'],
+                    'owner_type' => (string)$row['owner_type'],
+                    'owner_id' => (int)$row['owner_id'],
+                    'entity_id' => (int)$row['entity_id'],
+                    'mapping_source' =>
+                        (string)$row['mapping_source'],
+                ],
+                $rows
+            ),
+            'remediated' => count($requeued),
+            'requeued_exact_self' => $requeued,
         ];
     }
 
@@ -20184,6 +20299,28 @@ function ingredientOntologyV3ApplyChangeSetContinue(
                     'change_set_id' => $changeSetId,
                 ];
             }
+            if (
+                $foodOnProof !== null
+                || (string)($plan['controller_context'][
+                    'identity_authorization'
+                ] ?? '') === 'foodon_hierarchy_forbidden'
+            ) {
+                $db->prepare("
+                    UPDATE ontology_mutation_plans
+                    SET status = 'quarantined'
+                    WHERE id = ? AND status = 'staged'
+                ")->execute([(int)$row['plan_id']]);
+                if ($ownsTransaction) {
+                    $db->exec('COMMIT');
+                }
+                return [
+                    'applied' => false,
+                    'quarantined' => true,
+                    'reason' =>
+                        'foodon_hierarchy_cannot_authorize_identity',
+                    'change_set_id' => $changeSetId,
+                ];
+            }
             if (!ingredientOntologyControllerRiskAuthorized(
                 $db,
                 $risk,
@@ -20336,9 +20473,7 @@ function ingredientOntologyV3ApplyChangeSetContinue(
                         $mappingId,
                         $entityId,
                         $attributes,
-                        $foodOnProof !== null
-                            ? 'foodon_hierarchy'
-                            : 'autonomous_controller',
+                        'autonomous_controller',
                         $evidenceHash
                     );
                 }

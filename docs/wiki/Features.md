@@ -103,7 +103,7 @@ The Recipes page also maintains a local catalog:
   inventory is rechecked at mutation time, uncertain items remain ineligible, broad
   taxonomy rules cannot rename/dedupe groceries, and Home Assistant is never called directly
 - Keep local results available when every remote connector is offline
-- Keep remote Cookidoo hydration policy-disabled while preserving local/cached recipe search
+- Keep remote Cookidoo hydration opt-in while preserving local/cached recipe search
 
 Generated recipes are persisted automatically. Prepared-food inventory rows and
 already-expired stock are excluded from automatic suggestions. Inventory matching
@@ -156,11 +156,14 @@ Ingredient `preparation` is never accessed. The Instructions capability is an
 external Cookidoo link with an empty step list and no group property; local/manual/generated
 recipes may use bounded group labels backed by their own structured data.
 
-Current repository policy disables provider detail hydration because the available
-response co-transports official steps. Bridge search/direct metadata fail locally
-before provider calls; discovery and backfill enqueue are refused; legacy queued
-jobs are skipped without connector accounting. Existing cached rows remain readable,
-including external canonical/instructions links. No full backfill is authorized.
+Cookidoo detail hydration is default-off and requires matching EverShelf and bridge
+flags. The provider response may co-transport official steps, but the bridge returns
+only bounded factual metadata; instructions and other prohibited content are never
+inspected, logged, returned, or persisted. The execution capability must report
+`metadata-v3-operator-enabled`, independently of the `metadata-v2` storage marker.
+Existing cached rows remain searchable while stale, expose `is_stale`, and retain
+stable browse cursors across TTL refresh. Reads may enqueue bounded refresh work
+without the separately gated full backfill.
 
 ### AI Chat Assistant
 

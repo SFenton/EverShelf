@@ -954,7 +954,7 @@ function recipeCatalogSaveVariant(PDO $db, array $recipe, array $metadata = []):
     }
 
     $isNewRecipe = $recipeId <= 0;
-    $ownsTransaction = !$db->inTransaction();
+    $ownsTransaction = !databaseTransactionIsActive($db);
     if ($ownsTransaction) {
         $db->beginTransaction();
     }
@@ -1278,7 +1278,7 @@ function recipeCatalogSaveVariant(PDO $db, array $recipe, array $metadata = []):
             $db->commit();
         }
     } catch (Throwable $e) {
-        if ($ownsTransaction && $db->inTransaction()) {
+        if ($ownsTransaction && databaseTransactionIsActive($db)) {
             $db->rollBack();
         }
         throw $e;
@@ -1358,7 +1358,13 @@ function recipeCatalogGetById(PDO $db, int $recipeId, bool $includeDeleted = fal
                COALESCE(s.cooked_count, 0) AS cooked_count, s.last_cooked,
                cl.cluster_key, cl.method AS cluster_method, cl.confidence AS cluster_confidence,
                CASE
-                   WHEN c.stale_at IS NOT NULL AND c.stale_at < CURRENT_TIMESTAMP
+                   WHEN (
+                       c.stale_at IS NOT NULL
+                       AND c.stale_at < CURRENT_TIMESTAMP
+                   ) OR (
+                       c.cache_expires_at IS NOT NULL
+                       AND c.cache_expires_at < CURRENT_TIMESTAMP
+                   )
                    THEN 1 ELSE 0
                END AS is_stale
         FROM recipe_catalog c
@@ -1452,7 +1458,7 @@ function recipeCatalogGetById(PDO $db, int $recipeId, bool $includeDeleted = fal
 function recipeCatalogDelete(PDO $db, int $recipeId): bool {
     $saveLock = recipeCatalogSaveLock();
     try {
-        $ownsTransaction = !$db->inTransaction();
+        $ownsTransaction = !databaseTransactionIsActive($db);
         if ($ownsTransaction) {
             $db->beginTransaction();
         }
@@ -1489,7 +1495,7 @@ function recipeCatalogDelete(PDO $db, int $recipeId): bool {
             }
             return true;
         } catch (Throwable $e) {
-            if ($ownsTransaction && $db->inTransaction()) {
+            if ($ownsTransaction && databaseTransactionIsActive($db)) {
                 $db->rollBack();
             }
             throw $e;

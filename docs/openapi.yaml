@@ -940,12 +940,12 @@ paths:
 
   /v1/search:
     post:
-      summary: Cookidoo search policy gate with English-only scaffolding
+      summary: Search Cookidoo and return allowlisted metadata
       description: >-
         Authenticated internal bridge route. The request contract keeps locale
         separate from the upstream languages filter and defaults/forces
-        languages to English. Current repository policy still returns 503
-        locally and makes zero provider requests.
+        languages to English. The route is default-off and calls the provider
+        only when bridge detail hydration is enabled.
       tags: [Internal Cookidoo Bridge]
       servers:
         - url: http://cookidoo-bridge:8081
@@ -985,15 +985,15 @@ paths:
         "400": { description: Invalid request or non-English language filter }
         "401": { description: Invalid bridge bearer token }
         "429": { description: Bridge rate limit exceeded }
-        "503": { description: metadata_hydration_disabled_policy }
+        "503": { description: metadata_hydration_disabled }
 
   /v1/metadata:
     post:
-      summary: Cookidoo metadata hydration policy gate
+      summary: Hydrate allowlisted Cookidoo metadata
       description: >-
-        Internal bridge-only route. Current repository policy disables provider
-        detail hydration because the available response co-transports official
-        steps. Valid requests fail locally without a provider call.
+        Internal bridge-only route. Provider responses may co-transport official
+        steps, but only bounded factual metadata is returned. The route is
+        default-off and requires bridge detail hydration to be enabled.
       tags: [Internal Cookidoo Bridge]
       servers:
         - url: http://cookidoo-bridge:8081
@@ -1014,7 +1014,7 @@ paths:
         "429":
           description: Bridge rate limit exceeded
         "503":
-          description: metadata_hydration_disabled_policy
+          description: metadata_hydration_disabled
 
   /v1/planner-capabilities:
     post:
@@ -1062,7 +1062,7 @@ paths:
 
   /index.php?action=recipe_catalog_discover:
     post:
-      summary: Return local results with Cookidoo hydration disabled
+      summary: Return local results and optionally queue Cookidoo discovery
       tags: [Recipes]
       requestBody:
         required: true
@@ -1080,8 +1080,7 @@ paths:
                   items: { type: string }
                 locale:
                   type: string
-                  description: >-
-                    Retained request field; provider hydration is policy-disabled.
+                  description: Cookidoo storefront/localization locale.
                 languages:
                   type: array
                   items: { type: string, enum: [en] }
@@ -1103,8 +1102,7 @@ paths:
                 crawl_all:
                   type: boolean
                   default: false
-                  description: >-
-                    Retained compatibility field; no crawl job is queued.
+                  description: Continue bounded pages through the crawl queue.
                 interactive:
                   type: boolean
                   default: false
@@ -1116,8 +1114,9 @@ paths:
       responses:
         "200":
           description: >-
-            Local results with job null, detail_hydration false, and
-            unrefreshable_reason provider_detail_policy_disabled.
+            Local results plus an optional discovery job. When hydration is
+            disabled, job is null and unrefreshable_reason is
+            metadata_hydration_disabled.
 
   /index.php?action=recipe_jobs_status:
     get:
@@ -1139,12 +1138,13 @@ paths:
             One job, recent jobs, or aggregate hydration progress and compact new
             items for a search_id. Internal workers may also report bounded
             recipe_metadata_refresh jobs created by the disabled-by-default
-            direct-ID metadata-v2 backfill CLI. Those job results expose at most
+            direct-ID metadata-v2 backfill CLI. Provider execution additionally
+            requires bridge capability policy metadata-v3-operator-enabled.
+            Those job results expose at most
             20 ordered succeeded/failed recipe and external IDs, bounded
-            permanent error kinds, and per-outcome counts. A committed batch that
-            changes effective stale_at visibility increments only cursor_revision
-            once, invalidating older browse cursors without dirtying score or
-            catalog revisions.
+            permanent error kinds, and per-outcome counts. Freshness TTL never
+            removes a cached row from catalog membership, so stale-to-fresh
+            refresh preserves browse cursors and score/catalog revisions.
         "400":
           description: A supplied job ID is malformed or not a positive canonical integer
 
@@ -1710,12 +1710,15 @@ components:
             last_cooked: { type: [string, "null"] }
         freshness:
           type: object
-          required: [retrieved_at, stale_at, updated_at, is_stale]
+          required: [retrieved_at, stale_at, cache_expires_at, updated_at, is_stale]
           properties:
             retrieved_at: { type: [string, "null"] }
             stale_at: { type: [string, "null"] }
+            cache_expires_at: { type: [string, "null"] }
             updated_at: { type: string }
-            is_stale: { type: boolean }
+            is_stale:
+              type: boolean
+              description: True when either freshness deadline has elapsed; stale rows remain readable.
         revision:
           type: object
           required:

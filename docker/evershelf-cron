@@ -17,7 +17,7 @@ PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 # Preserve legacy-v2 score maintenance. For active v3 revisions this reports
 # that copied activation owns refresh instead of attempting a live shadow.
 * * * * * www-data sleep 5 && flock -n /var/www/html/data/.background-writer.lock php /var/www/html/scripts/rebuild-recipe-scores.php >> /var/www/html/data/cron.log 2>&1
-* * * * * www-data sleep 15 && flock -n /var/www/html/data/.background-writer.lock php /var/www/html/scripts/process-recipe-queue.php --limit=2 --max-attempts=3 --respect-cookidoo-cadence >> /var/www/html/data/cron.log 2>&1
+* * * * * www-data sleep 15 && php /var/www/html/scripts/process-recipe-queue.php --limit=2 --max-attempts=3 --respect-cookidoo-cadence >> /var/www/html/data/cron.log 2>&1
 * * * * * www-data sleep 25 && php /var/www/html/scripts/prune-recipe-scores.php --max-chunks=20 >> /var/www/html/data/cron.log 2>&1
 12 * * * * www-data php /var/www/html/scripts/compact-recipe-scores.php >> /var/www/html/data/cron.log 2>&1
 * * * * * www-data sleep 45 && flock -n /var/www/html/data/.background-writer.lock php /var/www/html/scripts/process-shopping-classification-queue.php --limit=1 >> /var/www/html/data/cron.log 2>&1

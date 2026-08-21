@@ -16,7 +16,8 @@ const INGREDIENT_ONTOLOGY_PRODUCT_READINESS_MAX_RETRY_SECONDS = 3600;
 
 function ingredientOntologyV3IdentityFeatureEnabled(
     string $environmentKey,
-    string $testOverrideKey
+    string $testOverrideKey,
+    bool $default = false
 ): bool {
     if (
         defined('RECIPE_BACKEND_TEST_MODE')
@@ -26,8 +27,12 @@ function ingredientOntologyV3IdentityFeatureEnabled(
         return !empty($GLOBALS[$testOverrideKey]);
     }
     $raw = function_exists('env')
-        ? env($environmentKey, 'false')
-        : (getenv($environmentKey) ?: 'false');
+        ? env($environmentKey, $default ? 'true' : 'false')
+        : (
+            getenv($environmentKey) !== false
+                ? getenv($environmentKey)
+                : ($default ? 'true' : 'false')
+        );
     return in_array(
         strtolower(trim((string)$raw)),
         ['1', 'true', 'yes', 'on'],
@@ -38,7 +43,8 @@ function ingredientOntologyV3IdentityFeatureEnabled(
 function ingredientOntologyV3ExactSelfIdentityEnabled(): bool {
     return ingredientOntologyV3IdentityFeatureEnabled(
         'INGREDIENT_ONTOLOGY_EXACT_SELF_IDENTITY_ENABLED',
-        'INGREDIENT_ONTOLOGY_EXACT_SELF_IDENTITY_ENABLED_OVERRIDE'
+        'INGREDIENT_ONTOLOGY_EXACT_SELF_IDENTITY_ENABLED_OVERRIDE',
+        true
     );
 }
 
@@ -52,7 +58,8 @@ function ingredientOntologyV3IdentityRoleWideningEnabled(): bool {
 function ingredientOntologyV3IdentityReadinessV2Enabled(): bool {
     return ingredientOntologyV3IdentityFeatureEnabled(
         'INGREDIENT_ONTOLOGY_IDENTITY_READINESS_V2_ENABLED',
-        'INGREDIENT_ONTOLOGY_IDENTITY_READINESS_V2_ENABLED_OVERRIDE'
+        'INGREDIENT_ONTOLOGY_IDENTITY_READINESS_V2_ENABLED_OVERRIDE',
+        true
     );
 }
 
@@ -448,7 +455,7 @@ function ingredientOntologyV3IdentityAdmissionMigrateProductBatch(
     $changed = [];
     $backfilled = [];
     foreach ($productIds as $productId) {
-        $nested = $db->inTransaction();
+        $nested = databaseTransactionIsActive($db);
         $savepoint = 'identity_product_migration_' . $productId;
         if ($nested) {
             $db->exec("SAVEPOINT {$savepoint}");
@@ -1512,7 +1519,7 @@ function ingredientOntologyV3IdentityExtensionClaim(
     $ownsTransaction = false;
     $savepoint = 'identity_extension_claim_'
         . (++$savepointSequence);
-    $nestedTransaction = $db->inTransaction();
+    $nestedTransaction = databaseTransactionIsActive($db);
     if (!$nestedTransaction) {
         try {
             dbBeginImmediateWithRetry($db);
@@ -2713,7 +2720,8 @@ function ingredientOntologyV3IdentityAnnexResolution(
     array $version,
     array $product,
     bool $createExtension = false,
-    bool $lookupExtension = true
+    bool $lookupExtension = true,
+    bool $preserveSealedMapping = true
 ): array {
     $normalizedLabel = ingredientOntologyV3NormalizeLabel(
         (string)$product['name']
@@ -2809,6 +2817,8 @@ function ingredientOntologyV3IdentityAnnexResolution(
         $sealedMappingPreserved = false;
         $productId = (int)($product['id'] ?? 0);
         if (
+            $preserveSealedMapping
+            &&
             ($createExtension || $lookupExtension)
             && $productId > 0
         ) {
@@ -2959,7 +2969,8 @@ function ingredientOntologyV3IdentityAnnexRefreshProduct(
     ?int $versionId = null,
     bool $resolveCoverageGaps = true,
     bool $createExtension = true,
-    bool $lookupExtension = true
+    bool $lookupExtension = true,
+    bool $preserveSealedMapping = true
 ): array {
     if (
         $productId <= 0
@@ -3012,7 +3023,8 @@ function ingredientOntologyV3IdentityAnnexRefreshProduct(
         $version,
         $product,
         $createExtension,
-        $lookupExtension
+        $lookupExtension,
+        $preserveSealedMapping
     );
     $persistedNormalizedLabel = mb_substr(
         (string)$resolution['normalized_label'],
@@ -3518,29 +3530,15 @@ function ingredientOntologyV3ProductReadinessRecordResolution(
             if ($incrementAttempt) {
                 $attempts = min(20, $attempts + 1);
             }
-            $requestedTimestamp = strtotime($requestedAt . ' UTC');
-            $ageSeconds = $requestedTimestamp === false
-                ? 0
-                : max(0, time() - $requestedTimestamp);
-            $terminal =
-                !ingredientOntologyV3IdentityReadinessV2Enabled()
-                && (
-                    $attempts
-                        >= INGREDIENT_ONTOLOGY_PRODUCT_READINESS_MAX_ATTEMPTS
-                    || $ageSeconds
-                        >= INGREDIENT_ONTOLOGY_PRODUCT_READINESS_DEADLINE_SECONDS
-                );
-            $status = $terminal ? 'needs_review' : 'retry';
-            $nextRetryAt = $terminal
-                ? null
-                : gmdate(
-                    'Y-m-d H:i:s',
-                    time()
-                        + ingredientOntologyV3ProductReadinessRetryDelaySeconds(
-                            $attempts + 1
-                        )
-                );
-            $failedAt = $terminal ? $now : null;
+            $status = 'retry';
+            $nextRetryAt = gmdate(
+                'Y-m-d H:i:s',
+                time()
+                    + ingredientOntologyV3ProductReadinessRetryDelaySeconds(
+                        $attempts + 1
+                    )
+            );
+            $failedAt = null;
             $lastErrorKind = $reason;
             $lastError = mb_substr(
                 'Identity unresolved after ' . trim($trigger) . '.',
@@ -3628,7 +3626,7 @@ function ingredientOntologyV3ProductReadinessRecordResolution(
         'next_retry_at' => $nextRetryAt,
         'terminal' => in_array(
             $status,
-            ['needs_review', 'non_satisfying', 'failed'],
+            ['non_satisfying', 'failed'],
             true
         ),
     ];
@@ -3643,7 +3641,8 @@ function ingredientOntologyV3IdentityAdmissionPublishProduct(
     bool $incrementAttempt = false,
     bool $resolveCoverageGaps = true,
     bool $createExtension = true,
-    bool $lookupExtension = true
+    bool $lookupExtension = true,
+    bool $preserveSealedMapping = true
 ): array {
     $admission = ingredientOntologyV3IdentityAnnexRefreshProduct(
         $db,
@@ -3651,7 +3650,8 @@ function ingredientOntologyV3IdentityAdmissionPublishProduct(
         $versionId,
         $resolveCoverageGaps,
         $createExtension,
-        $lookupExtension
+        $lookupExtension,
+        $preserveSealedMapping
     );
     if (empty($admission['available'])) {
         return $admission + [
@@ -4001,6 +4001,28 @@ function ingredientOntologyV3ProductReadinessRetryDue(
         ];
     }
     $limit = max(1, min(100, $limit));
+    $requeueHistorical = $db->prepare("
+        UPDATE ingredient_ontology_product_readiness
+        SET status = 'retry',
+            next_retry_at = CURRENT_TIMESTAMP,
+            failed_at = NULL,
+            last_error_kind = 'historical_identity_requeued',
+            last_error =
+                'Historical unresolved identity requeued for exact-self admission.',
+            updated_at = CURRENT_TIMESTAMP
+        WHERE product_id IN (
+            SELECT product_id
+            FROM ingredient_ontology_product_readiness
+            WHERE status = 'needs_review'
+               OR (
+                   status = 'failed'
+                   AND identity_status = 'unresolved'
+               )
+            ORDER BY updated_at, product_id
+            LIMIT ?
+        )
+    ");
+    $requeueHistorical->execute([$limit]);
     $due = $db->query("
         SELECT 1
         FROM ingredient_ontology_product_readiness
@@ -4083,19 +4105,12 @@ function ingredientOntologyV3ProductReadinessRetryDue(
                     20,
                     (int)($current['attempts'] ?? 0) + 1
                 );
-                $isTerminal =
-                    !ingredientOntologyV3IdentityReadinessV2Enabled()
-                    && $attempts
-                        >= INGREDIENT_ONTOLOGY_PRODUCT_READINESS_MAX_ATTEMPTS;
                 $db->prepare("
                     UPDATE ingredient_ontology_product_readiness
-                    SET status = ?,
+                    SET status = 'retry',
                         attempts = ?,
                         next_retry_at = ?,
-                        failed_at = CASE
-                            WHEN ? = 1 THEN CURRENT_TIMESTAMP
-                            ELSE NULL
-                        END,
+                        failed_at = NULL,
                         last_error_kind =
                             'identity_retry_exception',
                         last_error = ?,
@@ -4106,18 +4121,14 @@ function ingredientOntologyV3ProductReadinessRetryDue(
                       AND annex_evidence_hash = ?
                       AND next_retry_at <= CURRENT_TIMESTAMP
                 ")->execute([
-                    $isTerminal ? 'failed' : 'retry',
                     $attempts,
-                    $isTerminal
-                        ? null
-                        : gmdate(
-                            'Y-m-d H:i:s',
-                            time()
-                                + ingredientOntologyV3ProductReadinessRetryDelaySeconds(
-                                    $attempts + 1
-                                )
-                        ),
-                    $isTerminal ? 1 : 0,
+                    gmdate(
+                        'Y-m-d H:i:s',
+                        time()
+                            + ingredientOntologyV3ProductReadinessRetryDelaySeconds(
+                                $attempts + 1
+                            )
+                    ),
                     mb_substr(
                         $error->getMessage(),
                         0,
@@ -4129,7 +4140,6 @@ function ingredientOntologyV3ProductReadinessRetryDue(
                     (string)$retryRow['annex_evidence_hash'],
                 ]);
                 $processed++;
-                $terminal += $isTerminal ? 1 : 0;
                 $errors[$productId] = mb_substr(
                     $error->getMessage(),
                     0,

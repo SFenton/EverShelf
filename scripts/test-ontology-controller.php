@@ -6,6 +6,13 @@ define('CRON_MODE', true);
 define('RECIPE_BACKEND_TEST_MODE', true);
 require_once __DIR__ . '/../api/bootstrap.php';
 
+$GLOBALS[
+    'INGREDIENT_ONTOLOGY_EXACT_SELF_IDENTITY_ENABLED_OVERRIDE'
+] = false;
+$GLOBALS[
+    'INGREDIENT_ONTOLOGY_IDENTITY_READINESS_V2_ENABLED_OVERRIDE'
+] = false;
+
 $assertions = 0;
 function controllerTestAssert(bool $condition, string $message): void {
     global $assertions;
@@ -3476,6 +3483,12 @@ try {
         ],
         $GLOBALS['INGREDIENT_ONTOLOGY_PRODUCT_LANGUAGE_OVERRIDE']
     );
+    $GLOBALS[
+        'INGREDIENT_ONTOLOGY_EXACT_SELF_IDENTITY_ENABLED_OVERRIDE'
+    ] = false;
+    $GLOBALS[
+        'INGREDIENT_ONTOLOGY_IDENTITY_READINESS_V2_ENABLED_OVERRIDE'
+    ] = false;
 
     $reviewedRecipeIds = [];
     $reviewedIngredientIds = [];
@@ -7925,7 +7938,7 @@ try {
         && $foodOnEmptyChild === null
         && $foodOnWrongChild === null
         && $foodOnWrongSlug === null
-        && $foodOnRisk['risk'] === 'R0'
+        && $foodOnRisk['risk'] === 'R1'
         && $foodOnStructuralRisk['risk'] === 'R1'
         && $foodOnStapleRisk['risk'] === 'R1'
         && $foodOnLowConfidence['risk'] === 'R1'
@@ -7943,7 +7956,7 @@ try {
             === 'FOODON:TEST_TARGET'
         && $foodOnProof['target_identity_role']
             === (string)$foodOnTarget['identity_role'],
-        'Authoritative FoodOn hierarchy must authorize a source-local existing-entity mapping'
+        'FoodOn hierarchy may remain auditable but must never downgrade exact-identity risk'
     );
 
     $foodOnE2eSubject = [
@@ -8247,19 +8260,13 @@ try {
         controllerTestAssert(
             !ingredientOntologyControllerRiskAuthorized($db, 'R1')
             && $foodOnE2eProcess['results'][0]['status']
-                === 'generation_pending'
-            && $foodOnE2eJobRow['status'] === 'generation_pending'
-            && $foodOnE2ePlan['risk_tier'] === 'R0'
-            && $foodOnE2ePlan['status'] === 'applied'
-            && $foodOnE2eMapping['status'] === 'accepted'
+                === 'abstained'
+            && $foodOnE2eJobRow['status'] === 'abstained'
+            && $foodOnE2ePlan === false
             && $foodOnE2eMapping['mapping_source']
-                === 'foodon_hierarchy'
-            && $foodOnE2eMapping['entity_slug']
-                === $foodOnTargetSlug
-            && $foodOnE2eResolution['status'] === 'accepted'
-            && (int)$foodOnE2eResolution['entity_id']
-                === (int)$foodOnE2eMapping['entity_id'],
-            'A child-bound FoodOn plan must apply end to end as R0 without an R1 policy: '
+                !== 'foodon_hierarchy'
+            && $foodOnE2eProofAtEnd !== null,
+            'A child-bound FoodOn plan must remain quarantined and never create accepted hierarchy identity: '
                 . ingredientOntologyControllerStableJson([
                     'r1_authorized' =>
                         ingredientOntologyControllerRiskAuthorized(
@@ -8396,7 +8403,7 @@ try {
                 " . (int)$foodOnStagedWithoutPolicy['id']
         )->fetch(PDO::FETCH_ASSOC);
         controllerTestAssert(
-            $foodOnStagedWithoutPolicy['risk_tier'] === 'R0'
+            $foodOnStagedWithoutPolicy['risk_tier'] === 'R1'
             && !empty($foodOnInvalidWithoutPolicy['quarantined'])
             && $foodOnPlanAfterInvalidation['risk_tier'] === 'R1'
             && $foodOnPlanAfterInvalidation['status']
@@ -8405,7 +8412,7 @@ try {
                 === 'pending'
             && $foodOnMappingSnapshot()
                 === $foodOnMappingBeforeInvalidation,
-            'FoodOn proof removed after staging must fail closed before any mapping write'
+            'FoodOn hierarchy plans must fail closed before any mapping write'
         );
 
         $db->prepare("
@@ -8453,7 +8460,7 @@ try {
         )->fetch(PDO::FETCH_ASSOC);
         controllerTestAssert(
             ingredientOntologyControllerRiskAuthorized($db, 'R1')
-            && $foodOnStagedWithPolicy['risk_tier'] === 'R0'
+            && $foodOnStagedWithPolicy['risk_tier'] === 'R1'
             && !empty($foodOnInvalidWithPolicy['quarantined'])
             && $foodOnPlanAfterAuthorizedInvalidation['risk_tier']
                 === 'R1'
@@ -8461,7 +8468,7 @@ try {
                 === 'quarantined'
             && $foodOnMappingSnapshot()
                 === $foodOnMappingBeforeAuthorizedInvalidation,
-            'A post-stage risk increase must require renewed review even when R1 policy is active'
+            'FoodOn hierarchy must remain quarantined even when R1 policy is active'
         );
 
         $db->prepare("
@@ -8504,14 +8511,69 @@ try {
             (int)$foodOnE2eJobRow['candidate_version_id'],
         ]);
         controllerTestAssert(
-            $foodOnStagedBeforeRoleChange['risk_tier'] === 'R0'
+            $foodOnStagedBeforeRoleChange['risk_tier'] === 'R1'
             && !empty($foodOnInvalidRole['quarantined'])
             && $foodOnPlanAfterRoleChange['risk_tier'] === 'R1'
             && $foodOnPlanAfterRoleChange['status'] === 'quarantined'
             && $foodOnMappingSnapshot()
                 === $foodOnMappingBeforeRoleChange,
-            'A FoodOn target that becomes identity-ineligible after staging must quarantine before any mapping write'
+            'A FoodOn hierarchy target must remain quarantined across role changes'
         );
+        $db->prepare("
+            UPDATE ingredient_ontology_mappings
+            SET mapping_source = 'foodon_hierarchy',
+                status = 'accepted'
+            WHERE id = ?
+        ")->execute([(int)$foodOnE2eMapping['id']]);
+        $GLOBALS[
+            'INGREDIENT_ONTOLOGY_EXACT_SELF_IDENTITY_ENABLED_OVERRIDE'
+        ] = true;
+        $GLOBALS[
+            'INGREDIENT_ONTOLOGY_IDENTITY_READINESS_V2_ENABLED_OVERRIDE'
+        ] = true;
+        $GLOBALS[
+            'INGREDIENT_ONTOLOGY_PRODUCT_LANGUAGE_OVERRIDE'
+        ] = 'en';
+        $foodOnAudit =
+            ingredientOntologyV3FoodOnHierarchyIdentityAudit(
+                $db,
+                10,
+                true
+            );
+        controllerTestAssert(
+            $foodOnAudit['unsafe_mapping_count'] >= 1
+            && $foodOnAudit['remediated'] >= 1
+            && in_array(
+                'exact_self_identity',
+                array_column(
+                    $foodOnAudit['requeued_exact_self'],
+                    'source'
+                ),
+                true
+            )
+            && min(array_column(
+                $foodOnAudit['requeued_exact_self'],
+                'entity_id'
+            )) < 0,
+            'Unsafe FoodOn mappings must audit and requeue exact-self identity'
+        );
+        $db->prepare("
+            UPDATE ingredient_ontology_mappings
+            SET mapping_source = ?
+            WHERE id = ?
+        ")->execute([
+            (string)$foodOnE2eMapping['mapping_source'],
+            (int)$foodOnE2eMapping['id'],
+        ]);
+        $GLOBALS[
+            'INGREDIENT_ONTOLOGY_EXACT_SELF_IDENTITY_ENABLED_OVERRIDE'
+        ] = false;
+        $GLOBALS[
+            'INGREDIENT_ONTOLOGY_IDENTITY_READINESS_V2_ENABLED_OVERRIDE'
+        ] = false;
+        unset($GLOBALS[
+            'INGREDIENT_ONTOLOGY_PRODUCT_LANGUAGE_OVERRIDE'
+        ]);
     } finally {
         unset($GLOBALS['ONTOLOGY_CONTROLLER_TEST_HOOK']);
         $db->prepare("
@@ -10384,6 +10446,9 @@ try {
                 'INGREDIENT_ONTOLOGY_EXACT_SELF_IDENTITY_ENABLED_OVERRIDE'
             ]
         );
+        $GLOBALS[
+            'INGREDIENT_ONTOLOGY_EXACT_SELF_IDENTITY_ENABLED_OVERRIDE'
+        ] = false;
         recipeScoreFailAbandonedBuilds($activationTarget);
         recipeScorePruneRevisions($activationTarget);
         $importCandidateProtected = recipeScoreRevision(
@@ -11554,6 +11619,9 @@ try {
             'INGREDIENT_ONTOLOGY_EXACT_SELF_IDENTITY_ENABLED_OVERRIDE'
         ]
     );
+    $GLOBALS[
+        'INGREDIENT_ONTOLOGY_EXACT_SELF_IDENTITY_ENABLED_OVERRIDE'
+    ] = false;
     $cdcHighWaterBefore =
         ingredientOntologyActivationCdcSnapshot($activationTarget);
     $activationTarget->exec("

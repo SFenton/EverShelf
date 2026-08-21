@@ -298,13 +298,6 @@ function recipeCatalogTextSearch(
         LEFT JOIN recipe_user_state us ON us.recipe_id = c.id
         WHERE recipe_catalog_fts MATCH ?
           AND c.deleted_at IS NULL
-          AND (
-              (
-                  (c.cache_expires_at IS NULL OR c.cache_expires_at >= CURRENT_TIMESTAMP)
-                  AND (c.stale_at IS NULL OR c.stale_at >= CURRENT_TIMESTAMP)
-              )
-              OR COALESCE(us.favorite, 0) = 1
-          )
           AND COALESCE(us.hidden, 0) = 0
           {$sourceWhere}
           {$languageVisibility}
@@ -335,13 +328,6 @@ function recipeCatalogTextSearch(
         LEFT JOIN recipe_user_state us ON us.recipe_id = c.id
         WHERE recipe_catalog_fts MATCH ?
           AND c.deleted_at IS NULL
-          AND (
-              (
-                  (c.cache_expires_at IS NULL OR c.cache_expires_at >= CURRENT_TIMESTAMP)
-                  AND (c.stale_at IS NULL OR c.stale_at >= CURRENT_TIMESTAMP)
-              )
-              OR COALESCE(us.favorite, 0) = 1
-          )
           AND COALESCE(us.hidden, 0) = 0
           {$sourceWhere}
           {$languageVisibility}
@@ -378,13 +364,6 @@ function recipeCatalogSuggestionIds(PDO $db, ?string $source = null): array {
         FROM recipe_catalog c
         LEFT JOIN recipe_user_state us ON us.recipe_id = c.id
         WHERE c.deleted_at IS NULL
-          AND (
-              (
-                  (c.cache_expires_at IS NULL OR c.cache_expires_at >= CURRENT_TIMESTAMP)
-                  AND (c.stale_at IS NULL OR c.stale_at >= CURRENT_TIMESTAMP)
-              )
-              OR COALESCE(us.favorite, 0) = 1
-          )
           AND COALESCE(us.hidden, 0) = 0
           {$sourceWhere}
           {$languageVisibility}

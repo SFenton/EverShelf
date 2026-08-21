@@ -3141,13 +3141,6 @@ function recipeCatalogBrowseCte(
             LEFT JOIN recipe_user_state us ON us.recipe_id = c.id
             WHERE c.id <= :catalog_max_id
               AND c.deleted_at IS NULL
-              AND (
-                  (
-                      (c.cache_expires_at IS NULL OR c.cache_expires_at >= CURRENT_TIMESTAMP)
-                      AND (c.stale_at IS NULL OR c.stale_at >= CURRENT_TIMESTAMP)
-                  )
-                  OR COALESCE(us.favorite, 0) = 1
-              )
               AND COALESCE(us.hidden, 0) = 0
               AND scores.coverage >= :minimum_coverage
               {$queryWhere}
@@ -3228,6 +3221,7 @@ function recipeCatalogCardFromRow(array $row): array {
             : null,
         'score' => round((float)$row['weighted_score'], 6),
         'cookable' => !empty($row['cookable']),
+        'is_stale' => !empty($row['is_stale']),
     ];
 }
 
@@ -3325,6 +3319,16 @@ function recipeCatalogBrowseResult(PDO $db, array $options = []): array {
 
     $page = $db->prepare($built['cte'] . "
         SELECT d.*, c.title, c.image_url, c.primary_connector,
+               CASE
+                   WHEN (
+                       c.stale_at IS NOT NULL
+                       AND c.stale_at < CURRENT_TIMESTAMP
+                   ) OR (
+                       c.cache_expires_at IS NOT NULL
+                       AND c.cache_expires_at < CURRENT_TIMESTAMP
+                   )
+                   THEN 1 ELSE 0
+               END AS is_stale,
                (
                    SELECT origin.canonical_url
                    FROM recipe_origins origin
@@ -3514,6 +3518,16 @@ function recipeCatalogCardsByIds(PDO $db, array $recipeIds): array {
     $stmt = $db->prepare("
         SELECT c.id, COALESCE(cl.cluster_key, 'recipe:' || c.id) AS dedupe_key,
                c.title, c.image_url, c.primary_connector,
+               CASE
+                   WHEN (
+                       c.stale_at IS NOT NULL
+                       AND c.stale_at < CURRENT_TIMESTAMP
+                   ) OR (
+                       c.cache_expires_at IS NOT NULL
+                       AND c.cache_expires_at < CURRENT_TIMESTAMP
+                   )
+                   THEN 1 ELSE 0
+               END AS is_stale,
                (
                    SELECT origin.canonical_url
                    FROM recipe_origins origin

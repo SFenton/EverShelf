@@ -67,5 +67,61 @@
     "egg salad sandwich", "sausage casserole", "stuffed peppers",
     "roast chicken dinner"
   ],
+  "representative_cases": [
+    {
+      "id": "taxonomy-trap-sea-lavender",
+      "label": "sea lavender",
+      "brand": "",
+      "category": "vegetables",
+      "language": "en"
+    },
+    {
+      "id": "taxonomy-trap-lavender",
+      "label": "lavender",
+      "brand": "",
+      "category": "herbs",
+      "language": "en"
+    },
+    {
+      "id": "branded-food",
+      "label": "Northstar tomato passata",
+      "brand": "Northstar",
+      "category": "sauces",
+      "language": "en"
+    },
+    {
+      "id": "multilingual-it",
+      "label": "melanzana affumicata",
+      "brand": "",
+      "category": "verdure",
+      "language": "it"
+    },
+    {
+      "id": "multilingual-es",
+      "label": "berenjena ahumada",
+      "brand": "",
+      "category": "verduras",
+      "language": "es"
+    },
+    {
+      "id": "ambiguous-chili-pepper",
+      "label": "fresh chili pepper",
+      "brand": "",
+      "category": "produce",
+      "language": "en"
+    },
+    {
+      "id": "ambiguous-chili-dish",
+      "label": "prepared chili bowl",
+      "brand": "Market Kitchen",
+      "category": "prepared meals",
+      "language": "en"
+    }
+  ],
+  "representative_false_pairs": [
+    ["taxonomy-trap-sea-lavender", "taxonomy-trap-lavender"],
+    ["multilingual-it", "multilingual-es"],
+    ["ambiguous-chili-pepper", "ambiguous-chili-dish"]
+  ],
   "empty_or_invalid_labels": ["", "---", "///", "''", "..."]
 }

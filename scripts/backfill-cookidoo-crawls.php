@@ -23,7 +23,7 @@ function recipeCookidooBackfillUsage(): string {
         '  --json           Emit machine-readable JSON',
         '  --help           Show this help',
         '',
-        'Provider crawl enqueue is disabled by repository policy.',
+        'Requires Cookidoo connector and detail hydration to be enabled.',
     ]) . PHP_EOL;
 }
 
@@ -121,5 +121,3 @@ echo ($result['dry_run'] ? 'Dry run' : 'Cookidoo crawl backfill')
 if (!empty($result['reason'])) {
     echo 'Reason: ' . $result['reason'] . PHP_EOL;
 }
-echo 'No Cookidoo crawl jobs are created while detail hydration is policy-disabled.'
-    . PHP_EOL;

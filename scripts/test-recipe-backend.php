@@ -13,15 +13,13 @@ $GLOBALS['RECIPE_COOKIDOO_CONFIG'] = [
     'COOKIDOO_BRIDGE_TIMEOUT_SECONDS' => '5',
     'COOKIDOO_RESULT_LIMIT' => '20',
     'COOKIDOO_METADATA_REFRESH_DAYS' => '14',
-    'COOKIDOO_DETAIL_HYDRATION_ENABLED' => 'false',
+    'COOKIDOO_DETAIL_HYDRATION_ENABLED' => 'true',
     'COOKIDOO_METADATA_BACKFILL_ENABLED' => 'false',
     'COOKIDOO_METADATA_BACKFILL_BATCH_SIZE' => '20',
     'COOKIDOO_QUEUE_CADENCE_MINUTES' => '5',
     'COOKIDOO_PERIODIC_REFRESH_ENABLED' => 'true',
-    'COOKIDOO_LEGACY_REFRESH_ENABLED' => 'true',
     'COOKIDOO_INGEST_LANGUAGE_POLICY' => 'observe',
 ];
-$GLOBALS['RECIPE_COOKIDOO_POLICY_TEST_OVERRIDE'] = true;
 $GLOBALS['RECIPE_SCORE_PREVIEW_REVISION_ID'] = '';
 
 $recipeTestAssertions = 0;
@@ -531,8 +529,207 @@ try {
             idempotency_key, recipe_id, selection_hash, outcomes_json
         )
         VALUES ('legacy-upgrade-key', 1, 'legacy-selection-hash', '[]');
+        CREATE TABLE recipe_jobs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            idempotency_key TEXT NOT NULL UNIQUE,
+            job_type TEXT NOT NULL,
+            priority INTEGER NOT NULL DEFAULT 0,
+            scope TEXT DEFAULT NULL,
+            connector TEXT DEFAULT NULL,
+            ingredient_id INTEGER DEFAULT NULL,
+            product_id INTEGER DEFAULT NULL,
+            query TEXT DEFAULT NULL,
+            payload_json TEXT NOT NULL DEFAULT '{}',
+            status TEXT NOT NULL DEFAULT 'pending',
+            attempts INTEGER NOT NULL DEFAULT 0,
+            max_attempts INTEGER NOT NULL DEFAULT 3,
+            next_retry_at DATETIME DEFAULT NULL,
+            last_error TEXT NOT NULL DEFAULT '',
+            last_result_json TEXT DEFAULT NULL,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            started_at DATETIME DEFAULT NULL,
+            finished_at DATETIME DEFAULT NULL
+        );
     ");
+    $legacyPolicyCases = [
+        'legacy-policy-disabled' => [
+            'query' => 'legacy disabled policy',
+            'policy' => 'metadata-v2-detail-disabled',
+            'status' => 'done',
+        ],
+        'legacy-policy-opt-in' => [
+            'query' => 'legacy opt in policy',
+            'policy' => 'metadata-v2-allowlisted-opt-in',
+            'status' => 'done',
+        ],
+        'legacy-policy-current' => [
+            'query' => 'current v3 policy',
+            'policy' => RECIPE_COOKIDOO_DETAIL_POLICY_VERSION,
+            'status' => 'done',
+            'current' => true,
+        ],
+        'legacy-policy-future' => [
+            'query' => 'unknown future policy',
+            'policy' => 'metadata-v9-future',
+            'status' => 'done',
+        ],
+        'legacy-policy-absent' => [
+            'query' => 'historical absent policy',
+            'policy' => null,
+            'status' => 'done',
+        ],
+        'legacy-policy-absent-invalid' => [
+            'query' => null,
+            'policy' => null,
+            'status' => 'done',
+            'payload' => [],
+        ],
+        'legacy-policy-malformed' => [
+            'query' => 'malformed policy payload',
+            'policy' => null,
+            'status' => 'done',
+            'payload_json' => '{',
+        ],
+        'legacy-policy-in-progress' => [
+            'query' => 'legacy active policy',
+            'policy' => 'metadata-v2-detail-disabled',
+            'status' => 'in_progress',
+        ],
+    ];
+    $legacyPolicyIds = [];
+    $legacyJobInsert = $upgradeDb->prepare("
+        INSERT INTO recipe_jobs (
+            idempotency_key, job_type, priority, scope, connector,
+            query, payload_json, status, attempts, max_attempts,
+            updated_at, started_at
+        )
+        VALUES (
+            ?, 'connector_discovery', 0, ?, 'cookidoo',
+            ?, ?, ?, ?, 3,
+            CASE WHEN ? = 1
+                THEN CURRENT_TIMESTAMP
+                ELSE datetime('now', '-30 days')
+            END,
+            CASE WHEN ? = 'in_progress'
+                THEN datetime('now', '-1 hour')
+                ELSE NULL
+            END
+        )
+    ");
+    foreach ($legacyPolicyCases as $caseKey => $case) {
+        $query = (string)($case['query'] ?? '');
+        $identityQuery = $query !== '' ? $query : $caseKey;
+        $request = recipeCookidooNormalizeDiscoveryInput([
+            'query' => $identityQuery,
+            'locale' => 'en-GB',
+            'limit' => 1,
+        ]);
+        $payload = $case['payload'] ?? $request;
+        if ($case['policy'] !== null) {
+            $payload[RECIPE_COOKIDOO_POLICY_FIELD] =
+                $case['policy'];
+        }
+        $payloadJson = $case['payload_json']
+            ?? recipeCatalogJsonEncode($payload);
+        $idempotencyKey = recipeCookidooDiscoveryIdempotencyKey(
+            $request
+        );
+        if (isset($legacyPolicyIds[$idempotencyKey])) {
+            $idempotencyKey .= ':' . $caseKey;
+        }
+        $legacyJobInsert->execute([
+            $idempotencyKey,
+            recipeCookidooSearchId($request),
+            $query,
+            $payloadJson,
+            $case['status'],
+            $case['status'] === 'in_progress' ? 1 : 0,
+            !empty($case['current']) ? 1 : 0,
+            $case['status'],
+        ]);
+        $legacyPolicyIds[$caseKey] =
+            (int)$upgradeDb->lastInsertId();
+        if (!empty($case['current'])) {
+            $upgradeDb->prepare("
+                UPDATE recipe_jobs
+                SET updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+            ")->execute([$legacyPolicyIds[$caseKey]]);
+        }
+    }
+    $cursorBeforeRecipeMigration = (int)$upgradeDb->query("
+        SELECT cursor_revision
+        FROM recipe_score_state
+        WHERE id = 1
+    ")->fetchColumn();
+    $GLOBALS['RECIPE_SCHEMA_TEST_HOOK'] =
+        static function (
+            string $stage,
+            array $context
+        ): void {
+            if (
+                $stage === 'after_marker_insert'
+                && ($context['migration_key'] ?? '')
+                    === 'recipe_stale_while_revalidate_v1'
+            ) {
+                throw new RuntimeException(
+                    'synthetic stale cursor migration fault'
+                );
+            }
+        };
+    $staleCursorMigrationFault = null;
+    $upgradeDb->exec('BEGIN IMMEDIATE');
+    try {
+        recipeSchemaMigrate($upgradeDb);
+    } catch (Throwable $error) {
+        $staleCursorMigrationFault = $error->getMessage();
+    }
+    $rawMigrationTransactionRetained =
+        databaseTransactionIsActive($upgradeDb);
+    $upgradeDb->exec('COMMIT');
+    unset($GLOBALS['RECIPE_SCHEMA_TEST_HOOK']);
+    recipeTestAssert(
+        $staleCursorMigrationFault
+            === 'synthetic stale cursor migration fault'
+        && $rawMigrationTransactionRetained
+        && recipeTestCount(
+            $upgradeDb,
+            "SELECT COUNT(*)
+             FROM recipe_schema_migrations
+             WHERE migration_key =
+                'recipe_stale_while_revalidate_v1'"
+        ) === 0
+        && (int)$upgradeDb->query("
+            SELECT cursor_revision
+            FROM recipe_score_state
+            WHERE id = 1
+        ")->fetchColumn() === $cursorBeforeRecipeMigration,
+        'Stale cursor marker and bump must roll back together inside a raw caller transaction'
+    );
     recipeSchemaMigrate($upgradeDb);
+    $cursorAfterRecipeMigration = (int)$upgradeDb->query("
+        SELECT cursor_revision
+        FROM recipe_score_state
+        WHERE id = 1
+    ")->fetchColumn();
+    $legacyEpochsAfterMigration = $upgradeDb->query("
+        SELECT id, request_epoch, request_generation, status,
+               last_error
+        FROM recipe_jobs
+        ORDER BY id
+    ")->fetchAll(PDO::FETCH_ASSOC);
+    $legacyEpochSnapshot = [];
+    foreach ($legacyEpochsAfterMigration as $legacyEpochRow) {
+        $legacyEpochSnapshot[(int)$legacyEpochRow['id']] = [
+            'request_epoch' =>
+                (int)$legacyEpochRow['request_epoch'],
+            'request_generation' =>
+                (int)$legacyEpochRow['request_generation'],
+            'status' => (string)$legacyEpochRow['status'],
+            'last_error' => (string)$legacyEpochRow['last_error'],
+        ];
+    }
     $upgradeDb->exec("
         INSERT INTO recipe_ingredients (
             recipe_id, position, raw_text, normalized_name,
@@ -548,6 +745,180 @@ try {
              NULL, NULL, 'legacy_backfill')
     ");
     recipeSchemaMigrate($upgradeDb);
+    $legacyPolicyRows = $upgradeDb->query("
+        SELECT id, payload_json, request_epoch,
+               request_generation, status, last_error
+        FROM recipe_jobs
+        ORDER BY id
+    ")->fetchAll(PDO::FETCH_ASSOC);
+    $legacyPolicyById = [];
+    foreach ($legacyPolicyRows as $legacyPolicyRow) {
+        $decodedPayload = json_decode(
+            (string)$legacyPolicyRow['payload_json'],
+            true
+        );
+        $legacyPolicyById[(int)$legacyPolicyRow['id']] = [
+            'policy' => is_array($decodedPayload)
+                ? ($decodedPayload[
+                    RECIPE_COOKIDOO_POLICY_FIELD
+                ] ?? null)
+                : null,
+            'payload_json' =>
+                (string)$legacyPolicyRow['payload_json'],
+            'request_epoch' =>
+                (int)$legacyPolicyRow['request_epoch'],
+            'request_generation' =>
+                (int)$legacyPolicyRow['request_generation'],
+            'status' => (string)$legacyPolicyRow['status'],
+            'last_error' => (string)$legacyPolicyRow['last_error'],
+        ];
+    }
+    $legacyJobColumns = array_column(
+        $upgradeDb->query("PRAGMA table_info(recipe_jobs)")
+            ->fetchAll(PDO::FETCH_ASSOC),
+        'name'
+    );
+    $legacyWorkerColumns = array_column(
+        $upgradeDb->query("PRAGMA table_info(recipe_worker_leases)")
+            ->fetchAll(PDO::FETCH_ASSOC),
+        'name'
+    );
+    $maxLegacyEpoch = (int)$upgradeDb->query("
+        SELECT COALESCE(MAX(request_epoch), 0)
+        FROM recipe_jobs
+    ")->fetchColumn();
+    $nextLegacyEpoch = (int)$upgradeDb->query("
+        SELECT next_epoch
+        FROM recipe_job_request_epoch
+        WHERE id = 1
+    ")->fetchColumn();
+    recipeTestAssert(
+        $cursorAfterRecipeMigration
+            === $cursorBeforeRecipeMigration + 1
+        && (int)$upgradeDb->query("
+            SELECT cursor_revision
+            FROM recipe_score_state
+            WHERE id = 1
+        ")->fetchColumn() === $cursorAfterRecipeMigration
+        && recipeTestCount(
+            $upgradeDb,
+            "SELECT COUNT(*)
+             FROM recipe_schema_migrations
+             WHERE migration_key IN (
+                 'recipe_stale_while_revalidate_v1',
+                 'cookidoo_discovery_policy_v3_v1'
+             )"
+        ) === 2
+        && !array_diff(
+            [
+                'request_epoch', 'request_generation',
+                'request_hash', 'lease_token',
+                'lease_generation', 'lease_expires_at',
+            ],
+            $legacyJobColumns
+        )
+        && !array_diff(
+            [
+                'lease_token', 'lease_generation',
+                'lease_expires_at',
+            ],
+            $legacyWorkerColumns
+        )
+        && recipeTestCount(
+            $upgradeDb,
+            "SELECT COUNT(*)
+             FROM sqlite_master
+             WHERE type = 'index'
+               AND name = 'idx_recipe_jobs_lease'"
+        ) === 1
+        && $nextLegacyEpoch > $maxLegacyEpoch,
+        'Legacy job migration must install fenced columns, indexes, epochs, worker leases, and one-shot markers'
+    );
+    recipeTestAssert(
+        $legacyPolicyById[
+            $legacyPolicyIds['legacy-policy-disabled']
+        ]['policy'] === RECIPE_COOKIDOO_DETAIL_POLICY_VERSION
+        && $legacyPolicyById[
+            $legacyPolicyIds['legacy-policy-opt-in']
+        ]['policy'] === RECIPE_COOKIDOO_DETAIL_POLICY_VERSION
+        && $legacyPolicyById[
+            $legacyPolicyIds['legacy-policy-absent']
+        ]['policy'] === RECIPE_COOKIDOO_DETAIL_POLICY_VERSION
+        && $legacyPolicyById[
+            $legacyPolicyIds['legacy-policy-current']
+        ]['policy'] === RECIPE_COOKIDOO_DETAIL_POLICY_VERSION
+        && $legacyPolicyById[
+            $legacyPolicyIds['legacy-policy-future']
+        ]['policy'] === 'metadata-v9-future'
+        && $legacyPolicyById[
+            $legacyPolicyIds['legacy-policy-absent-invalid']
+        ]['policy'] === null
+        && $legacyPolicyById[
+            $legacyPolicyIds['legacy-policy-malformed']
+        ]['payload_json'] === '{'
+        && $legacyPolicyById[
+            $legacyPolicyIds['legacy-policy-disabled']
+        ]['request_generation'] === 2
+        && $legacyPolicyById[
+            $legacyPolicyIds['legacy-policy-current']
+        ]['request_generation'] === 1
+        && $legacyPolicyById[
+            $legacyPolicyIds['legacy-policy-future']
+        ]['request_generation'] === 1,
+        'Cookidoo policy migration must update only known or historically absent discovery policies'
+    );
+    $legacyInProgressId =
+        $legacyPolicyIds['legacy-policy-in-progress'];
+    recipeTestAssert(
+        $legacyPolicyById[$legacyInProgressId]['status'] === 'retry'
+        && $legacyPolicyById[$legacyInProgressId]['last_error']
+            === 'legacy lease reclaimed during migration'
+        && $legacyPolicyById[$legacyInProgressId]['request_epoch']
+            === $legacyEpochSnapshot[$legacyInProgressId][
+                'request_epoch'
+            ]
+        && $legacyPolicyById[$legacyInProgressId][
+            'request_generation'
+        ] === $legacyEpochSnapshot[$legacyInProgressId][
+            'request_generation'
+        ],
+        'Legacy in-progress reclaim and request epochs must remain stable across repeated migration'
+    );
+    foreach ($legacyEpochSnapshot as $legacyJobId => $snapshot) {
+        recipeTestAssert(
+            $legacyPolicyById[$legacyJobId]['request_epoch']
+                === $snapshot['request_epoch']
+            && $legacyPolicyById[$legacyJobId][
+                'request_generation'
+            ] === $snapshot['request_generation'],
+            'Repeated recipe migration changed request order for job '
+                . $legacyJobId
+        );
+    }
+    $periodicMigrated = recipeCookidooEnqueuePeriodicRefreshes(
+        $upgradeDb,
+        10
+    );
+    $expectedMigratedPeriodicIds = [
+        $legacyPolicyIds['legacy-policy-disabled'],
+        $legacyPolicyIds['legacy-policy-opt-in'],
+        $legacyPolicyIds['legacy-policy-absent'],
+    ];
+    sort($expectedMigratedPeriodicIds);
+    $actualMigratedPeriodicIds = $periodicMigrated['jobs'];
+    sort($actualMigratedPeriodicIds);
+    recipeTestAssert(
+        $periodicMigrated['queued'] === 3
+        && $actualMigratedPeriodicIds
+            === $expectedMigratedPeriodicIds,
+        'Periodic refresh selection must include migrated policy rows while '
+            . 'excluding current and unknown policies: '
+            . recipeCatalogJsonEncode([
+                'periodic' => $periodicMigrated,
+                'expected' => $expectedMigratedPeriodicIds,
+                'actual' => $actualMigratedPeriodicIds,
+            ])
+    );
     $requirednessRows = $upgradeDb->query("
         SELECT normalized_name, is_required, is_optional, is_staple,
                source_is_required, source_is_optional, requiredness_source
@@ -617,6 +988,7 @@ try {
                 'metadata_failure_count',
                 'metadata_next_probe_at',
                 'metadata_failure_schema_version',
+                'last_applied_request_epoch',
             ],
             $upgradeOriginColumns
         )
@@ -1223,8 +1595,19 @@ try {
     ))[0] ?? null;
     recipeTestAssert($idempotencyColumn !== null && (int)$idempotencyColumn['notnull'] === 1, 'Job key must be NOT NULL');
     recipeTestAssert(
-        in_array('priority', array_column($jobColumns, 'name'), true),
-        'Recipe jobs must support interactive priority'
+        !array_diff(
+            [
+                'priority',
+                'request_epoch',
+                'request_generation',
+                'request_hash',
+                'lease_token',
+                'lease_generation',
+                'lease_expires_at',
+            ],
+            array_column($jobColumns, 'name')
+        ),
+        'Recipe jobs must support priority, immutable requests, and leases'
     );
     recipeTestAssert(
         str_contains(
@@ -1233,8 +1616,15 @@ try {
                 WHERE type = 'index' AND name = 'idx_recipe_jobs_ready'
             ")->fetchColumn()),
             'priority'
+        )
+        && str_contains(
+            strtolower((string)$db->query("
+                SELECT sql FROM sqlite_master
+                WHERE type = 'index' AND name = 'idx_recipe_jobs_ready'
+            ")->fetchColumn()),
+            'lease_expires_at'
         ),
-        'Recipe job readiness index must use priority without per-request rebuilds'
+        'Recipe job readiness index must cover priority and leases'
     );
     recipeTestAssert(
         in_array(
@@ -1322,7 +1712,9 @@ try {
     );
     $cookidooRegistry = recipeConnectorRegistry()['cookidoo'];
     recipeTestAssert(
-        $cookidooRegistry['detail_hydration'] === true
+        RECIPE_COOKIDOO_DETAIL_POLICY_VERSION
+            === 'metadata-v3-operator-enabled'
+        && $cookidooRegistry['detail_hydration'] === true
         && $cookidooRegistry['detail_hydration_reason'] === null
         && $cookidooRegistry['policy_version']
             === RECIPE_COOKIDOO_DETAIL_POLICY_VERSION
@@ -1341,7 +1733,9 @@ try {
         $db,
         RECIPE_COOKIDOO_CONNECTOR
     );
-    $GLOBALS['RECIPE_COOKIDOO_POLICY_TEST_OVERRIDE'] = false;
+    $GLOBALS['RECIPE_COOKIDOO_CONFIG'][
+        'COOKIDOO_DETAIL_HYDRATION_ENABLED'
+    ] = 'false';
     $GLOBALS['RECIPE_COOKIDOO_CONFIG'][
         'COOKIDOO_METADATA_BACKFILL_ENABLED'
     ] = 'true';
@@ -1446,25 +1840,27 @@ try {
     );
     $policyQueue = recipeJobProcessQueueBatch($db, 2, 3, true);
     recipeTestAssert(
-        $policyQueue['processed'] === 2
-        && $policyQueue['skipped'] === 2
+        $policyQueue['processed'] === 0
+        && $policyQueue['skipped'] === 0
         && $policyTransportCalls === 0
         && recipeJobGet($db, (int)$policyMetadataJob['id'])['status']
-            === 'skipped'
+            === 'pending'
         && recipeJobGet($db, (int)$policyDiscoveryJob['id'])['status']
-            === 'skipped'
+            === 'pending'
         && recipeConnectorStateRow(
             $db,
             RECIPE_COOKIDOO_CONNECTOR
         ) === $policyConnectorStateBefore,
-        'Legacy hydration jobs must skip without provider or connector accounting'
+        'Disabled hydration must preserve queued jobs without provider or connector accounting'
     );
     $db->prepare("DELETE FROM recipe_jobs WHERE id IN (?, ?)")->execute([
         (int)$policyMetadataJob['id'],
         (int)$policyDiscoveryJob['id'],
     ]);
     unset($GLOBALS['RECIPE_COOKIDOO_BRIDGE_TRANSPORT']);
-    $GLOBALS['RECIPE_COOKIDOO_POLICY_TEST_OVERRIDE'] = true;
+    $GLOBALS['RECIPE_COOKIDOO_CONFIG'][
+        'COOKIDOO_DETAIL_HYDRATION_ENABLED'
+    ] = 'true';
     $GLOBALS['RECIPE_COOKIDOO_CONFIG'][
         'COOKIDOO_METADATA_BACKFILL_ENABLED'
     ] = 'false';
@@ -1479,8 +1875,8 @@ try {
             SELECT policy_version
             FROM recipe_connector_state
             WHERE connector = 'cookidoo'
-        ")->fetchColumn() === 'metadata-v2',
-        'Cookidoo connector policy must migrate from metadata-v1 to metadata-v2'
+        ")->fetchColumn() === RECIPE_COOKIDOO_DETAIL_POLICY_VERSION,
+        'Cookidoo connector execution policy must migrate to v3'
     );
     $ruleResolution = recipeIngredientResolve($db, 'Chicken breast');
     recipeTestAssert(
@@ -1894,7 +2290,9 @@ try {
         'test-policy-unrelated-local',
         5
     )['job'];
-    $GLOBALS['RECIPE_COOKIDOO_POLICY_TEST_OVERRIDE'] = false;
+    $GLOBALS['RECIPE_COOKIDOO_CONFIG'][
+        'COOKIDOO_DETAIL_HYDRATION_ENABLED'
+    ] = 'false';
     $db->prepare("
         UPDATE recipe_connector_state
         SET last_error = 'preserve-policy-accounting',
@@ -1906,6 +2304,9 @@ try {
         SET status = 'in_progress',
             attempts = ?,
             started_at = datetime('now', '-30 minutes'),
+            lease_token = 'expired-local',
+            lease_generation = lease_generation + 1,
+            lease_expires_at = datetime('now', '-1 minute'),
             last_error = 'old lease error',
             finished_at = NULL
         WHERE id = ?
@@ -1915,6 +2316,9 @@ try {
         SET status = 'in_progress',
             attempts = ?,
             started_at = datetime('now', '-30 minutes'),
+            lease_token = 'expired-cookidoo-exhausted',
+            lease_generation = lease_generation + 1,
+            lease_expires_at = datetime('now', '-1 minute'),
             last_error = 'old lease error',
             finished_at = NULL
         WHERE id = ?
@@ -1924,6 +2328,9 @@ try {
         SET status = 'in_progress',
             attempts = ?,
             started_at = datetime('now', '-30 minutes'),
+            lease_token = 'expired-cookidoo-retry',
+            lease_generation = lease_generation + 1,
+            lease_expires_at = datetime('now', '-1 minute'),
             last_error = 'old lease error',
             finished_at = NULL
         WHERE id = ?
@@ -1958,33 +2365,29 @@ try {
         $leaseExhaustedLocal['status'] === 'failed'
             && $leaseExhaustedLocal['last_error'] === 'lease_exhausted'
             && $leaseExhaustedLocal['finished_at'] !== null
-            && $leaseExhaustedCookidoo['status'] === 'skipped'
+            && $leaseExhaustedCookidoo['status'] === 'failed'
             && $leaseExhaustedCookidoo['last_error']
-                === RECIPE_COOKIDOO_DETAIL_POLICY_REASON
+                === 'lease_exhausted'
             && $leaseExhaustedCookidoo['finished_at'] !== null
             && $leaseExhaustedCookidoo['started_at'] === null
             && $leaseExhaustedCookidoo['next_retry_at'] === null
-            && $leaseExhaustedCookidoo['result']['reason']
-                === RECIPE_COOKIDOO_DETAIL_POLICY_REASON
-            && $leaseRetryCookidoo['status'] === 'skipped'
+            && $leaseRetryCookidoo['status'] === 'retry'
             && $leaseRetryCookidoo['last_error']
-                === RECIPE_COOKIDOO_DETAIL_POLICY_REASON
-            && $leaseRetryCookidoo['finished_at'] !== null
-            && $policyPendingCookidoo['status'] === 'skipped'
-            && $policyPendingCookidoo['last_error']
-                === RECIPE_COOKIDOO_DETAIL_POLICY_REASON
-            && $policyPendingCookidoo['finished_at'] !== null
-            && $policyRetryCookidoo['status'] === 'skipped'
+                === 'processing lease expired'
+            && $leaseRetryCookidoo['finished_at'] === null
+            && $policyPendingCookidoo['status'] === 'pending'
+            && $policyPendingCookidoo['finished_at'] === null
+            && $policyRetryCookidoo['status'] === 'retry'
             && $policyRetryCookidoo['last_error']
-                === RECIPE_COOKIDOO_DETAIL_POLICY_REASON
-            && $policyRetryCookidoo['next_retry_at'] === null
-            && $policyRetryCookidoo['finished_at'] !== null
+                === 'old retry error'
+            && $policyRetryCookidoo['next_retry_at'] !== null
+            && $policyRetryCookidoo['finished_at'] === null
             && $unrelatedLocalPending['status'] === 'pending'
             && $policyConnectorState['last_error']
                 === 'preserve-policy-accounting'
             && (int)$policyConnectorState['failure_count'] === 7,
-        'Policy-disabled Cookidoo discovery/detail jobs must terminalize '
-            . 'without touching unrelated local work or connector accounting: '
+        'Policy-disabled Cookidoo jobs must retain demand while expired leases '
+            . 'recover independently without connector accounting: '
             . json_encode([
                 'local' => $leaseExhaustedLocal,
                 'cookidoo_exhausted' => $leaseExhaustedCookidoo,
@@ -2008,6 +2411,9 @@ try {
         SET status = 'in_progress',
             attempts = 2,
             started_at = datetime('now', '-30 minutes'),
+            lease_token = 'expired-policy-worker',
+            lease_generation = lease_generation + 1,
+            lease_expires_at = datetime('now', '-1 minute'),
             last_error = 'old enabled-cadence lease'
         WHERE id = ?
     ")->execute([$policyTrueWorkerCookidoo['id']]);
@@ -2017,14 +2423,16 @@ try {
         $policyTrueWorkerCookidoo['id']
     );
     recipeTestAssert(
-        $policyTrueWorkerCookidoo['status'] === 'skipped'
+        $policyTrueWorkerCookidoo['status'] === 'failed'
             && $policyTrueWorkerCookidoo['last_error']
-                === RECIPE_COOKIDOO_DETAIL_POLICY_REASON
+                === 'lease_exhausted'
             && $policyTrueWorkerCookidoo['finished_at'] !== null
             && $policyTrueWorkerCookidoo['started_at'] === null,
-        'Global provider policy must terminalize Cookidoo work even when cadence allows it'
+        'Expired Cookidoo leases must recover without provider traffic'
     );
-    $GLOBALS['RECIPE_COOKIDOO_POLICY_TEST_OVERRIDE'] = true;
+    $GLOBALS['RECIPE_COOKIDOO_CONFIG'][
+        'COOKIDOO_DETAIL_HYDRATION_ENABLED'
+    ] = 'true';
     $cadenceGatedCookidoo = recipeJobEnqueueOnce(
         $db,
         'connector_discovery',
@@ -2362,7 +2770,11 @@ try {
     );
     $db->prepare("
         UPDATE recipe_jobs
-        SET status = 'in_progress', started_at = datetime('now', '-2 hours')
+        SET status = 'in_progress',
+            started_at = datetime('now', '-2 hours'),
+            lease_token = 'expired-stale-job',
+            lease_generation = lease_generation + 1,
+            lease_expires_at = datetime('now', '-1 minute')
         WHERE id = ?
     ")->execute([$staleJob['id']]);
     recipeJobProcessQueueBatch($db, 1, 3);
@@ -3040,11 +3452,28 @@ try {
         'tmv' => 'TM6',
         'limit' => 1,
     ]);
+    $disabledMetadataOutcome = recipeJobDispatchMetadataRefresh(
+        $db,
+        ['connector' => 'cookidoo'],
+        []
+    );
+    $disabledMetadataPlan = recipeCookidooMetadataBackfillPlan(
+        $db,
+        'en-GB',
+        20,
+        200
+    );
     recipeTestAssert(
         $disabledOutcome['status'] === 'skipped'
         && $disabledOutcome['result']['reason'] === 'connector_disabled'
+        && $disabledMetadataOutcome['status'] === 'skipped'
+        && $disabledMetadataOutcome['result']['reason']
+            === 'connector_disabled'
+        && $disabledMetadataPlan['refreshable'] === false
+        && $disabledMetadataPlan['unrefreshable_reason']
+            === 'connector_disabled'
         && $bridgeCalls === 0,
-        'Disabled Cookidoo connector must skip without bridge traffic'
+        'Disabled Cookidoo connector must block discovery and metadata traffic'
     );
     $jobsBeforeDisabledDiscovery = recipeTestCount(
         $db,
@@ -3758,9 +4187,13 @@ try {
         && !array_key_exists('groups', $cookidooDetail['instructions']),
         'Cookidoo detail must remain external-only without instruction text'
     );
-    $GLOBALS['RECIPE_COOKIDOO_POLICY_TEST_OVERRIDE'] = false;
+    $GLOBALS['RECIPE_COOKIDOO_CONFIG'][
+        'COOKIDOO_DETAIL_HYDRATION_ENABLED'
+    ] = 'false';
     $cachedPolicyDetail = recipeCatalogDetail($db, $cookidooRecipeId);
-    $GLOBALS['RECIPE_COOKIDOO_POLICY_TEST_OVERRIDE'] = true;
+    $GLOBALS['RECIPE_COOKIDOO_CONFIG'][
+        'COOKIDOO_DETAIL_HYDRATION_ENABLED'
+    ] = 'true';
     recipeTestAssert(
         $cachedPolicyDetail !== null
         && $cachedPolicyDetail['id'] === $cookidooRecipeId
@@ -7011,28 +7444,22 @@ try {
         $disabledMetadataEnqueueRejected = $e->getMessage()
             === 'cookidoo_metadata_backfill_disabled';
     }
-    $disabledMetadataDispatch = recipeJobDispatchMetadataRefresh(
-        $db,
-        ['connector' => 'cookidoo'],
-        $disabledMetadataPlan['batches'][0]['input']
-    );
     recipeTestAssert(
         $disabledMetadataPlan['recipe_count'] === 4
         && $disabledMetadataPlan['batch_count'] === 2
         && $disabledMetadataEnqueueRejected
-        && $disabledMetadataDispatch['status'] === 'skipped'
-        && $disabledMetadataDispatch['result']['reason']
-            === 'metadata_backfill_disabled'
         && recipeTestCount(
             $db,
             "SELECT COUNT(*) FROM recipe_jobs
              WHERE job_type = 'recipe_metadata_refresh'"
         ) === $metadataJobsBefore,
-        'Disabled metadata backfill must support dry planning without enqueueing'
+        'Disabled bulk metadata backfill must support dry planning without enqueueing'
     );
 
     $GLOBALS['RECIPE_COOKIDOO_CONFIG']['COOKIDOO_METADATA_BACKFILL_ENABLED'] = 'true';
-    $GLOBALS['RECIPE_COOKIDOO_POLICY_TEST_OVERRIDE'] = true;
+    $GLOBALS['RECIPE_COOKIDOO_CONFIG'][
+        'COOKIDOO_DETAIL_HYDRATION_ENABLED'
+    ] = 'true';
     $languageOnlyEnqueueRejected = false;
     try {
         recipeCookidooEnqueueMetadataBackfill($db, 'en', 20, 200);
@@ -7223,7 +7650,6 @@ try {
     $mixedMetadataResult = $metadataBatchFirstPass['items'][0]['result'] ?? [];
     $metadataBatchScoreStateAfter = recipeScoreState($db);
     $metadataBatchExpectedScoreState = $metadataBatchScoreStateBefore;
-    $metadataBatchExpectedScoreState['cursor_revision']++;
     recipeTestAssert(
         $metadataBatchFirstPass['succeeded'] === 1
         && $metadataBatchFirstPass['failed'] === 1
@@ -7320,8 +7746,7 @@ try {
             WHERE recipe_id IN ({$legacyMetadataIdList})
             ORDER BY score_revision_id, recipe_id
         ")->fetchAll(PDO::FETCH_ASSOC) === $metadataBatchScoresBefore,
-        'A mixed metadata batch with a stale-to-fresh success must increment '
-            . 'only cursor_revision exactly once'
+        'Metadata freshness refresh must preserve cursor and score revisions'
     );
     $failureCandidateIds = array_column(
         recipeCookidooMetadataBackfillCandidates($db, 'en-GB', 0, 200),
@@ -7686,7 +8111,7 @@ try {
     ];
     $pilotCircuitBreakRaised = false;
     try {
-        recipeCookidooBridgeMetadataBatch([
+        recipeCookidooBridgeMetadataBatch($db, [
             'locale' => 'en-GB',
             'recipes' => [[
                 'recipe_id' => (int)$permanentFailureRecipe['id'],
@@ -7824,8 +8249,18 @@ try {
         WHERE id = ?
     ")->execute([$cookidooRecipeId]);
     recipeTestAssert(
-        recipeCatalogTextSearch($db, 'cloud', 'cookidoo', 20, 0)['total'] === 0,
-        'Stale non-favorite Cookidoo metadata must leave normal search results'
+        recipeCatalogTextSearch(
+            $db,
+            'cloud',
+            'cookidoo',
+            20,
+            0
+        )['total'] === 1
+        && recipeCatalogGetById(
+            $db,
+            $cookidooRecipeId
+        )['is_stale'],
+        'Stale Cookidoo metadata must remain visible and explicitly stale'
     );
     recipeCatalogSetFavorite($db, $cookidooRecipeId, true);
     recipeTestAssert(
@@ -7850,7 +8285,8 @@ try {
             ['configured', 'healthy'],
             true
         )
-        && $cookidooConnector['state']['policy_version'] === 'metadata-v2'
+        && $cookidooConnector['state']['policy_version']
+            === RECIPE_COOKIDOO_DETAIL_POLICY_VERSION
         && $cookidooConnector['policy_version']
             === RECIPE_COOKIDOO_DETAIL_POLICY_VERSION
         && in_array(
@@ -7886,7 +8322,7 @@ try {
         'Cookidoo locale validation must accept supported script subtags'
     );
     $lastBridgePayload = null;
-    recipeCookidooBridgeSearch($defaultLocaleRequest);
+    recipeCookidooBridgeSearch($db, $defaultLocaleRequest);
     recipeTestAssert(
         !array_key_exists('locale', $lastBridgePayload),
         'Bridge requests must omit an unspecified locale'
@@ -7951,7 +8387,7 @@ try {
             $legacyDispatchRequest
         )
     );
-    recipeCookidooDispatchDiscovery(
+    $legacyDispatchOutcome = recipeCookidooDispatchDiscovery(
         $db,
         $legacyDispatchJob,
         $legacyDispatchRequest
@@ -7962,11 +8398,14 @@ try {
     );
     recipeTestAssert(
         $legacyDispatchMigrated['scope']
-            === recipeCookidooSearchId($legacyDispatchRequest)
-        && $legacyDispatchMigrated['payload'][
+            !== recipeCookidooSearchId($legacyDispatchRequest)
+        && !isset($legacyDispatchMigrated['payload'][
             RECIPE_COOKIDOO_POLICY_FIELD
-        ] === RECIPE_COOKIDOO_DETAIL_POLICY_VERSION,
-        'A queued legacy discovery job must migrate its scope and policy before dispatch'
+        ])
+        && $legacyDispatchOutcome['status'] === 'skipped'
+        && $legacyDispatchOutcome['result']['reason']
+            === 'cookidoo_policy_job_mismatch',
+        'A queued legacy discovery job must fail closed without a refresh escape hatch'
     );
     $db->prepare("DELETE FROM recipe_jobs WHERE id = ?")
         ->execute([(int)$legacyDispatchJob['id']]);
@@ -8065,19 +8504,20 @@ try {
         'locale' => 'en-GB',
         'crawl_all' => true,
     ]);
+    $legacyPeriodicPayload = $legacyPeriodicRequest;
+    $legacyPeriodicPayload[RECIPE_COOKIDOO_POLICY_FIELD] =
+        RECIPE_COOKIDOO_DETAIL_POLICY_VERSION;
     $legacyPeriodicJob = recipeJobEnqueue(
         $db,
         'connector_discovery',
         [
-            'scope' => 'cookidoo:' . substr(
-                recipeCookidooDiscoveryHash($legacyPeriodicRequest),
-                0,
-                24
+            'scope' => recipeCookidooSearchId(
+                $legacyPeriodicRequest
             ),
             'connector' => 'cookidoo',
             'query' => $legacyPeriodicRequest['query'],
         ],
-        $legacyPeriodicRequest,
+        $legacyPeriodicPayload,
         recipeCookidooDiscoveryIdempotencyKey(
             $legacyPeriodicRequest
         )
@@ -8109,11 +8549,11 @@ try {
     );
     recipeTestAssert(
         $legacyPeriodicRefresh['queued'] === 1
-        && $legacyPeriodicRefresh['legacy_migrated'] === 1
+        && $legacyPeriodicRefresh['legacy_migrated'] === 0
         && $legacyPeriodicSource['payload'][
             RECIPE_COOKIDOO_POLICY_FIELD
         ] === RECIPE_COOKIDOO_DETAIL_POLICY_VERSION,
-        'Periodic refresh must migrate one eligible legacy root before bounded page-zero refresh: '
+        'Persisted v3 jobs must remain eligible without legacy migration: '
             . json_encode([
                 'refresh' => $legacyPeriodicRefresh,
                 'source' => $legacyPeriodicSource,
@@ -8165,9 +8605,23 @@ try {
         $crawlRefreshWithoutExclusion,
         'Refresh crawl pages must rehydrate cached metadata instead of excluding it'
     );
-    $pageFiftyOutcome = recipeCookidooDispatchDiscovery($db, [
-        'connector' => 'cookidoo',
-    ], $crawlInput + ['page' => 50]);
+    $pageFiftyRequest = recipeCookidooNormalizeDiscoveryInput(
+        $crawlInput + ['page' => 50]
+    );
+    $pageFiftyEnqueue = recipeCookidooEnqueueDiscoveryJob(
+        $db,
+        $pageFiftyRequest,
+        true
+    );
+    recipeJobProcessQueueBatch($db, 1, 3);
+    $pageFiftyJob = recipeJobGet(
+        $db,
+        (int)$pageFiftyEnqueue['job']['id']
+    );
+    $pageFiftyOutcome = [
+        'status' => $pageFiftyJob['status'],
+        'result' => $pageFiftyJob['result'],
+    ];
     recipeTestAssert(
         $pageFiftyOutcome['status'] === 'done'
         && $pageFiftyOutcome['result']['next_page'] === 51
@@ -8176,11 +8630,13 @@ try {
         'A full crawl must stop after Cookidoo page 50 even when it has raw hits'
     );
     recipeTestAssert(
-        $crawlBridgeCalls === 6,
-        'Crawl tests must execute only their six bounded mocked bridge pages'
+        $crawlBridgeCalls === 5,
+        'Crawl tests must execute only their five bounded mocked bridge pages'
     );
     $db->prepare("DELETE FROM recipe_jobs WHERE id IN (?, ?)")
        ->execute([(int)$crawlRoot['id'], (int)$pageOneJob['id']]);
+    $db->prepare("DELETE FROM recipe_jobs WHERE id = ?")
+       ->execute([(int)$pageFiftyJob['id']]);
     $GLOBALS['RECIPE_COOKIDOO_BRIDGE_TRANSPORT'] = $metadataBridgeTransport;
 
     $_SERVER['REQUEST_METHOD'] = 'POST';
@@ -8949,6 +9405,16 @@ try {
         'fields' => 'card',
         'limit' => 2,
     ]);
+    $metadataCursorStaleCards = recipeCatalogSearchResult($db, [
+        'query' => 'metadata cursor fixture',
+        'fields' => 'card',
+        'limit' => 10,
+    ]);
+    $metadataCursorStaleCard = array_values(array_filter(
+        $metadataCursorStaleCards['items'],
+        static fn(array $card): bool =>
+            (int)$card['id'] === (int)$metadataCursorRecipe['id']
+    ))[0] ?? null;
     $metadataCursorStateBefore = recipeScoreState($db);
     $metadataCursorRevisionBefore = recipeScoreRevision(
         $db,
@@ -8969,8 +9435,7 @@ try {
     );
     $metadataCursorStateAfter = recipeScoreState($db);
     $metadataCursorExpectedState = $metadataCursorStateBefore;
-    $metadataCursorExpectedState['cursor_revision']++;
-    $staleMetadataCursorRejected = false;
+    $staleMetadataCursorAccepted = true;
     try {
         recipeCatalogSearchResult($db, [
             'query' => 'metadata cursor fixture',
@@ -8979,10 +9444,7 @@ try {
             'cursor' => $metadataCursorPageOne['next_cursor'],
         ]);
     } catch (InvalidArgumentException $e) {
-        $staleMetadataCursorRejected = str_contains(
-            $e->getMessage(),
-            'catalog changed'
-        );
+        $staleMetadataCursorAccepted = false;
     }
     $metadataCursorFreshResults = recipeCatalogSearchResult($db, [
         'query' => 'metadata cursor fixture',
@@ -8990,9 +9452,10 @@ try {
         'limit' => 10,
     ]);
     recipeTestAssert(
-        $metadataCursorPageOne['total'] === 5
+        $metadataCursorPageOne['total'] === 7
         && $metadataCursorPageOne['next_cursor'] !== null
-        && !empty($metadataCursorRefresh['visibility_changed'])
+        && !empty($metadataCursorStaleCard['is_stale'])
+        && empty($metadataCursorRefresh['visibility_changed'])
         && $metadataCursorStateAfter === $metadataCursorExpectedState
         && recipeScoreRevision(
             $db,
@@ -9004,15 +9467,22 @@ try {
             WHERE score_revision_id = " . (int)$activeScoreRevision['id'] . "
               AND recipe_id = " . (int)$metadataCursorRecipe['id'] . "
         ")->fetch(PDO::FETCH_ASSOC) === $metadataCursorScoreBefore
-        && $staleMetadataCursorRejected
-        && $metadataCursorFreshResults['total'] === 6
+        && $staleMetadataCursorAccepted
+        && $metadataCursorFreshResults['total'] === 7
         && in_array(
             (int)$metadataCursorRecipe['id'],
             array_column($metadataCursorFreshResults['items'], 'id'),
             true
         ),
-        'Stale-to-fresh metadata must increment only cursor_revision once, '
-            . 'preserve score state, expose the recipe, and reject old cursors'
+        'Stale-to-fresh metadata must preserve catalog membership, score state, '
+            . 'and existing cursors: ' . json_encode([
+                'page_total' => $metadataCursorPageOne['total'],
+                'refresh' => $metadataCursorRefresh,
+                'state_before' => $metadataCursorStateBefore,
+                'state_after' => $metadataCursorStateAfter,
+                'cursor_accepted' => $staleMetadataCursorAccepted,
+                'fresh_total' => $metadataCursorFreshResults['total'],
+            ])
     );
     $freshCursorStateBefore = recipeScoreState($db);
     $metadataSourceIdsBefore = $db->query("

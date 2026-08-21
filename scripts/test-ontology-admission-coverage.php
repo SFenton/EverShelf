@@ -172,6 +172,79 @@ foreach ($foodCases as $case) {
     $productIdByLabel[$label] = $productId;
 }
 
+$representativeIds = [];
+$insertRepresentative = $db->prepare("
+    INSERT INTO products (
+        name, brand, category, prepared_food
+    )
+    VALUES (?, ?, ?, 0)
+");
+foreach ((array)($fixture['representative_cases'] ?? []) as $case) {
+    $label = (string)$case['label'];
+    $language = (string)$case['language'];
+    $GLOBALS['INGREDIENT_ONTOLOGY_PRODUCT_LANGUAGE_OVERRIDE'] =
+        $language;
+    $insertRepresentative->execute([
+        $label,
+        (string)$case['brand'],
+        (string)$case['category'],
+    ]);
+    $productId = (int)$db->lastInsertId();
+    $admission = ingredientOntologyV3IdentityAnnexRefreshProduct(
+        $db,
+        $productId,
+        $versionId
+    );
+    $recipeResolution = ingredientOntologyV3RecipeAnnexResolution(
+        $db,
+        $version,
+        $label,
+        $language,
+        true
+    );
+    $readiness =
+        ingredientOntologyV3ProductReadinessRecordResolution(
+            $db,
+            $admission,
+            'admission_representative',
+            true
+        );
+    $assert(
+        !empty($admission['accepted'])
+        && (string)$admission['source'] === 'exact_self_identity'
+        && (int)$admission['entity_id'] < 0
+        && (int)$recipeResolution['effective_entity_id']
+            === (int)$admission['entity_id']
+        && (string)$readiness['status'] !== 'needs_review',
+        'Representative admission failed: '
+            . (string)$case['id']
+    );
+    $representativeIds[(string)$case['id']] =
+        (int)$admission['entity_id'];
+    $entityByLabel[$label] = (int)$admission['entity_id'];
+    $productIdByLabel[$label] = $productId;
+}
+$GLOBALS['INGREDIENT_ONTOLOGY_PRODUCT_LANGUAGE_OVERRIDE'] =
+    (string)$fixture['language'];
+foreach (
+    (array)($fixture['representative_false_pairs'] ?? [])
+    as $pair
+) {
+    $leftCase = null;
+    $rightCase = null;
+    foreach ((array)$fixture['representative_cases'] as $case) {
+        if ((string)$case['id'] === (string)$pair[0]) {
+            $leftCase = (string)$case['label'];
+        }
+        if ((string)$case['id'] === (string)$pair[1]) {
+            $rightCase = (string)$case['label'];
+        }
+    }
+    if ($leftCase !== null && $rightCase !== null) {
+        $falsePairs[] = [$leftCase, $rightCase];
+    }
+}
+
 $assert(
     count(array_unique(array_values($entityByLabel)))
         === count($entityByLabel),
@@ -251,6 +324,31 @@ foreach ($falsePairs as [$left, $right]) {
     $assert(
         empty($match['satisfies_required']),
         "False equivalence admitted: {$left} == {$right}"
+    );
+}
+$seaLavenderEntity =
+    $representativeIds['taxonomy-trap-sea-lavender'] ?? null;
+if ($seaLavenderEntity !== null) {
+    $hierarchyOnlyMatch = ingredientOntologyV3MatchWithContext(
+        $context,
+        [
+            'entity_id' => $seaLavenderEntity,
+            'status' => 'accepted',
+            'confidence' => 1.0,
+            'mapping_source' => 'identity_annex',
+            'attributes' => [],
+        ],
+        [
+            'entity_id' => $seaLavenderEntity,
+            'status' => 'accepted',
+            'confidence' => 1.0,
+            'mapping_source' => 'foodon_hierarchy',
+            'attributes' => [],
+        ]
+    );
+    $assert(
+        empty($hierarchyOnlyMatch['satisfies_required']),
+        'Semantic ancestry must never satisfy exact identity'
     );
 }
 

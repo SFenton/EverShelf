@@ -31,6 +31,11 @@ $db->exec('PRAGMA journal_mode=WAL');
 $db->exec('PRAGMA synchronous=NORMAL');
 migrateDB($db);
 
+$assert(
+    ingredientOntologyV3ExactSelfIdentityEnabled()
+    && ingredientOntologyV3IdentityReadinessV2Enabled(),
+    'Exact-self admission and retry-safe readiness must default on'
+);
 $GLOBALS[
     'INGREDIENT_ONTOLOGY_EXACT_SELF_IDENTITY_ENABLED_OVERRIDE'
 ] = false;
@@ -129,7 +134,8 @@ ingredientOntologyV3SetPublicationGuard($db, false);
 $saveProduct = static function (
     PDO $db,
     string $name,
-    ?int $productId = null
+    ?int $productId = null,
+    bool $includePreparedFlag = false
 ): array {
     $GLOBALS['PRODUCT_API_JSON_INPUT'] = [
         'name' => $name,
@@ -140,6 +146,9 @@ $saveProduct = static function (
     ];
     if ($productId !== null) {
         $GLOBALS['PRODUCT_API_JSON_INPUT']['id'] = $productId;
+    }
+    if ($includePreparedFlag) {
+        $GLOBALS['PRODUCT_API_JSON_INPUT']['prepared_food'] = false;
     }
     ob_start();
     try {
@@ -199,20 +208,19 @@ for ($index = 0; $index < 30; $index++) {
             'exact_identity_background_test',
             false
         );
+    $effectiveAdmission = !empty(
+        $saved['identity_admission']['accepted']
+    ) ? $saved['identity_admission'] : $backgroundAdmission;
     $assert(
         !empty($saved['success'])
-        && empty($saved['identity_admission']['accepted'])
+        && !empty($effectiveAdmission['accepted'])
         && (string)(
-            $saved['identity_admission']['status'] ?? ''
-        ) === 'unresolved'
-        && $backgroundAdmission['accepted'] === true
-        && (string)(
-            $backgroundAdmission['source'] ?? ''
+            $effectiveAdmission['source'] ?? ''
         ) === 'exact_self_identity'
         && (int)(
-            $backgroundAdmission['entity_id'] ?? 0
+            $effectiveAdmission['entity_id'] ?? 0
         ) < 0,
-        "Product save did not defer and publish exact identity: {$name}"
+        "Product save/background work did not publish exact identity: {$name}"
     );
 }
 $updatedExact = $saveProduct(
@@ -235,7 +243,7 @@ $baselineP95Ms =
 $p95Ms = $latencies[max(0, $p95Index)] ?? INF;
 $assert(
     $p95Ms <= 60.0
-    && $p95Ms <= max(3.0, $baselineP95Ms * 1.10),
+    && $p95Ms <= $baselineP95Ms * 1.10,
     sprintf(
         'Exact identity product-save p95 %.3f ms exceeded baseline %.3f ms',
         $p95Ms,
@@ -251,6 +259,145 @@ $assert(
     'Exact identity product saves must not create needs_review rows'
 );
 
+$providerIndependent = $saveProduct(
+    $db,
+    'Provider Independent Exact Food'
+);
+$providerIndependentId = (int)$providerIndependent['id'];
+$providerIndependentJobId = (int)(
+    $providerIndependent['identity_admission'][
+        'background_job_id'
+    ] ?? 0
+);
+$db->prepare("
+    DELETE FROM canonical_processing_queue
+    WHERE product_id = ?
+")->execute([$providerIndependentId]);
+recipeJobProcessQueueBatch($db, 100, 20, false);
+$providerIndependentAnnex = $db->query("
+    SELECT status, admission_source
+    FROM ingredient_ontology_identity_annex
+    WHERE product_id = {$providerIndependentId}
+")->fetch(PDO::FETCH_ASSOC);
+$assert(
+    $providerIndependentJobId > 0
+    && recipeJobGet(
+        $db,
+        $providerIndependentJobId
+    )['status'] === 'done'
+    && (string)$providerIndependentAnnex['status'] === 'accepted'
+    && (string)$providerIndependentAnnex['admission_source']
+        === 'exact_self_identity',
+    'Background exact-self admission depended on canonical/provider work'
+);
+
+$failureSubsystems = [
+    'shopping_intent',
+    'prepared_food_recipe_scoring',
+    'canonical_enqueue',
+    'controller_observation',
+    'identity_admission',
+];
+foreach ($failureSubsystems as $subsystem) {
+    $GLOBALS['PRODUCT_SAVE_TEST_HOOK'] =
+        static function (
+            string $stage,
+            array $context
+        ) use ($subsystem): void {
+            if (
+                $stage === 'before_side_effect'
+                && ($context['name'] ?? null) === $subsystem
+            ) {
+                throw new RuntimeException(
+                    'injected_' . $subsystem
+                );
+            }
+        };
+    $saved = $saveProduct(
+        $db,
+        'Fail-open ' . str_replace('_', ' ', $subsystem),
+        null,
+        true
+    );
+    $savedId = (int)($saved['id'] ?? 0);
+    $assert(
+        !empty($saved['success'])
+        && !empty($saved['degraded'])
+        && in_array(
+            $subsystem,
+            array_column(
+                $saved['degraded_subsystems'] ?? [],
+                'subsystem'
+            ),
+            true
+        )
+        && (int)$db->query("
+            SELECT COUNT(*)
+            FROM products
+            WHERE id = {$savedId}
+        ")->fetchColumn() === 1,
+        'Subsystem failure rolled back product save: ' . $subsystem
+    );
+    unset($GLOBALS['PRODUCT_SAVE_TEST_HOOK']);
+    if ($subsystem === 'canonical_enqueue') {
+        $reconcile = canonicalIngredientReconcileMissingProducts(
+            $db,
+            100
+        );
+        $assert(
+            in_array($savedId, $reconcile['product_ids'], true)
+            && canonicalIngredientQueueStatusForProduct(
+                $db,
+                $savedId
+            ) !== null,
+            'Canonical enqueue failure was not reconcilable'
+        );
+    } elseif ($subsystem === 'identity_admission') {
+        $reconciled =
+            ingredientOntologyV3IdentityAdmissionPublishProduct(
+                $db,
+                $savedId,
+                $versionId,
+                'product_save_failure_reconciliation',
+                false
+            );
+        $assert(
+            !empty($reconciled['accepted']),
+            'Identity admission failure was not reconcilable'
+        );
+    } elseif ($subsystem === 'prepared_food_recipe_scoring') {
+        $requeued = recipeJobEnqueueInventoryChanged(
+            $db,
+            $savedId,
+            'product_save_failure_reconciliation'
+        );
+        $assert(
+            (int)($requeued['id'] ?? 0) > 0,
+            'Prepared-food score failure was not reconcilable'
+        );
+    } elseif ($subsystem === 'controller_observation') {
+        $reobserved =
+            ingredientOntologyControllerObserveProductSafely(
+                $db,
+                $savedId
+            );
+        $assert(
+            is_array($reobserved),
+            'Controller observation failure was not reconcilable'
+        );
+    } elseif ($subsystem === 'shopping_intent') {
+        $rerecorded = productSaveRecordShoppingIntent(
+            $db,
+            $savedId,
+            'deterministic'
+        );
+        $assert(
+            is_array($rerecorded),
+            'Shopping intent failure was not reconcilable'
+        );
+    }
+}
+
 unset(
     $GLOBALS[
         'INGREDIENT_ONTOLOGY_EXACT_SELF_IDENTITY_ENABLED_OVERRIDE'
@@ -262,7 +409,8 @@ unset(
         'INGREDIENT_ONTOLOGY_IDENTITY_READINESS_V2_ENABLED_OVERRIDE'
     ],
     $GLOBALS['INGREDIENT_ONTOLOGY_PRODUCT_LANGUAGE_OVERRIDE'],
-    $GLOBALS['CANONICAL_QUEUE_TEST_WAKE']
+    $GLOBALS['CANONICAL_QUEUE_TEST_WAKE'],
+    $GLOBALS['PRODUCT_SAVE_TEST_HOOK']
 );
 $db = null;
 @unlink($path);

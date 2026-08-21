@@ -7,6 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.17.0] - 2026-08-21
+
+### Changed
+- Cookidoo search and direct metadata hydration are no longer hard-disabled by
+  repository policy. Matching default-off EverShelf and bridge flags now enable
+  the existing bounded factual allowlist while official instructions and other
+  prohibited provider content remain uninspected, unlogged, and unpersisted.
+- Cookidoo execution now requires bridge capability
+  `metadata-v3-operator-enabled` while persisted factual rows remain
+  `metadata-v2`. A one-shot guarded migration re-stamps only known superseded
+  discovery policies and valid historical pre-policy Cookidoo jobs; unknown
+  future policy identifiers remain unchanged and fail closed.
+- Recipe jobs use immutable request hashes, monotonic request epochs, expiring
+  lease tokens/generations, and per-origin/connector apply fences. Provider I/O
+  occurs after claim commit with no recipe/global queue flock or SQLite
+  transaction, followed by one short atomic apply/completion transaction.
+- Recipe queue invocations are bounded by a crash-recoverable database-backed
+  singleton lease. Competing cron/manual batches skip observably, while expiry
+  reclaim and token-fenced release require no provider-spanning file lock.
+- Cached recipes remain searchable and recommendable after either freshness
+  deadline. Reads expose `is_stale` and enqueue bounded best-effort refresh
+  without requiring the bulk-backfill gate; freshness transitions no longer
+  invalidate browse cursors.
+- Exact-self food admission and retry-safe readiness now default on with an
+  emergency disable. Product-save enrichment subsystems are savepoint-isolated
+  and report degraded outcomes without rolling back the core product.
+
+### Fixed
+- FoodOn hierarchy/ancestor evidence can no longer downgrade controller work to
+  R0, create `foodon_hierarchy` accepted identity, or satisfy exact ingredient
+  matching. A bounded copy-database audit can identify and requeue unsafe legacy
+  mappings into exact-self admission.
+- Legacy recipe migration now installs lease indexes only after their additive
+  columns, and stale-visibility cursor marker/bump publication is atomic.
+- Queued Cookidoo metadata refreshes now report `connector_disabled` instead of
+  the obsolete `metadata_backfill_disabled` reason when the connector itself is
+  unavailable; the bulk-backfill gate remains limited to bulk enqueue.
+
 ## [1.16.2] - 2026-08-21
 
 ### Fixed

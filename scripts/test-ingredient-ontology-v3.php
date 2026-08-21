@@ -6,6 +6,13 @@ define('CRON_MODE', true);
 define('RECIPE_BACKEND_TEST_MODE', true);
 require_once __DIR__ . '/../api/bootstrap.php';
 
+$GLOBALS[
+    'INGREDIENT_ONTOLOGY_EXACT_SELF_IDENTITY_ENABLED_OVERRIDE'
+] = false;
+$GLOBALS[
+    'INGREDIENT_ONTOLOGY_IDENTITY_READINESS_V2_ENABLED_OVERRIDE'
+] = false;
+
 $assertions = 0;
 function ontologyV3TestAssert(bool $condition, string $message): void {
     global $assertions;

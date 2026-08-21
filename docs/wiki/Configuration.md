@@ -57,7 +57,6 @@ COOKIDOO_QUEUE_CADENCE_MINUTES=1
 # Language-only discovery values are allowed; stored recipes use the selected effective locale.
 COOKIDOO_DISCOVERY_LOCALE=en-US
 COOKIDOO_PERIODIC_REFRESH_ENABLED=false
-COOKIDOO_LEGACY_REFRESH_ENABLED=false
 COOKIDOO_REFRESH_ENQUEUE_LIMIT=2
 
 # ─────────────────────────────────────────────
@@ -127,12 +126,20 @@ Most settings can also be configured from the browser via **Settings → ⚙️*
 
 ## Cookidoo Metadata Bridge
 
-The provider-facing bridge profile and Cookidoo credentials must not be configured
-while the current policy gate is active. The available provider detail response
-co-transports official steps, so `/v1/search` and `/v1/metadata` return
-`503 metadata_hydration_disabled_policy` locally without provider requests.
-EverShelf does not enqueue discovery/detail/backfill jobs. Existing cached catalog
-rows and completed isolated pilot artifacts remain readable.
+The provider-facing bridge remains default-off. To enable metadata discovery and
+direct refresh, set `COOKIDOO_CONNECTOR_ENABLED=true` and
+`COOKIDOO_DETAIL_HYDRATION_ENABLED=true` in EverShelf and set the matching
+`COOKIDOO_DETAIL_HYDRATION_ENABLED=true` bridge flag. Provider responses may
+co-transport official steps, but only bounded allowlisted factual metadata crosses
+the bridge API boundary; instructions are never logged, returned, or persisted.
+Existing cached catalog rows remain readable while either gate is disabled.
+The app verifies bridge capability policy `metadata-v3-operator-enabled` before
+any provider request; persisted factual metadata remains `metadata-v2`. Cached
+rows remain searchable after either freshness deadline and enqueue bounded
+best-effort refresh on reads without requiring the bulk-backfill gate.
+Known superseded Cookidoo discovery policy markers and valid pre-policy
+discovery payloads are re-stamped once during schema migration. Unknown policy
+identifiers remain untouched and ineligible.
 
 `RECIPE_COOKIDOO_THUMBNAIL_REWRITE=true` returns the verified smaller named Cookidoo
 CDN transform alongside the original URL. Disable it to use only the original;
@@ -424,16 +431,32 @@ Guided Cooking data, image bytes, and raw payloads are excluded. Remote image by
 are not proxied or stored; displaying the image contacts Cookidoo's image host.
 Ingredient `preparation` is never accessed.
 
-Automatic taxonomy discovery, full crawls, periodic refresh, and crawl seeding are
-policy-disabled. Legacy queued jobs terminate as local `skipped` outcomes without
-connector failure or circuit accounting.
+Automatic taxonomy discovery, bounded crawls, periodic refresh, and crawl seeding
+run only when connector and detail hydration gates are enabled. Existing
+disabled-gate jobs remain pending without connector failure or circuit accounting.
 
 ### Direct-ID metadata-v2 backfill
 
-Direct-ID backfill and scan-triggered discovery are policy-disabled.
-`COOKIDOO_CONNECTOR_ENABLED`, `COOKIDOO_DETAIL_HYDRATION_ENABLED`, and
-`COOKIDOO_METADATA_BACKFILL_ENABLED` cannot override the policy gate. Existing
-cached recipes remain readable.
+Direct-ID backfill requires connector/detail hydration plus
+`COOKIDOO_METADATA_BACKFILL_ENABLED=true`. Scan-triggered discovery requires the
+connector and detail hydration gates but not the backfill gate. Existing cached
+recipes remain readable while network hydration is disabled. Existing v3-policy
+jobs remain pending while gates are off. Only known superseded or historically
+absent discovery policy values are migrated; unknown values fail closed. Recipe
+queue processes coordinate through an expiring database singleton lease, so a
+second cron/manual invocation skips without holding SQLite or flock across
+provider traffic.
+
+### FoodOn exact-identity audit
+
+Audit copied databases without mutation:
+
+```bash
+php scripts/audit-foodon-hierarchy-identity.php --db=copy.sqlite
+```
+
+`--write` is accepted only for a copied database and requeues affected products
+through exact-self admission; it never materializes FoodOn semantic parents.
 
 ---
 

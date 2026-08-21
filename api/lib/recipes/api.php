@@ -147,6 +147,11 @@ function recipeCatalogApiSearch(PDO $db): void {
     [$options, $page] = recipeApiBrowseOptions();
     recipeApiWriteCatalogResult(static function () use ($db, $options, $page): array {
         $result = recipeCatalogSearchResult($db, $options);
+        recipeCookidooDemandRefresh(
+            $db,
+            array_column($result['items'] ?? [], 'id'),
+            'search'
+        );
         $result['page'] = $page;
         return $result;
     });
@@ -157,17 +162,30 @@ function recipeCatalogApiSuggest(PDO $db): void {
     $options['query'] = '';
     recipeApiWriteCatalogResult(static function () use ($db, $options, $page): array {
         $result = recipeCatalogSuggestionResult($db, $options);
+        recipeCookidooDemandRefresh(
+            $db,
+            array_column($result['items'] ?? [], 'id'),
+            'suggest'
+        );
         $result['page'] = $page;
         return $result;
     });
 }
 
 function recipeCatalogApiRecommendations(PDO $db): void {
-    recipeApiWriteCatalogResult(static fn(): array => recipeCatalogRecommendationResult($db, [
-        'source' => (string)($_GET['source'] ?? ''),
-        'locale' => (string)($_GET['locale'] ?? ''),
-        'limit' => max(5, min(100, (int)($_GET['limit'] ?? 30))),
-    ]));
+    recipeApiWriteCatalogResult(static function () use ($db): array {
+        $result = recipeCatalogRecommendationResult($db, [
+            'source' => (string)($_GET['source'] ?? ''),
+            'locale' => (string)($_GET['locale'] ?? ''),
+            'limit' => max(5, min(100, (int)($_GET['limit'] ?? 30))),
+        ]);
+        recipeCookidooDemandRefresh(
+            $db,
+            array_column($result['items'] ?? [], 'id'),
+            'recommendations'
+        );
+        return $result;
+    });
 }
 
 function recipeCatalogApiGet(PDO $db): void {
@@ -187,6 +205,7 @@ function recipeCatalogApiGet(PDO $db): void {
         echo json_encode(['success' => false, 'error' => 'recipe_not_found']);
         return;
     }
+    recipeCookidooDemandRefresh($db, [$id], 'get');
     echo json_encode(['success' => true, 'recipe' => $recipe], JSON_UNESCAPED_UNICODE);
 }
 
@@ -207,6 +226,7 @@ function recipeCatalogApiDetail(PDO $db): void {
         echo json_encode(['success' => false, 'error' => 'recipe_not_found']);
         return;
     }
+    recipeCookidooDemandRefresh($db, [$id], 'detail');
     echo json_encode(
         ['success' => true, 'detail' => $detail],
         JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES

@@ -1,7 +1,8 @@
 #!/usr/bin/env php
 <?php
 /**
- * Process bounded local recipe discovery/index jobs.
+ * Process bounded leased recipe jobs. Provider I/O runs only after claim
+ * commit and before the short fenced apply transaction.
  *
  * Usage:
  *   php scripts/process-recipe-queue.php [--limit=N] [--max-attempts=N] [--json]
@@ -34,6 +35,16 @@ $result = recipeJobProcessQueue(
 
 if ($json) {
     echo json_encode(['success' => true] + $result, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE) . PHP_EOL;
+    exit;
+}
+
+if (!empty($result['worker_skipped'])) {
+    echo 'Worker skipped: '
+        . (string)($result['worker_skip_reason'] ?? 'worker_lease_active');
+    if (!empty($result['worker_lease_expires_at'])) {
+        echo ' until ' . $result['worker_lease_expires_at'];
+    }
+    echo PHP_EOL;
     exit;
 }
 

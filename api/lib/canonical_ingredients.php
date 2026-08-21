@@ -2545,6 +2545,46 @@ function canonicalIngredientQueueStatusForProduct(PDO $db, int $productId): ?arr
     return $row ?: null;
 }
 
+function canonicalIngredientReconcileMissingProducts(
+    PDO $db,
+    int $limit = 25
+): array {
+    $limit = max(1, min(100, $limit));
+    $rows = $db->query("
+        SELECT p.id
+        FROM products p
+        WHERE NOT EXISTS (
+            SELECT 1
+            FROM canonical_processing_queue queue
+            WHERE queue.product_id = p.id
+        )
+          AND NOT EXISTS (
+            SELECT 1
+            FROM product_ingredients mapping
+            WHERE mapping.product_id = p.id
+              AND mapping.role = 'primary'
+          )
+        ORDER BY p.updated_at, p.id
+        LIMIT {$limit}
+    ")->fetchAll(PDO::FETCH_COLUMN);
+    $queued = [];
+    foreach ($rows as $productId) {
+        $result = canonicalIngredientEnqueueProduct(
+            $db,
+            (int)$productId,
+            'product_save_reconciliation'
+        );
+        if (!empty($result['queued'])) {
+            $queued[] = (int)$productId;
+        }
+    }
+    return [
+        'scanned' => count($rows),
+        'queued' => count($queued),
+        'product_ids' => $queued,
+    ];
+}
+
 function canonicalIngredientQueueStats(
     PDO $db,
     ?int $maxAttempts = null

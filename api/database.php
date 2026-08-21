@@ -11,7 +11,7 @@ require_once __DIR__ . '/lib/recipes/schema.php';
 
 define('DB_PATH', __DIR__ . '/../data/evershelf.db');
 // Bump whenever migrateDB() or a nested schema migration changes.
-const EVERSHELF_DATABASE_SCHEMA_VERSION = 2026082303;
+const EVERSHELF_DATABASE_SCHEMA_VERSION = 2026082305;
 
 /**
  * Ensure the data directory exists and is writable by the web-server user.
@@ -288,6 +288,27 @@ function dbBeginImmediateWithRetry(
         },
         $maxAttempts
     );
+}
+
+function databaseTransactionIsActive(PDO $db): bool {
+    if ($db->inTransaction()) {
+        return true;
+    }
+    try {
+        $db->exec('BEGIN');
+        $db->exec('ROLLBACK');
+        return false;
+    } catch (PDOException $error) {
+        $message = strtolower($error->getMessage());
+        if (
+            str_contains($message, 'within a transaction')
+            || str_contains($message, 'transaction is active')
+            || str_contains($message, 'cannot start a transaction')
+        ) {
+            return true;
+        }
+        throw $error;
+    }
 }
 
 function initializeDB(PDO $db): void {

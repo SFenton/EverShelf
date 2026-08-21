@@ -37,6 +37,10 @@ dispensa/
 - Product writes enqueue canonical work durably in the same foreground SQLite
   transaction and send a nonblocking Unix datagram only after commit. They do
   not perform provider or model calls.
+- Canonical, controller, identity, shopping-classification, and recipe-score
+  side effects use independent savepoints. A subsystem failure is returned as a
+  degraded outcome and reconciled by bounded workers without rolling back the
+  core product row.
 - The singleton canonical worker computes taxonomy, FoodOn, and USDA evidence
   without a database transaction and under a deadline derived from the crash
   lease minus a reserved apply window. Budget exhaustion explicitly releases
@@ -104,15 +108,30 @@ dispensa/
 - `recipe_catalog_grocery_add` revalidates inventory, canonicalizes selected
   ingredients, and writes only to EverShelf's internal shopping list with durable
   client idempotency. Home Assistant orchestration remains outside EverShelf.
-- Cookidoo provider detail hydration is policy-disabled because the available detail
-  response co-transports official steps. Bridge search/direct metadata fail locally
-  with `metadata_hydration_disabled_policy`; no production path calls raw/public
-  detail loaders. EverShelf refuses new discovery/backfill enqueue and marks legacy
-  queued jobs `skipped` without connector failure/circuit accounting.
-- Existing cached Cookidoo catalog rows remain readable and retain their historical
-  `metadata-v2`/`ingredient-topology-v1` facts. No policy-disabled path deletes
-  catalog data or changes search, clusters, scores, or revisions. Re-enabling would
-  require a separately reviewed step-free provider endpoint.
+- Cookidoo provider detail hydration is default-off and requires matching EverShelf
+  and bridge gates. The bounded bridge request may receive a response that
+  co-transports official steps, but only the `SafeRecipeMetadata` factual allowlist
+  crosses the bridge API boundary; prohibited fields are never inspected, returned,
+  logged, or persisted. EverShelf additionally requires the bridge execution-policy
+  capability `metadata-v3-operator-enabled`; factual rows retain the independent
+  `metadata-v2`/`ingredient-topology-v1` storage versions.
+- Recipe workers claim under a short SQLite write reservation using immutable
+  request hashes, monotonic request epochs, unpredictable lease tokens, lease
+  generations, and expiries. A separate database-backed singleton process lease
+  bounds concurrent cron/manual batches and is renewed between jobs; it is
+  logical state, not a held SQLite or file lock. All transactions and flock
+  probes finish before bridge I/O. A short catalog transaction then revalidates
+  the job lease and per-origin/connector request epoch before atomically applying
+  facts, pagination, connector outcome, and job completion.
+- Existing SQLite recipe-job tables gain ownership fields additively. Their
+  original table-level `CHECK` clauses are not rebuilt during upgrade; bounded
+  statuses, generations, tokens, and expiries are enforced by claim/update
+  predicates and migration regression tests instead.
+- When hydration is disabled, new discovery/backfill enqueue is refused and
+  existing queued jobs remain pending rather than being destroyed. Cached Cookidoo
+  rows remain searchable while stale; TTL controls refresh demand, not catalog
+  membership. Read-triggered refresh is bounded, best-effort, and independent of
+  the bulk-backfill gate.
 
 ## Ingredient ontology v3
 
@@ -134,6 +153,11 @@ dispensa/
   regexes, punctuation, alternatives, quantities, and modifier parsing are
   retained as evidence hints only; absent review, recipe rows terminate D9.
   Candidate assertions are snapshotted append-only before terminalization.
+- FoodOn hierarchy and `resolved_parent` remain compatibility evidence only.
+  They cannot lower controller risk, create accepted exact mappings, or satisfy
+  an ingredient identity. Exact-self admission defaults on for legitimate
+  unresolved foods and can be disabled only as an emergency operational guard;
+  unresolved foods remain retryable rather than becoming `needs_review`.
 - Entity `identity_role` is orthogonal to `entity_kind`. The graph has one
   connected `food` root; structural categories are identity-ineligible,
   prepared/composite identities can match only the identical base, and

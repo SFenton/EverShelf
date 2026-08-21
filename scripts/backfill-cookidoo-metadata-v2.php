@@ -25,8 +25,9 @@ function recipeCookidooMetadataBackfillUsage(): string {
         '  --json               Emit machine-readable JSON',
         '  --help               Show this help',
         '',
-        'Provider metadata enqueue is disabled by repository policy.',
-        'Existing cached catalog rows are unchanged and remain readable.',
+        'Provider metadata enqueue requires the default-off connector, detail,',
+        'bulk-backfill, and metadata-v3 bridge capability gates.',
+        'Existing cached catalog rows remain readable while stale.',
     ]) . PHP_EOL;
 }
 
