@@ -339,7 +339,10 @@ retains a once-per-minute activation fallback so the default topology still
 recovers full-score work; the activation process lock prevents it from
 overlapping the dedicated worker. The incremental score worker takes the
 shared background-writer lock nonblocking and skips cleanly during activation's
-live import/publication phases instead of entering SQLite contention.
+live import/publication phases instead of entering SQLite contention. A
+separate score-coordination lock spans copied database backup, scoring, and
+validation so the incremental scorer never wastes a full cycle against the
+same 61 GB snapshot operation; web scans do not take that coordination lock.
 
 Activation-only SQLite connections use file-backed temporary storage so large
 ordered verification queries stay within the worker memory limit. Generated

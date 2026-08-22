@@ -167,6 +167,7 @@ services:
       - --allow-active-db
       - --loop
       - --sleep-ms=200
+      - --coordination-lock=/var/www/html/data/.recipe-score-coordination.lock
       - --heartbeat=/var/www/html/data/.recipe-score-worker.heartbeat
       - --status-file=/var/www/html/data/.recipe-score-worker.status
     volumes:

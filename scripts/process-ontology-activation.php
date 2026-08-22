@@ -173,6 +173,32 @@ if (
     ], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . PHP_EOL;
     exit(0);
 }
+$coordinationLockPath =
+    $databaseDirectory . '/.recipe-score-coordination.lock';
+$coordinationLock = fopen($coordinationLockPath, 'c+');
+if ($coordinationLock === false) {
+    flock($lock, LOCK_UN);
+    fclose($backgroundLock);
+    fclose($lock);
+    throw new RuntimeException(
+        'ontology activation score coordination lock could not be opened'
+    );
+}
+if (!flock($coordinationLock, LOCK_EX | LOCK_NB)) {
+    flock($lock, LOCK_UN);
+    fclose($coordinationLock);
+    fclose($backgroundLock);
+    fclose($lock);
+    echo json_encode([
+        'success' => true,
+        'skipped' => true,
+        'outcome' => 'locked',
+        'reason' => 'score_coordination_locked',
+        'lock_scope' => 'score_coordination',
+        'retryable' => true,
+    ], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . PHP_EOL;
+    exit(0);
+}
 try {
     for ($cycle = 0; $cycle < $maximumCycles; $cycle++) {
         $result = ingredientOntologyActivationRunOnce(
@@ -354,6 +380,8 @@ try {
     );
     $exitCode = 2;
 } finally {
+    flock($coordinationLock, LOCK_UN);
+    fclose($coordinationLock);
     flock($lock, LOCK_UN);
     fclose($backgroundLock);
     fclose($lock);

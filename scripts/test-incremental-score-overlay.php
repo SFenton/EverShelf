@@ -419,8 +419,68 @@ $assert(
     'A contended score cycle must remain retryable without changing state'
 );
 $backgroundLockPath = dirname($path) . '/.background-writer.lock';
+$coordinationLockPath = $path . '.score-coordination';
 $workerHeartbeatPath = $path . '.worker-heartbeat';
 $workerStatusPath = $path . '.worker-status';
+$coordinationLock = fopen($coordinationLockPath, 'c+');
+$assert(
+    is_resource($coordinationLock)
+    && flock($coordinationLock, LOCK_EX | LOCK_NB),
+    'Score coordination lock fixture must be available'
+);
+$pipes = [];
+$coordinatedWorker = proc_open(
+    [
+        PHP_BINARY,
+        __DIR__ . '/incremental-score-worker.php',
+        '--db=' . $path,
+        '--background-lock=' . $backgroundLockPath,
+        '--coordination-lock=' . $coordinationLockPath,
+        '--heartbeat=' . $workerHeartbeatPath,
+        '--status-file=' . $workerStatusPath,
+        '--force',
+        '--json',
+    ],
+    [
+        0 => ['pipe', 'r'],
+        1 => ['pipe', 'w'],
+        2 => ['pipe', 'w'],
+    ],
+    $pipes,
+    dirname(__DIR__)
+);
+if (!is_resource($coordinatedWorker)) {
+    throw new RuntimeException(
+        'Could not start score coordination worker probe'
+    );
+}
+fclose($pipes[0]);
+$coordinatedStdout = stream_get_contents($pipes[1]);
+$coordinatedStderr = stream_get_contents($pipes[2]);
+fclose($pipes[1]);
+fclose($pipes[2]);
+$coordinatedStatus = proc_close($coordinatedWorker);
+flock($coordinationLock, LOCK_UN);
+fclose($coordinationLock);
+$coordinatedPayload = json_decode(
+    (string)$coordinatedStdout,
+    true
+);
+$assert(
+    $coordinatedStatus === 0
+    && is_array($coordinatedPayload)
+    && ($coordinatedPayload['success'] ?? null) === true
+    && (string)($coordinatedPayload['reason'] ?? '')
+        === 'score_coordination_locked'
+    && !empty($coordinatedPayload['skipped'])
+    && !empty($coordinatedPayload['retryable']),
+    'Copied builds must exclude the incremental scorer before SQLite: '
+        . ingredientOntologyV3Json([
+            'status' => $coordinatedStatus,
+            'stdout' => $coordinatedStdout,
+            'stderr' => $coordinatedStderr,
+        ])
+);
 $backgroundLock = fopen($backgroundLockPath, 'c+');
 $assert(
     is_resource($backgroundLock)
@@ -434,6 +494,7 @@ $lockedWorker = proc_open(
         __DIR__ . '/incremental-score-worker.php',
         '--db=' . $path,
         '--background-lock=' . $backgroundLockPath,
+        '--coordination-lock=' . $coordinationLockPath,
         '--heartbeat=' . $workerHeartbeatPath,
         '--status-file=' . $workerStatusPath,
         '--force',
@@ -519,6 +580,7 @@ $worker = proc_open(
         __DIR__ . '/incremental-score-worker.php',
         '--db=' . $path,
         '--background-lock=' . $backgroundLockPath,
+        '--coordination-lock=' . $coordinationLockPath,
         '--heartbeat=' . $workerHeartbeatPath,
         '--status-file=' . $workerStatusPath,
         '--force',
@@ -571,6 +633,7 @@ $loopWorker = proc_open(
         __DIR__ . '/incremental-score-worker.php',
         '--db=' . $path,
         '--background-lock=' . $backgroundLockPath,
+        '--coordination-lock=' . $coordinationLockPath,
         '--heartbeat=' . $workerHeartbeatPath,
         '--status-file=' . $workerStatusPath,
         '--force',
@@ -703,6 +766,7 @@ $db = null;
 @unlink($path . '-wal');
 @unlink($path . '-shm');
 @unlink($backgroundLockPath);
+@unlink($coordinationLockPath);
 @unlink($workerHeartbeatPath);
 @unlink($workerStatusPath);
 

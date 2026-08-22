@@ -86,6 +86,10 @@ $assert(
     && str_contains(
         $activationWorker,
         'ONTOLOGY_ACTIVATION_WORKER_MEMORY_LIMIT'
+    )
+    && str_contains(
+        $compose,
+        'recipe-score-coordination.lock'
     ),
     'A bounded copied-build activation worker must run separately'
 );

@@ -151,6 +151,9 @@ if ($settlerMode) {
                         '--db=' . $databasePath,
                         '--background-lock='
                             . $scoreBackgroundLock,
+                        '--coordination-lock='
+                            . $databasePath
+                            . '.score-coordination.lock',
                         '--heartbeat=' . $scoreHeartbeat,
                         '--status-file=' . $scoreStatus,
                         '--force',
@@ -467,6 +470,7 @@ $cleanup = [
     $databasePath . '.migration.lock',
     $databasePath . '.canonical.lock',
     $databasePath . '.score-background.lock',
+    $databasePath . '.score-coordination.lock',
     $databasePath . '.score-worker-heartbeat',
     $databasePath . '.score-worker-status',
     dirname($databasePath) . '/.' . basename($databasePath)

@@ -62,6 +62,17 @@ if ($backgroundLockPath === '') {
         '--background-lock must be an absolute path'
     );
 }
+$coordinationLockPath = trim(
+    (string)($options['coordination-lock'] ?? '')
+);
+if ($coordinationLockPath === '') {
+    $coordinationLockPath =
+        dirname($databaseFile) . '/.recipe-score-coordination.lock';
+} elseif (!str_starts_with($coordinationLockPath, '/')) {
+    throw new InvalidArgumentException(
+        '--coordination-lock must be an absolute path'
+    );
+}
 $heartbeatPath = trim((string)($options['heartbeat'] ?? ''));
 if ($heartbeatPath === '') {
     $heartbeatPath =
@@ -116,74 +127,101 @@ $cycle = 0;
 do {
     $cycle++;
     $writeState($heartbeatPath, (string)time());
-    $backgroundLock = fopen($backgroundLockPath, 'c+');
-    if ($backgroundLock === false) {
+    $coordinationLock = fopen($coordinationLockPath, 'c+');
+    if ($coordinationLock === false) {
         $result = [
             'rebuilt' => false,
             'reason' => 'worker_exception',
-            'error' => 'background writer lock could not be opened',
+            'error' => 'score coordination lock could not be opened',
         ];
-    } elseif (!flock($backgroundLock, LOCK_EX | LOCK_NB)) {
-        fclose($backgroundLock);
-        $backgroundLock = null;
+    } elseif (!flock($coordinationLock, LOCK_EX | LOCK_NB)) {
+        fclose($coordinationLock);
+        $coordinationLock = null;
         $result = [
             'rebuilt' => false,
-            'reason' => 'background_writer_locked',
+            'reason' => 'score_coordination_locked',
             'skipped' => true,
             'retryable' => true,
         ];
     } else {
         try {
-            $result = ingredientOntologyV3IncrementalRebuild(
-                $db,
-                $force
-            );
-            if (
-                (string)($result['reason'] ?? '')
-                    === 'compaction_required'
-            ) {
-                $compaction =
-                    ingredientOntologyV3CompactActiveScores(
+            $backgroundLock = fopen($backgroundLockPath, 'c+');
+            if ($backgroundLock === false) {
+                $result = [
+                    'rebuilt' => false,
+                    'reason' => 'worker_exception',
+                    'error' =>
+                        'background writer lock could not be opened',
+                ];
+            } elseif (!flock(
+                $backgroundLock,
+                LOCK_EX | LOCK_NB
+            )) {
+                fclose($backgroundLock);
+                $backgroundLock = null;
+                $result = [
+                    'rebuilt' => false,
+                    'reason' => 'background_writer_locked',
+                    'skipped' => true,
+                    'retryable' => true,
+                ];
+            } else {
+                try {
+                    $result = ingredientOntologyV3IncrementalRebuild(
                         $db,
-                        true
+                        $force
                     );
-                $result['compaction'] = $compaction;
-                if (!empty($compaction['compacted'])) {
-                    $result['reason'] = 'compacted';
+                    if (
+                        (string)($result['reason'] ?? '')
+                            === 'compaction_required'
+                    ) {
+                        $compaction =
+                            ingredientOntologyV3CompactActiveScores(
+                                $db,
+                                true
+                            );
+                        $result['compaction'] = $compaction;
+                        if (!empty($compaction['compacted'])) {
+                            $result['reason'] = 'compacted';
+                        }
+                    }
+                } catch (Throwable $error) {
+                    $rollbackError = null;
+                    try {
+                        databaseRollbackDanglingTransaction($db);
+                    } catch (Throwable $cleanupError) {
+                        $rollbackError = $cleanupError;
+                    }
+                    $reason = $rollbackError !== null
+                        ? 'worker_exception'
+                        : (
+                            databaseIsLockError($error)
+                                ? 'locked'
+                                : 'worker_exception'
+                        );
+                    $message = $error->getMessage();
+                    if ($rollbackError !== null) {
+                        $message .= '; connection rollback failed: '
+                            . $rollbackError->getMessage();
+                    }
+                    $result = [
+                        'rebuilt' => false,
+                        'reason' => $reason,
+                        'error' => mb_substr(
+                            $message,
+                            0,
+                            1000,
+                            'UTF-8'
+                        ),
+                    ];
+                } finally {
+                    flock($backgroundLock, LOCK_UN);
+                    fclose($backgroundLock);
                 }
             }
-        } catch (Throwable $error) {
-            $rollbackError = null;
-            try {
-                databaseRollbackDanglingTransaction($db);
-            } catch (Throwable $cleanupError) {
-                $rollbackError = $cleanupError;
-            }
-            $reason = $rollbackError !== null
-                ? 'worker_exception'
-                : (
-                    databaseIsLockError($error)
-                        ? 'locked'
-                        : 'worker_exception'
-                );
-            $message = $error->getMessage();
-            if ($rollbackError !== null) {
-                $message .= '; connection rollback failed: '
-                    . $rollbackError->getMessage();
-            }
-            $result = [
-                'rebuilt' => false,
-                'reason' => $reason,
-                'error' => mb_substr(
-                    $message,
-                    0,
-                    1000,
-                    'UTF-8'
-                ),
-            ];
         } finally {
-            flock($backgroundLock, LOCK_UN);
-            fclose($backgroundLock);
+            flock($coordinationLock, LOCK_UN);
+            fclose($coordinationLock);
         }
     }
     $reason = (string)($result['reason'] ?? '');
@@ -206,7 +244,11 @@ do {
         ];
     } elseif (in_array(
         $reason,
-        ['background_writer_locked', 'locked'],
+        [
+            'background_writer_locked',
+            'score_coordination_locked',
+            'locked',
+        ],
         true
     )) {
         $result['skipped'] = true;
@@ -272,6 +314,7 @@ do {
             min(5000, (int)($result['retry_after_ms'] ?? 50))
         ),
         'background_writer_locked' => max($sleepMs, 250),
+        'score_coordination_locked' => max($sleepMs, 250),
         'locked' => max($sleepMs, 250),
         'full_rebuild_required',
         'active_revision_missing',
