@@ -365,6 +365,32 @@ try {
         && $problemStatus['problem'] === true,
         'Active work must remain visible when an independent problem exists'
     );
+    $db->prepare("
+        UPDATE ontology_activation_imports
+        SET status = 'active',
+            last_error = 'activation reservation exceeded 100 ms',
+            completed_at = CURRENT_TIMESTAMP,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+    ")->execute([$scoreImportId]);
+    $db->exec("
+        UPDATE ontology_activation_state
+        SET failure_count = 0,
+            last_error = '',
+            last_outcome_kind = 'activated',
+            last_outcome_json =
+                '{\"reason\":\"score_import_activated\"}',
+            last_outcome_at = CURRENT_TIMESTAMP,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = 1
+    ");
+    $recoveredStatus = evershelfProcessingStatus($db);
+    $assert(
+        $recoveredStatus['activation']['last_error'] === null
+        && $recoveredStatus['problem'] === false,
+        'Historical successful-import warnings must not keep processing '
+            . 'in a failed state'
+    );
     $db->exec("
         UPDATE ontology_activation_imports
         SET status = 'cleaned',

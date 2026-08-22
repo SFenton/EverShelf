@@ -749,7 +749,6 @@ function evershelfProcessingStatusActivation(PDO $db): array {
     }
     $latest = null;
     $current = null;
-    $latestError = null;
     if (
         evershelfProcessingStatusTableExists(
             $db,
@@ -785,13 +784,6 @@ function evershelfProcessingStatusActivation(PDO $db): array {
                 id
             LIMIT 1
         ")->fetch(PDO::FETCH_ASSOC) ?: null;
-        $latestError = $db->query("
-            SELECT last_error, updated_at
-            FROM ontology_activation_imports
-            WHERE trim(last_error) <> ''
-            ORDER BY updated_at DESC, id DESC
-            LIMIT 1
-        ")->fetch(PDO::FETCH_ASSOC) ?: null;
     }
     $running = is_array($current);
     $errors = [];
@@ -802,11 +794,11 @@ function evershelfProcessingStatusActivation(PDO $db): array {
             'updated_at' => (string)($state['updated_at'] ?? ''),
         ];
     }
-    $importError = trim((string)($latestError['last_error'] ?? ''));
+    $importError = trim((string)($current['last_error'] ?? ''));
     if ($importError !== '') {
         $errors[] = [
             'message' => $importError,
-            'updated_at' => (string)($latestError['updated_at'] ?? ''),
+            'updated_at' => (string)($current['updated_at'] ?? ''),
         ];
     }
     usort(

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.18.12] - 2026-08-22
+
+### Fixed
+- Processing status no longer treats warnings retained on historical,
+  successfully completed activation imports as current system failures.
+
 ## [1.18.11] - 2026-08-22
 
 ### Fixed
