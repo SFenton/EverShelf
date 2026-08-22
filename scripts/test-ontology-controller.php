@@ -12333,6 +12333,10 @@ try {
             $activationSource,
             'ingredientOntologyActivationWithLiveReservation'
         )
+        && str_contains(
+            $activationSource,
+            "'identity_migration'"
+        )
         && is_int($scoreRefreshPriority)
         && is_int($policyDeferredRecord)
         && $scoreRefreshPriority < $policyDeferredRecord

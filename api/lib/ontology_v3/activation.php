@@ -8111,8 +8111,39 @@ function ingredientOntologyActivationAssertActiveDatabase(PDO $db): void {
             $db,
             $options
         );
-        $identitySync =
-            ingredientOntologyV3IdentityAdmissionSync($db);
+        $identityMaintenance =
+            ingredientOntologyActivationWithLiveReservation(
+                $options,
+                'identity_migration',
+                static function () use ($db): array {
+                    $identitySync =
+                        ingredientOntologyV3IdentityAdmissionSync(
+                            $db
+                        );
+                    $remaining = max(
+                        (int)(
+                            $identitySync[
+                                'resolver_migration'
+                            ]['remaining'] ?? 0
+                        ),
+                        (int)(
+                            $identitySync[
+                                'recipe_resolver_migration'
+                            ]['remaining'] ?? 0
+                        )
+                    );
+                    return [
+                        'sync' => $identitySync,
+                        'remaining' => $remaining,
+                        'product_reconcile' => $remaining > 0
+                            ? null
+                            : ingredientOntologyActivationReconcileProductAnnex(
+                                $db
+                            ),
+                    ];
+                }
+            );
+        $identitySync = $identityMaintenance['sync'];
         $identityMigrationRemaining = max(
             (int)(
                 $identitySync['resolver_migration']['remaining']
@@ -8136,7 +8167,6 @@ function ingredientOntologyActivationAssertActiveDatabase(PDO $db): void {
                 'cdc_pruned' => $cdcPruned,
             ];
         }
-        ingredientOntologyActivationReconcileProductAnnex($db);
         $pending = ingredientOntologyActivationPendingImport($db);
         if ($pending !== null) {
             $result = ingredientOntologyActivationDriveImport(
