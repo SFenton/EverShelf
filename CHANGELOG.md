@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.18.4] - 2026-08-22
+
+### Fixed
+- Bounded user-visible incremental score work now publishes before queued
+  ontology generations, preventing historical generation intents from forcing
+  another full copied rebuild after each deployment.
+
 ## [1.18.3] - 2026-08-22
 
 ### Fixed

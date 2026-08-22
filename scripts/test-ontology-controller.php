@@ -12343,6 +12343,10 @@ try {
         && str_contains(
             $activationSource,
             'ingredientOntologyActivationStartScoreRefresh'
+        )
+        && str_contains(
+            $activationSource,
+            "'incremental_score_pending'"
         ),
         'Production cron and live worker CLI must remain priority-fenced and reject active-database generation'
     );

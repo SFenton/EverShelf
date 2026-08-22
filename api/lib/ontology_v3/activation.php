@@ -8278,6 +8278,21 @@ function ingredientOntologyActivationAssertActiveDatabase(PDO $db): void {
             ];
         }
 
+        $activeScore = recipeScoreActiveRevision($db);
+        if (
+            $activeScore !== null
+            && recipeScoreRevisionStatus($db, $activeScore)
+                !== 'fresh'
+            && !ingredientOntologyActivationNeedsScoreBuild($db)
+        ) {
+            return [
+                'action' => 'none',
+                'reason' => 'incremental_score_pending',
+                'work_cleanup' => $workCleanup,
+                'cdc_pruned' => $cdcPruned,
+            ];
+        }
+
         if (ingredientOntologyActivationNeedsOntologyBuild($db)) {
             $reviewedManifestRefresh =
                 ingredientOntologyActivationShouldRebuildReviewedManifest(
