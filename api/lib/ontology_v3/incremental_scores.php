@@ -3180,7 +3180,9 @@ function ingredientOntologyV3IncrementalRebuild(
         }
         return [
             'rebuilt' => false,
-            'reason' => 'failed',
+            'reason' => databaseIsLockError($error)
+                ? 'locked'
+                : 'failed',
             'error' => mb_substr(
                 $error->getMessage(),
                 0,

@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.18.3] - 2026-08-22
+
+### Fixed
+- Incremental scoring classifies SQLite contention as retryable `locked`
+  work instead of terminal `failed` work, so rapid scan stress retries rather
+  than aborting the release gate.
+- Production-copy stress uses existing accepted recipe identities without
+  mutating the catalog, tolerates unrelated provider jobs, and limits integrity
+  scans to the tables touched by the test.
+
 ## [1.18.2] - 2026-08-22
 
 ### Fixed
