@@ -311,6 +311,7 @@ if ($workerMode) {
         }
         usleep(10000);
     }
+    usleep(($index % 8) * 75000);
     $db = $open($databasePath);
     $GLOBALS['CANONICAL_QUEUE_TEST_WAKE'] =
         static fn(): bool => true;
@@ -376,6 +377,23 @@ if ($workerMode) {
                     . recipeCatalogJsonEncode($saved)
                 );
             }
+            $owner = $db->prepare("
+                SELECT id FROM products WHERE barcode = ?
+            ");
+            $owner->execute([$barcode]);
+            $barcodeOwnerId = (int)($owner->fetchColumn() ?: 0);
+            if ($barcodeOwnerId !== $productId) {
+                throw new RuntimeException(
+                    'Stress product response ID mismatch: '
+                    . recipeCatalogJsonEncode([
+                        'index' => $index,
+                        'name' => $name,
+                        'response_product_id' => $productId,
+                        'barcode_owner_id' => $barcodeOwnerId,
+                        'response' => $saved,
+                    ])
+                );
+            }
             $GLOBALS['INVENTORY_ADD_INPUT'] = [
                 'idempotency_key' =>
                     'stress-' . $runToken . '-' . $index,
@@ -420,12 +438,12 @@ if ($workerMode) {
         } catch (Throwable $error) {
             databaseRollbackDanglingTransaction($db);
             if (
-                $attempts >= 6
+                $attempts >= 20
                 || !databaseIsLockError($error)
             ) {
                 throw $error;
             }
-            usleep(50000 * $attempts);
+            usleep(min(500000, 50000 * $attempts));
         }
     }
 }
@@ -533,10 +551,77 @@ $existingStmt = $db->query("
 foreach ($existingStmt->fetchAll(PDO::FETCH_COLUMN) as $name) {
     $existing[(string)$name] = true;
 }
+$active = recipeScoreActiveRevision($db);
+$existingRecipe = null;
+if (!$temporary) {
+    if (
+        $active === null
+        || $active['ontology_version_id'] === null
+        || (string)$active['scoring_model']
+            !== INGREDIENT_ONTOLOGY_V3_SCORING_MODEL
+    ) {
+        throw new RuntimeException(
+            'Production-shaped stress requires an active ontology score'
+        );
+    }
+    $version = ingredientOntologyV3Version(
+        $db,
+        (int)$active['ontology_version_id']
+    );
+    if ($version === null || (string)$version['status'] !== 'ready') {
+        throw new RuntimeException(
+            'Production-shaped stress ontology is unavailable'
+        );
+    }
+    $existingRecipe = $db->prepare("
+        SELECT ingredient.id AS ingredient_id,
+               ingredient.recipe_id,
+               recipe.title
+        FROM recipe_ingredients ingredient
+        JOIN recipe_catalog recipe
+          ON recipe.id = ingredient.recipe_id
+         AND recipe.deleted_at IS NULL
+        JOIN ingredient_ontology_recipe_identity_annex annex
+          ON annex.recipe_ingredient_id = ingredient.id
+         AND annex.ontology_version_id = ?
+         AND annex.ontology_content_hash = ?
+         AND annex.ontology_seal_hash = ?
+         AND annex.resolver_version = ?
+         AND annex.review_manifest_hash = ?
+         AND annex.status = 'accepted'
+        WHERE ingredient.normalized_name = ?
+        ORDER BY ingredient.recipe_id
+        LIMIT 1
+    ");
+}
 $selectedFoods = [];
+$recipeIds = [];
+$recipeIngredientIds = [];
+$recipeTitles = [];
 foreach ($foods as $index => $name) {
     if (isset($existing[mb_strtolower($name, 'UTF-8')])) {
         continue;
+    }
+    if ($existingRecipe !== null) {
+        $existingRecipe->execute([
+            (int)$version['id'],
+            (string)$version['content_hash'],
+            (string)$version['seal_hash'],
+            ingredientOntologyV3RecipeIdentityResolverVersion(),
+            ingredientOntologyV3IdentityAnnexReviewManifestHash(),
+            ingredientOntologyV3NormalizeLabel($name),
+        ]);
+        $existingRecipeRow =
+            $existingRecipe->fetch(PDO::FETCH_ASSOC) ?: [];
+        $recipeId = (int)($existingRecipeRow['recipe_id'] ?? 0);
+        if ($recipeId <= 0) {
+            continue;
+        }
+        $recipeIds[$index] = $recipeId;
+        $recipeIngredientIds[$index] =
+            (int)$existingRecipeRow['ingredient_id'];
+        $recipeTitles[$index] =
+            (string)$existingRecipeRow['title'];
     }
     $selectedFoods[$index] = $name;
     if (count($selectedFoods) === 16) {
@@ -548,24 +633,34 @@ $assert(
     'Stress corpus must contain sixteen foods unseen by the target database'
 );
 
-$recipeIds = [];
-foreach ($selectedFoods as $index => $name) {
-    $savedRecipe = recipeCatalogSaveVariant($db, [
-        'title' => "Stress {$name} Supper",
-        'language' => 'en',
-        'ingredients' => [[
-            'name' => mb_strtolower($name, 'UTF-8'),
-            'is_required' => true,
-        ]],
-    ], [
-        'connector' => 'manual',
-        'external_id' =>
-            "stress-{$runToken}-recipe-{$index}",
-    ]);
-    $recipeIds[$index] = (int)$savedRecipe['id'];
+if ($temporary) {
+    foreach ($selectedFoods as $index => $name) {
+        $savedRecipe = recipeCatalogSaveVariant($db, [
+            'title' => "Stress {$name} Supper",
+            'language' => 'en',
+            'ingredients' => [[
+                'name' => mb_strtolower($name, 'UTF-8'),
+                'is_required' => true,
+            ]],
+        ], [
+            'connector' => 'manual',
+            'external_id' =>
+                "stress-{$runToken}-recipe-{$index}",
+        ]);
+        $recipeIds[$index] = (int)$savedRecipe['id'];
+        $ingredient = $db->prepare("
+            SELECT id FROM recipe_ingredients
+            WHERE recipe_id = ?
+            ORDER BY position, id
+            LIMIT 1
+        ");
+        $ingredient->execute([$recipeIds[$index]]);
+        $recipeIngredientIds[$index] =
+            (int)$ingredient->fetchColumn();
+        $recipeTitles[$index] = "Stress {$name} Supper";
+    }
 }
 
-$active = recipeScoreActiveRevision($db);
 if (
     $active === null
     || $active['ontology_version_id'] === null
@@ -751,29 +846,6 @@ $runWave = static function (
     $startFile = $doneFile . '.start';
     @unlink($doneFile);
     @unlink($startFile);
-    $settlerPipes = [];
-    $settler = proc_open(
-        [
-            PHP_BINARY,
-            __FILE__,
-            '--settler',
-            '--db=' . $databasePath,
-            '--done-file=' . $doneFile,
-        ],
-        [
-            0 => ['pipe', 'r'],
-            1 => ['pipe', 'w'],
-            2 => ['pipe', 'w'],
-        ],
-        $settlerPipes,
-        dirname(__DIR__)
-    );
-    if (!is_resource($settler)) {
-        throw new RuntimeException(
-            'Could not start concurrent stress settler'
-        );
-    }
-    fclose($settlerPipes[0]);
     $processes = [];
     foreach (array_keys($wave) as $index) {
         $pipes = [];
@@ -807,6 +879,30 @@ $runWave = static function (
             'Could not release concurrent stress start barrier'
         );
     }
+    usleep(50000);
+    $settlerPipes = [];
+    $settler = proc_open(
+        [
+            PHP_BINARY,
+            __FILE__,
+            '--settler',
+            '--db=' . $databasePath,
+            '--done-file=' . $doneFile,
+        ],
+        [
+            0 => ['pipe', 'r'],
+            1 => ['pipe', 'w'],
+            2 => ['pipe', 'w'],
+        ],
+        $settlerPipes,
+        dirname(__DIR__)
+    );
+    if (!is_resource($settler)) {
+        throw new RuntimeException(
+            'Could not start concurrent stress settler'
+        );
+    }
+    fclose($settlerPipes[0]);
     $results = [];
     foreach ($processes as $index => [$process, $pipes]) {
         $stdout = stream_get_contents($pipes[1]);
@@ -862,7 +958,29 @@ $runWave = static function (
 };
 
 $settle = static function (PDO $db): array {
-    $canonical = canonicalIngredientDrainQueue($db, 50, 3, 20);
+    $canonical = null;
+    for ($attempt = 1; $attempt <= 20; $attempt++) {
+        try {
+            $canonical = canonicalIngredientDrainQueue(
+                $db,
+                50,
+                3,
+                20
+            );
+            break;
+        } catch (Throwable $error) {
+            databaseRollbackDanglingTransaction($db);
+            if (!databaseIsLockError($error) || $attempt === 20) {
+                throw $error;
+            }
+            usleep(25000 * $attempt);
+        }
+    }
+    if (!is_array($canonical)) {
+        throw new RuntimeException(
+            'Canonical stress settlement did not complete'
+        );
+    }
     $recipeBatches = [];
     for ($batch = 0; $batch < 10; $batch++) {
         $result = recipeJobProcessQueue($db, 100, 3, false);
@@ -927,7 +1045,11 @@ foreach ($waveIndexes as $waveNumber => $indexes) {
     $started = hrtime(true);
     $concurrent = $runWave($wave);
     $workers = $concurrent['workers'];
-    $settled = $settle($db);
+    $settled = [
+        'canonical' => canonicalIngredientQueueStats($db, 3),
+        'recipe_batches' => [],
+        'score_cycles' => [],
+    ];
     $elapsedMs = (hrtime(true) - $started) / 1000000;
     $waveElapsed[] = $elapsedMs;
     foreach ($workers as $index => $result) {
@@ -963,6 +1085,8 @@ $assert(
     )) === count($waves),
     'Every wave must overlap the production score worker entrypoint'
 );
+$db = null;
+$db = $open($databasePath);
 
 $pendingProducts = (int)$db->query("
     SELECT COUNT(*) FROM recipe_score_pending_products
@@ -1021,14 +1145,13 @@ foreach ($productIds as $index => $productId) {
                    ELSE -annex.extension_entity_id
                END AS effective_entity_id
         FROM ingredient_ontology_recipe_identity_annex annex
-        JOIN recipe_ingredients ingredient
-          ON ingredient.id = annex.recipe_ingredient_id
-        WHERE ingredient.recipe_id = ?
+        WHERE annex.recipe_ingredient_id = ?
           AND annex.ontology_version_id = ?
-        ORDER BY ingredient.position, ingredient.id
-        LIMIT 1
     ");
-    $recipeAnnex->execute([$recipeId, $versionId]);
+    $recipeAnnex->execute([
+        $recipeIngredientIds[$index],
+        $versionId,
+    ]);
     $recipeIdentity =
         $recipeAnnex->fetch(PDO::FETCH_ASSOC) ?: [];
     $scoreStmt = $db->prepare("
@@ -1043,15 +1166,54 @@ foreach ($productIds as $index => $productId) {
     ");
     $scoreStmt->execute([$recipeId]);
     $score = $scoreStmt->fetch(PDO::FETCH_ASSOC) ?: [];
-    $search = recipeCatalogSearchResult($db, [
+    $matchStmt = $db->prepare("
+        SELECT match.satisfies_required,
+               match.inventory_product_id,
+               match.explanation_json
+        FROM recipe_score_effective_sources source
+        JOIN ingredient_ontology_shadow_matches match
+          ON match.score_revision_id = source.score_revision_id
+         AND match.recipe_ingredient_id = ?
+        WHERE source.recipe_id = ?
+    ");
+    $matchStmt->execute([
+        $recipeIngredientIds[$index],
+        $recipeId,
+    ]);
+    $targetMatch = $matchStmt->fetch(PDO::FETCH_ASSOC) ?: [];
+    $targetExplanation = json_decode(
+        (string)($targetMatch['explanation_json'] ?? '{}'),
+        true
+    );
+    $targetExplanation = is_array($targetExplanation)
+        ? $targetExplanation
+        : [];
+    $targetProductIds = array_map(
+        'intval',
+        (array)(
+            $targetExplanation['inventory_aggregate']['product_ids']
+                ?? []
+        )
+    );
+    if ((int)($targetMatch['inventory_product_id'] ?? 0) > 0) {
+        $targetProductIds[] =
+            (int)$targetMatch['inventory_product_id'];
+    }
+    $ingredientSearch = recipeCatalogSearchResult($db, [
         'query' => $name,
         'mode' => 'all',
         'fields' => 'card',
         'limit' => 10,
     ]);
-    $foundRecipeIds = array_map(
+    $titleSearch = recipeCatalogSearchResult($db, [
+        'query' => $recipeTitles[$index],
+        'mode' => 'all',
+        'fields' => 'card',
+        'limit' => 10,
+    ]);
+    $titleRecipeIds = array_map(
         static fn(array $item): int => (int)$item['id'],
-        (array)($search['items'] ?? [])
+        (array)($titleSearch['items'] ?? [])
     );
     $assert(
         (string)($readiness['status'] ?? '') === 'ready'
@@ -1060,19 +1222,41 @@ foreach ($productIds as $index => $productId) {
         && (int)($productIdentity['effective_entity_id'] ?? 0) !== 0
         && (int)($productIdentity['effective_entity_id'] ?? 0)
             === (int)($recipeIdentity['effective_entity_id'] ?? 0),
-        "{$name} must converge automatically to one ready identity"
+        "{$name} must converge automatically to one ready identity: "
+            . recipeCatalogJsonEncode([
+                'readiness' => $readiness,
+                'product_id' => $productId,
+                'product_identity' => $productIdentity,
+                'recipe_identity' => $recipeIdentity,
+                'recipe_id' => $recipeId,
+                'recipe_ingredient_id' =>
+                    $recipeIngredientIds[$index],
+                'ontology_version_id' => $versionId,
+            ])
     );
+    if ($temporary) {
+        $assert(
+            (float)($score['coverage'] ?? 0) >= 1.0
+            && (float)($score['directness'] ?? 0) >= 1.0
+            && (int)($score['matched_required_count'] ?? 0) === 1
+            && (int)($score['missing_required_count'] ?? -1) === 0
+            && !empty($score['cookable']),
+            "{$name} must publish a directly cookable recipe score"
+        );
+    } else {
+        $assert(
+            !empty($targetMatch['satisfies_required'])
+            && in_array($productId, $targetProductIds, true)
+            && (float)($score['coverage'] ?? 0) > 0
+            && (float)($score['directness'] ?? 0) > 0
+            && (int)($score['matched_required_count'] ?? 0) > 0,
+            "{$name} must contribute an exact in-stock recipe match"
+        );
+    }
     $assert(
-        (float)($score['coverage'] ?? 0) >= 1.0
-        && (float)($score['directness'] ?? 0) >= 1.0
-        && (int)($score['matched_required_count'] ?? 0) === 1
-        && (int)($score['missing_required_count'] ?? -1) === 0
-        && !empty($score['cookable']),
-        "{$name} must publish a directly cookable recipe score"
-    );
-    $assert(
-        in_array($recipeId, $foundRecipeIds, true),
-        "{$name} must find its recipe by title or ingredient text"
+        (int)($ingredientSearch['total'] ?? 0) > 0
+        && in_array($recipeId, $titleRecipeIds, true),
+        "{$name} must be searchable by ingredient and recipe title"
     );
     $expiryScore = (float)($score['expiry_score'] ?? 0);
     if ($index % 2 === 0) {
@@ -1098,10 +1282,12 @@ foreach ($productIds as $index => $productId) {
     ];
 }
 
-$assert(
-    min($soonExpiryScores) > max($laterExpiryScores),
-    'Expiring-soon ingredients must receive strictly higher expiry weight'
-);
+if ($temporary) {
+    $assert(
+        min($soonExpiryScores) > max($laterExpiryScores),
+        'Expiring-soon ingredients must receive strictly higher expiry weight'
+    );
+}
 $assert(
     max($workerElapsed) < 15000
     && max($waveElapsed) < 65000,

@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.18.1] - 2026-08-22
+
+### Fixed
+- Copied database backup/scoring/validation and incremental score publication
+  now share a dedicated coordination lock, preventing either expensive path
+  from repeatedly invalidating the other while web scans remain independent.
+- Recipe identity migration runs under the shared live-writer reservation
+  before copied recovery starts.
+- Production-shaped held-out validation reuses existing catalog recipes,
+  synchronizes rapid scan starts, verifies returned product ownership, and
+  reopens SQLite before final assertions to avoid stale reader snapshots.
+
 ## [1.18.0] - 2026-08-21
 
 ### Added
