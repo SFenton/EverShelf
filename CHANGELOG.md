@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.18.5] - 2026-08-22
+
+### Fixed
+- Sparse score publication now closes completed SQLite read cursors before
+  acquiring its publication transaction, preventing normal concurrent WAL
+  commits from stranding a fully computed revision.
+- Incremental scoring recovers abandoned build rows when it acquires the
+  exclusive score lock and records failure cleanup atomically.
+
 ## [1.18.4] - 2026-08-22
 
 ### Fixed

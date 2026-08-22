@@ -7,6 +7,46 @@ define('CRON_MODE', true);
 define('RECIPE_BACKEND_TEST_MODE', true);
 require_once __DIR__ . '/../api/bootstrap.php';
 
+final class ExternalCommitBeforeScorePublicationPDO extends PDO {
+    private ?Closure $externalCommit = null;
+
+    public function armExternalCommit(Closure $callback): void {
+        $this->externalCommit = $callback;
+    }
+
+    public function exec(string $statement): int|false {
+        if (
+            $this->externalCommit !== null
+            && strtoupper(trim($statement)) === 'BEGIN IMMEDIATE'
+        ) {
+            $work = parent::query("
+                SELECT phase, total_recipe_count,
+                       processed_recipe_count
+                FROM recipe_score_work_state
+                WHERE id = 1
+            ");
+            $row = $work !== false
+                ? $work->fetch(PDO::FETCH_ASSOC)
+                : false;
+            if ($work !== false) {
+                $work->closeCursor();
+            }
+            if (
+                is_array($row)
+                && (string)$row['phase'] === 'scoring'
+                && (int)$row['total_recipe_count'] > 0
+                && (int)$row['processed_recipe_count']
+                    === (int)$row['total_recipe_count']
+            ) {
+                $callback = $this->externalCommit;
+                $this->externalCommit = null;
+                $callback();
+            }
+        }
+        return parent::exec($statement);
+    }
+}
+
 $assertions = 0;
 $assert = static function (
     bool $condition,
@@ -26,6 +66,13 @@ $db->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
 $db->setAttribute(PDO::ATTR_DEFAULT_FETCH_MODE, PDO::FETCH_ASSOC);
 $db->exec('PRAGMA foreign_keys=ON');
 migrateDB($db);
+$journalMode = $db->query('PRAGMA journal_mode=WAL');
+$journalModeValue = $journalMode->fetchColumn();
+$journalMode->closeCursor();
+$assert(
+    strtolower((string)$journalModeValue) === 'wal',
+    'Incremental concurrency regression requires WAL mode'
+);
 
 $db->exec("
     INSERT INTO recipe_catalog (
@@ -196,23 +243,94 @@ recipeScoreBuildEffectiveProjection($db, $parentRevisionId);
 $db->exec('DELETE FROM recipe_score_mutations');
 $db->exec('COMMIT');
 
+$db->exec("
+    CREATE TABLE incremental_external_commit_probe (
+        id INTEGER PRIMARY KEY,
+        value INTEGER NOT NULL
+    )
+");
+$db->exec("
+    INSERT INTO incremental_external_commit_probe (id, value)
+    VALUES (1, 0)
+");
+$parentForRecovery = recipeScoreRevision($db, $parentRevisionId);
+$abandonedRevisionId =
+    ingredientOntologyV3IncrementalInsertRevision(
+        $db,
+        $parentForRecovery,
+        recipeScoreState($db),
+        (string)$parentForRecovery['inventory_fingerprint'],
+        (string)$parentForRecovery['ontology_source_hash'],
+        ingredientOntologyV3IdentityExtensionSnapshot(
+            $db,
+            $versionId
+        )
+    );
 $favorite = recipeCatalogSetFavorite(
     $db,
     $baselineRecipeId,
     true
 );
+$externalCommitObserved = false;
+$publicationDb = new ExternalCommitBeforeScorePublicationPDO(
+    'sqlite:' . $path
+);
+$publicationDb->setAttribute(
+    PDO::ATTR_ERRMODE,
+    PDO::ERRMODE_EXCEPTION
+);
+$publicationDb->setAttribute(
+    PDO::ATTR_DEFAULT_FETCH_MODE,
+    PDO::FETCH_ASSOC
+);
+$publicationDb->exec('PRAGMA foreign_keys=ON');
+$publicationDb->exec('PRAGMA busy_timeout=10000');
+ingredientOntologyV3RegisterGuardFunctions($publicationDb);
+$publicationDb->armExternalCommit(
+    static function () use (
+        $path,
+        &$externalCommitObserved
+    ): void {
+        $writer = new PDO('sqlite:' . $path);
+        $writer->setAttribute(
+            PDO::ATTR_ERRMODE,
+            PDO::ERRMODE_EXCEPTION
+        );
+        $writer->exec('PRAGMA busy_timeout=10000');
+        $writer->exec("
+            UPDATE incremental_external_commit_probe
+            SET value = value + 1
+            WHERE id = 1
+        ");
+        $externalCommitObserved = true;
+    }
+);
 $favoriteDelta = ingredientOntologyV3IncrementalRebuild(
-    $db,
+    $publicationDb,
     true
 );
 $assert(
     $favorite
+    && $externalCommitObserved
     && !empty($favoriteDelta['rebuilt'])
     && $favoriteDelta['recipe_operations'][$baselineRecipeId]
         === 'replace'
     && (int)$favoriteDelta['physical_score_rows'] === 1
     && (int)$favoriteDelta['pending_recipe_count'] === 0,
-    'Favorite changes must publish a one-recipe score delta'
+    'A normal external WAL commit must not prevent sparse publication'
+);
+$assert(
+    (string)$db->query("
+        SELECT status
+        FROM recipe_score_revisions
+        WHERE id = {$abandonedRevisionId}
+    ")->fetchColumn() === 'failed'
+    && (int)$db->query("
+        SELECT value
+        FROM incremental_external_commit_probe
+        WHERE id = 1
+    ")->fetchColumn() === 1,
+    'Exclusive scoring must recover abandoned builds before publication'
 );
 
 $inserted = recipeCatalogSaveVariant($db, [

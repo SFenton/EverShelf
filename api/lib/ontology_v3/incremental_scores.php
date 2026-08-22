@@ -1960,6 +1960,9 @@ function ingredientOntologyV3IncrementalRebuild(
     $revisionId = 0;
     $publicationCommitted = false;
     try {
+        recipeScoreWithWriteRetry(
+            static fn(): int => recipeScoreFailAbandonedBuilds($db)
+        );
         $pendingProducts =
             ingredientOntologyV3IncrementalPendingProducts($db);
         $pendingRecipes =
@@ -2247,7 +2250,10 @@ function ingredientOntologyV3IncrementalRebuild(
                     SELECT 1 FROM products WHERE id = ?
                 ");
                 $productExists->execute([$productId]);
-                if (!$productExists->fetchColumn()) {
+                $productIsPresent =
+                    $productExists->fetchColumn() !== false;
+                $productExists->closeCursor();
+                if (!$productIsPresent) {
                     continue;
                 }
                 $identity =
@@ -2292,7 +2298,10 @@ function ingredientOntologyV3IncrementalRebuild(
                     WHERE id = ? AND deleted_at IS NULL
                 ");
                 $activeRecipe->execute([$recipeId]);
-                if (!$activeRecipe->fetchColumn()) {
+                $recipeIsActive =
+                    $activeRecipe->fetchColumn() !== false;
+                $activeRecipe->closeCursor();
+                if (!$recipeIsActive) {
                     $recipeOperations[$recipeId] = 'delete';
                     continue;
                 }
@@ -2616,6 +2625,7 @@ function ingredientOntologyV3IncrementalRebuild(
         ");
         $scoreCountStmt->execute([$revisionId]);
         $changedScoreCount = (int)$scoreCountStmt->fetchColumn();
+        $scoreCountStmt->closeCursor();
         $matchCountStmt = $db->prepare("
             SELECT COUNT(*)
             FROM ingredient_ontology_shadow_matches
@@ -2623,6 +2633,7 @@ function ingredientOntologyV3IncrementalRebuild(
         ");
         $matchCountStmt->execute([$revisionId]);
         $changedMatchCount = (int)$matchCountStmt->fetchColumn();
+        $matchCountStmt->closeCursor();
         if ($changedScoreCount !== count($replaceRecipeIds)) {
             throw new RuntimeException(
                 'incremental score delta is incomplete'
@@ -2683,6 +2694,7 @@ function ingredientOntologyV3IncrementalRebuild(
                 ),
                 true
             );
+            $present->closeCursor();
         }
         $addedRecipeCount = 0;
         $deletedRecipeCount = 0;
@@ -3130,65 +3142,108 @@ function ingredientOntologyV3IncrementalRebuild(
                     ),
             ];
         }
+        $errorMessage = mb_substr(
+            $error->getMessage(),
+            0,
+            1000,
+            'UTF-8'
+        );
+        $failureAdmissions = isset($productAdmissions)
+            ? $productAdmissions
+            : [];
+        $failureParentRevisionId = isset($parent)
+            ? (int)$parent['id']
+            : null;
+        $failureTotalRecipeCount = isset($replaceRecipeIds)
+            ? count($replaceRecipeIds)
+            : 0;
+        $failureProcessedRecipeCount = isset($recomputed)
+            ? (int)$recomputed
+            : 0;
+        $failurePendingProductCount = isset($productIds)
+            ? count($productIds)
+            : 0;
+        $failurePendingRecipeCount = isset($pendingRecipeIds)
+            ? count($pendingRecipeIds)
+            : 0;
+        $cleanupError = null;
         try {
-            ingredientOntologyV3ProductReadinessScoreFailed(
+            databaseRollbackDanglingTransaction($db);
+            recipeScoreWithWriteRetry(static function () use (
                 $db,
-                isset($productAdmissions)
-                    ? $productAdmissions
-                    : [],
-                $error->getMessage()
-            );
-        } catch (Throwable $ignored) {
-        }
-        try {
-            recipeScoreSetWorkState(
-                $db,
-                'failed',
-                $revisionId ?: null,
-                isset($parent) ? (int)$parent['id'] : null,
-                isset($replaceRecipeIds)
-                    ? count($replaceRecipeIds)
-                    : 0,
-                isset($recomputed) ? (int)$recomputed : 0,
-                isset($productIds) ? count($productIds) : 0,
-                isset($pendingRecipeIds)
-                    ? count($pendingRecipeIds)
-                    : 0,
-                $error->getMessage()
-            );
-        } catch (Throwable $ignored) {
-        }
-        if ($revisionId > 0) {
-            $db->prepare("
-                UPDATE recipe_score_state
-                SET active_score_overlay_revision_id = NULL,
-                    cursor_revision = cursor_revision + 1,
-                    updated_at = CURRENT_TIMESTAMP
-                WHERE id = 1
-                  AND active_score_overlay_revision_id = ?
-            ")->execute([$revisionId]);
-            $db->prepare("
-                UPDATE recipe_score_revisions
-                SET status = 'failed',
-                    last_error = ?,
-                    completed_at = CURRENT_TIMESTAMP
-                WHERE id = ? AND status = 'building'
-            ")->execute([
-                mb_substr($error->getMessage(), 0, 1000, 'UTF-8'),
                 $revisionId,
-            ]);
+                $failureAdmissions,
+                $failureParentRevisionId,
+                $failureTotalRecipeCount,
+                $failureProcessedRecipeCount,
+                $failurePendingProductCount,
+                $failurePendingRecipeCount,
+                $errorMessage
+            ): void {
+                $db->exec('BEGIN IMMEDIATE');
+                try {
+                    ingredientOntologyV3ProductReadinessScoreFailed(
+                        $db,
+                        $failureAdmissions,
+                        $errorMessage
+                    );
+                    recipeScoreSetWorkState(
+                        $db,
+                        'failed',
+                        $revisionId ?: null,
+                        $failureParentRevisionId,
+                        $failureTotalRecipeCount,
+                        $failureProcessedRecipeCount,
+                        $failurePendingProductCount,
+                        $failurePendingRecipeCount,
+                        $errorMessage
+                    );
+                    if ($revisionId > 0) {
+                        $db->prepare("
+                            UPDATE recipe_score_state
+                            SET active_score_overlay_revision_id = NULL,
+                                cursor_revision =
+                                    cursor_revision + 1,
+                                updated_at = CURRENT_TIMESTAMP
+                            WHERE id = 1
+                              AND active_score_overlay_revision_id = ?
+                        ")->execute([$revisionId]);
+                        $db->prepare("
+                            UPDATE recipe_score_revisions
+                            SET status = 'failed',
+                                last_error = ?,
+                                completed_at = CURRENT_TIMESTAMP
+                            WHERE id = ?
+                              AND status = 'building'
+                        ")->execute([
+                            $errorMessage,
+                            $revisionId,
+                        ]);
+                    }
+                    $db->exec('COMMIT');
+                } catch (Throwable $cleanupFailure) {
+                    try {
+                        $db->exec('ROLLBACK');
+                    } catch (Throwable $ignored) {
+                    }
+                    throw $cleanupFailure;
+                }
+            });
+        } catch (Throwable $cleanupFailure) {
+            $cleanupError = mb_substr(
+                $cleanupFailure->getMessage(),
+                0,
+                1000,
+                'UTF-8'
+            );
         }
         return [
             'rebuilt' => false,
             'reason' => databaseIsLockError($error)
                 ? 'locked'
                 : 'failed',
-            'error' => mb_substr(
-                $error->getMessage(),
-                0,
-                1000,
-                'UTF-8'
-            ),
+            'error' => $errorMessage,
+            'cleanup_error' => $cleanupError,
             'revision_id' => $revisionId ?: null,
             'elapsed_ms' => round(
                 (hrtime(true) - $started) / 1000000,

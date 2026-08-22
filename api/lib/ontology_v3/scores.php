@@ -2650,6 +2650,7 @@ function ingredientOntologyV3OrderedIdSetHash(
         while ($id = $stmt->fetchColumn()) {
             hash_update($hash, (string)(int)$id . "\n");
         }
+        $stmt->closeCursor();
         return hash_final($hash);
     }
 
@@ -2927,6 +2928,7 @@ function ingredientOntologyV3HashMaterializedRows(
         );
         $count++;
     }
+    $stmt->closeCursor();
     return ['hash' => hash_final($hash), 'count' => $count];
 }
 
