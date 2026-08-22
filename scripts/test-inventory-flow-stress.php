@@ -1312,9 +1312,42 @@ $assert(
     && max($waveElapsed) < 65000,
     'Concurrent scan and settle latency must remain bounded'
 );
+$integrityErrors = [];
+if ($temporary) {
+    if ($db->query('PRAGMA integrity_check')->fetchColumn() !== 'ok') {
+        $integrityErrors[] = 'database';
+    }
+} else {
+    foreach ([
+        'products',
+        'inventory',
+        'transactions',
+        'ingredient_ontology_identity_annex',
+        'ingredient_ontology_product_readiness',
+        'recipe_score_pending_products',
+        'recipe_score_state',
+        'recipe_score_revisions',
+        'recipe_inventory_scores',
+        'recipe_score_effective_sources',
+    ] as $table) {
+        $result = $db->query(
+            'PRAGMA integrity_check(' . $db->quote($table) . ')'
+        )->fetchColumn();
+        if ($result !== 'ok') {
+            $integrityErrors[] = $table . ': ' . (string)$result;
+        }
+        $foreignKey = $db->query(
+            'PRAGMA foreign_key_check(' . $db->quote($table) . ')'
+        )->fetchColumn();
+        if ($foreignKey !== false) {
+            $integrityErrors[] = $table . ': foreign_key';
+        }
+    }
+}
 $assert(
-    $db->query('PRAGMA integrity_check')->fetchColumn() === 'ok',
-    'Concurrent ingestion must leave the SQLite database valid'
+    $integrityErrors === [],
+    'Concurrent ingestion must leave mutated SQLite tables valid: '
+        . implode('; ', $integrityErrors)
 );
 $assert(
     (int)$db->query("
