@@ -12318,6 +12318,10 @@ try {
             "'clear_backoff'"
         )
         && str_contains(
+            $activationWorkerSource,
+            '$resultFailed'
+        )
+        && str_contains(
             $activationSource,
             "'record_policy_deferred'"
         )
@@ -12407,6 +12411,11 @@ try {
             $driftProductId,
             (int)$activeDriftVersion['id']
         );
+        recipeScoreMarkProductDirty(
+            $db,
+            $driftProductId,
+            'activation_corpus_drift_fixture'
+        );
         $driftAfterProduct =
             ingredientOntologyActivationCorpusDrifted(
                 $db
@@ -12424,18 +12433,25 @@ try {
         ");
         $driftNeedsOntologyBuild =
             ingredientOntologyActivationNeedsOntologyBuild($db);
+        $driftWithinIncrementalLimit =
+            ingredientOntologyActivationProductDriftWithinLimit(
+                $db
+            );
         controllerTestAssert(
             !$driftBeforeProduct
             && $driftAfterProduct
             && $driftHandledByAnnex
-            && !$driftNeedsOntologyBuild,
-            'Product-only corpus drift must remain on the annex sparse path: '
+            && $driftWithinIncrementalLimit,
+            'Product-only corpus drift within the bounded queue must remain '
+                . 'eligible for the annex sparse path: '
                 . ingredientOntologyControllerStableJson([
                     'before' => $driftBeforeProduct,
                     'after' => $driftAfterProduct,
                     'handled' => $driftHandledByAnnex,
                     'needs_ontology_build' =>
                         $driftNeedsOntologyBuild,
+                    'within_incremental_limit' =>
+                        $driftWithinIncrementalLimit,
                     'active_score' => recipeScoreActiveRevision($db),
                     'score_state' => recipeScoreState($db),
                     'pending_products' =>
@@ -12454,6 +12470,34 @@ try {
                         ORDER BY revision
                     ")->fetchAll(PDO::FETCH_ASSOC),
                 ])
+        );
+        $overflowPending = $db->prepare("
+            INSERT INTO recipe_score_pending_products (
+                product_id, first_inventory_revision,
+                latest_inventory_revision, reason
+            )
+            VALUES (?, ?, ?, 'activation_overflow_fixture')
+        ");
+        $overflowRevision =
+            (int)recipeScoreState($db)['inventory_revision'];
+        for (
+            $offset = 0;
+            $offset <= ingredientOntologyV3IncrementalProductLimit();
+            $offset++
+        ) {
+            $overflowPending->execute([
+                800000 + $offset,
+                $overflowRevision,
+                $overflowRevision,
+            ]);
+        }
+        controllerTestAssert(
+            !ingredientOntologyActivationProductDriftWithinLimit(
+                $db
+            )
+            && ingredientOntologyActivationNeedsOntologyBuild($db),
+            'Annex-handled product drift must escalate to copied ontology '
+                . 'refresh when the incremental product limit is exceeded'
         );
     } finally {
         ingredientOntologyV3SetReadyMutationGuard(
