@@ -2,7 +2,7 @@
 declare(strict_types=1);
 
 const EVERSHELF_PROCESSING_STATUS_SCHEMA =
-    'evershelf-processing-status-v2';
+    'evershelf-processing-status-v3';
 const EVERSHELF_PROCESSING_STATUS_PUBLIC_ERROR =
     'EverShelf processing needs attention. Check the server logs for details.';
 
@@ -1277,6 +1277,9 @@ function evershelfProcessingStatusIncrementalScores(PDO $db): array {
         ORDER BY id DESC
         LIMIT 1
     ")->fetch(PDO::FETCH_ASSOC) ?: null;
+    $copiedRecoveryRequired = function_exists(
+        'ingredientOntologyActivationNeedsScoreBuild'
+    ) && ingredientOntologyActivationNeedsScoreBuild($db);
     $oldestAt = evershelfProcessingStatusEarliest(
         trim((string)($pending['oldest_at'] ?? '')) ?: null,
         trim((string)($pendingRecipes['oldest_at'] ?? '')) ?: null,
@@ -1333,6 +1336,10 @@ function evershelfProcessingStatusIncrementalScores(PDO $db): array {
             ? (int)$latest['id']
             : null,
         'last_completed_at' => $latest['completed_at'] ?? null,
+        'copied_recovery_required' => $copiedRecoveryRequired,
+        'recovery_strategy' => $copiedRecoveryRequired
+            ? 'copied_score_refresh'
+            : null,
     ];
 }
 

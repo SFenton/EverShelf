@@ -7,11 +7,14 @@
  * while product saves and backfills remain fast and offline-safe.
  */
 
-const CANONICAL_INGREDIENT_RULESET_VERSION = 'evershelf_common_ingredients_v3';
+require_once __DIR__ . '/food_identity_text.php';
+
+const CANONICAL_INGREDIENT_RULESET_VERSION = 'evershelf_common_ingredients_v4';
 const FOODON_LOOKUP_CACHE_VERSION = 'foodon_ols4_v6';
 const USDA_FDC_LOOKUP_CACHE_VERSION = 'usda_fdc_v5';
 
 function canonicalIngredientNormalizeText(string $text): string {
+    $text = foodIdentityNormalizePossessiveOrthography($text);
     $text = mb_strtolower(trim($text), 'UTF-8');
     $text = str_replace(
         ['’', "'", '`', '&', '/', '_', '+', '-'],

@@ -124,6 +124,10 @@ try {
         throw new RuntimeException("Could not create {$root}");
     }
     $copyTree(__DIR__ . '/../api', $root . '/api');
+    file_put_contents(
+        $root . '/.build-revision',
+        '0123456789abcdef0123456789abcdef01234567'
+    );
     if (!mkdir($root . '/data/backups', 0770, true)) {
         throw new RuntimeException('Could not create fixture data directory');
     }
@@ -280,6 +284,8 @@ try {
         $startup['status'] === 200
         && ($startup['body']['ok'] ?? false) === true
         && ($startup['body']['scope'] ?? null) === 'startup'
+        && ($startup['body']['build_revision'] ?? null)
+            === '0123456789abcdef0123456789abcdef01234567'
         && ($startup['body']['skipped_checks'] ?? null)
             === ['db_integrity']
         && !array_key_exists(

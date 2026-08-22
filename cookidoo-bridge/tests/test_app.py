@@ -735,6 +735,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                 await client.get("/v1/capabilities")
             ).json()
         self.assertEqual(health["capabilities"], capabilities)
+        self.assertEqual(health["build_revision"], "unknown")
         self.assertEqual(
             capabilities,
             {

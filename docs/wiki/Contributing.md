@@ -28,7 +28,7 @@ git checkout -b fix/my-bug-fix
 php -S localhost:8080
 
 # Option B: Docker
-docker compose up -d
+./scripts/compose-up-exact.sh
 ```
 
 Open `http://localhost:8080` in your browser.

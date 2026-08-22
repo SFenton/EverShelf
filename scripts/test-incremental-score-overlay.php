@@ -403,6 +403,90 @@ $activeBeforeOverflow =
 $revisionCountBeforeOverflow = (int)$db->query("
     SELECT COUNT(*) FROM recipe_score_revisions
 ")->fetchColumn();
+$heldScoreLock = recipeScoreAcquireLock($db);
+$assert(
+    is_resource($heldScoreLock),
+    'Score recovery lock fixture must acquire the worker lock'
+);
+$lockedResult = ingredientOntologyV3IncrementalRebuild(
+    $db,
+    true
+);
+recipeScoreReleaseLock($heldScoreLock);
+$assert(
+    empty($lockedResult['rebuilt'])
+    && (string)($lockedResult['reason'] ?? '') === 'locked',
+    'A contended score cycle must remain retryable without changing state'
+);
+$backgroundLockPath = dirname($path) . '/.background-writer.lock';
+$workerHeartbeatPath = $path . '.worker-heartbeat';
+$workerStatusPath = $path . '.worker-status';
+$backgroundLock = fopen($backgroundLockPath, 'c+');
+$assert(
+    is_resource($backgroundLock)
+    && flock($backgroundLock, LOCK_EX | LOCK_NB),
+    'Background writer lock fixture must be available'
+);
+$pipes = [];
+$lockedWorker = proc_open(
+    [
+        PHP_BINARY,
+        __DIR__ . '/incremental-score-worker.php',
+        '--db=' . $path,
+        '--background-lock=' . $backgroundLockPath,
+        '--heartbeat=' . $workerHeartbeatPath,
+        '--status-file=' . $workerStatusPath,
+        '--force',
+        '--json',
+    ],
+    [
+        0 => ['pipe', 'r'],
+        1 => ['pipe', 'w'],
+        2 => ['pipe', 'w'],
+    ],
+    $pipes,
+    dirname(__DIR__)
+);
+if (!is_resource($lockedWorker)) {
+    throw new RuntimeException(
+        'Could not start background-lock score worker probe'
+    );
+}
+fclose($pipes[0]);
+$lockedWorkerStdout = stream_get_contents($pipes[1]);
+$lockedWorkerStderr = stream_get_contents($pipes[2]);
+fclose($pipes[1]);
+fclose($pipes[2]);
+$lockedWorkerStatus = proc_close($lockedWorker);
+flock($backgroundLock, LOCK_UN);
+fclose($backgroundLock);
+$lockedWorkerPayload = json_decode(
+    (string)$lockedWorkerStdout,
+    true
+);
+$assert(
+    $lockedWorkerStatus === 0
+    && is_array($lockedWorkerPayload)
+    && ($lockedWorkerPayload['success'] ?? null) === true
+    && (string)($lockedWorkerPayload['reason'] ?? '')
+        === 'background_writer_locked'
+    && !empty($lockedWorkerPayload['skipped'])
+    && !empty($lockedWorkerPayload['retryable']),
+    'The incremental worker must skip before touching SQLite while '
+        . 'activation owns the shared writer lock: '
+        . ingredientOntologyV3Json([
+            'status' => $lockedWorkerStatus,
+            'stdout' => $lockedWorkerStdout,
+            'stderr' => $lockedWorkerStderr,
+        ])
+);
+$assert(
+    str_starts_with(
+        trim((string)file_get_contents($workerStatusPath)),
+        '0 '
+    ),
+    'Retryable background-lock skips must keep worker health successful'
+);
 $overflowResult = ingredientOntologyV3IncrementalRebuild(
     $db,
     true
@@ -422,6 +506,166 @@ $assert(
         SELECT COUNT(*) FROM recipe_score_revisions
     ")->fetchColumn() === $revisionCountBeforeOverflow,
     'An over-limit pending set must require a full rebuild before publishing any falsely fresh partial revision'
+);
+$assert(
+    ingredientOntologyActivationNeedsScoreBuild($db),
+    'Product overflow must route to copied score-refresh recovery'
+);
+
+$pipes = [];
+$worker = proc_open(
+    [
+        PHP_BINARY,
+        __DIR__ . '/incremental-score-worker.php',
+        '--db=' . $path,
+        '--background-lock=' . $backgroundLockPath,
+        '--heartbeat=' . $workerHeartbeatPath,
+        '--status-file=' . $workerStatusPath,
+        '--force',
+        '--json',
+    ],
+    [
+        0 => ['pipe', 'r'],
+        1 => ['pipe', 'w'],
+        2 => ['pipe', 'w'],
+    ],
+    $pipes,
+    dirname(__DIR__)
+);
+if (!is_resource($worker)) {
+    throw new RuntimeException(
+        'Could not start incremental score worker regression probe'
+    );
+}
+fclose($pipes[0]);
+$workerStdout = stream_get_contents($pipes[1]);
+$workerStderr = stream_get_contents($pipes[2]);
+fclose($pipes[1]);
+fclose($pipes[2]);
+$workerStatus = proc_close($worker);
+$workerPayload = json_decode((string)$workerStdout, true);
+$assert(
+    $workerStatus === 2
+    && is_array($workerPayload)
+    && ($workerPayload['success'] ?? null) === false
+    && (string)($workerPayload['reason'] ?? '')
+        === 'full_rebuild_required'
+    && (string)($workerPayload['recovery']['strategy'] ?? '')
+        === 'copied_score_refresh'
+    && str_starts_with(
+        trim((string)file_get_contents($workerStatusPath)),
+        '2 '
+    ),
+    'A full-rebuild worker cycle must fail truthfully and name its '
+        . 'copy-safe recovery path: '
+        . ingredientOntologyV3Json([
+            'status' => $workerStatus,
+            'stdout' => $workerStdout,
+            'stderr' => $workerStderr,
+        ])
+);
+$pipes = [];
+$loopWorker = proc_open(
+    [
+        PHP_BINARY,
+        __DIR__ . '/incremental-score-worker.php',
+        '--db=' . $path,
+        '--background-lock=' . $backgroundLockPath,
+        '--heartbeat=' . $workerHeartbeatPath,
+        '--status-file=' . $workerStatusPath,
+        '--force',
+        '--loop',
+        '--max-cycles=1',
+        '--json',
+    ],
+    [
+        0 => ['pipe', 'r'],
+        1 => ['pipe', 'w'],
+        2 => ['pipe', 'w'],
+    ],
+    $pipes,
+    dirname(__DIR__)
+);
+if (!is_resource($loopWorker)) {
+    throw new RuntimeException(
+        'Could not start bounded loop score worker probe'
+    );
+}
+fclose($pipes[0]);
+$loopWorkerStdout = stream_get_contents($pipes[1]);
+$loopWorkerStderr = stream_get_contents($pipes[2]);
+fclose($pipes[1]);
+fclose($pipes[2]);
+$loopWorkerStatus = proc_close($loopWorker);
+$loopWorkerPayload = json_decode(
+    (string)$loopWorkerStdout,
+    true
+);
+$assert(
+    $loopWorkerStatus === 2
+    && is_array($loopWorkerPayload)
+    && ($loopWorkerPayload['success'] ?? null) === false
+    && (string)($loopWorkerPayload['reason'] ?? '')
+        === 'full_rebuild_required',
+    'A bounded loop must emit and exit nonzero for a failed cycle: '
+        . ingredientOntologyV3Json([
+            'status' => $loopWorkerStatus,
+            'stdout' => $loopWorkerStdout,
+            'stderr' => $loopWorkerStderr,
+        ])
+);
+
+$db->exec('DELETE FROM recipe_score_pending_products');
+$pendingRecipeInsert = $db->prepare("
+    INSERT INTO recipe_score_pending_recipes (
+        recipe_id, operation, first_catalog_revision,
+        latest_catalog_revision, latest_ontology_source_revision,
+        reason
+    )
+    VALUES (?, 'replace', ?, ?, ?, 'overflow_regression')
+");
+$overflowState = recipeScoreState($db);
+for ($offset = 0; $offset <= $pendingLimit; $offset++) {
+    $pendingRecipeInsert->execute([
+        200000 + $offset,
+        max(1, (int)$overflowState['catalog_revision']),
+        max(1, (int)$overflowState['catalog_revision']),
+        max(1, (int)$overflowState['ontology_source_revision']),
+    ]);
+}
+$recipeOverflow = ingredientOntologyV3IncrementalRebuild($db, true);
+$assert(
+    empty($recipeOverflow['rebuilt'])
+    && (string)($recipeOverflow['reason'] ?? '')
+        === 'full_rebuild_required'
+    && in_array(
+        'incremental pending recipe limit exceeded',
+        (array)($recipeOverflow['errors'] ?? []),
+        true
+    )
+    && ingredientOntologyActivationNeedsScoreBuild($db),
+    'Recipe overflow must route to copied score-refresh recovery'
+);
+$db->exec('DELETE FROM recipe_score_pending_recipes');
+
+$journalParent = recipeScoreActiveRevision($db);
+$journalState = recipeScoreState($db);
+$journalState['catalog_revision'] =
+    (int)$journalParent['catalog_revision'] + 1;
+$journalErrors = ingredientOntologyV3IncrementalScopedMutationErrors(
+    $db,
+    $journalParent,
+    $journalState,
+    [],
+    [$firstRecipeId]
+);
+$assert(
+    in_array(
+        'catalog_mutation_journal_incomplete',
+        $journalErrors,
+        true
+    ),
+    'A catalog journal gap must be classified for copied score recovery'
 );
 $db->prepare("
     UPDATE recipe_score_revisions
@@ -458,5 +702,8 @@ $db = null;
 @unlink($path);
 @unlink($path . '-wal');
 @unlink($path . '-shm');
+@unlink($backgroundLockPath);
+@unlink($workerHeartbeatPath);
+@unlink($workerStatusPath);
 
 echo "Incremental score overlay tests passed: {$assertions} assertions.\n";

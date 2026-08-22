@@ -315,8 +315,11 @@ php scripts/ontology-controller.php bundle-build \
   --payload-dir=/path/to/activation-payloads
 ```
 
-Set `ONTOLOGY_ACTIVATION_ENABLED=true` to let
+`ONTOLOGY_ACTIVATION_ENABLED=true` is the default and lets
 `scripts/process-ontology-activation.php` run this workflow automatically.
+The model and promotion gates remain independently default-off, while
+deterministic copied refreshes keep active-v3 score and corpus state
+recoverable after incremental overflow or resolver migration.
 Copied generation, scoring, and validation run without the shared
 background-writer lock. The worker takes that lock nonblocking only for bounded
 live import, reservation, and publication phases, yielding between phases. It
@@ -325,6 +328,18 @@ through one short score-pointer CAS. Inventory-only drift rebuilds only the
 score sidecar; source, policy, or constraint drift rebases from a fresh copy
 without another proposer call. Imported intents are acknowledged only in the
 same transaction that activates their score revision.
+
+Docker deployments run two distinct ontology services: the live
+`ontology-worker` is intake-only, while `ontology-activation-worker` repeatedly
+invokes the copy-safe activation pipeline. Do not pass `--copy-generation` to
+the live intake worker; that mode intentionally rejects the active database.
+Both ontology workers and the recipe-score worker default to a 512 MB PHP
+memory limit and expose container health checks. The Docker web container
+retains a once-per-minute activation fallback so the default topology still
+recovers full-score work; the activation process lock prevents it from
+overlapping the dedicated worker. The incremental score worker takes the
+shared background-writer lock nonblocking and skips cleanly during activation's
+live import/publication phases instead of entering SQLite contention.
 
 Activation-only SQLite connections use file-backed temporary storage so large
 ordered verification queries stay within the worker memory limit. Generated

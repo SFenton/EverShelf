@@ -29,8 +29,8 @@ cd EverShelf
 cp .env.example .env
 nano .env          # set GEMINI_API_KEY and other options
 
-# 3. Start
-docker compose up -d
+# 3. Build and start from one clean, exact source revision
+./scripts/compose-up-exact.sh
 
 # 4. Open in browser
 # → http://localhost:8080
@@ -214,8 +214,11 @@ restart `evershelf-ontology-copilot.service` before starting the `1.11.0`
 EverShelf containers. Starting the web image first makes interactive AI calls
 fail closed until the host provider is restarted.
 
-After the provider is healthy, deploy the web, ontology-worker, and
-recipe-score-worker services from the same `1.11.0` image.
+After the provider is healthy, deploy the web, ontology intake,
+ontology activation, and recipe-score worker services from the same image.
+The intake worker must use the active-database `work` mode without
+`--copy-generation`; the activation worker owns copied generation and score
+refresh.
 
 Pre-release development databases that ran an intermediate `1.11.0` build
 should confirm `PRAGMA foreign_key_list(recipe_score_pending_products)` is
@@ -276,8 +279,8 @@ no migration step.
 With Docker:
 
 ```bash
-docker compose pull
-docker compose up -d
+git pull --ff-only
+./scripts/compose-up-exact.sh
 ```
 
 ---

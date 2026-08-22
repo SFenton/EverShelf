@@ -2,9 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main, develop]
   pull_request:
-    branches: [main]
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -46,10 +44,14 @@ jobs:
         run: php scripts/test-inventory-update.php
 
       - name: Test processing status and contention contract
-        run: php scripts/test-processing-status.php
+        run: |
+          php scripts/test-processing-status.php
+          php scripts/test-worker-topology.php
 
       - name: Test canonical queue contention and recovery contract
-        run: php scripts/test-canonical-queue.php
+        run: |
+          php scripts/test-canonical-queue.php
+          php scripts/test-recipe-job-leases.php
 
       - name: Test sparse score invalidation contract
         run: php scripts/test-score-invalidation-phase0.php
@@ -96,13 +98,19 @@ jobs:
         run: |
           test -z "$(git ls-files 'data/*.json')"
           grep -Fxq 'data/*.json' .dockerignore
+          cp .env.example .env
+          cp cookidoo-bridge/.env.example cookidoo-bridge/.env
+          EVERSHELF_BUILD_SHA="${GITHUB_SHA}" \
+            docker compose config --quiet
 
       - name: Build Docker image
         run: |
           set -e
           for attempt in 1 2 3; do
             echo "Docker build attempt $attempt/3..."
-            if docker build -t evershelf-test .; then
+            if docker build \
+              --build-arg VCS_REF="${GITHUB_SHA}" \
+              -t evershelf-test .; then
               exit 0
             fi
             echo "Attempt $attempt failed — retrying in 20s..."
@@ -110,6 +118,14 @@ jobs:
           done
           echo "Docker build failed after 3 attempts"
           exit 1
+
+      - name: Verify image source revision
+        run: |
+          test "$(docker image inspect \
+            --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' \
+            evershelf-test)" = "${GITHUB_SHA}"
+          test "$(docker run --rm --entrypoint sh evershelf-test \
+            -c 'cat /var/www/html/.build-revision')" = "${GITHUB_SHA}"
 
       - name: Test container starts
         run: |
@@ -119,6 +135,38 @@ jobs:
           sleep 5
           curl -f http://localhost:8080/ || exit 1
           docker stop test-evershelf
+
+  cookidoo-bridge:
+    name: Cookidoo Bridge Regression
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: cookidoo-bridge/requirements.txt
+
+      - name: Install bridge dependencies
+        run: python -m pip install -r cookidoo-bridge/requirements.txt
+
+      - name: Test bridge
+        run: |
+          PYTHONPATH=cookidoo-bridge \
+            python -m unittest discover \
+              -s cookidoo-bridge/tests -p 'test_*.py' -v
+
+      - name: Build bridge image with provenance
+        run: |
+          docker build \
+            --build-arg VCS_REF="${GITHUB_SHA}" \
+            -t evershelf-cookidoo-bridge-test \
+            cookidoo-bridge
+          test "$(docker image inspect \
+            --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' \
+            evershelf-cookidoo-bridge-test)" = "${GITHUB_SHA}"
 
   validate-translations:
     name: Validate Translation Files
@@ -173,10 +221,12 @@ jobs:
       - name: Test scanner and instant identity contracts
         run: |
           php scripts/test-location-suggestions.php
+          php scripts/test-scan-idempotency.php
           php scripts/test-instant-identity-annex.php
           php scripts/test-ontology-admission-coverage.php
           php scripts/test-exact-identity-product-save.php
           php scripts/test-incremental-score-overlay.php
+          php -d memory_limit=512M scripts/test-inventory-flow-stress.php
 
       - name: Test recipe backend
         run: php -d memory_limit=512M scripts/test-recipe-backend.php
@@ -195,7 +245,7 @@ jobs:
   # You never need to merge manually again — just push to develop.
   auto-merge-to-main:
     name: Auto-merge develop → main
-    needs: [lint-php, lint-js, docker-build, validate-translations, deep-regression]
+    needs: [lint-php, lint-js, docker-build, cookidoo-bridge, validate-translations, deep-regression]
     if: github.ref == 'refs/heads/develop'
     runs-on: ubuntu-latest
     permissions:

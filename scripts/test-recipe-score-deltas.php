@@ -78,6 +78,7 @@ $db->prepare("
     WHERE id = ?
 ")->execute([$versionId]);
 ingredientOntologyV3SetPublicationGuard($db, false);
+ingredientOntologyV3IdentityAdmissionSync($db);
 
 $state = recipeScoreState($db);
 $sourceHash = ingredientOntologyV3CorpusHash($db);

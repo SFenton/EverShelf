@@ -27,6 +27,26 @@ $assert = static function (
         throw new RuntimeException($message);
     }
 };
+$assert(
+    recipeJobFailureRetrySeconds(
+        new PDOException('database is locked'),
+        1
+    ) === 1
+    && recipeJobFailureRetrySeconds(
+        new PDOException('database is locked'),
+        3
+    ) === 4
+    && recipeJobFailureRetrySeconds(
+        new RuntimeException('provider timeout'),
+        1
+    ) === 30
+    && recipeJobFailureRetrySeconds(
+        new RecipeCookidooCircuitBreakException('rate limited'),
+        1,
+        true
+    ) === 900,
+    'SQLite contention must retry quickly without changing provider backoff'
+);
 $path = dirname(__DIR__) . '/data/.recipe-job-leases-'
     . getmypid() . '.sqlite';
 @unlink($path);

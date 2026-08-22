@@ -128,6 +128,27 @@ $maximumCycles = max(
     1,
     min(100, (int)($options['max-cycles'] ?? 1))
 );
+$resultFailed = static function (array $result): bool {
+    if (in_array(
+        (string)($result['action'] ?? ''),
+        ['failed', 'non_converging_expected_outcome'],
+        true
+    )) {
+        return true;
+    }
+    foreach (
+        ['import', 'score_import', 'ontology_import']
+        as $field
+    ) {
+        if (
+            is_array($result[$field] ?? null)
+            && (string)($result[$field]['status'] ?? '') === 'failed'
+        ) {
+            return true;
+        }
+    }
+    return false;
+};
 $results = [];
 $state = $db->query("
     SELECT failure_count, next_attempt_at
@@ -186,6 +207,10 @@ try {
             ]
         );
         $results[] = ['cycle' => $cycle + 1] + $result;
+        if ($resultFailed($result)) {
+            $exitCode = 2;
+            break;
+        }
         if (($result['action'] ?? '') === 'none') {
             break;
         }

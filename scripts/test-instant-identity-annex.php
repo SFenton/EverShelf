@@ -985,9 +985,26 @@ $currentAdmissionManifest = [
     'version' => INGREDIENT_ONTOLOGY_IDENTITY_ANNEX_REVIEW_VERSION,
     'resolver_version' =>
         ingredientOntologyV3ProductIdentityResolverVersion(),
+    'recipe_resolver_version' => str_replace(
+        INGREDIENT_ONTOLOGY_IDENTITY_ANNEX_RESOLVER_VERSION,
+        'identity-annex-r0-v3',
+        ingredientOntologyV3RecipeIdentityResolverVersion()
+    ),
     'aliases' =>
         ingredientOntologyV3IdentityAnnexReviewedAliases(),
 ];
+$staleRecipeResolver =
+    (string)$currentAdmissionManifest['recipe_resolver_version'];
+$db->prepare("
+    UPDATE ingredient_ontology_recipe_identity_annex
+    SET resolver_version = ?
+    WHERE recipe_ingredient_id = ?
+")->execute([
+    $staleRecipeResolver,
+    $reviewedEggplantIngredientId,
+]);
+$sourceRevisionBeforeResolverMigration =
+    (int)recipeScoreState($db)['ontology_source_revision'];
 $db->prepare("
     UPDATE ingredient_ontology_identity_admission_state
     SET resolver_version = ?,
@@ -1009,6 +1026,29 @@ $migratedGarlicsReadiness =
     );
 $assert(
     !empty($resolverMigration['changed'])
+    && !empty($resolverMigration['recipe_resolver_changed'])
+    && (int)recipeScoreState($db)['ontology_source_revision']
+        === $sourceRevisionBeforeResolverMigration + 1
+    && (int)$db->query("
+        SELECT COUNT(*)
+        FROM recipe_score_mutations
+        WHERE domain = 'source'
+          AND owner_type = 'global'
+          AND reason = 'recipe_identity_resolver_changed'
+          AND revision = "
+            . ($sourceRevisionBeforeResolverMigration + 1)
+    )->fetchColumn() === 1
+    && ingredientOntologyActivationNeedsScoreBuild($db)
+    && (int)(
+        $resolverMigration[
+            'recipe_resolver_migration'
+        ]['processed'] ?? 0
+    ) >= 1
+    && (int)(
+        $resolverMigration[
+            'recipe_resolver_migration'
+        ]['remaining'] ?? -1
+    ) === 0
     && (string)$migratedGarlicsReadiness['status'] === 'ready'
     && (int)$migratedGarlicsReadiness['score_revision_id']
         === $fixtureActiveRevisionId
@@ -1017,7 +1057,18 @@ $assert(
         FROM recipe_score_pending_products
         WHERE product_id = {$productIds['garlics']}
     ")->fetchColumn() === 0,
-    'Resolver migration must backfill unchanged accepted readiness without rescoring'
+    'Resolver migration must backfill unchanged product readiness and '
+        . 'force copied refresh of stale recipe identities'
+);
+$assert(
+    (string)$db->query("
+        SELECT resolver_version
+        FROM ingredient_ontology_recipe_identity_annex
+        WHERE recipe_ingredient_id =
+            {$reviewedEggplantIngredientId}
+    ")->fetchColumn()
+        === ingredientOntologyV3RecipeIdentityResolverVersion(),
+    'Copied score refresh must migrate stale recipe annex rows'
 );
 $db->prepare("
     UPDATE ingredient_ontology_identity_annex

@@ -212,6 +212,14 @@ try {
             'coverage_gap_open_count',
             $status['ontology_queue']
         )
+        && array_key_exists(
+            'copied_recovery_required',
+            $status['incremental_scores']
+        )
+        && array_key_exists(
+            'recovery_strategy',
+            $status['incremental_scores']
+        )
         && array_key_exists('advisories', $status)
         && $status['pending']['total'] >= 1
         && in_array(

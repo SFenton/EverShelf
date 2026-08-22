@@ -45,6 +45,19 @@ from yarl import URL
 LOGGER = logging.getLogger("cookidoo_bridge")
 logging.getLogger("cookidoo_api").setLevel(logging.WARNING)
 
+BUILD_REVISION_PATH = Path(__file__).with_name(".build-revision")
+
+
+def _build_revision() -> str:
+    try:
+        revision = BUILD_REVISION_PATH.read_text(encoding="ascii").strip()
+    except OSError:
+        return "unknown"
+    return revision if re.fullmatch(r"[0-9a-f]{40}(?:[0-9a-f]{24})?", revision) else "unknown"
+
+
+BUILD_REVISION = _build_revision()
+
 MAX_BODY_BYTES = 2 * 1024 * 1024
 MAX_RESPONSE_BYTES = 1_000_000
 MAX_UPSTREAM_RESPONSE_BYTES = 2_000_000
@@ -2770,6 +2783,7 @@ async def health_handler(request: web.Request) -> web.Response:
         {
             "status": "ok",
             "service": "cookidoo-bridge",
+            "build_revision": BUILD_REVISION,
             "capabilities": _policy_capabilities(request.app[CONFIG_KEY]),
         }
     )

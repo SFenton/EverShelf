@@ -42,6 +42,64 @@ if ($databasePath === '') {
         $databasePath . '.migration.lock'
     );
 }
+$databaseFile = (string)(
+    $db->query('PRAGMA database_list')->fetch(PDO::FETCH_ASSOC)['file']
+        ?? ''
+);
+if ($databaseFile === '') {
+    throw new RuntimeException(
+        'Incremental score worker requires a file-backed database'
+    );
+}
+$backgroundLockPath = trim(
+    (string)($options['background-lock'] ?? '')
+);
+if ($backgroundLockPath === '') {
+    $backgroundLockPath =
+        dirname($databaseFile) . '/.background-writer.lock';
+} elseif (!str_starts_with($backgroundLockPath, '/')) {
+    throw new InvalidArgumentException(
+        '--background-lock must be an absolute path'
+    );
+}
+$heartbeatPath = trim((string)($options['heartbeat'] ?? ''));
+if ($heartbeatPath === '') {
+    $heartbeatPath =
+        dirname($databaseFile) . '/.recipe-score-worker.heartbeat';
+}
+$statusPath = trim((string)($options['status-file'] ?? ''));
+if ($statusPath === '') {
+    $statusPath =
+        dirname($databaseFile) . '/.recipe-score-worker.status';
+}
+foreach ([$heartbeatPath, $statusPath] as $statePath) {
+    if (!str_starts_with($statePath, '/')) {
+        throw new InvalidArgumentException(
+            'Worker state paths must be absolute'
+        );
+    }
+}
+$writeState = static function (
+    string $path,
+    string $value
+): void {
+    $temporary = $path . '.tmp.' . getmypid();
+    if (
+        file_put_contents(
+            $temporary,
+            $value . PHP_EOL,
+            LOCK_EX
+        ) === false
+        || !rename($temporary, $path)
+    ) {
+        @unlink($temporary);
+        throw new RuntimeException(
+            'Incremental score worker state could not be written'
+        );
+    }
+};
+$writeState($heartbeatPath, (string)time());
+$writeState($statusPath, '0 ' . time());
 
 $running = true;
 if (function_exists('pcntl_async_signals')) {
@@ -57,59 +115,114 @@ if (function_exists('pcntl_async_signals')) {
 $cycle = 0;
 do {
     $cycle++;
-    try {
-        $result = ingredientOntologyV3IncrementalRebuild(
-            $db,
-            $force
-        );
-    } catch (Throwable $error) {
-        $rollbackError = null;
-        try {
-            databaseRollbackDanglingTransaction($db);
-        } catch (Throwable $cleanupError) {
-            $rollbackError = $cleanupError;
-        }
-        $reason = $rollbackError !== null
-            ? 'worker_exception'
-            : (
-                databaseIsLockError($error)
-                    ? 'locked'
-                    : 'worker_exception'
-            );
-        $message = $error->getMessage();
-        if ($rollbackError !== null) {
-            $message .= '; connection rollback failed: '
-                . $rollbackError->getMessage();
-        }
+    $writeState($heartbeatPath, (string)time());
+    $backgroundLock = fopen($backgroundLockPath, 'c+');
+    if ($backgroundLock === false) {
         $result = [
             'rebuilt' => false,
-            'reason' => $reason,
-            'error' => mb_substr(
-                $message,
-                0,
-                1000,
-                'UTF-8'
-            ),
+            'reason' => 'worker_exception',
+            'error' => 'background writer lock could not be opened',
         ];
-    }
-    if (
-        (string)($result['reason'] ?? '')
-            === 'compaction_required'
-    ) {
-        $compaction = ingredientOntologyV3CompactActiveScores(
-            $db,
-            true
-        );
-        $result['compaction'] = $compaction;
-        if (!empty($compaction['compacted'])) {
-            $result['reason'] = 'compacted';
+    } elseif (!flock($backgroundLock, LOCK_EX | LOCK_NB)) {
+        fclose($backgroundLock);
+        $backgroundLock = null;
+        $result = [
+            'rebuilt' => false,
+            'reason' => 'background_writer_locked',
+            'skipped' => true,
+            'retryable' => true,
+        ];
+    } else {
+        try {
+            $result = ingredientOntologyV3IncrementalRebuild(
+                $db,
+                $force
+            );
+            if (
+                (string)($result['reason'] ?? '')
+                    === 'compaction_required'
+            ) {
+                $compaction =
+                    ingredientOntologyV3CompactActiveScores(
+                        $db,
+                        true
+                    );
+                $result['compaction'] = $compaction;
+                if (!empty($compaction['compacted'])) {
+                    $result['reason'] = 'compacted';
+                }
+            }
+        } catch (Throwable $error) {
+            $rollbackError = null;
+            try {
+                databaseRollbackDanglingTransaction($db);
+            } catch (Throwable $cleanupError) {
+                $rollbackError = $cleanupError;
+            }
+            $reason = $rollbackError !== null
+                ? 'worker_exception'
+                : (
+                    databaseIsLockError($error)
+                        ? 'locked'
+                        : 'worker_exception'
+                );
+            $message = $error->getMessage();
+            if ($rollbackError !== null) {
+                $message .= '; connection rollback failed: '
+                    . $rollbackError->getMessage();
+            }
+            $result = [
+                'rebuilt' => false,
+                'reason' => $reason,
+                'error' => mb_substr(
+                    $message,
+                    0,
+                    1000,
+                    'UTF-8'
+                ),
+            ];
+        } finally {
+            flock($backgroundLock, LOCK_UN);
+            fclose($backgroundLock);
         }
     }
+    $reason = (string)($result['reason'] ?? '');
+    $failed = in_array(
+        $reason,
+        [
+            'active_revision_missing',
+            'compaction_required',
+            'failed',
+            'full_rebuild_required',
+            'worker_exception',
+        ],
+        true
+    );
+    if ($reason === 'full_rebuild_required') {
+        $result['recovery'] = [
+            'strategy' => 'copied_score_refresh',
+            'worker' => 'ontology-activation-worker',
+            'retryable' => true,
+        ];
+    } elseif (in_array(
+        $reason,
+        ['background_writer_locked', 'locked'],
+        true
+    )) {
+        $result['skipped'] = true;
+        $result['retryable'] = true;
+    }
+    $writeState($heartbeatPath, (string)time());
+    $writeState(
+        $statusPath,
+        ($failed ? '2 ' : '0 ') . time()
+    );
     if (
         !$loop
         || !empty($result['rebuilt'])
+        || $failed
         || in_array(
-            (string)($result['reason'] ?? ''),
+            $reason,
             [
                 'worker_exception',
                 'full_rebuild_required',
@@ -122,7 +235,7 @@ do {
             && isset($result['error'])
         )
     ) {
-        $payload = ['success' => true, 'cycle' => $cycle] + $result;
+        $payload = ['success' => !$failed, 'cycle' => $cycle] + $result;
         echo $json
             ? json_encode(
                 $payload,
@@ -138,20 +251,27 @@ do {
                 ) . PHP_EOL;
     }
     if (!$loop || !$running) {
-        if ((string)($result['reason'] ?? '') === 'worker_exception') {
+        if ($failed) {
             exit(2);
         }
         break;
     }
     if ($maxCycles > 0 && $cycle >= $maxCycles) {
+        if ($failed) {
+            exit(2);
+        }
         break;
     }
-    $reason = (string)($result['reason'] ?? '');
     $delayMs = match ($reason) {
         'coalescing' => max(
             $sleepMs,
             min(5000, (int)($result['retry_after_ms'] ?? $sleepMs))
         ),
+        'identity_migration_pending' => max(
+            $sleepMs,
+            min(5000, (int)($result['retry_after_ms'] ?? 50))
+        ),
+        'background_writer_locked' => max($sleepMs, 250),
         'locked' => max($sleepMs, 250),
         'full_rebuild_required',
         'active_revision_missing',

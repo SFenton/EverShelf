@@ -1894,6 +1894,25 @@ function ingredientOntologyV3IncrementalRebuild(
     $started = hrtime(true);
     $identityAdmission =
         ingredientOntologyV3IdentityAdmissionSync($db);
+    $identityMigrationRemaining = max(
+        (int)(
+            $identityAdmission['resolver_migration']['remaining']
+                ?? 0
+        ),
+        (int)(
+            $identityAdmission[
+                'recipe_resolver_migration'
+            ]['remaining'] ?? 0
+        )
+    );
+    if ($identityMigrationRemaining > 0) {
+        return [
+            'rebuilt' => false,
+            'reason' => 'identity_migration_pending',
+            'remaining' => $identityMigrationRemaining,
+            'retry_after_ms' => 50,
+        ];
+    }
     $identityRetries =
         ingredientOntologyV3ProductReadinessRetryDue($db);
     $pendingProducts =

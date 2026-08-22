@@ -2080,6 +2080,20 @@ function recipeJobFinishLocalOutcome(
     }
 }
 
+function recipeJobFailureRetrySeconds(
+    Throwable $error,
+    int $attempts,
+    bool $forceCircuitBreak = false
+): int {
+    if (databaseIsLockError($error)) {
+        return min(5, 2 ** max(0, $attempts - 1));
+    }
+    if ($forceCircuitBreak) {
+        return 900;
+    }
+    return min(3600, 30 * (2 ** max(0, $attempts - 1)));
+}
+
 function recipeJobReleaseClaim(
     PDO $db,
     array $claim,
@@ -2098,12 +2112,11 @@ function recipeJobReleaseClaim(
             < min((int)$claim['max_attempts'], $maxAttempts);
         $forceCircuitBreak =
             $error instanceof RecipeCookidooCircuitBreakException;
-        $retrySeconds = $forceCircuitBreak
-            ? 900
-            : min(
-                3600,
-                30 * (2 ** max(0, (int)$claim['attempts'] - 1))
-            );
+        $retrySeconds = recipeJobFailureRetrySeconds(
+            $error,
+            (int)$claim['attempts'],
+            $forceCircuitBreak
+        );
         $status = $canRetry ? 'retry' : 'failed';
         $stmt = $db->prepare("
             UPDATE recipe_jobs
@@ -2148,6 +2161,7 @@ function recipeJobReleaseClaim(
                 'recipe_job_failure_fence_lost'
             );
         }
+
         recipeJobConnectorOutcomeInTransaction(
             $db,
             $claim,

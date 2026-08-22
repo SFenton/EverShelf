@@ -524,10 +524,6 @@ try {
             $cronFile,
             'scripts/rebuild-recipe-scores.php'
         )
-        && !preg_match(
-            '/flock[^\n]*process-ontology-activation\.php/',
-            $cronFile
-        )
         && is_string($activationScript)
         && str_contains(
             $activationScript,
@@ -549,7 +545,7 @@ try {
             $activationScript,
             "'reason' => 'ontology_activation_backoff'"
         ),
-        'Cron must run copied activation outside the shared lock while the '
+        'Docker cron must retain default copied-recovery fallback while the '
             . 'worker reports bounded live lock and backoff outcomes'
     );
 

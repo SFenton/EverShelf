@@ -72,7 +72,6 @@ try {
         }
     }
     ini_set('memory_limit', '32M');
-
     $fixtures = [
         null,
         true,

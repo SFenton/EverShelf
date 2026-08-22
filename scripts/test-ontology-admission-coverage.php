@@ -245,6 +245,80 @@ foreach (
     }
 }
 
+$GLOBALS['INGREDIENT_ONTOLOGY_PRODUCT_LANGUAGE_OVERRIDE'] = 'en';
+$insertRepresentative->execute([
+    "Confectioner's Sugar",
+    '',
+    'baking',
+]);
+$possessiveProductId = (int)$db->lastInsertId();
+$possessiveAdmission =
+    ingredientOntologyV3IdentityAnnexRefreshProduct(
+        $db,
+        $possessiveProductId,
+        $versionId
+    );
+$providerOrthography =
+    ingredientOntologyV3RecipeAnnexResolution(
+        $db,
+        $version,
+        'confectioners sugar',
+        'en',
+        true
+    );
+$curlyOrthography =
+    ingredientOntologyV3RecipeAnnexResolution(
+        $db,
+        $version,
+        "Confectioner’s Sugar",
+        'en',
+        true
+    );
+$distinctSingular =
+    ingredientOntologyV3RecipeAnnexResolution(
+        $db,
+        $version,
+        'confectioner sugar',
+        'en',
+        true
+    );
+$possessiveAnnexStmt = $db->prepare("
+    SELECT normalized_label, extension_entity_id
+    FROM ingredient_ontology_identity_annex
+    WHERE product_id = ?
+");
+$possessiveAnnexStmt->execute([$possessiveProductId]);
+$possessiveAnnex =
+    $possessiveAnnexStmt->fetch(PDO::FETCH_ASSOC) ?: [];
+$assert(
+    !empty($possessiveAdmission['accepted'])
+    && (int)$possessiveAdmission['entity_id'] < 0
+    && (int)$providerOrthography['effective_entity_id']
+        === (int)$possessiveAdmission['entity_id']
+    && (int)$curlyOrthography['effective_entity_id']
+        === (int)$possessiveAdmission['entity_id']
+    && (string)($possessiveAnnex['normalized_label'] ?? '')
+        === 'confectioners sugar'
+    && (string)$providerOrthography['normalized_label']
+        === 'confectioners sugar'
+    && (int)$distinctSingular['effective_entity_id']
+        !== (int)$possessiveAdmission['entity_id'],
+    'Possessive punctuation variants must converge without dropping '
+        . 'the possessive s: '
+        . ingredientOntologyV3Json([
+            'admission' => $possessiveAdmission,
+            'annex' => $possessiveAnnex,
+            'provider' => $providerOrthography,
+            'curly' => $curlyOrthography,
+            'singular' => $distinctSingular,
+        ])
+);
+$assert(
+    canonicalIngredientNormalizeText("Confectioner's Sugar")
+        === 'confectioners sugar',
+    'Canonical discovery terms must preserve possessive s'
+);
+
 $assert(
     count(array_unique(array_values($entityByLabel)))
         === count($entityByLabel),

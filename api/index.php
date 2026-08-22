@@ -715,9 +715,17 @@ if (($_GET['action'] ?? '') === 'health_check') {
     $allOk = array_reduce($criticalKeys, fn($c, $k) => $c && ($checks[$k]['ok'] ?? false), true);
 
     header('Content-Type: application/json');
+    $buildRevisionPath = dirname(__DIR__) . '/.build-revision';
+    $buildRevision = is_readable($buildRevisionPath)
+        ? trim((string)file_get_contents($buildRevisionPath))
+        : '';
+    if (!preg_match('/^[a-f0-9]{7,64}$/D', $buildRevision)) {
+        $buildRevision = 'unknown';
+    }
     echo json_encode([
         'ok'             => $allOk,
         'scope'          => $scope,
+        'build_revision' => $buildRevision,
         'checks'         => $checks,
         'fresh'          => $isFresh,
         'skipped_checks' => $skippedChecks,

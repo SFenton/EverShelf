@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.18.0] - 2026-08-21
+
+### Added
+- Exact source-revision metadata on both container images and the public
+  startup-health response.
+- A concurrent two-wave, sixteen-food ingestion release gate covering product
+  save, inventory add, canonicalization, identity convergence, score
+  publication, expiry weighting, recipe search, and SQLite integrity.
+- Dedicated health checks for the canonical, ontology intake, ontology
+  activation, and recipe-score workers.
+
+### Changed
+- The dedicated ontology container now runs the supported live intake mode,
+  while a separate bounded activation worker performs copy-only ontology and
+  full-score work before short live import/publication phases.
+- Copy-safe activation defaults on while model execution and promotion remain
+  separately gated, so active-v3 installations cannot strand overflow work.
+- CI now runs on every pushed commit, exercises the Cookidoo bridge, verifies
+  image-to-commit provenance, and includes the concurrent ingestion gate.
+
+### Fixed
+- Full-rebuild-required score cycles are routed to copied score refresh, while
+  incremental scoring skips activation-owned live write phases through the
+  shared background-writer lock instead of repeatedly colliding with SQLite.
+- Incremental score worker output no longer reports success for failed,
+  missing-parent, compaction-required, or full-rebuild-required cycles.
+- Recipe identity resolver upgrades invalidate the active score source and
+  force a copied full refresh so existing recipe annex rows cannot remain on
+  obsolete identity extensions.
+- Possessive ingredient spellings such as `Confectioner's Sugar`,
+  `Confectioner’s Sugar`, and `confectioners sugar` converge without collapsing
+  the distinct phrase `confectioner sugar`.
+
 ## [1.17.0] - 2026-08-21
 
 ### Changed
