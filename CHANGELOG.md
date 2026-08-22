@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.18.9] - 2026-08-22
+
+### Fixed
+- Interrupted activation workspaces and their SQLite sidecars are reclaimed
+  after one minute, preventing repeated 61 GB copy failures from exhausting
+  the Docker data filesystem.
+- Successful ontology and score imports clear transient reservation warnings
+  while retaining reservation-duration metrics.
+
 ## [1.18.8] - 2026-08-22
 
 ### Fixed

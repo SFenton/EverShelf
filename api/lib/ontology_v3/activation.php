@@ -5900,6 +5900,7 @@ function ingredientOntologyActivationAssertActiveDatabase(PDO $db): void {
                         WHEN ? = 'active' THEN CURRENT_TIMESTAMP
                         ELSE activated_at
                     END,
+                    last_error = '',
                     completed_at = CURRENT_TIMESTAMP,
                     updated_at = CURRENT_TIMESTAMP
                 WHERE id = ? AND status = 'activatable'
@@ -5983,15 +5984,9 @@ function ingredientOntologyActivationAssertActiveDatabase(PDO $db): void {
                         maximum_reservation_ms,
                         ?
                     ),
-                    last_error = CASE
-                        WHEN CAST(? AS REAL) > 100
-                        THEN 'activation reservation exceeded 100 ms'
-                        ELSE ''
-                    END,
                     updated_at = CURRENT_TIMESTAMP
                 WHERE id = ?
             ")->execute([
-                $reservationMs,
                 $reservationMs,
                 $reservationMs,
                 $importId,
@@ -7950,7 +7945,8 @@ function ingredientOntologyActivationAssertActiveDatabase(PDO $db): void {
             );
             $temporary = preg_match(
                 '/^(generation|score|validation|ontology)-.+'
-                    . '\.sqlite\.tmp\.[1-9][0-9]*\.[a-f0-9]{12}$/D',
+                    . '\.sqlite\.tmp\.[1-9][0-9]*\.[a-f0-9]{12}'
+                    . '(?:-wal|-shm|-journal)?$/D',
                 $name
             ) || preg_match(
                 '/^(bundle-set|score-bundle|acknowledgement|'
@@ -7960,7 +7956,7 @@ function ingredientOntologyActivationAssertActiveDatabase(PDO $db): void {
             );
             if (
                 ($workspace || $validation || $lock || $temporary)
-                && $age >= 21600
+                && $age >= 60
             ) {
                 if (unlink($path)) {
                     $deleted[] = $path;

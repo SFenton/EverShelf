@@ -9857,13 +9857,26 @@ try {
                 $agedArtifactTime
             );
         }
+        $staleWorkspacePath =
+            $payloadDirectory
+            . '/generation-0123456789abcdef.sqlite';
+        $staleTemporarySidecarPath =
+            $payloadDirectory
+            . '/validation-999-0123456789abcdef.sqlite'
+            . '.tmp.123.abcdefabcdef-wal';
+        file_put_contents($staleWorkspacePath, 'stale');
+        file_put_contents($staleTemporarySidecarPath, 'stale');
+        touch($staleWorkspacePath, time() - 120);
+        touch($staleTemporarySidecarPath, time() - 120);
         $agedArtifactCleanup =
             ingredientOntologyActivationCleanupWorkFiles(
                 $activationTarget,
                 $payloadDirectory
             );
         controllerTestAssert(
-            $agedArtifactCleanup['deleted'] === 0
+            $agedArtifactCleanup['deleted'] === 2
+            && !is_file($staleWorkspacePath)
+            && !is_file($staleTemporarySidecarPath)
             && is_file($bundleManifestPath)
             && is_file(
                 $payloadDirectory . '/'
