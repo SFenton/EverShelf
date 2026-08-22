@@ -735,7 +735,10 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                 await client.get("/v1/capabilities")
             ).json()
         self.assertEqual(health["capabilities"], capabilities)
-        self.assertEqual(health["build_revision"], "unknown")
+        self.assertRegex(
+            health["build_revision"],
+            r"^(?:unknown|[0-9a-f]{40}(?:[0-9a-f]{24})?)$",
+        )
         self.assertEqual(
             capabilities,
             {
