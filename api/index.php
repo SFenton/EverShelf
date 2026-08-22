@@ -3873,6 +3873,16 @@ function saveProduct(PDO $db): void {
                 $id = (int)$db->lastInsertId();
         }
 
+        productSaveTestHook(
+            'before_commit',
+            [
+                'id' => $id,
+                'mode' => $existing !== null ? 'update' : 'create',
+            ]
+        );
+        $db->exec('COMMIT');
+        $transactionStarted = false;
+
         $shoppingOutcome = productSaveRunSideEffect(
             $db,
             'shopping_intent',
@@ -3961,15 +3971,6 @@ function saveProduct(PDO $db): void {
         if ($identityOutcome['degraded'] !== null) {
             $degradedSubsystems[] = $identityOutcome['degraded'];
         }
-        productSaveTestHook(
-                'before_commit',
-                [
-                    'id' => $id,
-                    'mode' => $existing !== null ? 'update' : 'create',
-                ]
-        );
-        $db->exec('COMMIT');
-        $transactionStarted = false;
         if (!empty($queue['queued'])) {
             canonicalIngredientWake();
         }

@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.18.2] - 2026-08-22
+
+### Fixed
+- Product create/update commits now contain only the core product mutation.
+  Shopping intent, canonical enqueue, controller observation, and identity
+  admission run as independently recoverable transactions, preventing rapid
+  concurrent scans from holding one long SQLite write reservation.
+- The production-shaped stress gate now reuses existing catalog recipes,
+  validates returned barcode ownership, refreshes its reader snapshot after
+  concurrent workers finish, and tolerates unrelated queued provider jobs.
+
 ## [1.18.1] - 2026-08-22
 
 ### Fixed
