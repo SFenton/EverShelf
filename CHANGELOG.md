@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.18.10] - 2026-08-22
+
+### Fixed
+- Copied no-op acknowledgements whose live score parent has already advanced
+  are now recorded as expected superseded snapshots instead of activation
+  failures; their source intents remain pending for the next coherent build.
+
 ## [1.18.9] - 2026-08-22
 
 ### Fixed

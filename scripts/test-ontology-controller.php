@@ -10797,6 +10797,51 @@ try {
     $pointerBeforeAck = recipeScoreState(
         $activationTarget
     )['active_score_revision_id'];
+    $activationTarget->exec("
+        UPDATE recipe_score_state
+        SET ontology_source_revision =
+                ontology_source_revision + 1,
+            ontology_source_hash = '',
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = 1
+    ");
+    $GLOBALS['ONTOLOGY_CONTROLLER_ACTIVE_DB_PATH_OVERRIDE'] =
+        $activationTargetDbPath;
+    try {
+        $staleAckResult =
+            ingredientOntologyActivationAcknowledgeNoOp(
+                $activationTarget,
+                $ackDocument
+            );
+    } finally {
+        unset($GLOBALS['ONTOLOGY_CONTROLLER_ACTIVE_DB_PATH_OVERRIDE']);
+    }
+    $activationTarget->prepare("
+        UPDATE recipe_score_state
+        SET ontology_source_revision = ?,
+            ontology_source_hash = ?,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = 1
+    ")->execute([
+        (int)$ackDocument['source_fence']['ontology_source_revision'],
+        (string)recipeScoreActiveRevision(
+            $activationTarget
+        )['ontology_source_hash'],
+    ]);
+    controllerTestAssert(
+        empty($staleAckResult['applied'])
+        && (string)$staleAckResult['outcome']
+            === 'superseded_snapshot'
+        && (string)$staleAckResult['reason']
+            === 'acknowledgement_parent_changed'
+        && $activationTarget->query("
+            SELECT status
+            FROM ontology_generation_intents
+            WHERE source_job_id = {$ackSourceJobId}
+        ")->fetchColumn() === 'pending',
+        'Pre-reservation acknowledgement drift must be retried as a '
+            . 'superseded snapshot without consuming its intent'
+    );
     $ackRaceDb = new PDO('sqlite:' . $activationTargetDbPath);
     $ackRaceDb->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
     $GLOBALS['ONTOLOGY_ACTIVATION_BEFORE_ACK_RESERVATION'] =

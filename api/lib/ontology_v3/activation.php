@@ -2858,9 +2858,28 @@ function ingredientOntologyActivationQuoteIdentifier(
                     'ontology_source_revision'
                 ]
         ) {
-            throw new RuntimeException(
-                'ontology activation acknowledgement parent changed'
+            ingredientOntologyActivationRecordOutcome(
+                $db,
+                'superseded_snapshot',
+                [
+                    'reason' => 'acknowledgement_parent_changed',
+                    'expected_score_revision_id' =>
+                        (int)$document['parent']['score_revision_id'],
+                    'active_score_revision_id' =>
+                        (int)($state['active_score_revision_id'] ?? 0),
+                ],
+                true
             );
+            return [
+                'applied' => false,
+                'document_hash' => $expected,
+                'intent_count' => count($intents),
+                'applied_count' => 0,
+                'deferred_count' => 0,
+                'outcome' => 'superseded_snapshot',
+                'reason' => 'acknowledgement_parent_changed',
+                'policy_deferred' => false,
+            ];
         }
         $cdc = ingredientOntologyActivationCdcSnapshot($db);
         foreach (['source', 'constraint', 'policy'] as $domain) {
