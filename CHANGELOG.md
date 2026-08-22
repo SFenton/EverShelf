@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.18.6] - 2026-08-22
+
+### Fixed
+- Production-copy stress scanners now release barcode verification cursors
+  before inventory insertion, preventing the harness itself from retaining a
+  stale WAL snapshot during concurrent writes.
+
 ## [1.18.5] - 2026-08-22
 
 ### Fixed
@@ -15,6 +22,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   commits from stranding a fully computed revision.
 - Incremental scoring recovers abandoned build rows when it acquires the
   exclusive score lock and records failure cleanup atomically.
+- Aborted temporary stress runs now remove their per-wave synchronization
+  markers.
 
 ## [1.18.4] - 2026-08-22
 

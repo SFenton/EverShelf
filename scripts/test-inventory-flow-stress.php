@@ -391,6 +391,7 @@ if ($workerMode) {
             ");
             $owner->execute([$barcode]);
             $barcodeOwnerId = (int)($owner->fetchColumn() ?: 0);
+            $owner->closeCursor();
             if ($barcodeOwnerId !== $productId) {
                 throw new RuntimeException(
                     'Stress product response ID mismatch: '
@@ -571,6 +572,7 @@ $existingStmt = $db->query("
 foreach ($existingStmt->fetchAll(PDO::FETCH_COLUMN) as $name) {
     $existing[(string)$name] = true;
 }
+$existingStmt->closeCursor();
 $active = recipeScoreActiveRevision($db);
 $existingRecipe = null;
 if (!$temporary) {
@@ -648,6 +650,9 @@ foreach ($foods as $index => $name) {
         break;
     }
 }
+if ($existingRecipe !== null) {
+    $existingRecipe->closeCursor();
+}
 $assert(
     count($selectedFoods) === 16,
     'Stress corpus must contain sixteen foods unseen by the target database'
@@ -677,6 +682,7 @@ if ($temporary) {
         $ingredient->execute([$recipeIds[$index]]);
         $recipeIngredientIds[$index] =
             (int)$ingredient->fetchColumn();
+        $ingredient->closeCursor();
         $recipeTitles[$index] = "Stress {$name} Supper";
     }
 }
