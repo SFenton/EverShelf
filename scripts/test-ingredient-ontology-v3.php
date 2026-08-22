@@ -96,6 +96,69 @@ function ontologyV3TestCookidooMetadataItem(
     ];
 }
 
+$providerTerm = [
+    'connector' => 'cookidoo',
+    'metadata_schema_version' => 'ingredient-topology-v1',
+    'namespace' => 'com.vorwerk.ingredients.Ingredient-rpf',
+    'provider_ref' =>
+        'com.vorwerk.ingredients.Ingredient-rpf-267',
+    'title_hash' => hash('sha256', 'pumpkin seeds'),
+    'consistency_state' => 'variant',
+    'mapping_status' => 'accepted',
+    'review_state' => 'accepted',
+    'entity_slug' => 'pumpkin-seed',
+    'attributes_json' => '{}',
+];
+$staleProviderReview = [
+    'term_fingerprint' => hash(
+        'sha256',
+        'stale-provider-review'
+    ),
+    'title_hash' => hash('sha256', 'pumpkin seeds'),
+    'disposition_code' => 'D1',
+    'entity_slug' => 'pumpkin-seed',
+    'attributes_json' => '{}',
+    'rationale' => 'Previously reviewed provider term',
+    'reviewer' => 'test-reviewer',
+];
+$dynamicProviderReview =
+    ingredientOntologyV3ResolveProviderTermReview(
+        $providerTerm,
+        $staleProviderReview,
+        true
+    );
+ontologyV3TestAssert(
+    !empty($dynamicProviderReview['dynamic_unreviewed'])
+    && !empty($dynamicProviderReview['dynamic_stale'])
+    && (string)$dynamicProviderReview['review'][
+        'disposition_code'
+    ] === 'D8'
+    && hash_equals(
+        (string)$dynamicProviderReview['fingerprint'],
+        (string)$dynamicProviderReview['review'][
+            'term_fingerprint'
+        ]
+    ),
+    'Dynamic ontology builds must quarantine stale provider reviews'
+);
+$staticStaleRejected = false;
+try {
+    ingredientOntologyV3ResolveProviderTermReview(
+        $providerTerm,
+        $staleProviderReview,
+        false
+    );
+} catch (RuntimeException $error) {
+    $staticStaleRejected = str_contains(
+        $error->getMessage(),
+        'provider term review is stale'
+    );
+}
+ontologyV3TestAssert(
+    $staticStaleRejected,
+    'Static ontology builds must still reject stale provider reviews'
+);
+
 $dbPath = __DIR__ . '/../data/.ontology-v3-test-' . getmypid() . '.sqlite';
 $legacyCliDbPath = __DIR__ . '/../data/.ontology-v3-legacy-cli-'
     . getmypid() . '.sqlite';

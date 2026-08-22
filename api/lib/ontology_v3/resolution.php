@@ -6414,6 +6414,100 @@ function ingredientOntologyV3NonAcceptedDisposition(array $row): array {
     ];
 }
 
+function ingredientOntologyV3ResolveProviderTermReview(
+    array $term,
+    ?array $review,
+    bool $dynamicController
+): array {
+    $fingerprint = ingredientOntologyV3Hash([
+        'connector' => (string)$term['connector'],
+        'metadata_schema_version' =>
+            (string)$term['metadata_schema_version'],
+        'namespace' => (string)$term['namespace'],
+        'provider_ref' => (string)$term['provider_ref'],
+        'title_hash' => (string)($term['title_hash'] ?? ''),
+        'consistency_state' => (string)$term['consistency_state'],
+    ]);
+    $reviewIsStale = $review !== null
+        && (
+            !hash_equals(
+                (string)$review['term_fingerprint'],
+                $fingerprint
+            )
+            || !hash_equals(
+                (string)$review['title_hash'],
+                (string)($term['title_hash'] ?? '')
+            )
+        );
+    $dynamicUnreviewed = false;
+    if ($review === null || ($dynamicController && $reviewIsStale)) {
+        if ($dynamicController) {
+            $review = [
+                'term_fingerprint' => $fingerprint,
+                'title_hash' => (string)($term['title_hash'] ?? ''),
+                'disposition_code' => 'D8',
+                'entity_slug' => '',
+                'attributes_json' => '{}',
+                'rationale' => $reviewIsStale
+                    ? 'Dynamic provider term review is stale and awaits renewed explicit disposition'
+                    : 'Dynamic provider term awaits explicit reviewed disposition',
+                'reviewer' => 'autonomous-controller',
+            ];
+            $dynamicUnreviewed = true;
+        } elseif (
+            defined('RECIPE_BACKEND_TEST_MODE')
+            && RECIPE_BACKEND_TEST_MODE
+        ) {
+            $acceptedSynthetic =
+                (string)$term['mapping_status'] === 'accepted'
+                && (string)$term['review_state'] === 'accepted';
+            $review = [
+                'term_fingerprint' => $fingerprint,
+                'title_hash' => (string)($term['title_hash'] ?? ''),
+                'disposition_code' =>
+                    $acceptedSynthetic ? 'D1' : 'D8',
+                'entity_slug' =>
+                    $acceptedSynthetic
+                        ? (string)$term['entity_slug']
+                        : '',
+                'attributes_json' =>
+                    $acceptedSynthetic
+                        ? (string)$term['attributes_json']
+                        : '{}',
+                'rationale' =>
+                    'Synthetic test-only provider disposition',
+                'reviewer' => 'synthetic-test',
+            ];
+        } else {
+            throw new RuntimeException(
+                'provider term lacks explicit review: '
+                . (string)$term['provider_ref']
+            );
+        }
+    }
+    if (
+        !hash_equals(
+            (string)$review['term_fingerprint'],
+            $fingerprint
+        )
+        || !hash_equals(
+            (string)$review['title_hash'],
+            (string)($term['title_hash'] ?? '')
+        )
+    ) {
+        throw new RuntimeException(
+            'provider term review is stale: '
+            . (string)$term['provider_ref']
+        );
+    }
+    return [
+        'review' => $review,
+        'fingerprint' => $fingerprint,
+        'dynamic_unreviewed' => $dynamicUnreviewed,
+        'dynamic_stale' => $dynamicUnreviewed && $reviewIsStale,
+    ];
+}
+
 function ingredientOntologyV3FinalizeTerminalDispositions(
     PDO $db,
     int $versionId,
@@ -6483,6 +6577,7 @@ function ingredientOntologyV3FinalizeTerminalDispositions(
     ");
     $providerCounts = [];
     $dynamicUnreviewedProviderTerms = 0;
+    $dynamicStaleProviderTerms = 0;
     while ($term = $provider->fetch(PDO::FETCH_ASSOC)) {
         $reviewKey = implode('|', [
             (string)$term['connector'],
@@ -6491,73 +6586,19 @@ function ingredientOntologyV3FinalizeTerminalDispositions(
             (string)$term['provider_ref'],
         ]);
         $review = $providerTermReviews[$reviewKey] ?? null;
-        $fingerprint = ingredientOntologyV3Hash([
-            'connector' => (string)$term['connector'],
-            'metadata_schema_version' =>
-                (string)$term['metadata_schema_version'],
-            'namespace' => (string)$term['namespace'],
-            'provider_ref' => (string)$term['provider_ref'],
-            'title_hash' => (string)($term['title_hash'] ?? ''),
-            'consistency_state' => (string)$term['consistency_state'],
-        ]);
-        if ($review === null) {
-            if ($dynamicController) {
-                $review = [
-                    'term_fingerprint' => $fingerprint,
-                    'title_hash' => (string)($term['title_hash'] ?? ''),
-                    'disposition_code' => 'D8',
-                    'entity_slug' => '',
-                    'attributes_json' => '{}',
-                    'rationale' =>
-                        'Dynamic provider term awaits explicit reviewed disposition',
-                    'reviewer' => 'autonomous-controller',
-                ];
-                $dynamicUnreviewedProviderTerms++;
-            } elseif (
-                defined('RECIPE_BACKEND_TEST_MODE')
-                && RECIPE_BACKEND_TEST_MODE
-            ) {
-                $acceptedSynthetic =
-                    (string)$term['mapping_status'] === 'accepted'
-                    && (string)$term['review_state'] === 'accepted';
-                $review = [
-                    'term_fingerprint' => $fingerprint,
-                    'title_hash' => (string)($term['title_hash'] ?? ''),
-                    'disposition_code' =>
-                        $acceptedSynthetic ? 'D1' : 'D8',
-                    'entity_slug' =>
-                        $acceptedSynthetic
-                            ? (string)$term['entity_slug']
-                            : '',
-                    'attributes_json' =>
-                        $acceptedSynthetic
-                            ? (string)$term['attributes_json']
-                            : '{}',
-                    'rationale' =>
-                        'Synthetic test-only provider disposition',
-                    'reviewer' => 'synthetic-test',
-                ];
-            } else {
-                throw new RuntimeException(
-                    'provider term lacks explicit review: '
-                    . (string)$term['provider_ref']
-                );
-            }
-        }
-        if (
-            !hash_equals(
-                (string)$review['term_fingerprint'],
-                $fingerprint
-            )
-            || !hash_equals(
-                (string)$review['title_hash'],
-                (string)($term['title_hash'] ?? '')
-            )
-        ) {
-            throw new RuntimeException(
-                'provider term review is stale: '
-                . (string)$term['provider_ref']
+        $reviewResolution =
+            ingredientOntologyV3ResolveProviderTermReview(
+                $term,
+                $review,
+                $dynamicController
             );
+        $review = $reviewResolution['review'];
+        $fingerprint = (string)$reviewResolution['fingerprint'];
+        if (!empty($reviewResolution['dynamic_unreviewed'])) {
+            $dynamicUnreviewedProviderTerms++;
+        }
+        if (!empty($reviewResolution['dynamic_stale'])) {
+            $dynamicStaleProviderTerms++;
         }
         $code = (string)$review['disposition_code'];
         $attributes = json_decode(
@@ -7165,6 +7206,8 @@ function ingredientOntologyV3FinalizeTerminalDispositions(
         'provider_terms' => $providerCounts,
         'dynamic_unreviewed_provider_term_count' =>
             $dynamicUnreviewedProviderTerms,
+        'dynamic_stale_provider_term_count' =>
+            $dynamicStaleProviderTerms,
         'products' => $productCounts,
         'mappings' => $mappingCounts,
         'scope_count' => count($cache),

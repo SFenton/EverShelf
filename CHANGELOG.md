@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.18.7] - 2026-08-22
+
+### Fixed
+- Autonomous ontology builds now quarantine provider terms whose frozen review
+  fingerprint became stale, instead of aborting the entire generation.
+- Static and manually reviewed ontology builds continue to reject stale
+  provider evidence.
+
 ## [1.18.6] - 2026-08-22
 
 ### Fixed
