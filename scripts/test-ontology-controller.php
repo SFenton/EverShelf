@@ -306,6 +306,40 @@ try {
         ")->fetchColumn() === 1,
         'Provisional queue writes must survive an intervening WAL commit'
     );
+    $baselineProductSequence =
+        ingredientOntologyActivationSequence(
+            $provisionalDb,
+            'products'
+        );
+    $provisionalDb->exec("
+        INSERT INTO products (name, brand, category)
+        VALUES ('Sequence Fence Fixture', '', 'food')
+    ");
+    $sequenceFenceOutcome = null;
+    try {
+        ingredientOntologyActivationReserveManifestSequences(
+            $provisionalDb,
+            [[
+                'table' => 'products',
+                'baseline_sequence' => $baselineProductSequence,
+                'row_count' => 0,
+            ]]
+        );
+    } catch (
+        IngredientOntologyActivationExpectedOutcome $error
+    ) {
+        $sequenceFenceOutcome = $error;
+    }
+    controllerTestAssert(
+        $sequenceFenceOutcome instanceof
+            IngredientOntologyActivationExpectedOutcome
+        && $sequenceFenceOutcome->outcomeKind()
+            === 'superseded_snapshot'
+        && (string)($sequenceFenceOutcome->details()['table'] ?? '')
+            === 'products',
+        'Concurrent sequence advancement must request a fresh snapshot '
+            . 'instead of reporting an integrity failure'
+    );
     $provisionalDb = null;
 
     $db = new PDO('sqlite:' . $dbPath);

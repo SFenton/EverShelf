@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.18.11] - 2026-08-22
+
+### Fixed
+- Copied bundle registration now classifies concurrent parent and sequence
+  advancement as expected snapshot supersession rather than an integrity
+  failure, allowing a clean rebuild against the latest live state.
+
 ## [1.18.10] - 2026-08-22
 
 ### Fixed

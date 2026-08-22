@@ -1517,8 +1517,15 @@ function ingredientOntologyActivationQuoteIdentifier(
                 $tableName
             );
             if ($current === null || $current !== (int)$baseline) {
-                throw new RuntimeException(
-                    "ontology activation sequence fence changed: {$tableName}"
+                throw new IngredientOntologyActivationExpectedOutcome(
+                    'superseded_snapshot',
+                    "ontology activation sequence fence changed: {$tableName}",
+                    [
+                        'reason' => 'sequence_fence_changed',
+                        'table' => $tableName,
+                        'expected_sequence' => (int)$baseline,
+                        'current_sequence' => $current,
+                    ]
                 );
             }
             if ((int)($table['row_count'] ?? 0) > 0) {
@@ -4210,8 +4217,17 @@ function ingredientOntologyActivationAssertActiveDatabase(PDO $db): void {
                 (int)($state['active_score_revision_id'] ?? 0)
                     !== $parentScoreId
             ) {
-                throw new RuntimeException(
-                    'ontology activation parent score pointer changed'
+                throw new IngredientOntologyActivationExpectedOutcome(
+                    'superseded_snapshot',
+                    'ontology activation parent score pointer changed',
+                    [
+                        'reason' => 'parent_score_pointer_changed',
+                        'expected_score_revision_id' => $parentScoreId,
+                        'active_score_revision_id' =>
+                            (int)(
+                                $state['active_score_revision_id'] ?? 0
+                            ),
+                    ]
                 );
             }
         }
@@ -4230,8 +4246,17 @@ function ingredientOntologyActivationAssertActiveDatabase(PDO $db): void {
                 )
             )
         ) {
-            throw new RuntimeException(
-                'ontology activation parent ontology changed'
+            throw new IngredientOntologyActivationExpectedOutcome(
+                'superseded_snapshot',
+                'ontology activation parent ontology changed',
+                [
+                    'reason' => 'parent_ontology_changed',
+                    'expected_ontology_version_id' => $parentVersionId,
+                    'active_ontology_version_id' =>
+                        $activeVersion !== null
+                            ? (int)$activeVersion['id']
+                            : null,
+                ]
             );
         }
         $candidateId = ingredientOntologyActivationCandidateId($bundle);
