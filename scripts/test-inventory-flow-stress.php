@@ -507,14 +507,24 @@ if ($temporary) {
     foreach ($cleanup as $path) {
         @unlink($path);
     }
+    foreach (glob($databasePath . '.wave-*.done*') ?: [] as $path) {
+        @unlink($path);
+    }
     if (!isset($options['keep-db'])) {
-        register_shutdown_function(
-            static function () use ($cleanup): void {
-                foreach ($cleanup as $path) {
-                    @unlink($path);
-                }
+        register_shutdown_function(static function () use (
+            $cleanup,
+            $databasePath
+        ): void {
+            foreach ($cleanup as $path) {
+                @unlink($path);
             }
-        );
+            foreach (
+                glob($databasePath . '.wave-*.done*') ?: []
+                as $path
+            ) {
+                @unlink($path);
+            }
+        });
     }
 }
 
