@@ -12345,6 +12345,42 @@ try {
 
     $db->exec('BEGIN IMMEDIATE');
     try {
+        $db->exec("
+            UPDATE ontology_activation_state
+            SET failure_count = 2,
+                last_error = 'fixture unresolved failure'
+            WHERE id = 1
+        ");
+        ingredientOntologyActivationRecordOutcome(
+            $db,
+            'fresh',
+            ['reason' => 'activation_state_fresh'],
+            true
+        );
+        controllerTestAssert(
+            (int)$db->query("
+                SELECT failure_count
+                FROM ontology_activation_state
+                WHERE id = 1
+            ")->fetchColumn() === 0
+            && (string)$db->query("
+                SELECT last_error
+                FROM ontology_activation_state
+                WHERE id = 1
+            ")->fetchColumn() === '',
+            'A fresh activation cycle must clear persisted failure health'
+        );
+        $db->exec('ROLLBACK');
+    } catch (Throwable $error) {
+        try {
+            $db->exec('ROLLBACK');
+        } catch (Throwable $ignored) {
+        }
+        throw $error;
+    }
+
+    $db->exec('BEGIN IMMEDIATE');
+    try {
         $driftReadyGuardWas =
             ingredientOntologyV3ReadyMutationGuardEnabled($db);
         $driftPublicationGuardWas =
