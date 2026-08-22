@@ -78,6 +78,9 @@ $scoreValidationDbPath =
 $scoreRefreshWorkspacePath =
     __DIR__ . '/../data/.score-refresh-workspace-test-'
     . getmypid() . '.sqlite';
+$provisionalCursorDbPath =
+    __DIR__ . '/../data/.ontology-provisional-cursor-test-'
+    . getmypid() . '.sqlite';
 $refreshBundleDbPath =
     __DIR__ . '/../data/.refresh-bundle-test-'
     . getmypid() . '.sqlite';
@@ -127,6 +130,12 @@ $cleanup = [
     $scoreRefreshWorkspacePath . '-shm',
     dirname($scoreRefreshWorkspacePath)
         . '/.' . basename($scoreRefreshWorkspacePath)
+        . '.recipe-score.lock',
+    $provisionalCursorDbPath,
+    $provisionalCursorDbPath . '-wal',
+    $provisionalCursorDbPath . '-shm',
+    dirname($provisionalCursorDbPath)
+        . '/.' . basename($provisionalCursorDbPath)
         . '.recipe-score.lock',
     $refreshBundleDbPath,
     $refreshBundleDbPath . '-wal',
@@ -202,6 +211,102 @@ try {
         'Activation import claims must retry transient BEGIN IMMEDIATE contention'
     );
     $retryDb = null;
+
+    $provisionalDb = new PDO(
+        'sqlite:' . $provisionalCursorDbPath
+    );
+    $provisionalDb->setAttribute(
+        PDO::ATTR_ERRMODE,
+        PDO::ERRMODE_EXCEPTION
+    );
+    $provisionalDb->setAttribute(
+        PDO::ATTR_DEFAULT_FETCH_MODE,
+        PDO::FETCH_ASSOC
+    );
+    $provisionalDb->exec('PRAGMA foreign_keys=ON');
+    initializeDB($provisionalDb);
+    migrateDB($provisionalDb);
+    $provisionalDb->exec('PRAGMA journal_mode=WAL');
+    $provisionalDb->exec("
+        CREATE TABLE ontology_provisional_cursor_probe (
+            id INTEGER PRIMARY KEY,
+            value INTEGER NOT NULL
+        )
+    ");
+    $provisionalDb->exec("
+        INSERT INTO ontology_provisional_cursor_probe (id, value)
+        VALUES (1, 0)
+    ");
+    $provisionalDb->exec("
+        INSERT INTO products (name, brand, category)
+        VALUES ('Provisional Cursor Fixture', '', 'food')
+    ");
+    $provisionalProductId = (int)$provisionalDb->lastInsertId();
+    ingredientOntologyControllerObserveProduct(
+        $provisionalDb,
+        $provisionalProductId
+    );
+    $provisionalJobStatement = $provisionalDb->query("
+        SELECT job.*
+        FROM ontology_controller_jobs job
+        JOIN ontology_subject_occurrences occurrence
+          ON occurrence.subject_id = job.subject_id
+        WHERE occurrence.owner_type = 'product'
+          AND occurrence.owner_id = {$provisionalProductId}
+        ORDER BY job.id
+        LIMIT 1
+    ");
+    $provisionalJob =
+        $provisionalJobStatement->fetch(PDO::FETCH_ASSOC);
+    $provisionalJobStatement->closeCursor();
+    controllerTestAssert(
+        is_array($provisionalJob),
+        'Provisional cursor fixture job must exist'
+    );
+    $externalCommitObserved = false;
+    $GLOBALS[
+        'INGREDIENT_ONTOLOGY_CONTROLLER_AFTER_PROVISIONAL_SUBJECT_READ'
+    ] = static function () use (
+        $provisionalCursorDbPath,
+        &$externalCommitObserved
+    ): void {
+        $writer = new PDO(
+            'sqlite:' . $provisionalCursorDbPath
+        );
+        $writer->setAttribute(
+            PDO::ATTR_ERRMODE,
+            PDO::ERRMODE_EXCEPTION
+        );
+        $writer->exec('PRAGMA busy_timeout=10000');
+        $writer->exec("
+            UPDATE ontology_provisional_cursor_probe
+            SET value = value + 1
+            WHERE id = 1
+        ");
+        $externalCommitObserved = true;
+    };
+    $provisional = ingredientOntologyControllerQueueProvisionalIntent(
+        $provisionalDb,
+        $provisionalJob,
+        'retry',
+        'Exercise WAL-safe provisional queueing.'
+    );
+    unset(
+        $GLOBALS[
+            'INGREDIENT_ONTOLOGY_CONTROLLER_AFTER_PROVISIONAL_SUBJECT_READ'
+        ]
+    );
+    controllerTestAssert(
+        $externalCommitObserved
+        && !empty($provisional['queued'])
+        && (int)$provisionalDb->query("
+            SELECT value
+            FROM ontology_provisional_cursor_probe
+            WHERE id = 1
+        ")->fetchColumn() === 1,
+        'Provisional queue writes must survive an intervening WAL commit'
+    );
+    $provisionalDb = null;
 
     $db = new PDO('sqlite:' . $dbPath);
     $db->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);

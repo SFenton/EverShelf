@@ -16154,37 +16154,62 @@ function ingredientOntologyControllerResumeDurableJob(
                 ");
                 $subject->execute([$subjectId]);
                 $fingerprint = (string)($subject->fetchColumn() ?: '');
+                $subject->closeCursor();
                 if (!preg_match('/^[a-f0-9]{64}$/D', $fingerprint)) {
                     return ['queued' => false];
+                }
+                if (
+                    defined('RECIPE_BACKEND_TEST_MODE')
+                    && RECIPE_BACKEND_TEST_MODE
+                    && is_callable(
+                        $GLOBALS[
+                            'INGREDIENT_ONTOLOGY_CONTROLLER_AFTER_PROVISIONAL_SUBJECT_READ'
+                        ] ?? null
+                    )
+                ) {
+                    ($GLOBALS[
+                        'INGREDIENT_ONTOLOGY_CONTROLLER_AFTER_PROVISIONAL_SUBJECT_READ'
+                    ])($db, $subjectId);
                 }
                 $slug = ingredientOntologyControllerProvisionalSlug(
                     $fingerprint
                 );
-                $db->prepare("
-                    INSERT INTO ontology_provisional_queue (
-                        subject_id, portable_slug, source_job_id,
-                        response_artifact_id, status, reason,
-                        next_attempt_at
-                    )
-                    VALUES (?, ?, ?, ?, ?, ?,
-                            datetime('now', '+15 minutes'))
-                    ON CONFLICT(subject_id) DO UPDATE SET
-                        portable_slug = excluded.portable_slug,
-                        source_job_id = excluded.source_job_id,
-                        response_artifact_id =
-                            excluded.response_artifact_id,
-                        status = excluded.status,
-                        reason = excluded.reason,
-                        next_attempt_at = excluded.next_attempt_at,
-                        updated_at = CURRENT_TIMESTAMP
-                ")->execute([
+                dbWithRetry(static function () use (
+                    $db,
                     $subjectId,
                     $slug,
-                    (int)$job['id'],
+                    $job,
                     $responseId,
                     $status,
-                    mb_substr($reason, 0, 1000, 'UTF-8'),
-                ]);
+                    $reason
+                ): void {
+                    $db->prepare("
+                        INSERT INTO ontology_provisional_queue (
+                            subject_id, portable_slug, source_job_id,
+                            response_artifact_id, status, reason,
+                            next_attempt_at
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?,
+                                datetime('now', '+15 minutes'))
+                        ON CONFLICT(subject_id) DO UPDATE SET
+                            portable_slug = excluded.portable_slug,
+                            source_job_id = excluded.source_job_id,
+                            response_artifact_id =
+                                excluded.response_artifact_id,
+                            status = excluded.status,
+                            reason = excluded.reason,
+                            next_attempt_at =
+                                excluded.next_attempt_at,
+                            updated_at = CURRENT_TIMESTAMP
+                    ")->execute([
+                        $subjectId,
+                        $slug,
+                        (int)$job['id'],
+                        $responseId,
+                        $status,
+                        mb_substr($reason, 0, 1000, 'UTF-8'),
+                    ]);
+                });
                 return [
                     'queued' => true,
                     'subject_id' => $subjectId,

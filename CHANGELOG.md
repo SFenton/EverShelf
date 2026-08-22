@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.18.8] - 2026-08-22
+
+### Fixed
+- Ontology intake now releases its subject lookup cursor before queuing a
+  provisional intent and retries that write under transient SQLite
+  contention.
+- The resident ontology worker keeps running after retryable lock conflicts
+  instead of exiting and relying on container restart recovery.
+
 ## [1.18.7] - 2026-08-22
 
 ### Fixed

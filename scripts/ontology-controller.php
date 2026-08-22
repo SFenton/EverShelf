@@ -288,11 +288,33 @@ switch ($command) {
         );
         $cycle = 0;
         do {
-            $result = ingredientOntologyControllerProcessQueue(
-                $db,
-                $limit,
-                $workOptions
-            );
+            try {
+                $result = ingredientOntologyControllerProcessQueue(
+                    $db,
+                    $limit,
+                    $workOptions
+                );
+            } catch (Throwable $error) {
+                try {
+                    databaseRollbackDanglingTransaction($db);
+                } catch (Throwable $ignored) {
+                }
+                if (!$loop || !databaseIsLockError($error)) {
+                    throw $error;
+                }
+                $result = [
+                    'claimed' => 0,
+                    'results' => [],
+                    'retryable' => true,
+                    'reason' => 'locked',
+                    'error' => mb_substr(
+                        $error->getMessage(),
+                        0,
+                        1000,
+                        'UTF-8'
+                    ),
+                ];
+            }
             $writeJson(['cycle' => $cycle + 1] + $result);
             $cycle++;
             if (
