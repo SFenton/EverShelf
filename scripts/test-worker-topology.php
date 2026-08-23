@@ -66,6 +66,9 @@ $composeBuilder = $read(
 $containerHealth = $read(
     $root . '/scripts/container-health.php'
 );
+$entrypoint = $read(
+    $root . '/docker/entrypoint.sh'
+);
 $scoreWorker = $read(
     $root . '/scripts/incremental-score-worker.php'
 );
@@ -172,8 +175,15 @@ $assert(
     str_contains($dockerfile, 'scripts/container-health.php')
     && str_contains($compose, 'scripts/container-health.php')
     && str_contains($containerHealth, "name = 'products'")
+    && str_contains(
+        $containerHealth,
+        '/tmp/evershelf-application-ready'
+    )
+    && str_contains($containerHealth, 'fsockopen(')
+    && str_contains($entrypoint, 'rm -f "$ready_file"')
+    && str_contains($entrypoint, ': > "$ready_file"')
     && str_contains($containerHealth, '.build-revision'),
-    'Application health must verify the schema and immutable build revision'
+    'Application health must verify completed startup, HTTP, schema, and SHA'
 );
 $assert(
     str_contains($ci, 'php -d memory_limit=512M '

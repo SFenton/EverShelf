@@ -7,6 +7,9 @@
 # the container keeps the image self-sufficient.
 set -e
 
+ready_file=/tmp/evershelf-application-ready
+rm -f "$ready_file"
+
 runtime_timezone="${TZ:-UTC}"
 case "$runtime_timezone" in
     ""|/*|*".."*|*[!A-Za-z0-9_+./-]*)
@@ -63,6 +66,8 @@ done
 su -s /bin/sh www-data -c \
     'php /var/www/html/scripts/migrate-database.php'
 
+: > "$ready_file"
+chmod 0644 "$ready_file"
 cron
 
 exec apache2-foreground

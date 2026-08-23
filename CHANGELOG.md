@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.19.1] - 2026-08-23
+
+### Fixed
+- Container health now remains unavailable until database migration finishes
+  and Apache is listening, preventing dependent workers from starting against
+  a held migration lock and restarting during deployment.
+
 ## [1.19.0] - 2026-08-23
 
 ### Added

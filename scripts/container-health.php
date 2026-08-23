@@ -16,6 +16,12 @@ if (
     exit(1);
 }
 
+$readyPath = '/tmp/evershelf-application-ready';
+if (!is_file($readyPath)) {
+    fwrite(STDERR, "EverShelf startup is incomplete\n");
+    exit(1);
+}
+
 $databasePath = dirname(__DIR__) . '/data/evershelf.db';
 if (!is_file($databasePath) || !is_readable($databasePath)) {
     fwrite(STDERR, "EverShelf database is unavailable\n");
@@ -39,5 +45,18 @@ try {
     fwrite(STDERR, "EverShelf database probe failed\n");
     exit(1);
 }
+
+$socket = @fsockopen(
+    '127.0.0.1',
+    80,
+    $socketError,
+    $socketErrorMessage,
+    1.0
+);
+if ($socket === false) {
+    fwrite(STDERR, "EverShelf HTTP listener is unavailable\n");
+    exit(1);
+}
+fclose($socket);
 
 exit(0);
