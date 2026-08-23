@@ -41,6 +41,7 @@ $activation = $serviceBlock(
     'ontology-activation-worker'
 );
 $score = $serviceBlock($compose, 'recipe-score-worker');
+$recipeQueue = $serviceBlock($compose, 'recipe-queue-worker');
 $canonical = $serviceBlock($compose, 'canonical-worker');
 $dockerfile = $read($root . '/Dockerfile');
 $bridgeDockerfile = $read($root . '/cookidoo-bridge/Dockerfile');
@@ -72,6 +73,10 @@ $entrypoint = $read(
 $scoreWorker = $read(
     $root . '/scripts/incremental-score-worker.php'
 );
+$recipeQueueWorker = $read(
+    $root . '/scripts/recipe-queue-worker.php'
+);
+$cron = $read($root . '/docker/evershelf-cron');
 
 $assert(
     str_contains($ontology, 'ontology-controller.php')
@@ -103,22 +108,33 @@ foreach ([
     'ontology-worker' => $ontology,
     'ontology-activation-worker' => $activation,
     'recipe-score-worker' => $score,
+    'recipe-queue-worker' => $recipeQueue,
     'canonical-worker' => $canonical,
 ] as $service => $block) {
     $assert(
         str_contains($block, 'check-worker-health.php')
+        && str_contains($block, 'condition: service_healthy')
         && !str_contains($block, 'disable: true'),
-        "{$service} must expose an enabled health check"
+        "{$service} must wait for app health and expose a health check"
     );
 }
 $assert(
     str_contains($ontology, 'memory_limit=')
     && str_contains($score, 'memory_limit=')
+    && str_contains($recipeQueue, 'memory_limit=')
     && str_contains(
         $activationWorker,
         'memory_limit=${memory_limit}'
     ),
     'Ontology, activation, and score workers must have explicit memory limits'
+);
+$assert(
+    str_contains($recipeQueue, 'recipe-queue-worker.php')
+    && str_contains($recipeQueue, 'recipe-queue.sock')
+    && str_contains($recipeQueueWorker, "'local'")
+    && str_contains($recipeQueueWorker, 'stream_socket_server(')
+    && str_contains($cron, '--provider-only'),
+    'Local recipe jobs must use a wake-driven provider-isolated worker'
 );
 $assert(
     str_contains($scoreWorker, 'requireServing: $servingPending')

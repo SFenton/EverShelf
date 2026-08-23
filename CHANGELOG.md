@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.19.2] - 2026-08-23
+
+### Added
+- A resident datagram-woken recipe queue worker now drains local identity,
+  taxonomy-ready, and inventory jobs immediately.
+
+### Changed
+- Cookidoo discovery uses an independent provider lease and remains on its
+  rate-limited minute cadence instead of delaying local product readiness.
+
 ## [1.19.1] - 2026-08-23
 
 ### Fixed

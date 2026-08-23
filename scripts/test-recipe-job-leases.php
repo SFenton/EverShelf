@@ -111,21 +111,229 @@ $assert(
 $cron = (string)file_get_contents(
     __DIR__ . '/../docker/evershelf-cron'
 );
-$recipeCronLine = '';
+$recipeCronLines = [];
 foreach (preg_split('/\R/', $cron) ?: [] as $line) {
     if (str_contains($line, 'process-recipe-queue.php')) {
-        $recipeCronLine = $line;
-        break;
+        $recipeCronLines[] = $line;
+    }
+}
+$providerCronLine = '';
+$localCronLine = '';
+foreach ($recipeCronLines as $line) {
+    if (str_contains($line, '--provider-only')) {
+        $providerCronLine = $line;
+    }
+    if (str_contains($line, '--local-only')) {
+        $localCronLine = $line;
     }
 }
 $assert(
-    $recipeCronLine !== ''
-    && !str_contains($recipeCronLine, 'background-writer.lock')
-    && !str_contains($recipeCronLine, 'flock'),
+    $providerCronLine !== ''
+    && $localCronLine !== ''
+    && !str_contains($providerCronLine, 'background-writer.lock')
+    && !str_contains($providerCronLine, 'flock')
+    && !str_contains($localCronLine, 'background-writer.lock')
+    && !str_contains($localCronLine, 'flock'),
     'Recipe cron still holds the outer background-writer flock'
+);
+$assert(
+    str_contains($providerCronLine, '--provider-only')
+    && str_contains($localCronLine, '--local-only'),
+    'Recipe cron lanes must remain isolated'
 );
 $db->prepare("DELETE FROM recipe_jobs WHERE id = ?")
     ->execute([(int)$legacyLease['id']]);
+
+$localWorkerLease = recipeJobWorkerLeaseAcquire(
+    $db,
+    2,
+    'queue_local',
+    'local'
+);
+$providerWorkerLease = recipeJobWorkerLeaseAcquire(
+    $openPeer(),
+    2,
+    'queue_provider',
+    'provider'
+);
+$assert(
+    $localWorkerLease !== null
+    && $providerWorkerLease !== null
+    && (int)$localWorkerLease['lease_seconds'] <= 900
+    && (int)$providerWorkerLease['lease_seconds']
+        > (int)$localWorkerLease['lease_seconds']
+    && recipeJobWorkerLeaseRelease(
+        $openPeer(),
+        $localWorkerLease
+    )
+    && recipeJobWorkerLeaseRelease(
+        $db,
+        $providerWorkerLease
+    ),
+    'Local and provider recipe workers must lease independently'
+);
+$db->exec("
+    DELETE FROM recipe_worker_leases
+    WHERE lease_name IN ('queue_local', 'queue_provider')
+");
+
+$socketPath = $path . '.recipe-worker.sock';
+$heartbeatPath = $path . '.recipe-worker-heartbeat';
+$statusPath = $path . '.recipe-worker-status';
+$workerPipes = [];
+$worker = proc_open(
+    [
+        PHP_BINARY,
+        __DIR__ . '/recipe-queue-worker.php',
+        '--db=' . $path,
+        '--loop',
+        '--poll-ms=30000',
+        '--limit=5',
+        '--max-attempts=3',
+        '--socket=' . $socketPath,
+        '--heartbeat=' . $heartbeatPath,
+        '--status-file=' . $statusPath,
+    ],
+    [
+        0 => ['pipe', 'r'],
+        1 => ['pipe', 'w'],
+        2 => ['pipe', 'w'],
+    ],
+    $workerPipes,
+    dirname(__DIR__)
+);
+if (!is_resource($worker)) {
+    throw new RuntimeException(
+        'Could not start the recipe queue worker fixture'
+    );
+}
+fclose($workerPipes[0]);
+stream_set_blocking($workerPipes[1], false);
+stream_set_blocking($workerPipes[2], false);
+$workerReadyDeadline = microtime(true) + 5;
+while (!file_exists($socketPath)) {
+    if (microtime(true) >= $workerReadyDeadline) {
+        throw new RuntimeException(
+            'Recipe queue worker wake socket did not become ready'
+        );
+    }
+    usleep(20000);
+}
+$idleLocalLeaseCount = (int)$db->query("
+    SELECT COUNT(*)
+    FROM recipe_worker_leases
+    WHERE lease_name = 'queue_local'
+")->fetchColumn();
+$wakeJob = recipeJobEnqueue(
+    $db,
+    'catalog_rebuild_search',
+    ['scope' => 'wake-driven-local', 'connector' => 'local'],
+    [],
+    'lease-test-wake-driven-local'
+);
+$GLOBALS['RECIPE_QUEUE_TEST_WAKE_SOCKET'] = $socketPath;
+$wakeStarted = hrtime(true);
+$assert(
+    $idleLocalLeaseCount === 0
+    && recipeJobWake(),
+    'Recipe queue wake datagram could not be delivered'
+);
+$wakeDeadline = microtime(true) + 2;
+$wakeStatus = '';
+do {
+    usleep(20000);
+    $wakeStatus = (string)(
+        recipeJobGet($db, (int)$wakeJob['id'])['status'] ?? ''
+    );
+} while (
+    $wakeStatus !== 'done'
+    && microtime(true) < $wakeDeadline
+);
+$wakeElapsedMs =
+    (hrtime(true) - $wakeStarted) / 1000000;
+unset($GLOBALS['RECIPE_QUEUE_TEST_WAKE_SOCKET']);
+proc_terminate($worker);
+foreach ($workerPipes as $pipe) {
+    if (is_resource($pipe)) {
+        fclose($pipe);
+    }
+}
+proc_close($worker);
+foreach ([
+    $socketPath,
+    $heartbeatPath,
+    $statusPath,
+    dirname($socketPath) . '/.recipe-queue-worker.lock',
+] as $workerPath) {
+    @unlink($workerPath);
+}
+$assert(
+    $wakeStatus === 'done'
+    && $wakeElapsedMs < 2000,
+    'A wake-driven local recipe job did not settle promptly: '
+        . json_encode([
+            'status' => $wakeStatus,
+            'elapsed_ms' => round($wakeElapsedMs, 3),
+        ], JSON_UNESCAPED_SLASHES)
+);
+
+$localLaneJob = recipeJobEnqueue(
+    $db,
+    'catalog_rebuild_search',
+    ['scope' => 'local-lane', 'connector' => 'local'],
+    [],
+    'lease-test-local-lane'
+);
+$providerLaneJob = recipeJobEnqueue(
+    $db,
+    'connector_discovery',
+    [
+        'scope' => 'provider-lane',
+        'connector' => 'cookidoo',
+        'query' => 'lane fixture',
+    ],
+    [
+        'query' => 'lane fixture',
+        'locale' => 'en-US',
+        'languages' => ['en'],
+        'tmv' => 'TM6',
+        'limit' => 20,
+        'page' => 0,
+    ],
+    'lease-test-provider-lane'
+);
+$localClaims = recipeJobClaimBatch(
+    $db,
+    5,
+    3,
+    false,
+    null,
+    'local'
+);
+$providerClaims = recipeJobClaimBatch(
+    $openPeer(),
+    5,
+    3,
+    true,
+    null,
+    'provider'
+);
+$assert(
+    array_map(
+        static fn(array $claim): int => (int)$claim['id'],
+        $localClaims
+    ) === [(int)$localLaneJob['id']]
+    && array_map(
+        static fn(array $claim): int => (int)$claim['id'],
+        $providerClaims
+    ) === [(int)$providerLaneJob['id']],
+    'Local and provider claims crossed recipe queue lanes'
+);
+$db->prepare("DELETE FROM recipe_jobs WHERE id IN (?, ?)")
+    ->execute([
+        (int)$localLaneJob['id'],
+        (int)$providerLaneJob['id'],
+    ]);
 
 $singletonJob = recipeJobEnqueue(
     $db,
@@ -1017,4 +1225,6 @@ if (!empty($legacyQueueLockCreated)) {
 }
 
 echo 'Recipe job lease tests passed: '
-    . $assertions . " assertions.\n";
+    . $assertions . ' assertions; wake_ms='
+    . number_format($wakeElapsedMs, 3, '.', '')
+    . ".\n";

@@ -16,6 +16,78 @@ function recipeJobTestHook(
     }
 }
 
+function recipeJobWakeSocketPath(): string {
+    if (
+        defined('RECIPE_BACKEND_TEST_MODE')
+        && RECIPE_BACKEND_TEST_MODE
+        && is_string(
+            $GLOBALS['RECIPE_QUEUE_TEST_WAKE_SOCKET'] ?? null
+        )
+        && trim(
+            (string)$GLOBALS['RECIPE_QUEUE_TEST_WAKE_SOCKET']
+        ) !== ''
+    ) {
+        return (string)$GLOBALS['RECIPE_QUEUE_TEST_WAKE_SOCKET'];
+    }
+    $configured = function_exists('env')
+        ? trim((string)env('RECIPE_QUEUE_WAKE_SOCKET', ''))
+        : '';
+    return $configured !== ''
+        ? $configured
+        : __DIR__ . '/../../../data/recipe-queue.sock';
+}
+
+function recipeJobWake(): bool {
+    if (
+        defined('RECIPE_BACKEND_TEST_MODE')
+        && RECIPE_BACKEND_TEST_MODE
+        && is_callable($GLOBALS['RECIPE_QUEUE_TEST_WAKE'] ?? null)
+    ) {
+        return (bool)($GLOBALS['RECIPE_QUEUE_TEST_WAKE'])();
+    }
+    $path = recipeJobWakeSocketPath();
+    if (
+        $path === ''
+        || strlen($path) > 220
+        || str_contains($path, "\0")
+    ) {
+        return false;
+    }
+    $socket = @stream_socket_client(
+        'udg://' . $path,
+        $errno,
+        $error,
+        0.02,
+        STREAM_CLIENT_CONNECT
+    );
+    if (!is_resource($socket)) {
+        return false;
+    }
+    try {
+        return @fwrite($socket, "wake\n") !== false;
+    } finally {
+        fclose($socket);
+    }
+}
+
+function recipeJobScheduleWake(): void {
+    static $registered = false;
+    if ($registered) {
+        return;
+    }
+    $registered = true;
+    register_shutdown_function(
+        static function (): void {
+            recipeJobWake();
+        }
+    );
+}
+
+function recipeJobScopeIsLocal(array $scope): bool {
+    return strtolower(trim((string)($scope['connector'] ?? '')))
+        !== RECIPE_COOKIDOO_CONNECTOR;
+}
+
 function recipeJobStableScope(array $scope): array {
     return recipeCatalogStableValue([
         'scope' => $scope['scope'] ?? null,
@@ -155,7 +227,14 @@ function recipeJobEnqueue(
             );
         }
         $db->exec("RELEASE SAVEPOINT {$savepoint}");
-        return recipeJobDecodeRow($row);
+        $job = recipeJobDecodeRow($row);
+        if (
+            recipeJobScopeIsLocal($scope)
+            && in_array($job['status'], ['pending', 'retry'], true)
+        ) {
+            recipeJobScheduleWake();
+        }
+        return $job;
     } catch (Throwable $error) {
         try {
             $db->exec("ROLLBACK TO SAVEPOINT {$savepoint}");
@@ -195,8 +274,19 @@ function recipeJobEnqueueOnce(
         $existing = $read->fetch(PDO::FETCH_ASSOC);
         if ($existing) {
             $db->exec("RELEASE SAVEPOINT {$savepoint}");
+            $job = recipeJobDecodeRow($existing);
+            if (
+                recipeJobScopeIsLocal($scope)
+                && in_array(
+                    $job['status'],
+                    ['pending', 'retry'],
+                    true
+                )
+            ) {
+                recipeJobScheduleWake();
+            }
             return [
-                'job' => recipeJobDecodeRow($existing),
+                'job' => $job,
                 'created' => false,
             ];
         }
@@ -247,8 +337,15 @@ function recipeJobEnqueueOnce(
             );
         }
         $db->exec("RELEASE SAVEPOINT {$savepoint}");
+        $job = recipeJobDecodeRow($row);
+        if (
+            recipeJobScopeIsLocal($scope)
+            && in_array($job['status'], ['pending', 'retry'], true)
+        ) {
+            recipeJobScheduleWake();
+        }
         return [
-            'job' => recipeJobDecodeRow($row),
+            'job' => $job,
             'created' => $created,
         ];
     } catch (Throwable $error) {
@@ -272,7 +369,9 @@ function recipeJobEnqueueInventoryChanged(PDO $db, int $productId, string $reaso
         'inventory_changed',
         ['scope' => 'product:' . $productId, 'connector' => 'local', 'product_id' => $productId],
         ['reason' => $reason, 'inventory_revision' => $inventoryRevision],
-        'inventory_changed:product:' . $productId
+        'inventory_changed:product:' . $productId,
+        3,
+        40
     );
 }
 
@@ -282,7 +381,9 @@ function recipeJobEnqueueTaxonomyReady(PDO $db, int $productId): array {
         'taxonomy_ready',
         ['scope' => 'product:' . $productId, 'connector' => 'local', 'product_id' => $productId],
         ['reason' => 'canonical_queue_success'],
-        'taxonomy_ready:product:' . $productId
+        'taxonomy_ready:product:' . $productId,
+        3,
+        40
     );
 }
 
@@ -382,8 +483,63 @@ function recipeJobsRecent(PDO $db, int $limit = 50): array {
     return array_map('recipeJobDecodeRow', $rows);
 }
 
-function recipeJobWorkerLeaseSeconds(int $batchLimit): int {
+function recipeJobLocalWorkDue(
+    PDO $db,
+    int $maxAttempts = 20
+): bool {
+    $maxAttempts = max(1, min(20, $maxAttempts));
+    $stmt = $db->prepare("
+        SELECT 1
+        FROM recipe_jobs
+        WHERE (connector IS NULL OR connector <> 'cookidoo')
+          AND (
+              (
+                  status IN ('pending', 'retry')
+                  AND attempts < MIN(
+                      max_attempts,
+                      CAST(? AS INTEGER)
+                  )
+                  AND (
+                      next_retry_at IS NULL
+                      OR next_retry_at <= CURRENT_TIMESTAMP
+                  )
+              )
+              OR (
+                  status = 'in_progress'
+                  AND lease_expires_at IS NOT NULL
+                  AND lease_expires_at <= CURRENT_TIMESTAMP
+              )
+          )
+        LIMIT 1
+    ");
+    $stmt->execute([$maxAttempts]);
+    return $stmt->fetchColumn() !== false;
+}
+
+function recipeJobLocalLeaseSeconds(): int {
+    return max(
+        30,
+        min(
+            900,
+            (int)env('RECIPE_QUEUE_LOCAL_LEASE_SECONDS', '120')
+        )
+    );
+}
+
+function recipeJobWorkerLeaseSeconds(
+    int $batchLimit,
+    string $lane = 'all'
+): int {
     $batchLimit = max(1, min(100, $batchLimit));
+    if ($lane === 'local') {
+        return min(
+            900,
+            max(
+                recipeJobLocalLeaseSeconds(),
+                ($batchLimit * 5) + 30
+            )
+        );
+    }
     $providerDeadline = function_exists(
         'recipeCookidooBridgeTimeoutSeconds'
     ) ? recipeCookidooBridgeTimeoutSeconds() + 30 : 150;
@@ -396,23 +552,41 @@ function recipeJobWorkerLeaseSeconds(int $batchLimit): int {
 
 function recipeJobWorkerLeaseAcquire(
     PDO $db,
-    int $batchLimit
+    int $batchLimit,
+    string $leaseName = 'queue',
+    string $lane = 'all'
 ): ?array {
     if (databaseTransactionIsActive($db)) {
         throw new RuntimeException(
             'recipe worker lease cannot be claimed inside a transaction'
         );
     }
-    $leaseSeconds = recipeJobWorkerLeaseSeconds($batchLimit);
+    if (
+        preg_match('/^[a-z0-9_:-]{1,80}$/D', $leaseName) !== 1
+    ) {
+        throw new InvalidArgumentException(
+            'recipe worker lease name is invalid'
+        );
+    }
+    if (!in_array($lane, ['all', 'local', 'provider'], true)) {
+        throw new InvalidArgumentException(
+            'recipe worker lease lane is invalid'
+        );
+    }
+    $leaseSeconds = recipeJobWorkerLeaseSeconds(
+        $batchLimit,
+        $lane
+    );
     $leaseToken = bin2hex(random_bytes(32));
     dbBeginImmediateWithRetry($db);
     try {
-        $db->exec("
+        $insertLease = $db->prepare("
             INSERT OR IGNORE INTO recipe_worker_leases (
                 lease_name, lease_generation
             )
-            VALUES ('queue', 0)
+            VALUES (?, 0)
         ");
+        $insertLease->execute([$leaseName]);
         $claim = $db->prepare("
             UPDATE recipe_worker_leases
             SET lease_token = ?,
@@ -423,20 +597,26 @@ function recipeJobWorkerLeaseAcquire(
                 ),
                 owner_started_at = CURRENT_TIMESTAMP,
                 updated_at = CURRENT_TIMESTAMP
-            WHERE lease_name = 'queue'
+            WHERE lease_name = ?
               AND (
                   lease_token IS NULL
                   OR lease_expires_at IS NULL
                   OR lease_expires_at <= CURRENT_TIMESTAMP
               )
         ");
-        $claim->execute([$leaseToken, $leaseSeconds]);
-        $row = $db->query("
+        $claim->execute([
+            $leaseToken,
+            $leaseSeconds,
+            $leaseName,
+        ]);
+        $read = $db->prepare("
             SELECT lease_generation, lease_expires_at,
                    owner_started_at
             FROM recipe_worker_leases
-            WHERE lease_name = 'queue'
-        ")->fetch(PDO::FETCH_ASSOC) ?: [];
+            WHERE lease_name = ?
+        ");
+        $read->execute([$leaseName]);
+        $row = $read->fetch(PDO::FETCH_ASSOC) ?: [];
         $db->exec('COMMIT');
     } catch (Throwable $error) {
         try {
@@ -447,6 +627,8 @@ function recipeJobWorkerLeaseAcquire(
     }
     if ($claim->rowCount() !== 1) {
         recipeJobTestHook('worker_lease_skipped', [
+            'lease_name' => $leaseName,
+            'lane' => $lane,
             'lease_generation' =>
                 (int)($row['lease_generation'] ?? 0),
             'lease_expires_at' =>
@@ -455,7 +637,8 @@ function recipeJobWorkerLeaseAcquire(
         return null;
     }
     $lease = [
-        'lease_name' => 'queue',
+        'lease_name' => $leaseName,
+        'lane' => $lane,
         'lease_token' => $leaseToken,
         'lease_generation' =>
             (int)($row['lease_generation'] ?? 0),
@@ -464,6 +647,8 @@ function recipeJobWorkerLeaseAcquire(
         'lease_seconds' => $leaseSeconds,
     ];
     recipeJobTestHook('worker_lease_acquired', [
+        'lease_name' => $leaseName,
+        'lane' => $lane,
         'lease_generation' => $lease['lease_generation'],
         'lease_expires_at' => $lease['lease_expires_at'],
         'lease_seconds' => $leaseSeconds,
@@ -481,7 +666,10 @@ function recipeJobWorkerLeaseRenew(
             'recipe worker lease cannot be renewed inside a transaction'
         );
     }
-    $leaseSeconds = recipeJobWorkerLeaseSeconds($remainingJobs);
+    $leaseSeconds = recipeJobWorkerLeaseSeconds(
+        $remainingJobs,
+        (string)($lease['lane'] ?? 'all')
+    );
     dbBeginImmediateWithRetry($db);
     try {
         $renew = $db->prepare("
@@ -502,13 +690,17 @@ function recipeJobWorkerLeaseRenew(
             (string)$lease['lease_token'],
             (int)$lease['lease_generation'],
         ]);
-        $expiresAt = $renew->rowCount() === 1
-            ? $db->query("
+        if ($renew->rowCount() === 1) {
+            $read = $db->prepare("
                 SELECT lease_expires_at
                 FROM recipe_worker_leases
-                WHERE lease_name = 'queue'
-            ")->fetchColumn()
-            : false;
+                WHERE lease_name = ?
+            ");
+            $read->execute([(string)$lease['lease_name']]);
+            $expiresAt = $read->fetchColumn();
+        } else {
+            $expiresAt = false;
+        }
         $db->exec('COMMIT');
     } catch (Throwable $error) {
         try {
@@ -1620,15 +1812,24 @@ function recipeJobClaimBatch(
     int $limit,
     int $maxAttempts,
     bool $allowCookidoo,
-    ?int $leaseSeconds = null
+    ?int $leaseSeconds = null,
+    string $lane = 'all'
 ): array {
     if (databaseTransactionIsActive($db)) {
         throw new RuntimeException(
             'recipe jobs cannot be claimed inside a caller transaction'
         );
     }
+    if (!in_array($lane, ['all', 'local', 'provider'], true)) {
+        throw new InvalidArgumentException(
+            'recipe job lane is invalid'
+        );
+    }
+    $minimumLeaseSeconds = $lane === 'local'
+        ? recipeJobLocalLeaseSeconds()
+        : recipeJobLeaseSeconds();
     $leaseSeconds = max(
-        recipeJobLeaseSeconds(),
+        $minimumLeaseSeconds,
         min(21600, (int)($leaseSeconds ?? 0))
     );
     dbBeginImmediateWithRetry($db);
@@ -1681,9 +1882,16 @@ function recipeJobClaimBatch(
         $providerAllowed =
             recipeCookidooDetailHydrationPolicyAllows()
             && $allowCookidoo;
-        $providerWhere = $providerAllowed
-            ? ''
-            : "AND (connector IS NULL OR connector <> 'cookidoo')";
+        $laneWhere = match ($lane) {
+            'local' =>
+                "AND (connector IS NULL OR connector <> 'cookidoo')",
+            'provider' => $providerAllowed
+                ? "AND connector = 'cookidoo'"
+                : 'AND 1 = 0',
+            default => $providerAllowed
+                ? ''
+                : "AND (connector IS NULL OR connector <> 'cookidoo')",
+        };
         $fetch = static function (
             string $priorityWhere,
             int $rowLimit,
@@ -1691,7 +1899,7 @@ function recipeJobClaimBatch(
         ) use (
             $db,
             $maxAttempts,
-            $providerWhere
+            $laneWhere
         ): array {
             if ($rowLimit <= 0) {
                 return [];
@@ -1721,7 +1929,7 @@ function recipeJobClaimBatch(
                   )
                   {$priorityWhere}
                   {$excludeWhere}
-                  {$providerWhere}
+                  {$laneWhere}
                 ORDER BY priority DESC, created_at ASC, id ASC
                 LIMIT {$rowLimit}
             ");
@@ -2184,14 +2392,16 @@ function recipeJobProcessQueue(
     PDO $db,
     int $limit = 10,
     int $maxAttempts = 3,
-    bool $allowCookidoo = true
+    bool $allowCookidoo = true,
+    string $lane = 'all'
 ): array {
     $limit = max(0, min(100, $limit));
     return recipeJobProcessQueueBatch(
         $db,
         $limit,
         $maxAttempts,
-        $allowCookidoo
+        $allowCookidoo,
+        $lane
     );
 }
 
@@ -2199,10 +2409,21 @@ function recipeJobProcessQueueBatch(
     PDO $db,
     int $limit,
     int $maxAttempts,
-    bool $allowCookidoo = true
+    bool $allowCookidoo = true,
+    string $lane = 'all'
 ): array {
     $limit = max(0, min(100, $limit));
     $maxAttempts = max(1, $maxAttempts);
+    if (!in_array($lane, ['all', 'local', 'provider'], true)) {
+        throw new InvalidArgumentException(
+            'recipe job lane is invalid'
+        );
+    }
+    $leaseName = match ($lane) {
+        'local' => 'queue_local',
+        'provider' => 'queue_provider',
+        default => 'queue',
+    };
     $summary = [
         'processed' => 0,
         'succeeded' => 0,
@@ -2216,13 +2437,20 @@ function recipeJobProcessQueueBatch(
         'worker_lease_generation' => 0,
         'worker_lease_expires_at' => null,
     ];
-    $workerLease = recipeJobWorkerLeaseAcquire($db, $limit);
+    $workerLease = recipeJobWorkerLeaseAcquire(
+        $db,
+        $limit,
+        $leaseName,
+        $lane
+    );
     if ($workerLease === null) {
-        $active = $db->query("
+        $activeStmt = $db->prepare("
             SELECT lease_generation, lease_expires_at
             FROM recipe_worker_leases
-            WHERE lease_name = 'queue'
-        ")->fetch(PDO::FETCH_ASSOC) ?: [];
+            WHERE lease_name = ?
+        ");
+        $activeStmt->execute([$leaseName]);
+        $active = $activeStmt->fetch(PDO::FETCH_ASSOC) ?: [];
         $summary['worker_skipped'] = true;
         $summary['worker_skip_reason'] = 'worker_lease_active';
         $summary['worker_lease_generation'] =
@@ -2242,7 +2470,8 @@ function recipeJobProcessQueueBatch(
             $limit,
             $maxAttempts,
             $allowCookidoo,
-            (int)$workerLease['lease_seconds']
+            (int)$workerLease['lease_seconds'],
+            $lane
         );
         foreach ($claims as $index => $job) {
             if (!recipeJobWorkerLeaseRenew(

@@ -414,11 +414,14 @@ if ($workerMode) {
                 'default_quantity' => 1,
                 'prepared_food' => false,
             ];
+            $saveStarted = hrtime(true);
             try {
                 $saved = $capture(static fn() => saveProduct($db));
             } finally {
                 unset($GLOBALS['PRODUCT_API_JSON_INPUT']);
             }
+            $saveElapsedMs =
+                (hrtime(true) - $saveStarted) / 1000000;
             $productId = (int)($saved['payload']['id'] ?? 0);
             if (
                 $saved['status'] !== 200
@@ -461,11 +464,14 @@ if ($workerMode) {
                     ->format('Y-m-d'),
                 'expiry_user_set' => true,
             ];
+            $inventoryStarted = hrtime(true);
             try {
                 $added = $capture(static fn() => addToInventory($db));
             } finally {
                 unset($GLOBALS['INVENTORY_ADD_INPUT']);
             }
+            $inventoryElapsedMs =
+                (hrtime(true) - $inventoryStarted) / 1000000;
             if (
                 $added['status'] !== 200
                 || empty($added['payload']['success'])
@@ -483,6 +489,11 @@ if ($workerMode) {
                 'inventory_id' =>
                     (int)$added['payload']['inventory_id'],
                 'attempts' => $attempts,
+                'product_save_ms' => round($saveElapsedMs, 3),
+                'inventory_add_ms' => round(
+                    $inventoryElapsedMs,
+                    3
+                ),
                 'elapsed_ms' => round(
                     (hrtime(true) - $workerStarted) / 1000000,
                     3
@@ -1544,6 +1555,7 @@ $assert(
                 3
             ),
             'max_ms' => round(max($workerElapsed), 3),
+            'waves' => $waves,
         ])
 );
 $assert(

@@ -3319,6 +3319,7 @@ function canonicalIngredientApplyQueueResultOnce(
         );
         $db->exec('COMMIT');
         $transactionStarted = false;
+        recipeJobWake();
         return [
             'status' => 'done',
             'identity_admission' => $identityAdmission,
