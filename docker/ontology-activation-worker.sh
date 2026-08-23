@@ -8,6 +8,7 @@ failure_sleep_seconds="${ONTOLOGY_ACTIVATION_WORKER_FAILURE_SLEEP_SECONDS:-30}"
 memory_limit="${ONTOLOGY_ACTIVATION_WORKER_MEMORY_LIMIT:-512M}"
 stopping=0
 child_pid=
+heartbeat_pid=
 
 case "$sleep_seconds:$failure_sleep_seconds" in
     *[!0-9:]*|:*|*:) echo "Invalid ontology activation worker sleep interval" >&2; exit 2 ;;
@@ -33,6 +34,10 @@ write_status() {
 
 stop_worker() {
     stopping=1
+    if [ -n "$heartbeat_pid" ]; then
+        kill "$heartbeat_pid" 2>/dev/null || true
+        wait "$heartbeat_pid" 2>/dev/null || true
+    fi
     if [ -n "$child_pid" ]; then
         kill "$child_pid" 2>/dev/null || true
         wait "$child_pid" 2>/dev/null || true
@@ -48,8 +53,20 @@ while [ "$stopping" -eq 0 ]; do
     php -d "memory_limit=${memory_limit}" \
         /var/www/html/scripts/process-ontology-activation.php "$@" &
     child_pid=$!
+    (
+        while kill -0 "$child_pid" 2>/dev/null; do
+            sleep 30
+            if kill -0 "$child_pid" 2>/dev/null; then
+                write_heartbeat
+            fi
+        done
+    ) &
+    heartbeat_pid=$!
     wait "$child_pid"
     status=$?
+    kill "$heartbeat_pid" 2>/dev/null || true
+    wait "$heartbeat_pid" 2>/dev/null || true
+    heartbeat_pid=
     child_pid=
     write_heartbeat
     write_status "$status"

@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.20.2] - 2026-08-23
+
+### Fixed
+- The ontology activation wrapper now renews its heartbeat while a long copied
+  build or validation child is running, preventing healthy maintenance work
+  from being reported as a dead worker.
+
 ## [1.20.1] - 2026-08-23
 
 ### Fixed

@@ -98,6 +98,8 @@ $assert(
         $activationWorker,
         'ONTOLOGY_ACTIVATION_WORKER_MEMORY_LIMIT'
     )
+    && str_contains($activationWorker, 'kill -0 "$child_pid"')
+    && str_contains($activationWorker, 'write_heartbeat')
     && str_contains(
         $compose,
         'recipe-score-coordination.lock'
