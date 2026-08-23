@@ -604,10 +604,18 @@ function recipeScoreBackfillContributorRevision(
         $direct = $db->prepare("
             INSERT OR IGNORE INTO recipe_score_match_contributors (
                 score_revision_id, recipe_ingredient_id,
-                recipe_id, product_id
+                recipe_id, product_id, semantic
             )
             SELECT score_revision_id, recipe_ingredient_id,
-                   recipe_id, inventory_product_id
+                   recipe_id, inventory_product_id,
+                   CASE
+                       WHEN outcome IN (
+                           'exact', 'compatible_variant',
+                           'possible_substitute',
+                           'insufficient_quantity', 'staple'
+                       )
+                       THEN 1 ELSE 0
+                   END
             FROM ingredient_ontology_shadow_matches
             WHERE score_revision_id = ?
               AND inventory_product_id IS NOT NULL
@@ -617,12 +625,20 @@ function recipeScoreBackfillContributorRevision(
         $aggregate = $db->prepare("
             INSERT OR IGNORE INTO recipe_score_match_contributors (
                 score_revision_id, recipe_ingredient_id,
-                recipe_id, product_id
+                recipe_id, product_id, semantic
             )
             SELECT match.score_revision_id,
                    match.recipe_ingredient_id,
                    match.recipe_id,
-                   CAST(contributor.value AS INTEGER)
+                   CAST(contributor.value AS INTEGER),
+                   CASE
+                       WHEN match.outcome IN (
+                           'exact', 'compatible_variant',
+                           'possible_substitute',
+                           'insufficient_quantity', 'staple'
+                       )
+                       THEN 1 ELSE 0
+                   END
             FROM ingredient_ontology_shadow_matches match
             JOIN json_each(
                 CASE

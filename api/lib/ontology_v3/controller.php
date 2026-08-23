@@ -2261,10 +2261,7 @@ function ingredientOntologyControllerRecipePayload(array $row): array {
             ?? '',
         500
     );
-    $originLocale = trim((string)($row['origin_locale'] ?? ''));
-    $language = $originLocale !== ''
-        ? $originLocale
-        : (string)($row['language'] ?? 'und');
+    $language = ingredientOntologyV3RecipeIdentityLanguage($row);
     $normalizedIdentity = recipeIngredientNormalizeName($label);
     $payload = [
         'schema' => 'ontology-recipe-ingredient-subject-v1',
@@ -2276,9 +2273,7 @@ function ingredientOntologyControllerRecipePayload(array $row): array {
         'provider_ref' => trim((string)(
             $row['source_ingredient_ref'] ?? ''
         )),
-        'language' => ingredientOntologyV3NormalizeLanguage(
-            $language
-        ),
+        'language' => $language,
         'normalized_identity_text' => $normalizedIdentity,
         'provider_default_title' =>
             recipeIngredientNormalizeName((string)(
@@ -3290,6 +3285,8 @@ function ingredientOntologyControllerRecipeOwnerRows(
                ) AS connector,
                COALESCE(origin.external_id, '') AS origin_external_id,
                COALESCE(origin.locale, '') AS origin_locale,
+               COALESCE(origin.content_language, '')
+                   AS origin_content_language,
                COALESCE(origin.metadata_version, '')
                    AS metadata_version,
                COALESCE(origin.metadata_schema_version, '')
@@ -3329,6 +3326,8 @@ function ingredientOntologyControllerRecipeOwnerRows(
                    ) AS connector,
                    COALESCE(origin.external_id, '') AS origin_external_id,
                    COALESCE(origin.locale, '') AS origin_locale,
+                   COALESCE(origin.content_language, '')
+                       AS origin_content_language,
                    COALESCE(origin.metadata_version, '')
                        AS metadata_version,
                    COALESCE(origin.metadata_schema_version, '')
@@ -3632,12 +3631,8 @@ function ingredientOntologyControllerMaterializeMissingOwnerMappings(
                     'New owner awaits distinct subject resolution.',
             ];
         }
-        $originLocale = trim((string)(
-            $sourceRow['origin_locale'] ?? ''
-        ));
-        $effectiveLanguage = (string)(
-            $sourceRow['language'] ?? 'und'
-        );
+        $effectiveLanguage =
+            ingredientOntologyV3RecipeIdentityLanguage($sourceRow);
         $isStaple = false;
         if (
             $ownerType === 'recipe_ingredient'
@@ -3685,9 +3680,7 @@ function ingredientOntologyControllerMaterializeMissingOwnerMappings(
             (string)($sourceRow['source_label']
                 ?? $sourceRow['name']
                 ?? ''),
-            $originLocale !== ''
-                ? $originLocale
-                : $effectiveLanguage,
+            $effectiveLanguage,
             $resolution,
             $ownerFingerprint,
             $facetMap,
@@ -3829,7 +3822,9 @@ function ingredientOntologyControllerMaterializeMissingOwnerMappings(
                    catalog.language, catalog.primary_connector,
                    COALESCE(scope_origin.external_id, '')
                        AS origin_external_id,
-                   COALESCE(scope_origin.locale, '') AS origin_locale
+                   COALESCE(scope_origin.locale, '') AS origin_locale,
+                   COALESCE(scope_origin.content_language, '')
+                       AS origin_content_language
             FROM ingredient_ontology_mappings mapping
             JOIN recipe_ingredients owner
               ON owner.id = mapping.owner_id
@@ -3870,7 +3865,9 @@ function ingredientOntologyControllerMaterializeMissingOwnerMappings(
                    COALESCE(scope_origin.external_id, '')
                        AS origin_external_id,
                    COALESCE(scope_origin.locale, '')
-                       AS origin_locale
+                       AS origin_locale,
+                   COALESCE(scope_origin.content_language, '')
+                       AS origin_content_language
             FROM ingredient_ontology_mappings mapping
             JOIN recipe_source_ingredients owner
               ON owner.id = mapping.owner_id
@@ -7302,7 +7299,9 @@ function ingredientOntologyControllerStreamEpoch(
                        recipe.language, recipe.primary_connector,
                        COALESCE(origin.external_id, '')
                            AS origin_external_id,
-                       COALESCE(origin.locale, '') AS origin_locale
+                       COALESCE(origin.locale, '') AS origin_locale,
+                       COALESCE(origin.content_language, '')
+                           AS origin_content_language
                 FROM recipe_ingredients ingredient
                 JOIN recipe_catalog recipe
                   ON recipe.id = ingredient.recipe_id
@@ -7351,7 +7350,9 @@ function ingredientOntologyControllerStreamEpoch(
                         $db,
                         $version,
                         (string)$row['source_label'],
-                        (string)$row['language'],
+                        ingredientOntologyV3RecipeIdentityLanguage(
+                            $row
+                        ),
                         true
                     );
                 if ((string)$resolution['status'] !== 'accepted') {

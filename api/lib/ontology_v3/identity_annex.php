@@ -4,7 +4,7 @@ declare(strict_types=1);
 require_once dirname(__DIR__) . '/food_identity_text.php';
 
 const INGREDIENT_ONTOLOGY_IDENTITY_ANNEX_RESOLVER_VERSION =
-    'identity-annex-r0-v4';
+    'identity-annex-r0-v5';
 const INGREDIENT_ONTOLOGY_PRODUCT_IDENTITY_ANNEX_RESOLVER_VERSION =
     'identity-annex-product-r0-v6';
 const INGREDIENT_ONTOLOGY_IDENTITY_ANNEX_REVIEW_VERSION =
@@ -625,14 +625,70 @@ function ingredientOntologyV3IdentityAdmissionMigrateRecipeBatch(
         ];
     }
     $limit = max(1, min(1000, $limit));
-    $staleWhere = "
-        annex.ontology_version_id <> ?
-        OR annex.ontology_content_hash <> ?
-        OR annex.ontology_seal_hash <> ?
-        OR annex.resolver_version <> ?
-        OR annex.review_manifest_hash <> ?
+    $refreshWhere = "
+        (
+            annex.recipe_ingredient_id IS NOT NULL
+            AND (
+                annex.ontology_version_id <> ?
+                OR annex.ontology_content_hash <> ?
+                OR annex.ontology_seal_hash <> ?
+                OR annex.resolver_version <> ?
+                OR annex.review_manifest_hash <> ?
+            )
+        )
+        OR (
+            annex.recipe_ingredient_id IS NULL
+            AND (
+                COALESCE(mapping.status, '') <> 'accepted'
+                OR (
+                    mapping.status = 'accepted'
+                    AND (
+                        (
+                            LOWER(REPLACE(
+                                mapping.language, '_', '-'
+                            )) = 'und'
+                            AND recipe.primary_connector = 'cookidoo'
+                            AND (
+                                TRIM(COALESCE(
+                                    origin.content_language, ''
+                                )) <> ''
+                                OR TRIM(COALESCE(
+                                    origin.locale, ''
+                                )) <> ''
+                            )
+                        )
+                        OR (
+                            EXISTS (
+                                SELECT 1
+                                FROM ontology_subject_occurrences
+                                    current_occurrence
+                                WHERE current_occurrence.owner_type =
+                                        'recipe_ingredient'
+                                  AND current_occurrence.owner_id =
+                                        ingredient.id
+                                  AND current_occurrence.active = 1
+                            )
+                            AND NOT EXISTS (
+                                SELECT 1
+                                FROM ontology_subject_occurrences
+                                    matching_occurrence
+                                WHERE matching_occurrence.owner_type =
+                                        'recipe_ingredient'
+                                  AND matching_occurrence.owner_id =
+                                        ingredient.id
+                                  AND matching_occurrence.active = 1
+                                  AND matching_occurrence
+                                        .owner_fingerprint =
+                                      mapping.owner_fingerprint
+                            )
+                        )
+                    )
+                )
+            )
+        )
     ";
     $params = [
+        $versionId,
         $versionId,
         (string)$version['content_hash'],
         (string)$version['seal_hash'],
@@ -641,13 +697,26 @@ function ingredientOntologyV3IdentityAdmissionMigrateRecipeBatch(
     ];
     $recipes = $db->prepare("
         SELECT DISTINCT ingredient.recipe_id
-        FROM ingredient_ontology_recipe_identity_annex annex
-        JOIN recipe_ingredients ingredient
-          ON ingredient.id = annex.recipe_ingredient_id
+        FROM recipe_ingredients ingredient
         JOIN recipe_catalog recipe
           ON recipe.id = ingredient.recipe_id
          AND recipe.deleted_at IS NULL
-        WHERE {$staleWhere}
+        LEFT JOIN ingredient_ontology_recipe_identity_annex annex
+          ON annex.recipe_ingredient_id = ingredient.id
+        LEFT JOIN ingredient_ontology_mappings mapping
+          ON mapping.ontology_version_id = ?
+         AND mapping.owner_type = 'recipe_ingredient'
+         AND mapping.owner_id = ingredient.id
+        LEFT JOIN recipe_origins origin
+          ON origin.id = (
+              SELECT candidate.id
+              FROM recipe_origins candidate
+              WHERE candidate.recipe_id = ingredient.recipe_id
+                AND candidate.connector = recipe.primary_connector
+              ORDER BY candidate.id
+              LIMIT 1
+          )
+        WHERE {$refreshWhere}
         ORDER BY ingredient.recipe_id
         LIMIT {$limit}
     ");
@@ -669,15 +738,50 @@ function ingredientOntologyV3IdentityAdmissionMigrateRecipeBatch(
         $recipeIds,
         $versionId
     );
+    $changedRecipeIds = [];
+    foreach (
+        (array)($refreshed['recipes'] ?? []) as $recipeId => $recipe
+    ) {
+        if ((int)($recipe['changed_row_count'] ?? 0) > 0) {
+            $changedRecipeIds[] = (int)$recipeId;
+        }
+    }
+    sort($changedRecipeIds, SORT_NUMERIC);
+    if (
+        $changedRecipeIds
+        && function_exists('recipeScoreMarkRecipesDirtyBatch')
+    ) {
+        recipeScoreMarkRecipesDirtyBatch(
+            $db,
+            $changedRecipeIds,
+            'replace',
+            'recipe_identity_resolver_migration',
+            false,
+            'maintenance'
+        );
+    }
     $remaining = $db->prepare("
         SELECT COUNT(DISTINCT ingredient.recipe_id)
-        FROM ingredient_ontology_recipe_identity_annex annex
-        JOIN recipe_ingredients ingredient
-          ON ingredient.id = annex.recipe_ingredient_id
+        FROM recipe_ingredients ingredient
         JOIN recipe_catalog recipe
           ON recipe.id = ingredient.recipe_id
          AND recipe.deleted_at IS NULL
-        WHERE {$staleWhere}
+        LEFT JOIN ingredient_ontology_recipe_identity_annex annex
+          ON annex.recipe_ingredient_id = ingredient.id
+        LEFT JOIN ingredient_ontology_mappings mapping
+          ON mapping.ontology_version_id = ?
+         AND mapping.owner_type = 'recipe_ingredient'
+         AND mapping.owner_id = ingredient.id
+        LEFT JOIN recipe_origins origin
+          ON origin.id = (
+              SELECT candidate.id
+              FROM recipe_origins candidate
+              WHERE candidate.recipe_id = ingredient.recipe_id
+                AND candidate.connector = recipe.primary_connector
+              ORDER BY candidate.id
+              LIMIT 1
+          )
+        WHERE {$refreshWhere}
     ");
     $remaining->execute($params);
     return [
@@ -685,6 +789,7 @@ function ingredientOntologyV3IdentityAdmissionMigrateRecipeBatch(
         'processed' => count($recipeIds),
         'changed_row_count' =>
             (int)($refreshed['changed_row_count'] ?? 0),
+        'changed_recipe_ids' => $changedRecipeIds,
         'remaining' => (int)$remaining->fetchColumn(),
     ];
 }
@@ -2121,7 +2226,9 @@ function ingredientOntologyV3RecipeAnnexSourceRows(
                ) AS source_label,
                recipe.language, recipe.primary_connector,
                COALESCE(origin.external_id, '') AS origin_external_id,
-               COALESCE(origin.locale, '') AS origin_locale
+               COALESCE(origin.locale, '') AS origin_locale,
+               COALESCE(origin.content_language, '')
+                   AS origin_content_language
         FROM recipe_ingredients ingredient
         JOIN recipe_catalog recipe
           ON recipe.id = ingredient.recipe_id
@@ -2167,6 +2274,8 @@ function ingredientOntologyV3RecipeAnnexBatchSourceRows(
                recipe.language, recipe.primary_connector,
                COALESCE(origin.external_id, '') AS origin_external_id,
                COALESCE(origin.locale, '') AS origin_locale,
+               COALESCE(origin.content_language, '')
+                   AS origin_content_language,
                mapping.owner_fingerprint
                    AS sealed_owner_fingerprint,
                mapping.status AS sealed_status,
@@ -2393,6 +2502,8 @@ function ingredientOntologyV3RecipeAnnexRefreshBatch(
                 'recipe_ingredient',
                 $row
             );
+        $identityLanguage =
+            ingredientOntologyV3RecipeIdentityLanguage($row);
         if (
             $row['sealed_owner_fingerprint'] !== null
             && hash_equals(
@@ -2417,7 +2528,7 @@ function ingredientOntologyV3RecipeAnnexRefreshBatch(
         $cacheKey = ingredientOntologyV3NormalizeLabel(
             (string)$row['source_label']
         ) . "\n" . ingredientOntologyV3NormalizeLanguage(
-            (string)$row['language']
+            $identityLanguage
         );
         if (!isset($resolutionCache[$cacheKey])) {
             $resolutionCache[$cacheKey] =
@@ -2425,7 +2536,7 @@ function ingredientOntologyV3RecipeAnnexRefreshBatch(
                     $db,
                     $version,
                     (string)$row['source_label'],
-                    (string)$row['language'],
+                    $identityLanguage,
                     true
                 );
         }
@@ -4087,6 +4198,7 @@ function ingredientOntologyV3ProductReadinessBackfillReady(
              AND source.score_revision_id =
                  contributor.score_revision_id
             WHERE contributor.product_id = ?
+              AND contributor.semantic = 1
         ");
         $count->execute([(int)$admission['product_id']]);
         $affectedRecipeCount = (int)$count->fetchColumn();

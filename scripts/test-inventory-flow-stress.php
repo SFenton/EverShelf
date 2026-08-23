@@ -787,6 +787,8 @@ if (!$temporary && count($selectedFoods) < 16) {
              AND annex.status = 'accepted'
             WHERE length(trim(annex.normalized_label))
                     BETWEEN 3 AND 80
+              AND lower(trim(ingredient.normalized_name))
+                    = lower(trim(annex.normalized_label))
               AND NOT EXISTS (
                   SELECT 1
                   FROM products product
@@ -827,13 +829,32 @@ if (!$temporary && count($selectedFoods) < 16) {
         ) {
             continue;
         }
+        $searchName = trim((string)$row['search_name']);
+        $preflight = recipeCatalogSearchResult($db, [
+            'query' => $searchName,
+            'limit' => 100,
+            'fields' => 'card',
+            'explain' => false,
+        ]);
+        $preflightIds = array_map(
+            static fn(array $item): int => (int)$item['id'],
+            (array)($preflight['items'] ?? [])
+        );
+        if (
+            !in_array(
+                (int)$row['recipe_id'],
+                $preflightIds,
+                true
+            )
+        ) {
+            continue;
+        }
         $selectedFoods[$fallbackIndex] = $name;
         $recipeIds[$fallbackIndex] = (int)$row['recipe_id'];
         $recipeIngredientIds[$fallbackIndex] =
             (int)$row['ingredient_id'];
         $recipeTitles[$fallbackIndex] = (string)$row['title'];
-        $searchQueries[$fallbackIndex] =
-            (string)$row['search_name'];
+        $searchQueries[$fallbackIndex] = $searchName;
         $selectedNames[$nameKey] = true;
         $fallbackIndex++;
         if (count($selectedFoods) === 16) {
@@ -1341,13 +1362,36 @@ $maintenanceAtRead = (int)$db->query("
     SELECT COUNT(*) FROM recipe_score_pending_recipes
     WHERE lane = 'maintenance'
 ")->fetchColumn();
+$deferredMutationCount = 0;
+if ($active !== null) {
+    $deferredMutation = $db->prepare("
+        SELECT COUNT(*)
+        FROM recipe_score_mutations
+        WHERE (
+            domain = 'catalog'
+            AND revision > ?
+        ) OR (
+            domain = 'source'
+            AND revision > ?
+        )
+    ");
+    $deferredMutation->execute([
+        (int)$active['covered_catalog_revision'],
+        (int)$active['covered_ontology_source_revision'],
+    ]);
+    $deferredMutationCount =
+        (int)$deferredMutation->fetchColumn();
+}
 $assert(
     $active !== null
     && (string)$active['status'] === 'ready'
     && (
         $activeStatus === 'fresh'
         || (
-            $maintenanceAtRead > 0
+            (
+                $maintenanceAtRead > 0
+                || $deferredMutationCount > 0
+            )
             && $activeStatus === 'partial'
         )
     ),
@@ -1656,6 +1700,7 @@ $report = [
         'products' => $pendingProducts,
         'recipes' => $pendingRecipes,
         'maintenance_recipes' => $maintenancePendingRecipes,
+        'deferred_mutations' => $deferredMutationCount,
         'recipe_jobs' => $openRecipeJobs,
         'canonical' => (int)($canonicalStats['pending'] ?? 0),
     ],

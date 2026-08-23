@@ -238,7 +238,7 @@ function ingredientOntologyV3ResolutionManifest(): array {
             !== INGREDIENT_ONTOLOGY_V3_RESOLUTION_MANIFEST_VERSION
         || (string)($manifest['reviewer'] ?? '') === ''
         || (string)($manifest['review_batch'] ?? '') === ''
-        || (string)($manifest['corrective_version'] ?? '') !== 'v3.17'
+        || (string)($manifest['corrective_version'] ?? '') !== 'v3.18'
         || (string)($manifest['activation_policy'] ?? '')
             !== 'manual_review'
         || trim((string)($manifest['activation_block_reason'] ?? '')) === ''
@@ -1447,6 +1447,9 @@ function ingredientOntologyV3ApplyResolutionEntities(
     array $manifest,
     int $policyEvidenceSourceId
 ): array {
+    $expectedEntityCount = (int)(
+        $manifest['frozen_sources']['entity_count'] ?? 307
+    );
     $roleRows = [];
     foreach (
         ingredientOntologyV3ResolutionCsvRows('entity-roles.csv')
@@ -1504,9 +1507,9 @@ function ingredientOntologyV3ApplyResolutionEntities(
         ]);
         $roleRows[$slug] = $row;
     }
-    if (count($roleRows) !== 305) {
+    if (count($roleRows) !== $expectedEntityCount) {
         throw new RuntimeException(
-            'explicit entity-role manifest must contain 305 rows'
+            'explicit entity-role manifest has an invalid row count'
         );
     }
     $actualSlugs = $db->prepare("
@@ -1783,9 +1786,9 @@ function ingredientOntologyV3ApplyResolutionEntities(
         }
         $parents[$child] = $parent !== '' ? $parent : null;
     }
-    if (count($parents) !== 305) {
+    if (count($parents) !== $expectedEntityCount) {
         throw new RuntimeException(
-            'primary-edge manifest must contain 305 rows'
+            'primary-edge manifest has an invalid row count'
         );
     }
     $db->prepare("
@@ -1938,9 +1941,9 @@ function ingredientOntologyV3ApplyResolutionEntities(
             'rationale' => (string)$row['rationale'],
         ];
     }
-    if (count($reviewRows) !== 305) {
+    if (count($reviewRows) !== $expectedEntityCount) {
         throw new RuntimeException(
-            'edge-review manifest must contain 305 rows'
+            'edge-review manifest has an invalid row count'
         );
     }
     $insertReview = $db->prepare("
@@ -4628,7 +4631,9 @@ function ingredientOntologyV3BuildRecipeCohorts(
                ) AS label,
                catalog.primary_connector,
                COALESCE(origin.external_id, '') AS origin_external_id,
-               COALESCE(origin.locale, '') AS origin_locale
+               COALESCE(origin.locale, '') AS origin_locale,
+               COALESCE(origin.content_language, '')
+                   AS origin_content_language
         FROM recipe_ingredients ingredient
         JOIN recipe_catalog catalog ON catalog.id = ingredient.recipe_id
         LEFT JOIN recipe_origins origin
@@ -7608,7 +7613,7 @@ function ingredientOntologyV3DispositionAudit(
         $manifest['frozen_sources']['prior_accepted_label_count'] ?? 522
     );
     $expectedEdges = (int)(
-        $manifest['frozen_sources']['entity_count'] ?? 305
+        $manifest['frozen_sources']['entity_count'] ?? 307
     );
     $expectedProviderReviews = (int)(
         $manifest['frozen_sources']['provider_local_review_count'] ?? 100

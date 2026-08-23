@@ -6948,6 +6948,169 @@ try {
         ontologyV3TestCount(
             $db,
             "SELECT COUNT(*)
+             FROM ingredient_ontology_entities child
+             JOIN ingredient_ontology_relations relation
+               ON relation.from_entity_id = child.id
+              AND relation.ontology_version_id =
+                    child.ontology_version_id
+              AND relation.relation = 'is_a'
+              AND relation.is_primary = 1
+              AND relation.review_state = 'accepted'
+             JOIN ingredient_ontology_entities parent
+               ON parent.id = relation.to_entity_id
+             WHERE child.ontology_version_id = ?
+               AND child.slug = 'pecorino'
+               AND child.identity_role = 'identity_leaf'
+               AND child.provenance = 'full-resolution-v3'
+               AND parent.slug = 'cheese'",
+            [$dynamicVersionId]
+        ) === 1
+        && ontologyV3TestCount(
+            $db,
+            "SELECT COUNT(*)
+             FROM ingredient_ontology_labels label
+             JOIN ingredient_ontology_entities entity
+               ON entity.id = label.entity_id
+             WHERE label.ontology_version_id = ?
+               AND entity.slug = 'pecorino'
+               AND label.normalized_label IN (
+                   'pecorino', 'pecorino cheese'
+               )
+               AND label.language = 'en'
+               AND label.kind = 'exact_alias'
+               AND label.review_state = 'accepted'",
+            [$dynamicVersionId]
+        ) === 2
+        && ontologyV3TestCount(
+            $db,
+            "SELECT COUNT(*)
+             FROM ingredient_ontology_entities child
+             JOIN ingredient_ontology_relations parent_relation
+               ON parent_relation.from_entity_id = child.id
+              AND parent_relation.ontology_version_id =
+                    child.ontology_version_id
+              AND parent_relation.relation = 'is_a'
+              AND parent_relation.is_primary = 1
+              AND parent_relation.review_state = 'accepted'
+             JOIN ingredient_ontology_entities parent
+               ON parent.id = parent_relation.to_entity_id
+             JOIN ingredient_ontology_relations variant
+               ON variant.ontology_version_id =
+                    child.ontology_version_id
+              AND variant.from_entity_id = child.id
+              AND variant.to_entity_id = parent.id
+              AND variant.relation = 'variant_of'
+              AND variant.is_primary = 0
+              AND variant.satisfies_required = 0
+              AND variant.review_state = 'accepted'
+             WHERE child.ontology_version_id = ?
+               AND child.slug = 'pecorino-romano'
+               AND child.identity_role = 'identity_leaf'
+               AND parent.slug = 'pecorino'",
+            [$dynamicVersionId]
+        ) === 1,
+        'Dynamic reviewed candidates must seal generic Pecorino and '
+            . 'the non-satisfying Pecorino Romano variant'
+    );
+    $dynamicEntities = $db->prepare("
+        SELECT slug, id
+        FROM ingredient_ontology_entities
+        WHERE ontology_version_id = ?
+          AND slug IN ('cheese', 'pecorino', 'pecorino-romano')
+    ");
+    $dynamicEntities->execute([$dynamicVersionId]);
+    $dynamicEntityIds = [];
+    foreach ($dynamicEntities->fetchAll(PDO::FETCH_ASSOC) as $row) {
+        $dynamicEntityIds[(string)$row['slug']] = (int)$row['id'];
+    }
+    $dynamicVersionRow = ingredientOntologyV3Version(
+        $db,
+        $dynamicVersionId
+    );
+    $pecorinoResolution =
+        ingredientOntologyV3RecipeAnnexResolution(
+            $db,
+            $dynamicVersionRow,
+            'Pecorino cheese',
+            'en',
+            true
+        );
+    $romanoResolution =
+        ingredientOntologyV3RecipeAnnexResolution(
+            $db,
+            $dynamicVersionRow,
+            'Pecorino Romano',
+            'en',
+            true
+        );
+    $dynamicMatcher = new IngredientOntologyV3MatcherContext(
+        $db,
+        $dynamicVersionId
+    );
+    $genericExact = ingredientOntologyV3MatchWithContext(
+        $dynamicMatcher,
+        [
+            'entity_id' => $dynamicEntityIds['pecorino'],
+            'status' => 'accepted',
+            'mapping_source' => 'test',
+            'attributes' => [],
+        ],
+        [
+            'entity_id' => $dynamicEntityIds['pecorino'],
+            'status' => 'accepted',
+            'mapping_source' => 'test',
+            'attributes' => [],
+        ]
+    );
+    $romanoVariant = ingredientOntologyV3MatchWithContext(
+        $dynamicMatcher,
+        [
+            'entity_id' => $dynamicEntityIds['pecorino-romano'],
+            'status' => 'accepted',
+            'mapping_source' => 'test',
+            'attributes' => [],
+        ],
+        [
+            'entity_id' => $dynamicEntityIds['pecorino'],
+            'status' => 'accepted',
+            'mapping_source' => 'test',
+            'attributes' => [],
+        ]
+    );
+    $bareCheese = ingredientOntologyV3MatchWithContext(
+        $dynamicMatcher,
+        [
+            'entity_id' => $dynamicEntityIds['pecorino'],
+            'status' => 'accepted',
+            'mapping_source' => 'test',
+            'attributes' => [],
+        ],
+        [
+            'entity_id' => $dynamicEntityIds['cheese'],
+            'status' => 'accepted',
+            'mapping_source' => 'test',
+            'attributes' => [],
+        ]
+    );
+    ontologyV3TestAssert(
+        (int)$pecorinoResolution['effective_entity_id']
+            === $dynamicEntityIds['pecorino']
+        && (int)$romanoResolution['effective_entity_id']
+            === $dynamicEntityIds['pecorino-romano']
+        && !empty($genericExact['satisfies_required'])
+        && (string)$genericExact['outcome'] === 'exact'
+        && empty($romanoVariant['satisfies_required'])
+        && (string)$romanoVariant['outcome']
+            === 'compatible_variant'
+        && abs((float)$romanoVariant['score'] - 0.82) < 0.000001
+        && empty($bareCheese['satisfies_required']),
+        'Pecorino aliases must converge exactly while Romano and bare '
+            . 'cheese remain non-satisfying evidence'
+    );
+    ontologyV3TestAssert(
+        ontologyV3TestCount(
+            $db,
+            "SELECT COUNT(*)
              FROM ingredient_ontology_entities entity
              WHERE entity.ontology_version_id = ?
                AND entity.provenance = 'autonomous_controller'

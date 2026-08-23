@@ -3817,16 +3817,6 @@ function recipeCookidooApplyMetadataV2(
             WHERE recipe_id = ? AND position >= ?
         ")->execute([$recipeId, count($sourceIngredients)]);
 
-        if (function_exists(
-            'ingredientOntologyControllerObserveRecipeSafely'
-        )) {
-            $controllerObservation =
-                ingredientOntologyControllerObserveRecipeSafely(
-                    $db,
-                    $recipeId
-                );
-        }
-
         $versionUpdate = $db->prepare("
             UPDATE recipe_origins SET
                 metadata_version = ?,
@@ -3868,6 +3858,15 @@ function recipeCookidooApplyMetadataV2(
         );
         $visibilityChanged = $visibilityChanged
             || !empty($languageChange['visibility_changed']);
+        if (function_exists(
+            'ingredientOntologyControllerObserveRecipeSafely'
+        )) {
+            $controllerObservation =
+                ingredientOntologyControllerObserveRecipeSafely(
+                    $db,
+                    $recipeId
+                );
+        }
         if ($visibilityChanged && $ownsTransaction) {
             recipeScoreInvalidateCursors($db);
         }

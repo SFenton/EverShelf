@@ -1223,7 +1223,8 @@ try {
         ],
         'recipe_ontology_source_origins_update' => [
             'recipe_id', 'connector', 'external_id', 'locale',
-            'metadata_version', 'metadata_schema_version',
+            'content_language', 'metadata_version',
+            'metadata_schema_version',
         ],
         'recipe_ontology_source_ingredients_update' => [
             'recipe_id', 'position', 'raw_text', 'normalized_name',

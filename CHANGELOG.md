@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.20.0] - 2026-08-23
+
+### Added
+- The reviewed ontology now contains distinct generic Pecorino and Pecorino
+  Romano identities, with exact generic aliases and non-satisfying Romano
+  variant evidence.
+- A production-copy identity-flow gate adds targeted generic, variety,
+  broad-category, and prepared-food products and verifies their full ingestion
+  and recipe-scoring behavior.
+
+### Fixed
+- Cookidoo recipes with an undetermined catalog language now use trusted
+  origin content language for ontology identity, with source invalidation when
+  that language changes.
+- Recipe identity migration backfills missing annex rows for unresolved sealed
+  mappings and batches semantically changed recipes into maintenance scoring.
+
 ## [1.19.2] - 2026-08-23
 
 ### Added

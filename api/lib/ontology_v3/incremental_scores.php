@@ -3901,14 +3901,16 @@ function ingredientOntologyV3CompactActiveScores(
             $db->prepare("
                 INSERT INTO recipe_score_match_contributors (
                     score_revision_id, recipe_ingredient_id,
-                    recipe_id, product_id, created_at
+                    recipe_id, product_id, semantic, created_at
                 )
                 SELECT ?, contributor.recipe_ingredient_id,
                        COALESCE(
                            contributor.recipe_id,
                            ingredient.recipe_id
                        ),
-                       contributor.product_id, CURRENT_TIMESTAMP
+                       contributor.product_id,
+                       contributor.semantic,
+                       CURRENT_TIMESTAMP
                 FROM recipe_score_match_contributors contributor
                 LEFT JOIN recipe_ingredients ingredient
                   ON ingredient.id =

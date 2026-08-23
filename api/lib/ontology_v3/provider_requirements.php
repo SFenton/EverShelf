@@ -445,6 +445,8 @@ function ingredientOntologyV3ProviderSourceRows(
                COALESCE(scope_origin.external_id, '')
                    AS origin_external_id,
                COALESCE(scope_origin.locale, '') AS origin_locale,
+               COALESCE(scope_origin.content_language, '')
+                   AS origin_content_language,
                m.id AS mapping_id, m.owner_fingerprint,
                m.entity_id AS mapping_entity_id,
                m.status AS mapping_status,
@@ -2026,7 +2028,9 @@ function ingredientOntologyV3RequirementBatchRows(
                    ) AS metadata_schema_version,
                    COALESCE(scope_origin.external_id, '')
                        AS origin_external_id,
-                   COALESCE(scope_origin.locale, '') AS origin_locale
+                   COALESCE(scope_origin.locale, '') AS origin_locale,
+                   COALESCE(scope_origin.content_language, '')
+                       AS origin_content_language
             FROM recipe_source_ingredients si
             JOIN recipe_catalog c ON c.id = si.recipe_id
             LEFT JOIN recipe_origins scope_origin
@@ -2091,7 +2095,9 @@ function ingredientOntologyV3RequirementBatchRows(
                    '' AS metadata_schema_version,
                    COALESCE(scope_origin.external_id, '')
                        AS origin_external_id,
-                   COALESCE(scope_origin.locale, '') AS origin_locale
+                   COALESCE(scope_origin.locale, '') AS origin_locale,
+                   COALESCE(scope_origin.content_language, '')
+                       AS origin_content_language
             FROM recipe_ingredients ri
             JOIN recipe_catalog c ON c.id = ri.recipe_id
             LEFT JOIN recipe_origins scope_origin

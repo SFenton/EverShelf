@@ -8,8 +8,8 @@
 require_once __DIR__ . '/../ontology_v3/schema.php';
 
 const RECIPE_MAX_FACTUAL_DURATION_SECONDS = 366 * 24 * 60 * 60;
-const RECIPE_SCHEMA_VERSION = 31602;
-const RECIPE_ONTOLOGY_SOURCE_TRIGGER_VERSION = 31602;
+const RECIPE_SCHEMA_VERSION = 31604;
+const RECIPE_ONTOLOGY_SOURCE_TRIGGER_VERSION = 31604;
 
 function recipeSchemaTestHook(
     string $stage,
@@ -949,6 +949,8 @@ function recipeSchemaMigrate(PDO $db): void {
             recipe_ingredient_id INTEGER NOT NULL,
             recipe_id INTEGER DEFAULT NULL,
             product_id INTEGER NOT NULL,
+            semantic INTEGER NOT NULL DEFAULT 1
+                CHECK(semantic IN (0, 1)),
             created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
             PRIMARY KEY (
                 score_revision_id,
@@ -1214,6 +1216,8 @@ function recipeSchemaMigrate(PDO $db): void {
                 recipe_ingredient_id INTEGER NOT NULL,
                 recipe_id INTEGER DEFAULT NULL,
                 product_id INTEGER NOT NULL,
+                semantic INTEGER NOT NULL DEFAULT 1
+                    CHECK(semantic IN (0, 1)),
                 created_at DATETIME NOT NULL
                     DEFAULT CURRENT_TIMESTAMP,
                 PRIMARY KEY (
@@ -1227,12 +1231,28 @@ function recipeSchemaMigrate(PDO $db): void {
             );
             INSERT INTO recipe_score_match_contributors_next (
                 score_revision_id, recipe_ingredient_id,
-                recipe_id, product_id, created_at
+                recipe_id, product_id, semantic, created_at
             )
             SELECT contributor.score_revision_id,
                    contributor.recipe_ingredient_id,
                    ingredient.recipe_id,
                    contributor.product_id,
+                   CASE
+                       WHEN EXISTS (
+                           SELECT 1
+                           FROM ingredient_ontology_shadow_matches match
+                           WHERE match.score_revision_id =
+                                   contributor.score_revision_id
+                             AND match.recipe_ingredient_id =
+                                   contributor.recipe_ingredient_id
+                             AND match.outcome IN (
+                                 'exact', 'compatible_variant',
+                                 'possible_substitute',
+                                 'insufficient_quantity', 'staple'
+                             )
+                       )
+                       THEN 1 ELSE 0
+                   END,
                    contributor.created_at
             FROM recipe_score_match_contributors contributor
             LEFT JOIN recipe_ingredients ingredient
@@ -1251,6 +1271,40 @@ function recipeSchemaMigrate(PDO $db): void {
                     score_revision_id, recipe_id,
                     recipe_ingredient_id
                 );
+        ");
+    }
+    $contributorColumns = array_column(
+        $db->query("
+            PRAGMA table_info(recipe_score_match_contributors)
+        ")->fetchAll(PDO::FETCH_ASSOC),
+        'name'
+    );
+    if (!in_array('semantic', $contributorColumns, true)) {
+        $db->exec("
+            ALTER TABLE recipe_score_match_contributors
+            ADD COLUMN semantic INTEGER NOT NULL DEFAULT 1
+                CHECK(semantic IN (0, 1))
+        ");
+        $db->exec("
+            UPDATE recipe_score_match_contributors
+            SET semantic = CASE
+                WHEN EXISTS (
+                    SELECT 1
+                    FROM ingredient_ontology_shadow_matches match
+                    WHERE match.score_revision_id =
+                            recipe_score_match_contributors
+                                .score_revision_id
+                      AND match.recipe_ingredient_id =
+                            recipe_score_match_contributors
+                                .recipe_ingredient_id
+                      AND match.outcome IN (
+                          'exact', 'compatible_variant',
+                          'possible_substitute',
+                          'insufficient_quantity', 'staple'
+                      )
+                )
+                THEN 1 ELSE 0
+            END
         ");
     }
     $db->exec("
@@ -2194,12 +2248,14 @@ function recipeSchemaMigrate(PDO $db): void {
         END;
         CREATE TRIGGER recipe_ontology_source_origins_update
         AFTER UPDATE OF recipe_id, connector, external_id, locale,
+                        content_language,
                         metadata_version, metadata_schema_version
         ON recipe_origins
         WHEN OLD.recipe_id IS NOT NEW.recipe_id
           OR OLD.connector IS NOT NEW.connector
           OR OLD.external_id IS NOT NEW.external_id
           OR OLD.locale IS NOT NEW.locale
+          OR OLD.content_language IS NOT NEW.content_language
           OR OLD.metadata_version IS NOT NEW.metadata_version
           OR OLD.metadata_schema_version
                 IS NOT NEW.metadata_schema_version
@@ -2226,6 +2282,39 @@ function recipeSchemaMigrate(PDO $db): void {
                    END,
                    'update', 'recipe_origins'
             FROM recipe_score_state WHERE id = 1;
+            INSERT INTO recipe_score_pending_recipes (
+                recipe_id, operation, lane,
+                first_catalog_revision,
+                latest_catalog_revision,
+                latest_ontology_source_revision,
+                reason, created_at, updated_at
+            )
+            SELECT NEW.recipe_id, 'replace', 'maintenance',
+                   catalog_revision, catalog_revision,
+                   ontology_source_revision,
+                   'recipe_origin_identity_changed',
+                   CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+            FROM recipe_score_state
+            WHERE id = 1
+            ON CONFLICT(recipe_id) DO UPDATE SET
+                operation = 'replace',
+                lane = CASE
+                    WHEN recipe_score_pending_recipes.lane = 'serving'
+                    THEN 'serving'
+                    ELSE 'maintenance'
+                END,
+                latest_catalog_revision = MAX(
+                    recipe_score_pending_recipes
+                        .latest_catalog_revision,
+                    excluded.latest_catalog_revision
+                ),
+                latest_ontology_source_revision = MAX(
+                    recipe_score_pending_recipes
+                        .latest_ontology_source_revision,
+                    excluded.latest_ontology_source_revision
+                ),
+                reason = excluded.reason,
+                updated_at = CURRENT_TIMESTAMP;
         END;
         CREATE TRIGGER recipe_ontology_source_origins_delete
         AFTER DELETE ON recipe_origins

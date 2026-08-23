@@ -290,6 +290,38 @@ function ingredientOntologyV3ProviderNamespace(?string $providerRef): string {
     return 'opaque';
 }
 
+function ingredientOntologyV3RecipeIdentityLanguage(
+    array $row
+): string {
+    $language = ingredientOntologyV3NormalizeLanguage(
+        (string)($row['language'] ?? 'und')
+    );
+    if ($language !== 'und') {
+        return $language;
+    }
+    $connector = strtolower(trim((string)(
+        $row['connector']
+            ?? $row['primary_connector']
+            ?? ''
+    )));
+    if ($connector !== 'cookidoo') {
+        return 'und';
+    }
+    foreach ([
+        $row['origin_content_language'] ?? null,
+        $row['content_language'] ?? null,
+        $row['origin_locale'] ?? null,
+    ] as $candidate) {
+        $candidate = ingredientOntologyV3NormalizeLanguage(
+            (string)$candidate
+        );
+        if ($candidate !== 'und') {
+            return $candidate;
+        }
+    }
+    return 'und';
+}
+
 function ingredientOntologyV3RecipeOwnerFingerprint(
     string $ownerType,
     array $row
@@ -321,9 +353,8 @@ function ingredientOntologyV3RecipeOwnerFingerprint(
             (string)($row['origin_locale'] ?? '')
         ),
         'position' => (int)$row['position'],
-        'language' => ingredientOntologyV3NormalizeLanguage(
-            (string)($row['language'] ?? 'und')
-        ),
+        'language' =>
+            ingredientOntologyV3RecipeIdentityLanguage($row),
         'source_text' => trim($sourceText),
         'normalized_name' => trim((string)($row['normalized_name'] ?? '')),
     ];
@@ -492,6 +523,8 @@ function ingredientOntologyV3CurrentOwnerFingerprint(
         ) AS connector,
         COALESCE(scope_origin.external_id, '') AS origin_external_id,
         COALESCE(scope_origin.locale, '') AS origin_locale,
+        COALESCE(scope_origin.content_language, '')
+            AS origin_content_language,
         COALESCE(scope_origin.metadata_version, '') AS metadata_version,
         COALESCE(
             scope_origin.metadata_schema_version,
@@ -3004,7 +3037,9 @@ function ingredientOntologyV3CorpusHash(PDO $db): string {
                        c.primary_connector,
                        COALESCE(scope_origin.external_id, '')
                            AS origin_external_id,
-                       COALESCE(scope_origin.locale, '') AS origin_locale
+                       COALESCE(scope_origin.locale, '') AS origin_locale,
+                       COALESCE(scope_origin.content_language, '')
+                           AS origin_content_language
                 FROM recipe_ingredients si
                 JOIN recipe_catalog c ON c.id = si.recipe_id
                 LEFT JOIN recipe_origins scope_origin
@@ -3041,7 +3076,9 @@ function ingredientOntologyV3CorpusHash(PDO $db): string {
                        ) AS metadata_schema_version,
                        COALESCE(scope_origin.external_id, '')
                            AS origin_external_id,
-                       COALESCE(scope_origin.locale, '') AS origin_locale
+                       COALESCE(scope_origin.locale, '') AS origin_locale,
+                       COALESCE(scope_origin.content_language, '')
+                           AS origin_content_language
                 FROM recipe_source_ingredients si
                 JOIN recipe_catalog c ON c.id = si.recipe_id
                 LEFT JOIN recipe_origins scope_origin
@@ -3567,7 +3604,9 @@ function ingredientOntologyV3OwnerFingerprintAudit(
                    c.language, c.primary_connector,
                    COALESCE(scope_origin.external_id, '')
                        AS origin_external_id,
-                   COALESCE(scope_origin.locale, '') AS origin_locale
+                   COALESCE(scope_origin.locale, '') AS origin_locale,
+                   COALESCE(scope_origin.content_language, '')
+                       AS origin_content_language
             FROM ingredient_ontology_mappings m
             LEFT JOIN recipe_ingredients si ON si.id = m.owner_id
             LEFT JOIN recipe_catalog c ON c.id = si.recipe_id
@@ -3604,7 +3643,9 @@ function ingredientOntologyV3OwnerFingerprintAudit(
                    ) AS metadata_schema_version,
                    COALESCE(scope_origin.external_id, '')
                        AS origin_external_id,
-                   COALESCE(scope_origin.locale, '') AS origin_locale
+                   COALESCE(scope_origin.locale, '') AS origin_locale,
+                   COALESCE(scope_origin.content_language, '')
+                       AS origin_content_language
             FROM ingredient_ontology_mappings m
             LEFT JOIN recipe_source_ingredients si ON si.id = m.owner_id
             LEFT JOIN recipe_catalog c ON c.id = si.recipe_id
@@ -3935,6 +3976,8 @@ function ingredientOntologyV3BuildMappings(
             COALESCE(scope_origin.external_id, '')
                 AS origin_external_id,
             COALESCE(scope_origin.locale, '') AS origin_locale,
+            COALESCE(scope_origin.content_language, '')
+                AS origin_content_language,
             COALESCE(scope_origin.metadata_version, '')
                 AS metadata_version,
             COALESCE(scope_origin.metadata_schema_version, '')
@@ -3956,7 +3999,8 @@ function ingredientOntologyV3BuildMappings(
             if ($label === '') {
                 $label = trim((string)$row['normalized_name']);
             }
-            $language = (string)($row['language'] ?? 'und');
+            $language =
+                ingredientOntologyV3RecipeIdentityLanguage($row);
             $cohort = $cohortMap[(int)$row['recipe_id']] ?? null;
             $effectiveLanguage = $cohort !== null
                 ? (string)$cohort

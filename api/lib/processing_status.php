@@ -1498,6 +1498,7 @@ function evershelfProcessingStatusIdentityReadiness(PDO $db): array {
                        contributor.score_revision_id
                   WHERE contributor.product_id =
                         readiness.product_id
+                    AND contributor.semantic = 1
               )
         ")->fetchColumn();
     }

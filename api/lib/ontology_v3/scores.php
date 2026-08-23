@@ -865,6 +865,8 @@ function ingredientOntologyV3LoadRecipeBatch(
                COALESCE(origin.external_id, '')
                    AS origin_external_id,
                COALESCE(origin.locale, '') AS origin_locale,
+               COALESCE(origin.content_language, '')
+                   AS origin_content_language,
                COALESCE(NULLIF(ri.raw_text, ''), ri.normalized_name)
                    AS current_source_label,
                CASE
@@ -1537,9 +1539,9 @@ function ingredientOntologyV3WriteScoreRows(
     $insertContributor = $db->prepare("
         INSERT OR IGNORE INTO recipe_score_match_contributors (
             score_revision_id, recipe_ingredient_id,
-            recipe_id, product_id
+            recipe_id, product_id, semantic
         )
-        VALUES (?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?)
     ");
     foreach ($matches as $row) {
         $productIds = [];
@@ -1596,12 +1598,22 @@ function ingredientOntologyV3WriteScoreRows(
             $revisionId,
             (int)$row['recipe_ingredient_id'],
         ]);
+        $semanticContributor = in_array(
+            (string)$row['outcome'],
+            [
+                'exact', 'compatible_variant',
+                'possible_substitute',
+                'insufficient_quantity', 'staple',
+            ],
+            true
+        ) ? 1 : 0;
         foreach ($productIds as $productId) {
             $insertContributor->execute([
                 $revisionId,
                 (int)$row['recipe_ingredient_id'],
                 (int)$row['recipe_id'],
                 $productId,
+                $semanticContributor,
             ]);
         }
     }

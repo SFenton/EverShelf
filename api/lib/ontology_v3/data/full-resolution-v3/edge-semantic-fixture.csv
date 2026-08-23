@@ -12,6 +12,8 @@ half-and-half,,cream,,,Inactive cream-class duplicate has no primary edge
 lime-juice,juice,beverage,derived_from,lime,Lime juice uses juice ancestry and non-satisfying fruit derivation
 nut-butter,spread,butter,,,Nut butter is a spread and not a lexical butter subtype
 pear-marmalade,fruit-preserve,pear,derived_from,pear,Pear marmalade uses preserve ancestry and non-satisfying pear derivation
+pecorino,cheese,ingredient,,,Pecorino uses the reviewed cheese branch and never the generic ingredient placeholder
+pecorino-romano,pecorino,cheese,variant_of,pecorino,Pecorino Romano uses specific Pecorino ancestry plus a non-satisfying variant relation
 soy-sauce,sauce,condiment,,,Soy sauce uses the specific sauce branch
 stock-paste,stock-base,stock-broth,,,Stock paste is a concentrated stock base
 white-chocolate,,chocolate,,,Inactive chocolate-class duplicate has no primary edge
