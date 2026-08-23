@@ -694,6 +694,21 @@ function evershelfProcessingStatusScores(PDO $db): array {
     ) {
         $reasons[] = 'score_date';
     }
+    if (
+        (int)($effectiveRevision['covered_catalog_revision'] ?? 0)
+            !== (int)$state['catalog_revision']
+    ) {
+        $reasons[] = 'catalog_coverage';
+    }
+    if (
+        (int)(
+            $effectiveRevision[
+                'covered_ontology_source_revision'
+            ] ?? 0
+        ) !== (int)$state['ontology_source_revision']
+    ) {
+        $reasons[] = 'ontology_source_coverage';
+    }
     return [
         'available' => true,
         'active_revision_id' => $revisionId,
@@ -722,8 +737,21 @@ function evershelfProcessingStatusScores(PDO $db): array {
                 (int)$effectiveRevision['inventory_revision'],
             'catalog_revision' =>
                 (int)$effectiveRevision['catalog_revision'],
+            'covered_catalog_revision' =>
+                (int)($effectiveRevision[
+                    'covered_catalog_revision'
+                ] ?? $effectiveRevision['catalog_revision']),
             'ontology_source_revision' =>
                 (int)$effectiveRevision['ontology_source_revision'],
+            'covered_ontology_source_revision' =>
+                (int)($effectiveRevision[
+                    'covered_ontology_source_revision'
+                ] ?? $effectiveRevision[
+                    'ontology_source_revision'
+                ]),
+            'revision_kind' => (string)(
+                $effectiveRevision['revision_kind'] ?? 'baseline'
+            ),
         ],
         'dirty_at' => $state['dirty_at'] ?? null,
         'last_built_at' => $state['last_built_at'] ?? null,
@@ -1239,6 +1267,10 @@ function evershelfProcessingStatusIncrementalScores(PDO $db): array {
     ) ? (
         $db->query("
             SELECT COUNT(*) AS pending_recipe_count,
+                   SUM(CASE WHEN lane = 'serving' THEN 1 ELSE 0 END)
+                       AS serving_pending_recipe_count,
+                   SUM(CASE WHEN lane = 'maintenance' THEN 1 ELSE 0 END)
+                       AS maintenance_pending_recipe_count,
                    MIN(created_at) AS oldest_at,
                    MAX(latest_catalog_revision)
                        AS latest_catalog_revision
@@ -1287,6 +1319,18 @@ function evershelfProcessingStatusIncrementalScores(PDO $db): array {
             (int)($pending['pending_product_count'] ?? 0),
         'pending_recipe_count' =>
             (int)($pendingRecipes['pending_recipe_count'] ?? 0),
+        'serving_pending_recipe_count' =>
+            (int)(
+                $pendingRecipes[
+                    'serving_pending_recipe_count'
+                ] ?? 0
+            ),
+        'maintenance_pending_recipe_count' =>
+            (int)(
+                $pendingRecipes[
+                    'maintenance_pending_recipe_count'
+                ] ?? 0
+            ),
         'phase' => (string)($work['phase'] ?? 'idle'),
         'revision_id' => ($work['revision_id'] ?? null) !== null
             ? (int)$work['revision_id']

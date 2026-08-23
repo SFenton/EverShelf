@@ -7375,16 +7375,27 @@ function ingredientOntologyControllerStreamEpoch(
                     'reviewed recipe admissions did not materialize'
                 );
             }
-            if (function_exists('recipeScoreMarkRecipeDirty')) {
-                foreach ($recipeIds as $recipeId) {
-                    recipeScoreMarkRecipeDirty(
-                        $db,
-                        $recipeId,
-                        'replace',
-                        'deterministic_reviewed_identity',
-                        false
-                    );
+            $changedRecipeIds = [];
+            foreach (
+                (array)($annex['recipes'] ?? []) as $recipeId => $recipe
+            ) {
+                if ((int)($recipe['changed_row_count'] ?? 0) > 0) {
+                    $changedRecipeIds[] = (int)$recipeId;
                 }
+            }
+            sort($changedRecipeIds, SORT_NUMERIC);
+            if (
+                $changedRecipeIds
+                && function_exists('recipeScoreMarkRecipesDirtyBatch')
+            ) {
+                recipeScoreMarkRecipesDirtyBatch(
+                    $db,
+                    $changedRecipeIds,
+                    'replace',
+                    'deterministic_reviewed_identity',
+                    false,
+                    'maintenance'
+                );
             }
             return $resolutions[0] + [
                     'owner_type' => 'recipe_ingredient',
@@ -7392,6 +7403,7 @@ function ingredientOntologyControllerStreamEpoch(
                     'owner_ids' => $ownerIds,
                     'recipe_id' => $recipeIds[0],
                     'recipe_ids' => $recipeIds,
+                    'changed_recipe_ids' => $changedRecipeIds,
                     'recipe_annex' => $annex,
                     'occurrence_fence_hash' => $occurrenceFenceHash,
                 ];

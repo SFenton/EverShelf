@@ -127,14 +127,34 @@ $cycle = 0;
 do {
     $cycle++;
     $writeState($heartbeatPath, (string)time());
-    $coordinationLock = fopen($coordinationLockPath, 'c+');
-    if ($coordinationLock === false) {
+    $servingProductPendingCount = (int)$db->query("
+        SELECT COUNT(*) FROM recipe_score_pending_products
+    ")->fetchColumn();
+    $servingRecipePendingCount = (int)$db->query("
+        SELECT COUNT(*)
+        FROM recipe_score_pending_recipes
+        WHERE lane = 'serving'
+    ")->fetchColumn();
+    $servingPending =
+        $servingProductPendingCount + $servingRecipePendingCount > 0
+        && $servingProductPendingCount
+            <= ingredientOntologyV3IncrementalProductLimit()
+        && $servingRecipePendingCount
+            <= ingredientOntologyV3IncrementalProductLimit();
+    $coordinationLock = null;
+    $coordinationReady = $servingPending;
+    if (!$servingPending) {
+        $coordinationLock = fopen($coordinationLockPath, 'c+');
+        $coordinationReady = is_resource($coordinationLock)
+            && flock($coordinationLock, LOCK_EX | LOCK_NB);
+    }
+    if (!$servingPending && $coordinationLock === false) {
         $result = [
             'rebuilt' => false,
             'reason' => 'worker_exception',
             'error' => 'score coordination lock could not be opened',
         ];
-    } elseif (!flock($coordinationLock, LOCK_EX | LOCK_NB)) {
+    } elseif (!$coordinationReady) {
         fclose($coordinationLock);
         $coordinationLock = null;
         $result = [
@@ -169,7 +189,8 @@ do {
                 try {
                     $result = ingredientOntologyV3IncrementalRebuild(
                         $db,
-                        $force
+                        $force,
+                        requireServing: $servingPending
                     );
                     if (
                         (string)($result['reason'] ?? '')
@@ -220,8 +241,10 @@ do {
                 }
             }
         } finally {
-            flock($coordinationLock, LOCK_UN);
-            fclose($coordinationLock);
+            if (is_resource($coordinationLock)) {
+                flock($coordinationLock, LOCK_UN);
+                fclose($coordinationLock);
+            }
         }
     }
     $reason = (string)($result['reason'] ?? '');

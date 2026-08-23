@@ -66,6 +66,9 @@ $composeBuilder = $read(
 $containerHealth = $read(
     $root . '/scripts/container-health.php'
 );
+$scoreWorker = $read(
+    $root . '/scripts/incremental-score-worker.php'
+);
 
 $assert(
     str_contains($ontology, 'ontology-controller.php')
@@ -113,6 +116,11 @@ $assert(
         'memory_limit=${memory_limit}'
     ),
     'Ontology, activation, and score workers must have explicit memory limits'
+);
+$assert(
+    str_contains($scoreWorker, 'requireServing: $servingPending')
+    && str_contains($scoreWorker, "WHERE lane = 'serving'"),
+    'A coordination-bypassed score worker must remain in serving mode'
 );
 foreach ([
     'application' => $dockerfile,

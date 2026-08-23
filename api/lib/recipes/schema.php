@@ -8,8 +8,8 @@
 require_once __DIR__ . '/../ontology_v3/schema.php';
 
 const RECIPE_MAX_FACTUAL_DURATION_SECONDS = 366 * 24 * 60 * 60;
-const RECIPE_SCHEMA_VERSION = 31601;
-const RECIPE_ONTOLOGY_SOURCE_TRIGGER_VERSION = 31502;
+const RECIPE_SCHEMA_VERSION = 31602;
+const RECIPE_ONTOLOGY_SOURCE_TRIGGER_VERSION = 31602;
 
 function recipeSchemaTestHook(
     string $stage,
@@ -789,6 +789,8 @@ function recipeSchemaMigrate(PDO $db): void {
             recipe_id INTEGER PRIMARY KEY,
             operation TEXT NOT NULL
                 CHECK(operation IN ('replace', 'delete')),
+            lane TEXT NOT NULL DEFAULT 'serving'
+                CHECK(lane IN ('serving', 'maintenance')),
             first_catalog_revision INTEGER NOT NULL
                 CHECK(first_catalog_revision > 0),
             latest_catalog_revision INTEGER NOT NULL
@@ -807,6 +809,8 @@ function recipeSchemaMigrate(PDO $db): void {
             domain TEXT NOT NULL
                 CHECK(domain IN ('catalog', 'source')),
             revision INTEGER NOT NULL CHECK(revision > 0),
+            lane TEXT NOT NULL DEFAULT 'serving'
+                CHECK(lane IN ('serving', 'maintenance')),
             owner_type TEXT NOT NULL
                 CHECK(owner_type IN ('recipe', 'product', 'global')),
             owner_id INTEGER DEFAULT NULL,
@@ -969,6 +973,7 @@ function recipeSchemaMigrate(PDO $db): void {
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             inventory_revision INTEGER NOT NULL,
             catalog_revision INTEGER NOT NULL DEFAULT 1,
+            covered_catalog_revision INTEGER DEFAULT NULL,
             inventory_fingerprint TEXT NOT NULL,
             score_date DATE NOT NULL,
             catalog_max_id INTEGER NOT NULL DEFAULT 0,
@@ -995,7 +1000,12 @@ function recipeSchemaMigrate(PDO $db): void {
             ontology_corpus_hash TEXT DEFAULT NULL,
             ontology_content_hash TEXT DEFAULT NULL,
             ontology_source_revision INTEGER NOT NULL DEFAULT 1,
+            covered_ontology_source_revision INTEGER DEFAULT NULL,
             ontology_source_hash TEXT NOT NULL DEFAULT '',
+            revision_kind TEXT NOT NULL DEFAULT 'baseline'
+                CHECK(revision_kind IN (
+                    'baseline', 'serving_delta', 'maintenance_delta'
+                )),
             identity_extension_revision INTEGER NOT NULL DEFAULT 0
                 CHECK(identity_extension_revision >= 0),
             identity_extension_hash TEXT NOT NULL
@@ -1818,6 +1828,11 @@ function recipeSchemaMigrate(PDO $db): void {
         'catalog_lineage_hash' => "TEXT NOT NULL DEFAULT ''",
         'ontology_source_lineage_hash' =>
             "TEXT NOT NULL DEFAULT ''",
+        'covered_catalog_revision' => 'INTEGER DEFAULT NULL',
+        'covered_ontology_source_revision' =>
+            'INTEGER DEFAULT NULL',
+        'revision_kind' =>
+            "TEXT NOT NULL DEFAULT 'baseline'",
     ] as $column => $definition) {
         if (in_array($column, $scoreRevisionColumns, true)) {
             continue;
@@ -1833,6 +1848,38 @@ function recipeSchemaMigrate(PDO $db): void {
             }
         }
     }
+    $pendingRecipeColumns = array_column(
+        $db->query("PRAGMA table_info(recipe_score_pending_recipes)")
+            ->fetchAll(PDO::FETCH_ASSOC),
+        'name'
+    );
+    if (!in_array('lane', $pendingRecipeColumns, true)) {
+        $db->exec("
+            ALTER TABLE recipe_score_pending_recipes
+            ADD COLUMN lane TEXT NOT NULL DEFAULT 'maintenance'
+        ");
+    }
+    $mutationColumns = array_column(
+        $db->query("PRAGMA table_info(recipe_score_mutations)")
+            ->fetchAll(PDO::FETCH_ASSOC),
+        'name'
+    );
+    if (!in_array('lane', $mutationColumns, true)) {
+        $db->exec("
+            ALTER TABLE recipe_score_mutations
+            ADD COLUMN lane TEXT NOT NULL DEFAULT 'maintenance'
+        ");
+    }
+    $db->exec("
+        CREATE INDEX IF NOT EXISTS idx_recipe_score_pending_recipe_lane
+            ON recipe_score_pending_recipes(
+                lane, updated_at, recipe_id
+            );
+        CREATE INDEX IF NOT EXISTS idx_recipe_score_mutations_lane_revision
+            ON recipe_score_mutations(
+                lane, domain, revision, owner_type, owner_id
+            )
+    ");
     $scoreStateExists = (int)$db->query("
         SELECT COUNT(*) FROM recipe_score_state WHERE id = 1
     ")->fetchColumn();
@@ -2024,11 +2071,11 @@ function recipeSchemaMigrate(PDO $db): void {
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = 1;
             INSERT INTO recipe_score_mutations (
-                domain, revision, owner_type, owner_id,
+                domain, revision, lane, owner_type, owner_id,
                 operation, reason
             )
             SELECT 'source', ontology_source_revision,
-                   'product', NEW.id, 'insert', 'products'
+                   'serving', 'product', NEW.id, 'insert', 'products'
             FROM recipe_score_state WHERE id = 1;
         END;
         CREATE TRIGGER recipe_ontology_source_products_update
@@ -2045,11 +2092,11 @@ function recipeSchemaMigrate(PDO $db): void {
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = 1;
             INSERT INTO recipe_score_mutations (
-                domain, revision, owner_type, owner_id,
+                domain, revision, lane, owner_type, owner_id,
                 operation, reason
             )
             SELECT 'source', ontology_source_revision,
-                   'product', NEW.id, 'update', 'products'
+                   'serving', 'product', NEW.id, 'update', 'products'
             FROM recipe_score_state WHERE id = 1;
         END;
         CREATE TRIGGER recipe_ontology_source_products_delete
@@ -2062,11 +2109,11 @@ function recipeSchemaMigrate(PDO $db): void {
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = 1;
             INSERT INTO recipe_score_mutations (
-                domain, revision, owner_type, owner_id,
+                domain, revision, lane, owner_type, owner_id,
                 operation, reason
             )
             SELECT 'source', ontology_source_revision,
-                   'product', OLD.id, 'delete', 'products'
+                   'serving', 'product', OLD.id, 'delete', 'products'
             FROM recipe_score_state WHERE id = 1;
         END;
 
@@ -2080,11 +2127,12 @@ function recipeSchemaMigrate(PDO $db): void {
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = 1;
             INSERT INTO recipe_score_mutations (
-                domain, revision, owner_type, owner_id,
+                domain, revision, lane, owner_type, owner_id,
                 operation, reason
             )
             SELECT 'source', ontology_source_revision,
-                   'recipe', NEW.id, 'insert', 'recipe_catalog'
+                   'maintenance', 'recipe', NEW.id, 'insert',
+                   'recipe_catalog'
             FROM recipe_score_state WHERE id = 1;
         END;
         CREATE TRIGGER recipe_ontology_source_catalog_update
@@ -2099,11 +2147,12 @@ function recipeSchemaMigrate(PDO $db): void {
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = 1;
             INSERT INTO recipe_score_mutations (
-                domain, revision, owner_type, owner_id,
+                domain, revision, lane, owner_type, owner_id,
                 operation, reason
             )
             SELECT 'source', ontology_source_revision,
-                   'recipe', NEW.id, 'update', 'recipe_catalog'
+                   'maintenance', 'recipe', NEW.id, 'update',
+                   'recipe_catalog'
             FROM recipe_score_state WHERE id = 1;
         END;
         CREATE TRIGGER recipe_ontology_source_catalog_delete
@@ -2116,11 +2165,12 @@ function recipeSchemaMigrate(PDO $db): void {
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = 1;
             INSERT INTO recipe_score_mutations (
-                domain, revision, owner_type, owner_id,
+                domain, revision, lane, owner_type, owner_id,
                 operation, reason
             )
             SELECT 'source', ontology_source_revision,
-                   'recipe', OLD.id, 'delete', 'recipe_catalog'
+                   'maintenance', 'recipe', OLD.id, 'delete',
+                   'recipe_catalog'
             FROM recipe_score_state WHERE id = 1;
         END;
 
@@ -2134,11 +2184,12 @@ function recipeSchemaMigrate(PDO $db): void {
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = 1;
             INSERT INTO recipe_score_mutations (
-                domain, revision, owner_type, owner_id,
+                domain, revision, lane, owner_type, owner_id,
                 operation, reason
             )
             SELECT 'source', ontology_source_revision,
-                   'recipe', NEW.recipe_id, 'insert', 'recipe_origins'
+                   'maintenance', 'recipe', NEW.recipe_id, 'insert',
+                   'recipe_origins'
             FROM recipe_score_state WHERE id = 1;
         END;
         CREATE TRIGGER recipe_ontology_source_origins_update
@@ -2160,10 +2211,11 @@ function recipeSchemaMigrate(PDO $db): void {
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = 1;
             INSERT INTO recipe_score_mutations (
-                domain, revision, owner_type, owner_id,
+                domain, revision, lane, owner_type, owner_id,
                 operation, reason
             )
             SELECT 'source', ontology_source_revision,
+                   'maintenance',
                    CASE
                        WHEN OLD.recipe_id IS NOT NEW.recipe_id
                        THEN 'global' ELSE 'recipe'
@@ -2185,11 +2237,12 @@ function recipeSchemaMigrate(PDO $db): void {
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = 1;
             INSERT INTO recipe_score_mutations (
-                domain, revision, owner_type, owner_id,
+                domain, revision, lane, owner_type, owner_id,
                 operation, reason
             )
             SELECT 'source', ontology_source_revision,
-                   'recipe', OLD.recipe_id, 'delete', 'recipe_origins'
+                   'maintenance', 'recipe', OLD.recipe_id, 'delete',
+                   'recipe_origins'
             FROM recipe_score_state WHERE id = 1;
         END;
 
@@ -2203,11 +2256,11 @@ function recipeSchemaMigrate(PDO $db): void {
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = 1;
             INSERT INTO recipe_score_mutations (
-                domain, revision, owner_type, owner_id,
+                domain, revision, lane, owner_type, owner_id,
                 operation, reason
             )
             SELECT 'source', ontology_source_revision,
-                   'recipe', NEW.recipe_id, 'insert',
+                   'maintenance', 'recipe', NEW.recipe_id, 'insert',
                    'recipe_ingredients'
             FROM recipe_score_state WHERE id = 1;
         END;
@@ -2238,10 +2291,11 @@ function recipeSchemaMigrate(PDO $db): void {
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = 1;
             INSERT INTO recipe_score_mutations (
-                domain, revision, owner_type, owner_id,
+                domain, revision, lane, owner_type, owner_id,
                 operation, reason
             )
             SELECT 'source', ontology_source_revision,
+                   'maintenance',
                    CASE
                        WHEN OLD.recipe_id IS NOT NEW.recipe_id
                        THEN 'global' ELSE 'recipe'
@@ -2263,11 +2317,11 @@ function recipeSchemaMigrate(PDO $db): void {
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = 1;
             INSERT INTO recipe_score_mutations (
-                domain, revision, owner_type, owner_id,
+                domain, revision, lane, owner_type, owner_id,
                 operation, reason
             )
             SELECT 'source', ontology_source_revision,
-                   'recipe', OLD.recipe_id, 'delete',
+                   'maintenance', 'recipe', OLD.recipe_id, 'delete',
                    'recipe_ingredients'
             FROM recipe_score_state WHERE id = 1;
         END;
@@ -2282,11 +2336,11 @@ function recipeSchemaMigrate(PDO $db): void {
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = 1;
             INSERT INTO recipe_score_mutations (
-                domain, revision, owner_type, owner_id,
+                domain, revision, lane, owner_type, owner_id,
                 operation, reason
             )
             SELECT 'source', ontology_source_revision,
-                   'recipe', NEW.recipe_id, 'insert',
+                   'maintenance', 'recipe', NEW.recipe_id, 'insert',
                    'recipe_source_ingredients'
             FROM recipe_score_state WHERE id = 1;
         END;
@@ -2319,10 +2373,11 @@ function recipeSchemaMigrate(PDO $db): void {
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = 1;
             INSERT INTO recipe_score_mutations (
-                domain, revision, owner_type, owner_id,
+                domain, revision, lane, owner_type, owner_id,
                 operation, reason
             )
             SELECT 'source', ontology_source_revision,
+                   'maintenance',
                    CASE
                        WHEN OLD.recipe_id IS NOT NEW.recipe_id
                        THEN 'global' ELSE 'recipe'
@@ -2344,11 +2399,11 @@ function recipeSchemaMigrate(PDO $db): void {
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = 1;
             INSERT INTO recipe_score_mutations (
-                domain, revision, owner_type, owner_id,
+                domain, revision, lane, owner_type, owner_id,
                 operation, reason
             )
             SELECT 'source', ontology_source_revision,
-                   'recipe', OLD.recipe_id, 'delete',
+                   'maintenance', 'recipe', OLD.recipe_id, 'delete',
                    'recipe_source_ingredients'
             FROM recipe_score_state WHERE id = 1;
         END;

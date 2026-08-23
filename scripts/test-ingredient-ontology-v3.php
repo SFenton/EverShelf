@@ -393,6 +393,7 @@ try {
             'id' => $rowId,
             'inventory_revision' => 10 + $rowId,
             'catalog_revision' => 20 + $rowId,
+            'covered_catalog_revision' => 20 + $rowId,
             'inventory_fingerprint' => 'inventory-' . $rowId,
             'score_date' => '2026-08-11',
             'catalog_max_id' => 30 + $rowId,
@@ -423,6 +424,8 @@ try {
             'match_rows_hash',
             'materialization_hash' => $hashValue($name . '-' . $rowId),
             'ontology_source_revision' => 50 + $rowId,
+            'covered_ontology_source_revision' => 50 + $rowId,
+            'revision_kind' => 'baseline',
             'identity_extension_revision' => 0,
             'identity_extension_hash' =>
                 ingredientOntologyV3IdentityExtensionZeroHash(),

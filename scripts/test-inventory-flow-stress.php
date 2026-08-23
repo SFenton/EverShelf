@@ -62,6 +62,38 @@ $foods = [
     'Broccoli',
     'Banana',
     'Raisins',
+    'Green Beans',
+    'Greek Yogurt',
+    'Cottage Cheese',
+    'Pineapple',
+    'Mango',
+    'Asparagus',
+    'Cauliflower',
+    'Zucchini',
+    'Celery',
+    'Cilantro',
+    'Parsley',
+    'Basil',
+    'Rosemary',
+    'Thyme',
+    'Oregano',
+    'Cumin',
+    'Paprika',
+    'Couscous',
+    'Quinoa',
+    'Jasmine Rice',
+    'Mozzarella',
+    'Goat Cheese',
+    'Pecans',
+    'Walnuts',
+    'Almond Flour',
+    'Cornstarch',
+    'Maple Syrup',
+    'Honey',
+    'Limes',
+    'Lemons',
+    'Avocado',
+    'Spinach',
 ];
 
 $open = static function (string $path): PDO {
@@ -148,6 +180,7 @@ if ($settlerMode) {
                 ) + (
                     SELECT COUNT(*)
                     FROM recipe_score_pending_recipes
+                    WHERE lane = 'serving'
                 )
             ")->fetchColumn();
             if ($pendingScore > 0) {
@@ -155,6 +188,8 @@ if ($settlerMode) {
                 $scoreProcess = proc_open(
                     [
                         PHP_BINARY,
+                        '-d',
+                        'memory_limit=512M',
                         __DIR__ . '/incremental-score-worker.php',
                         '--db=' . $databasePath,
                         '--background-lock='
@@ -230,6 +265,7 @@ if ($settlerMode) {
             $pendingRecipes = (int)$db->query("
                 SELECT COUNT(*)
                 FROM recipe_score_pending_recipes
+                WHERE lane = 'serving'
             ")->fetchColumn();
             $settled = is_file($doneFile)
                 && $openJobs === 0
@@ -283,6 +319,11 @@ if ($settlerMode) {
         ")->fetchColumn(),
         'pending_recipes' => (int)$db->query("
             SELECT COUNT(*) FROM recipe_score_pending_recipes
+            WHERE lane = 'serving'
+        ")->fetchColumn(),
+        'maintenance_recipes' => (int)$db->query("
+            SELECT COUNT(*) FROM recipe_score_pending_recipes
+            WHERE lane = 'maintenance'
         ")->fetchColumn(),
         'work_state' => $db->query("
             SELECT * FROM recipe_score_work_state WHERE id = 1
@@ -300,12 +341,15 @@ if ($workerMode) {
     $runToken = trim((string)($options['run-token'] ?? ''));
     $startFile = trim((string)($options['start-file'] ?? ''));
     $index = (int)$options['worker-index'];
+    $workerFoodName = trim((string)(
+        $options['food-name'] ?? ($foods[$index] ?? '')
+    ));
     if (
         $databasePath === ''
         || $runToken === ''
         || $startFile === ''
         || !str_starts_with($startFile, '/')
-        || !isset($foods[$index])
+        || $workerFoodName === ''
     ) {
         throw new InvalidArgumentException(
             'Stress worker arguments are invalid'
@@ -350,7 +394,7 @@ if ($workerMode) {
             'payload' => $payload,
         ];
     };
-    $name = $foods[$index];
+    $name = $workerFoodName;
     $workerStarted = hrtime(true);
     $barcodeNumber = sprintf(
         '%010u',
@@ -553,6 +597,7 @@ $baselinePendingProducts = (int)$db->query("
 ")->fetchColumn();
 $baselinePendingRecipes = (int)$db->query("
     SELECT COUNT(*) FROM recipe_score_pending_recipes
+    WHERE lane = 'serving'
 ")->fetchColumn();
 $assert(
     $baselineOpenRecipeJobs === 0
@@ -595,6 +640,52 @@ if (!$temporary) {
             'Production-shaped stress ontology is unavailable'
         );
     }
+    $resolver = $db->prepare("
+        SELECT annex.resolver_version
+        FROM ingredient_ontology_recipe_identity_annex annex
+        WHERE annex.ontology_version_id = ?
+          AND annex.ontology_content_hash = ?
+          AND annex.ontology_seal_hash = ?
+          AND annex.review_manifest_hash = ?
+          AND annex.status = 'accepted'
+        GROUP BY annex.resolver_version
+        ORDER BY COUNT(*) DESC, annex.resolver_version
+        LIMIT 1
+    ");
+    $resolver->execute([
+        (int)$version['id'],
+        (string)$version['content_hash'],
+        (string)$version['seal_hash'],
+        ingredientOntologyV3IdentityAnnexReviewManifestHash(),
+    ]);
+    $activeRecipeResolver = trim(
+        (string)($resolver->fetchColumn() ?: '')
+    );
+    $resolver->closeCursor();
+    if ($activeRecipeResolver !== '') {
+        $roleWidening = str_contains(
+            $activeRecipeResolver,
+            ':roles-on'
+        );
+        $exactSelfIdentity = str_contains(
+            $activeRecipeResolver,
+            ':exact-on'
+        );
+        $GLOBALS[
+            'INGREDIENT_ONTOLOGY_IDENTITY_ROLE_WIDENING_ENABLED_OVERRIDE'
+        ] = $roleWidening;
+        $GLOBALS[
+            'INGREDIENT_ONTOLOGY_EXACT_SELF_IDENTITY_ENABLED_OVERRIDE'
+        ] = $exactSelfIdentity;
+        putenv(
+            'INGREDIENT_ONTOLOGY_IDENTITY_ROLE_WIDENING_ENABLED='
+            . ($roleWidening ? 'true' : 'false')
+        );
+        putenv(
+            'INGREDIENT_ONTOLOGY_EXACT_SELF_IDENTITY_ENABLED='
+            . ($exactSelfIdentity ? 'true' : 'false')
+        );
+    }
     $existingRecipe = $db->prepare("
         SELECT ingredient.id AS ingredient_id,
                ingredient.recipe_id,
@@ -620,6 +711,7 @@ $selectedFoods = [];
 $recipeIds = [];
 $recipeIngredientIds = [];
 $recipeTitles = [];
+$searchQueries = [];
 foreach ($foods as $index => $name) {
     if (isset($existing[mb_strtolower($name, 'UTF-8')])) {
         continue;
@@ -646,8 +738,96 @@ foreach ($foods as $index => $name) {
             (string)$existingRecipeRow['title'];
     }
     $selectedFoods[$index] = $name;
+    $searchQueries[$index] = $name;
     if (count($selectedFoods) === 16) {
         break;
+    }
+}
+if (!$temporary && count($selectedFoods) < 16) {
+    $fallback = $db->prepare("
+        SELECT ingredient_id, recipe_id, normalized_name,
+               search_name, title
+        FROM (
+            SELECT ingredient.id AS ingredient_id,
+                   ingredient.recipe_id,
+                   annex.normalized_label AS normalized_name,
+                   ingredient.normalized_name AS search_name,
+                   recipe.title,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY
+                           lower(trim(annex.normalized_label))
+                       ORDER BY ingredient.recipe_id, ingredient.id
+                   ) AS row_number,
+                   COUNT(*) OVER (
+                       PARTITION BY
+                           lower(trim(annex.normalized_label))
+                   ) AS occurrence_count
+            FROM recipe_ingredients ingredient
+            JOIN recipe_catalog recipe
+              ON recipe.id = ingredient.recipe_id
+             AND recipe.deleted_at IS NULL
+            JOIN ingredient_ontology_recipe_identity_annex annex
+              ON annex.recipe_ingredient_id = ingredient.id
+             AND annex.ontology_version_id = ?
+             AND annex.ontology_content_hash = ?
+             AND annex.ontology_seal_hash = ?
+             AND annex.resolver_version = ?
+             AND annex.review_manifest_hash = ?
+             AND annex.status = 'accepted'
+            WHERE length(trim(annex.normalized_label))
+                    BETWEEN 3 AND 80
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM products product
+                  WHERE lower(trim(product.name)) =
+                        lower(trim(annex.normalized_label))
+              )
+        )
+        WHERE row_number = 1
+          AND occurrence_count = 1
+        ORDER BY recipe_id, lower(trim(normalized_name))
+        LIMIT 500
+    ");
+    $fallback->execute([
+        (int)$version['id'],
+        (string)$version['content_hash'],
+        (string)$version['seal_hash'],
+        ingredientOntologyV3RecipeIdentityResolverVersion(),
+        ingredientOntologyV3IdentityAnnexReviewManifestHash(),
+    ]);
+    $selectedNames = array_fill_keys(
+        array_map(
+            static fn(string $name): string =>
+                mb_strtolower(trim($name), 'UTF-8'),
+            array_values($selectedFoods)
+        ),
+        true
+    );
+    $fallbackIndex = $foods ? max(array_keys($foods)) + 1 : 0;
+    foreach ($fallback->fetchAll(PDO::FETCH_ASSOC) as $row) {
+        $normalizedName = trim(
+            (string)$row['normalized_name']
+        );
+        $name = canonicalIngredientTitle($normalizedName);
+        $nameKey = mb_strtolower($name, 'UTF-8');
+        if (
+            $name === ''
+            || isset($selectedNames[$nameKey])
+        ) {
+            continue;
+        }
+        $selectedFoods[$fallbackIndex] = $name;
+        $recipeIds[$fallbackIndex] = (int)$row['recipe_id'];
+        $recipeIngredientIds[$fallbackIndex] =
+            (int)$row['ingredient_id'];
+        $recipeTitles[$fallbackIndex] = (string)$row['title'];
+        $searchQueries[$fallbackIndex] =
+            (string)$row['search_name'];
+        $selectedNames[$nameKey] = true;
+        $fallbackIndex++;
+        if (count($selectedFoods) === 16) {
+            break;
+        }
     }
 }
 if ($existingRecipe !== null) {
@@ -883,6 +1063,7 @@ $runWave = static function (
                 '--db=' . $databasePath,
                 '--run-token=' . $runToken,
                 '--start-file=' . $startFile,
+                '--food-name=' . (string)$wave[$index],
             ],
             [
                 0 => ['pipe', 'r'],
@@ -1036,6 +1217,7 @@ $settle = static function (PDO $db): array {
             && (int)$db->query("
                 SELECT COUNT(*)
                 FROM recipe_score_pending_recipes
+                WHERE lane = 'serving'
             ")->fetchColumn() === 0
         ) {
             break;
@@ -1119,6 +1301,11 @@ $pendingProducts = (int)$db->query("
 ")->fetchColumn();
 $pendingRecipes = (int)$db->query("
     SELECT COUNT(*) FROM recipe_score_pending_recipes
+    WHERE lane = 'serving'
+")->fetchColumn();
+$maintenancePendingRecipes = (int)$db->query("
+    SELECT COUNT(*) FROM recipe_score_pending_recipes
+    WHERE lane = 'maintenance'
 ")->fetchColumn();
 $openRecipeJobs = (int)$db->query("
     SELECT COUNT(*) FROM recipe_jobs
@@ -1136,17 +1323,31 @@ $assert(
 );
 
 $active = recipeScoreActiveRevision($db);
+$activeStatus = $active !== null
+    ? recipeScoreRevisionStatus($db, $active)
+    : 'missing';
+$maintenanceAtRead = (int)$db->query("
+    SELECT COUNT(*) FROM recipe_score_pending_recipes
+    WHERE lane = 'maintenance'
+")->fetchColumn();
 $assert(
     $active !== null
     && (string)$active['status'] === 'ready'
-    && recipeScoreRevisionStatus($db, $active) === 'fresh',
-    'The final active score revision must be ready and fresh'
+    && (
+        $activeStatus === 'fresh'
+        || (
+            $maintenanceAtRead > 0
+            && $activeStatus === 'partial'
+        )
+    ),
+    'The final active score revision must be ready and serving-current'
 );
 
 $soonExpiryScores = [];
 $laterExpiryScores = [];
 $identityRows = [];
 $searchRows = [];
+$visibilityElapsed = [];
 foreach ($productIds as $index => $productId) {
     $name = $selectedFoods[$index];
     $readiness =
@@ -1227,7 +1428,7 @@ foreach ($productIds as $index => $productId) {
             (int)$targetMatch['inventory_product_id'];
     }
     $ingredientSearch = recipeCatalogSearchResult($db, [
-        'query' => $name,
+        'query' => $searchQueries[$index] ?? $name,
         'mode' => 'all',
         'fields' => 'card',
         'limit' => 10,
@@ -1294,6 +1495,8 @@ foreach ($productIds as $index => $productId) {
         );
     }
     $expiryScore = (float)($score['expiry_score'] ?? 0);
+    $visibilityElapsed[] =
+        (float)($readiness['visible_ms'] ?? 0.0);
     if ($index % 2 === 0) {
         $soonExpiryScores[] = $expiryScore;
     } else {
@@ -1311,7 +1514,7 @@ foreach ($productIds as $index => $productId) {
         'expiry_score' => $expiryScore,
     ];
     $searchRows[] = [
-        'query' => $name,
+        'query' => $searchQueries[$index] ?? $name,
         'recipe_id' => $recipeId,
         'found' => true,
     ];
@@ -1327,6 +1530,36 @@ $assert(
     max($workerElapsed) < 15000
     && max($waveElapsed) < 65000,
     'Concurrent scan and settle latency must remain bounded'
+);
+$assert(
+    $percentile($workerElapsed, 0.95) < 100,
+    'Scan ingestion p95 must remain under 100 milliseconds: '
+        . recipeCatalogJsonEncode([
+            'p50_ms' => round(
+                $percentile($workerElapsed, 0.50),
+                3
+            ),
+            'p95_ms' => round(
+                $percentile($workerElapsed, 0.95),
+                3
+            ),
+            'max_ms' => round(max($workerElapsed), 3),
+        ])
+);
+$assert(
+    $percentile($visibilityElapsed, 0.95) < 10000,
+    'Recipe score visibility p95 must remain under 10 seconds: '
+        . recipeCatalogJsonEncode([
+            'p50_ms' => round(
+                $percentile($visibilityElapsed, 0.50),
+                3
+            ),
+            'p95_ms' => round(
+                $percentile($visibilityElapsed, 0.95),
+                3
+            ),
+            'max_ms' => round(max($visibilityElapsed), 3),
+        ])
 );
 $integrityErrors = [];
 if ($temporary) {
@@ -1396,9 +1629,21 @@ $report = [
         'p95' => round($percentile($workerElapsed, 0.95), 3),
         'max' => round(max($workerElapsed), 3),
     ],
+    'score_visibility_ms' => [
+        'p50' => round(
+            $percentile($visibilityElapsed, 0.50),
+            3
+        ),
+        'p95' => round(
+            $percentile($visibilityElapsed, 0.95),
+            3
+        ),
+        'max' => round(max($visibilityElapsed), 3),
+    ],
     'pending' => [
         'products' => $pendingProducts,
         'recipes' => $pendingRecipes,
+        'maintenance_recipes' => $maintenancePendingRecipes,
         'recipe_jobs' => $openRecipeJobs,
         'canonical' => (int)($canonicalStats['pending'] ?? 0),
     ],

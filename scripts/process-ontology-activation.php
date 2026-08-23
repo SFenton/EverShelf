@@ -173,6 +173,29 @@ if (
     ], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . PHP_EOL;
     exit(0);
 }
+$servingProductPending = (int)$db->query("
+    SELECT COUNT(*) FROM recipe_score_pending_products
+")->fetchColumn();
+$servingRecipePending = (int)$db->query("
+    SELECT COUNT(*)
+    FROM recipe_score_pending_recipes
+    WHERE lane = 'serving'
+")->fetchColumn();
+if ($servingProductPending + $servingRecipePending > 0) {
+    flock($lock, LOCK_UN);
+    fclose($backgroundLock);
+    fclose($lock);
+    echo json_encode([
+        'success' => true,
+        'skipped' => true,
+        'outcome' => 'incremental_score_pending',
+        'reason' => 'serving_score_pending',
+        'pending_product_count' => $servingProductPending,
+        'pending_recipe_count' => $servingRecipePending,
+        'retryable' => true,
+    ], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . PHP_EOL;
+    exit(0);
+}
 $coordinationLockPath =
     $databaseDirectory . '/.recipe-score-coordination.lock';
 $coordinationLock = fopen($coordinationLockPath, 'c+');

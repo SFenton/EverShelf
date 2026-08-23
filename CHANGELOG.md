@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.19.0] - 2026-08-23
+
+### Added
+- Recipe scoring now separates latency-critical serving work from recipe and
+  ontology maintenance, with explicit covered-revision watermarks and lane
+  telemetry.
+- CI now validates 500,000-row mutation journals under a 128 MB PHP limit and
+  enforces per-item score visibility in the concurrent inventory stress gate.
+
+### Changed
+- Product, inventory, and user-facing recipe updates publish sparse serving
+  revisions without waiting for copied maintenance recovery.
+- Reviewed ontology admissions batch only genuinely changed recipe annex rows
+  into one maintenance invalidation.
+
+### Fixed
+- Mutation validation and lineage hashing are bounded-memory, annex refreshes
+  are batched, and affected-match counts use the indexed effective projection.
+- Serving publication uses short fenced writes so concurrent scans do not wait
+  behind recipe scoring, while recipe and product races remain pending for a
+  safe retry.
+
 ## [1.18.12] - 2026-08-22
 
 ### Fixed

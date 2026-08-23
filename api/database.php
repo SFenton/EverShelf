@@ -11,7 +11,7 @@ require_once __DIR__ . '/lib/recipes/schema.php';
 
 define('DB_PATH', __DIR__ . '/../data/evershelf.db');
 // Bump whenever migrateDB() or a nested schema migration changes.
-const EVERSHELF_DATABASE_SCHEMA_VERSION = 2026082305;
+const EVERSHELF_DATABASE_SCHEMA_VERSION = 2026082306;
 
 /**
  * Ensure the data directory exists and is writable by the web-server user.

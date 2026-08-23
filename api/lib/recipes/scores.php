@@ -167,15 +167,20 @@ function recipeScoreReconcileWorkState(PDO $db): void {
     $pendingProducts = (int)$db->query("
         SELECT COUNT(*) FROM recipe_score_pending_products
     ")->fetchColumn();
-    $pendingRecipes = (int)$db->query("
-        SELECT COUNT(*) FROM recipe_score_pending_recipes
+    $pendingServingRecipes = (int)$db->query("
+        SELECT COUNT(*)
+        FROM recipe_score_pending_recipes
+        WHERE lane = 'serving'
     ")->fetchColumn();
     $active = recipeScoreActiveRevision($db);
+    $activeStatus = $active !== null
+        ? recipeScoreRevisionStatus($db, $active)
+        : 'stale';
     if (
         $pendingProducts === 0
-        && $pendingRecipes === 0
+        && $pendingServingRecipes === 0
         && $active !== null
-        && recipeScoreRevisionStatus($db, $active) === 'fresh'
+        && in_array($activeStatus, ['fresh', 'partial'], true)
     ) {
         recipeScoreSetWorkState(
             $db,
@@ -832,7 +837,8 @@ function recipeScoreMarkRecipeDirty(
     int $recipeId,
     string $operation,
     string $reason,
-    bool $cursorUnsafe = true
+    bool $cursorUnsafe = true,
+    string $lane = 'serving'
 ): int {
     if ($recipeId <= 0) {
         throw new InvalidArgumentException(
@@ -842,6 +848,11 @@ function recipeScoreMarkRecipeDirty(
     if (!in_array($operation, ['replace', 'delete'], true)) {
         throw new InvalidArgumentException(
             'recipe score dirty operation is invalid'
+        );
+    }
+    if (!in_array($lane, ['serving', 'maintenance'], true)) {
+        throw new InvalidArgumentException(
+            'recipe score dirty lane is invalid'
         );
     }
     recipeScoreState($db);
@@ -858,12 +869,13 @@ function recipeScoreMarkRecipeDirty(
     $catalogRevision = (int)$state['catalog_revision'];
     $db->prepare("
         INSERT INTO recipe_score_mutations (
-            domain, revision, owner_type, owner_id,
+            domain, revision, lane, owner_type, owner_id,
             operation, reason
         )
-        VALUES ('catalog', ?, 'recipe', ?, ?, ?)
+        VALUES ('catalog', ?, ?, 'recipe', ?, ?, ?)
     ")->execute([
         $catalogRevision,
+        $lane,
         $recipeId,
         $operation,
         mb_substr(trim($reason), 0, 160, 'UTF-8'),
@@ -879,14 +891,20 @@ function recipeScoreMarkRecipeDirty(
     }
     $db->prepare("
         INSERT INTO recipe_score_pending_recipes (
-            recipe_id, operation, first_catalog_revision,
+            recipe_id, operation, lane, first_catalog_revision,
             latest_catalog_revision,
             latest_ontology_source_revision,
             reason, created_at, updated_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+        VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
         ON CONFLICT(recipe_id) DO UPDATE SET
             operation = excluded.operation,
+            lane = CASE
+                WHEN recipe_score_pending_recipes.lane = 'serving'
+                  OR excluded.lane = 'serving'
+                THEN 'serving'
+                ELSE 'maintenance'
+            END,
             latest_catalog_revision = MAX(
                 recipe_score_pending_recipes.latest_catalog_revision,
                 excluded.latest_catalog_revision
@@ -901,12 +919,132 @@ function recipeScoreMarkRecipeDirty(
     ")->execute([
         $recipeId,
         $operation,
+        $lane,
         $catalogRevision,
         $catalogRevision,
         (int)$state['ontology_source_revision'],
         mb_substr(trim($reason), 0, 160, 'UTF-8'),
     ]);
     return $catalogRevision;
+}
+
+function recipeScoreMarkRecipesDirtyBatch(
+    PDO $db,
+    array $recipeIds,
+    string $operation,
+    string $reason,
+    bool $cursorUnsafe = true,
+    string $lane = 'maintenance'
+): int {
+    $recipeIds = array_values(array_unique(array_filter(
+        array_map('intval', $recipeIds),
+        static fn(int $recipeId): bool => $recipeId > 0
+    )));
+    if (!$recipeIds) {
+        return (int)recipeScoreState($db)['catalog_revision'];
+    }
+    if (!in_array($operation, ['replace', 'delete'], true)) {
+        throw new InvalidArgumentException(
+            'recipe score dirty operation is invalid'
+        );
+    }
+    if (!in_array($lane, ['serving', 'maintenance'], true)) {
+        throw new InvalidArgumentException(
+            'recipe score dirty lane is invalid'
+        );
+    }
+    static $batchSequence = 0;
+    $savepoint = 'recipe_score_dirty_batch_' . (++$batchSequence);
+    $db->exec("SAVEPOINT {$savepoint}");
+    try {
+        recipeScoreState($db);
+        $db->prepare("
+        UPDATE recipe_score_state SET
+            catalog_revision = catalog_revision + 1,
+            cursor_revision = cursor_revision + ?,
+            active_score_overlay_revision_id = NULL,
+            dirty_at = CURRENT_TIMESTAMP,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = 1
+        ")->execute([$cursorUnsafe ? 1 : 0]);
+        $state = recipeScoreState($db);
+        $catalogRevision = (int)$state['catalog_revision'];
+        $reason = mb_substr(trim($reason), 0, 160, 'UTF-8');
+        $db->prepare("
+            INSERT INTO recipe_score_mutations (
+                domain, revision, lane, owner_type, owner_id,
+                operation, reason
+            )
+            VALUES (
+                'catalog', ?, ?, 'global', NULL, 'global', ?
+            )
+        ")->execute([
+            $catalogRevision,
+            $lane,
+            mb_substr($reason . '_batch', 0, 160, 'UTF-8'),
+        ]);
+        $active = recipeScoreActiveRevision($db);
+        if (
+            $active === null
+            || (string)($active['scoring_model'] ?? '')
+                !== 'faceted-ontology-v3'
+            || $active['ontology_version_id'] === null
+        ) {
+            $db->exec("RELEASE SAVEPOINT {$savepoint}");
+            return $catalogRevision;
+        }
+        $insert = $db->prepare("
+            INSERT INTO recipe_score_pending_recipes (
+                recipe_id, operation, lane,
+                first_catalog_revision, latest_catalog_revision,
+                latest_ontology_source_revision, reason,
+                created_at, updated_at
+            )
+            VALUES (
+                ?, ?, ?, ?, ?, ?, ?,
+                CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+            )
+            ON CONFLICT(recipe_id) DO UPDATE SET
+                operation = excluded.operation,
+                lane = CASE
+                    WHEN recipe_score_pending_recipes.lane = 'serving'
+                      OR excluded.lane = 'serving'
+                    THEN 'serving'
+                    ELSE 'maintenance'
+                END,
+                latest_catalog_revision = MAX(
+                    recipe_score_pending_recipes.latest_catalog_revision,
+                    excluded.latest_catalog_revision
+                ),
+                latest_ontology_source_revision = MAX(
+                    recipe_score_pending_recipes
+                        .latest_ontology_source_revision,
+                    excluded.latest_ontology_source_revision
+                ),
+                reason = excluded.reason,
+                updated_at = CURRENT_TIMESTAMP
+        ");
+        foreach ($recipeIds as $recipeId) {
+            $insert->execute([
+                $recipeId,
+                $operation,
+                $lane,
+                $catalogRevision,
+                $catalogRevision,
+                (int)$state['ontology_source_revision'],
+                $reason,
+            ]);
+        }
+        $db->exec("RELEASE SAVEPOINT {$savepoint}");
+        return $catalogRevision;
+    } catch (Throwable $error) {
+        try {
+            $db->exec("ROLLBACK TO SAVEPOINT {$savepoint}");
+            $db->exec("RELEASE SAVEPOINT {$savepoint}");
+        } catch (Throwable $ignored) {
+        }
+        throw $error;
+    }
 }
 
 function recipeScoreClearPendingRecipes(
@@ -953,11 +1091,11 @@ function recipeScoreMarkCatalogDirty(PDO $db, bool $cursorUnsafe = false): int {
     $revision = recipeScoreState($db)['catalog_revision'];
     $db->prepare("
         INSERT INTO recipe_score_mutations (
-            domain, revision, owner_type, owner_id,
+            domain, revision, lane, owner_type, owner_id,
             operation, reason
         )
         VALUES (
-            'catalog', ?, 'global', NULL, 'global',
+            'catalog', ?, 'maintenance', 'global', NULL, 'global',
             'unscoped_catalog_mutation'
         )
     ")->execute([$revision]);
@@ -1133,6 +1271,17 @@ function recipeScoreRevision(PDO $db, int $revisionId): ?array {
     ] as $key) {
         $row[$key] = (int)$row[$key];
     }
+    $row['covered_catalog_revision'] =
+        ($row['covered_catalog_revision'] ?? null) !== null
+            ? (int)$row['covered_catalog_revision']
+            : (int)$row['catalog_revision'];
+    $row['covered_ontology_source_revision'] =
+        ($row['covered_ontology_source_revision'] ?? null) !== null
+            ? (int)$row['covered_ontology_source_revision']
+            : (int)$row['ontology_source_revision'];
+    $row['revision_kind'] = (string)(
+        $row['revision_kind'] ?? 'baseline'
+    );
     foreach ([
         'ontology_version_id',
         'parent_score_revision_id',
@@ -1802,6 +1951,21 @@ function recipeScoreRevisionStatus(PDO $db, array $revision): string {
         )
     ) {
         return 'stale';
+    }
+    if (
+        (string)($revision['revision_kind'] ?? 'baseline')
+            === 'serving_delta'
+        && (int)$revision['inventory_revision']
+            === $state['inventory_revision']
+        && (string)$revision['score_date']
+            === recipeScoreCurrentDate()
+    ) {
+        return (int)$revision['covered_catalog_revision']
+                === (int)$state['catalog_revision']
+            && (int)$revision['covered_ontology_source_revision']
+                === (int)$state['ontology_source_revision']
+                ? 'fresh'
+                : 'partial';
     }
     if (
         (int)$revision['inventory_revision'] === $state['inventory_revision']

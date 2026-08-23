@@ -3703,6 +3703,12 @@ try {
         ],
         'model_abstained'
     );
+    $reviewedCatalogRevisionBefore =
+        (int)recipeScoreState($db)['catalog_revision'];
+    $reviewedMutationCountBefore = controllerTestCount(
+        $db,
+        "SELECT COUNT(*) FROM recipe_score_mutations"
+    );
     $reviewedRecipeRun =
         ingredientOntologyControllerProcessQueue(
             $db,
@@ -3746,8 +3752,15 @@ try {
             "SELECT COUNT(*)
              FROM recipe_score_pending_recipes
              WHERE recipe_id IN ({$reviewedRecipeList})
-               AND operation = 'replace'"
+               AND operation = 'replace'
+               AND lane = 'maintenance'"
         ) === 2
+        && (int)recipeScoreState($db)['catalog_revision']
+            === $reviewedCatalogRevisionBefore + 1
+        && controllerTestCount(
+            $db,
+            "SELECT COUNT(*) FROM recipe_score_mutations"
+        ) === $reviewedMutationCountBefore + 1
         && controllerTestCount(
             $db,
             "SELECT COUNT(*)
@@ -3762,6 +3775,33 @@ try {
             $reviewedRecipeIds[1]
         ]['ingredients'][0]['mapping']['status'] === 'accepted',
         'Reviewed recipe admission must materialize every active occurrence, dirty every owning recipe, and resolve gaps only after the fenced transition'
+    );
+    $repeatCatalogRevision =
+        (int)recipeScoreState($db)['catalog_revision'];
+    $repeatPendingCount = controllerTestCount(
+        $db,
+        "SELECT COUNT(*)
+         FROM recipe_score_pending_recipes
+         WHERE recipe_id IN ({$reviewedRecipeList})"
+    );
+    $repeatAdmission =
+        ingredientOntologyControllerReviewedAdmission(
+            $db,
+            $reviewedRecipeJob,
+            $baseVersionId
+        );
+    controllerTestAssert(
+        is_array($repeatAdmission)
+        && ($repeatAdmission['changed_recipe_ids'] ?? null) === []
+        && (int)recipeScoreState($db)['catalog_revision']
+            === $repeatCatalogRevision
+        && controllerTestCount(
+            $db,
+            "SELECT COUNT(*)
+             FROM recipe_score_pending_recipes
+             WHERE recipe_id IN ({$reviewedRecipeList})"
+        ) === $repeatPendingCount,
+        'Unchanged reviewed admissions must not dirty recipes again'
     );
     $db->prepare("
         UPDATE ontology_subject_occurrences
@@ -12544,6 +12584,14 @@ try {
         && str_contains(
             $activationSource,
             "'incremental_score_pending'"
+        )
+        && str_contains(
+            $activationWorkerSource,
+            "'serving_score_pending'"
+        )
+        && str_contains(
+            $activationWorkerSource,
+            "WHERE lane = 'serving'"
         ),
         'Production cron and live worker CLI must remain priority-fenced and reject active-database generation'
     );

@@ -7,46 +7,6 @@ define('CRON_MODE', true);
 define('RECIPE_BACKEND_TEST_MODE', true);
 require_once __DIR__ . '/../api/bootstrap.php';
 
-final class ExternalCommitBeforeScorePublicationPDO extends PDO {
-    private ?Closure $externalCommit = null;
-
-    public function armExternalCommit(Closure $callback): void {
-        $this->externalCommit = $callback;
-    }
-
-    public function exec(string $statement): int|false {
-        if (
-            $this->externalCommit !== null
-            && strtoupper(trim($statement)) === 'BEGIN IMMEDIATE'
-        ) {
-            $work = parent::query("
-                SELECT phase, total_recipe_count,
-                       processed_recipe_count
-                FROM recipe_score_work_state
-                WHERE id = 1
-            ");
-            $row = $work !== false
-                ? $work->fetch(PDO::FETCH_ASSOC)
-                : false;
-            if ($work !== false) {
-                $work->closeCursor();
-            }
-            if (
-                is_array($row)
-                && (string)$row['phase'] === 'scoring'
-                && (int)$row['total_recipe_count'] > 0
-                && (int)$row['processed_recipe_count']
-                    === (int)$row['total_recipe_count']
-            ) {
-                $callback = $this->externalCommit;
-                $this->externalCommit = null;
-                $callback();
-            }
-        }
-        return parent::exec($statement);
-    }
-}
-
 $assertions = 0;
 $assert = static function (
     bool $condition,
@@ -66,6 +26,23 @@ $db->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
 $db->setAttribute(PDO::ATTR_DEFAULT_FETCH_MODE, PDO::FETCH_ASSOC);
 $db->exec('PRAGMA foreign_keys=ON');
 migrateDB($db);
+$laneIndexes = $db->query("
+    SELECT name
+    FROM sqlite_master
+    WHERE type = 'index'
+      AND name IN (
+          'idx_recipe_score_pending_recipe_lane',
+          'idx_recipe_score_mutations_lane_revision'
+      )
+    ORDER BY name
+")->fetchAll(PDO::FETCH_COLUMN);
+$assert(
+    $laneIndexes === [
+        'idx_recipe_score_mutations_lane_revision',
+        'idx_recipe_score_pending_recipe_lane',
+    ],
+    'Fresh schema migration must create both score-lane indexes'
+);
 $journalMode = $db->query('PRAGMA journal_mode=WAL');
 $journalModeValue = $journalMode->fetchColumn();
 $journalMode->closeCursor();
@@ -244,6 +221,195 @@ $db->exec('DELETE FROM recipe_score_mutations');
 $db->exec('COMMIT');
 
 $db->exec("
+    INSERT INTO products (name, brand, category)
+    VALUES ('Serving Lane Fixture', '', 'food')
+");
+$servingProductId = (int)$db->lastInsertId();
+$db->prepare("
+    INSERT INTO inventory (product_id, location, quantity)
+    VALUES (?, 'dispensa', 1)
+")->execute([$servingProductId]);
+$maintenanceRecipeIds = range(300000, 300500);
+$maintenanceParentId =
+    (int)recipeScoreState($db)['active_score_revision_id'];
+recipeScoreMarkRecipesDirtyBatch(
+    $db,
+    $maintenanceRecipeIds,
+    'replace',
+    'maintenance_backlog_regression',
+    false,
+    'maintenance'
+);
+recipeScoreMarkProductDirty(
+    $db,
+    $servingProductId,
+    'serving_lane_regression'
+);
+$maintenanceCount = (int)$db->query("
+    SELECT COUNT(*)
+    FROM recipe_score_pending_recipes
+    WHERE lane = 'maintenance'
+")->fetchColumn();
+$servingResult = ingredientOntologyV3IncrementalRebuild(
+    $db,
+    true
+);
+$servingRevision = recipeScoreRevision(
+    $db,
+    (int)($servingResult['revision_id'] ?? 0)
+);
+$assert(
+    $maintenanceCount === 501
+    && !empty($servingResult['rebuilt'])
+    && !empty($servingResult['serving_only'])
+    && is_array($servingRevision)
+    && (string)$servingRevision['revision_kind']
+        === 'serving_delta'
+    && (int)$servingRevision['parent_score_revision_id']
+        === $maintenanceParentId
+    && (int)$db->query("
+        SELECT COUNT(*) FROM recipe_score_pending_products
+    ")->fetchColumn() === 0
+    && (int)$db->query("
+        SELECT COUNT(*)
+        FROM recipe_score_pending_recipes
+        WHERE lane = 'maintenance'
+    ")->fetchColumn() === $maintenanceCount,
+    'Maintenance recipe overflow must not block serving product scores: '
+        . ingredientOntologyV3Json([
+            'result' => $servingResult,
+            'revision' => $servingRevision,
+            'maintenance_count' => $maintenanceCount,
+        ])
+);
+$db->exec("
+    INSERT INTO products (name, brand, category)
+    VALUES ('Unscoped Source Fixture', '', 'food')
+");
+$unscopedSourceProductId = (int)$db->lastInsertId();
+$db->exec("
+    INSERT INTO products (name, brand, category)
+    VALUES ('Serving Lock Fixture', '', 'food')
+");
+$servingLockProductId = (int)$db->lastInsertId();
+$db->prepare("
+    INSERT INTO inventory (product_id, location, quantity)
+    VALUES (?, 'dispensa', 1)
+")->execute([$servingLockProductId]);
+recipeScoreMarkProductDirty(
+    $db,
+    $servingLockProductId,
+    'serving_lock_regression'
+);
+$servingCoordinationPath =
+    $path . '.serving-coordination';
+$servingBackgroundPath =
+    $path . '.serving-background';
+$servingHeartbeatPath =
+    $path . '.serving-heartbeat';
+$servingStatusPath =
+    $path . '.serving-status';
+$servingCoordination = fopen(
+    $servingCoordinationPath,
+    'c+'
+);
+$assert(
+    is_resource($servingCoordination)
+    && flock(
+        $servingCoordination,
+        LOCK_EX | LOCK_NB
+    ),
+    'Serving coordination fixture must acquire the copied-build lock'
+);
+$servingPipes = [];
+$servingWorker = proc_open(
+    [
+        PHP_BINARY,
+        __DIR__ . '/incremental-score-worker.php',
+        '--db=' . $path,
+        '--background-lock=' . $servingBackgroundPath,
+        '--coordination-lock=' . $servingCoordinationPath,
+        '--heartbeat=' . $servingHeartbeatPath,
+        '--status-file=' . $servingStatusPath,
+        '--force',
+        '--json',
+    ],
+    [
+        0 => ['pipe', 'r'],
+        1 => ['pipe', 'w'],
+        2 => ['pipe', 'w'],
+    ],
+    $servingPipes,
+    dirname(__DIR__)
+);
+if (!is_resource($servingWorker)) {
+    throw new RuntimeException(
+        'Could not start serving lock worker probe'
+    );
+}
+fclose($servingPipes[0]);
+$servingStdout =
+    stream_get_contents($servingPipes[1]);
+$servingStderr =
+    stream_get_contents($servingPipes[2]);
+fclose($servingPipes[1]);
+fclose($servingPipes[2]);
+$servingWorkerStatus = proc_close($servingWorker);
+flock($servingCoordination, LOCK_UN);
+fclose($servingCoordination);
+$servingPayload = json_decode(
+    (string)$servingStdout,
+    true
+);
+$assert(
+    $servingWorkerStatus === 0
+    && is_array($servingPayload)
+    && !empty($servingPayload['success'])
+    && !empty($servingPayload['rebuilt'])
+    && !empty($servingPayload['serving_only']),
+    'Serving products must publish while copied recovery owns its '
+        . 'coordination lock: '
+        . ingredientOntologyV3Json([
+            'status' => $servingWorkerStatus,
+            'stdout' => $servingStdout,
+            'stderr' => $servingStderr,
+        ])
+);
+$servingLockRevision = recipeScoreActiveRevision($db);
+$servingLockState = recipeScoreState($db);
+$assert(
+    is_array($servingLockRevision)
+    && (int)$servingLockRevision[
+        'covered_ontology_source_revision'
+    ] < (int)$servingLockState['ontology_source_revision']
+    && recipeScoreRevisionStatus($db, $servingLockRevision)
+        === 'partial'
+    && (int)$db->query("
+        SELECT COUNT(*)
+        FROM recipe_score_pending_products
+        WHERE product_id = {$unscopedSourceProductId}
+    ")->fetchColumn() === 0,
+    'An out-of-scope product mutation must retain source coverage lag'
+);
+$db->exec("
+    DELETE FROM recipe_score_pending_recipes
+    WHERE lane = 'maintenance'
+");
+recipeScoreMarkRecipesDirtyBatch(
+    $db,
+    [400001],
+    'replace',
+    'concurrent_maintenance_recipe_regression',
+    false,
+    'maintenance'
+);
+$concurrentMaintenanceCount = (int)$db->query("
+    SELECT COUNT(*)
+    FROM recipe_score_pending_recipes
+    WHERE lane = 'maintenance'
+")->fetchColumn();
+
+$db->exec("
     CREATE TABLE incremental_external_commit_probe (
         id INTEGER PRIMARY KEY,
         value INTEGER NOT NULL
@@ -272,9 +438,7 @@ $favorite = recipeCatalogSetFavorite(
     true
 );
 $externalCommitObserved = false;
-$publicationDb = new ExternalCommitBeforeScorePublicationPDO(
-    'sqlite:' . $path
-);
+$publicationDb = new PDO('sqlite:' . $path);
 $publicationDb->setAttribute(
     PDO::ATTR_ERRMODE,
     PDO::ERRMODE_EXCEPTION
@@ -286,7 +450,7 @@ $publicationDb->setAttribute(
 $publicationDb->exec('PRAGMA foreign_keys=ON');
 $publicationDb->exec('PRAGMA busy_timeout=10000');
 ingredientOntologyV3RegisterGuardFunctions($publicationDb);
-$publicationDb->armExternalCommit(
+$GLOBALS['INGREDIENT_ONTOLOGY_V3_AFTER_INCREMENTAL_SNAPSHOT'] =
     static function () use (
         $path,
         &$externalCommitObserved
@@ -303,22 +467,61 @@ $publicationDb->armExternalCommit(
             WHERE id = 1
         ");
         $externalCommitObserved = true;
-    }
-);
+    };
 $favoriteDelta = ingredientOntologyV3IncrementalRebuild(
     $publicationDb,
     true
 );
+unset($GLOBALS['INGREDIENT_ONTOLOGY_V3_AFTER_INCREMENTAL_SNAPSHOT']);
+$favoriteRevision = recipeScoreRevision(
+    $db,
+    (int)($favoriteDelta['revision_id'] ?? 0)
+);
+$favoriteProcessingStatus =
+    evershelfProcessingStatusScores($db);
 $assert(
     $favorite
     && $externalCommitObserved
     && !empty($favoriteDelta['rebuilt'])
+    && !empty($favoriteDelta['serving_only'])
+    && (string)($favoriteRevision['revision_kind'] ?? '')
+        === 'serving_delta'
     && $favoriteDelta['recipe_operations'][$baselineRecipeId]
         === 'replace'
     && (int)$favoriteDelta['physical_score_rows'] === 1
-    && (int)$favoriteDelta['pending_recipe_count'] === 0,
-    'A normal external WAL commit must not prevent sparse publication'
+    && (int)$db->query("
+        SELECT COUNT(*)
+        FROM recipe_score_pending_recipes
+        WHERE lane = 'serving'
+    ")->fetchColumn() === 0,
+    'Serving recipe edits must publish despite concurrent maintenance debt: '
+        . ingredientOntologyV3Json([
+            'result' => $favoriteDelta,
+            'revision' => $favoriteRevision,
+            'maintenance_count' => $concurrentMaintenanceCount,
+        ])
 );
+$assert(
+    (int)$db->query("
+        SELECT COUNT(*)
+        FROM recipe_score_pending_recipes
+        WHERE lane = 'maintenance'
+    ")->fetchColumn() === $concurrentMaintenanceCount,
+    'Serving recipe publication must preserve maintenance recipe work'
+);
+$assert(
+    (string)$favoriteProcessingStatus['status'] === 'partial'
+    && in_array(
+        'catalog_coverage',
+        $favoriteProcessingStatus['reasons'],
+        true
+    ),
+    'Partial serving revisions must expose maintenance coverage lag'
+);
+$db->exec("
+    DELETE FROM recipe_score_pending_recipes
+    WHERE lane = 'maintenance'
+");
 $assert(
     (string)$db->query("
         SELECT status
@@ -495,11 +698,12 @@ $backfill = recipeScoreBackfillContributorRevision(
 );
 $assert(
     (int)$updated['id'] === $insertedRecipeId
-    && !empty($racedUpdate['rebuilt'])
-    && $racedUpdate['recipe_operations'][$insertedRecipeId]
-        === 'replace'
-    && (int)$racedUpdate['physical_score_rows'] === 1
-    && (int)$racedUpdate['pending_recipe_count'] === 1
+    && empty($racedUpdate['rebuilt'])
+    && (string)$racedUpdate['reason'] === 'failed'
+    && str_contains(
+        (string)($racedUpdate['error'] ?? ''),
+        'serving score recipe fingerprint changed'
+    )
     && !empty($updateDelta['rebuilt'])
     && $updateDelta['recipe_operations'][$insertedRecipeId]
         === 'replace'
@@ -638,13 +842,27 @@ recipeScoreSetWorkState(
     0
 );
 $noWork = ingredientOntologyV3IncrementalRebuild($db, true);
+$servingModeLost = ingredientOntologyV3IncrementalRebuild(
+    $db,
+    true,
+    requireServing: true
+);
 $workPhase = (string)$db->query("
     SELECT phase FROM recipe_score_work_state WHERE id = 1
 ")->fetchColumn();
 $assert(
     (string)$noWork['reason'] === 'no_pending_changes'
     && $workPhase === 'idle',
-    'No-work recovery must clear a stale published work phase'
+    'No-work recovery must clear a stale published work phase: '
+        . ingredientOntologyV3Json([
+            'no_work' => $noWork,
+            'serving_mode_lost' => $servingModeLost,
+            'work_phase' => $workPhase,
+        ])
+);
+$assert(
+    (string)$servingModeLost['reason'] === 'serving_mode_lost',
+    'A coordination-bypassed run must not downgrade into maintenance mode'
 );
 $assert(
     !empty($idSetAudit['valid'])
@@ -656,6 +874,14 @@ $db = null;
 @unlink($path);
 @unlink($path . '-wal');
 @unlink($path . '-shm');
+foreach ([
+    $servingCoordinationPath,
+    $servingBackgroundPath,
+    $servingHeartbeatPath,
+    $servingStatusPath,
+] as $statePath) {
+    @unlink($statePath);
+}
 
 echo "Recipe score delta tests passed: "
     . "{$assertions} assertions.\n";

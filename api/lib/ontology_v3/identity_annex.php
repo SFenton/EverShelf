@@ -955,11 +955,13 @@ function ingredientOntologyV3IdentityAdmissionSync(
                 $scoreState = recipeScoreState($db);
                 $db->prepare("
                     INSERT INTO recipe_score_mutations (
-                        domain, revision, owner_type, owner_id,
+                        domain, revision, lane,
+                        owner_type, owner_id,
                         operation, reason
                     )
                     VALUES (
-                        'source', ?, 'global', NULL, 'global',
+                        'source', ?, 'maintenance',
+                        'global', NULL, 'global',
                         'recipe_identity_resolver_changed'
                     )
                 ")->execute([
@@ -1000,19 +1002,25 @@ function ingredientOntologyV3IdentityAdmissionSync(
             if ($recipeIds) {
                 $pendingRecipe = $db->prepare("
                     INSERT INTO recipe_score_pending_recipes (
-                        recipe_id, operation,
+                        recipe_id, operation, lane,
                         first_catalog_revision,
                         latest_catalog_revision,
                         latest_ontology_source_revision,
                         reason, created_at, updated_at
                     )
                     VALUES (
-                        ?, 'replace', ?, ?, ?,
+                        ?, 'replace', 'maintenance', ?, ?, ?,
                         'identity_admission_manifest_changed',
                         CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
                     )
                     ON CONFLICT(recipe_id) DO UPDATE SET
                         operation = 'replace',
+                        lane = CASE
+                            WHEN recipe_score_pending_recipes.lane =
+                                'serving'
+                            THEN 'serving'
+                            ELSE 'maintenance'
+                        END,
                         latest_catalog_revision = MAX(
                             recipe_score_pending_recipes
                                 .latest_catalog_revision,
@@ -3979,7 +3987,10 @@ function ingredientOntologyV3ProductReadinessBeginScoring(
           AND identity_status = 'accepted'
     ");
     foreach ($admissions as $admission) {
-        if ((string)($admission['status'] ?? '') !== 'accepted') {
+        if (
+            (string)($admission['status'] ?? '') !== 'accepted'
+            && empty($admission['sealed_mapping_preserved'])
+        ) {
             continue;
         }
         $stmt->execute([
@@ -4026,7 +4037,10 @@ function ingredientOntologyV3ProductReadinessMarkReady(
           )
     ");
     foreach ($admissions as $admission) {
-        if ((string)($admission['status'] ?? '') !== 'accepted') {
+        if (
+            (string)($admission['status'] ?? '') !== 'accepted'
+            && empty($admission['sealed_mapping_preserved'])
+        ) {
             continue;
         }
         $stmt->execute([

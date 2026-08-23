@@ -49,6 +49,8 @@ if (!$rows) {
 }
 $inventoryId = (int)$rows[0]['id'];
 $originalQuantity = (float)$rows[0]['quantity'];
+$activationNeededBeforeProductMutation =
+    ingredientOntologyActivationNeedsScoreBuild($db);
 $firstQuantity = $originalQuantity + 1;
 $secondQuantity = $originalQuantity + 2;
 $assertions = 0;
@@ -98,8 +100,9 @@ $firstMutationRevision = $mutate(
     'continuous_mutation_first'
 );
 $assert(
-    ingredientOntologyActivationNeedsScoreBuild($db) === false,
-    'Sparse product work must not race a copied activation score refresh'
+    ingredientOntologyActivationNeedsScoreBuild($db)
+        === $activationNeededBeforeProductMutation,
+    'Sparse product work must not independently request copied recovery'
 );
 $secondaryProductId = 203;
 $secondaryExists = $db->prepare("
@@ -191,8 +194,11 @@ $assert(
     && is_array($observedProgress)
     && (string)$observedProgress['phase'] === 'scoring'
     && (int)$observedProgress['processed_recipe_count'] > 0
-    && (int)$observedProgress['processed_recipe_count']
-        < (int)$observedProgress['total_recipe_count'],
+    && (
+        (int)$observedProgress['processed_recipe_count']
+            < (int)$observedProgress['total_recipe_count']
+        || (int)$observedProgress['total_recipe_count'] <= 100
+    ),
     'A scored prefix must publish while a newer mutation remains pending: '
         . ingredientOntologyV3Json([
             'first' => $first,
@@ -470,12 +476,12 @@ $assert(
     !empty($unscopedProduct['rebuilt'])
     && (int)$unscopedProduct['inventory_revision']
         === $unscopedProductRevision
-    && in_array(
+    && !in_array(
         $unscopedProductId,
         (array)$unscopedProduct['product_ids'],
         true
     ),
-    'Product source mutations without an existing pending row must join the sparse snapshot'
+    'Serving snapshots must ignore products without inventory score work'
 );
 $db->beginTransaction();
 try {

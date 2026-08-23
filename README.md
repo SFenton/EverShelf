@@ -25,7 +25,7 @@
 [![SQLite](https://img.shields.io/badge/SQLite-3-blue.svg)](https://www.sqlite.org/)
 [![Docker](https://img.shields.io/badge/Docker-Ready-2496ED.svg)](Dockerfile)
 [![i18n](https://img.shields.io/badge/i18n-IT%20%7C%20EN%20%7C%20DE%20%7C%20FR%20%7C%20ES-orange.svg)](translations/)
-[![Version](https://img.shields.io/badge/version-1.18.12-brightgreen.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-1.19.0-brightgreen.svg)](CHANGELOG.md)
 [![GitHub stars](https://img.shields.io/github/stars/dadaloop82/EverShelf?style=social)](https://github.com/dadaloop82/EverShelf/stargazers)
 [![Last commit](https://img.shields.io/github/last-commit/dadaloop82/EverShelf/main)](https://github.com/dadaloop82/EverShelf/commits/main)
 [![Contributors](https://img.shields.io/github/contributors/dadaloop82/EverShelf)](https://github.com/dadaloop82/EverShelf/graphs/contributors)
@@ -808,9 +808,13 @@ plus terminal cleanup of disabled provider work. Without them, new products neve
 taxonomy terms, durable ontology intents remain pending, large recipe catalogs
 remain temporarily unavailable, and stale provider work remains queued. Overlapping
 activation and queue runs share the background-writer lock only during bounded
-live import and publication phases. Copied generation and validation run
-without it; web scans stay independent and force a safe rebase if their inputs
-change.
+live import and publication phases. Ordinary product, inventory, and
+user-facing recipe changes publish through a serving lane that remains
+independent of historical recipe and ontology maintenance debt. Serving
+revisions retain explicit covered-revision watermarks, so the active sparse
+projection stays available without claiming that deferred maintenance is
+fresh. Copied generation and validation run without the live lock; web scans
+stay independent and force a safe rebase if their inputs change.
 
 Canonical enrichment performs FoodOn/USDA work before opening a write
 transaction. Its short apply transaction rechecks the product fingerprint and
