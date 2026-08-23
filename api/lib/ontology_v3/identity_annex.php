@@ -657,31 +657,6 @@ function ingredientOntologyV3IdentityAdmissionMigrateRecipeBatch(
                                 )) <> ''
                             )
                         )
-                        OR (
-                            EXISTS (
-                                SELECT 1
-                                FROM ontology_subject_occurrences
-                                    current_occurrence
-                                WHERE current_occurrence.owner_type =
-                                        'recipe_ingredient'
-                                  AND current_occurrence.owner_id =
-                                        ingredient.id
-                                  AND current_occurrence.active = 1
-                            )
-                            AND NOT EXISTS (
-                                SELECT 1
-                                FROM ontology_subject_occurrences
-                                    matching_occurrence
-                                WHERE matching_occurrence.owner_type =
-                                        'recipe_ingredient'
-                                  AND matching_occurrence.owner_id =
-                                        ingredient.id
-                                  AND matching_occurrence.active = 1
-                                  AND matching_occurrence
-                                        .owner_fingerprint =
-                                      mapping.owner_fingerprint
-                            )
-                        )
                     )
                 )
             )
