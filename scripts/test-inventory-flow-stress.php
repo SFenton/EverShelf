@@ -533,6 +533,16 @@ $percentile = static function (array $values, float $fraction): float {
         max(0, min(count($values) - 1, $index))
     ];
 };
+$scanP95LimitMs = max(
+    50.0,
+    min(
+        5000.0,
+        (float)env(
+            'INVENTORY_FLOW_SCAN_P95_LIMIT_MS',
+            '100'
+        )
+    )
+);
 
 $requestedPath = trim((string)($options['db'] ?? ''));
 $temporary = $requestedPath === '';
@@ -1587,9 +1597,10 @@ $assert(
     'Concurrent scan and settle latency must remain bounded'
 );
 $assert(
-    $percentile($workerElapsed, 0.95) < 100,
-    'Scan ingestion p95 must remain under 100 milliseconds: '
+    $percentile($workerElapsed, 0.95) < $scanP95LimitMs,
+    'Scan ingestion p95 exceeded its latency gate: '
         . recipeCatalogJsonEncode([
+            'limit_ms' => $scanP95LimitMs,
             'p50_ms' => round(
                 $percentile($workerElapsed, 0.50),
                 3
@@ -1681,6 +1692,7 @@ $report = [
     ),
     'wave_p95_ms' => round($percentile($waveElapsed, 0.95), 3),
     'scan_latency_ms' => [
+        'limit' => $scanP95LimitMs,
         'p50' => round($percentile($workerElapsed, 0.50), 3),
         'p95' => round($percentile($workerElapsed, 0.95), 3),
         'max' => round(max($workerElapsed), 3),

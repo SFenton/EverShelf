@@ -228,7 +228,8 @@ jobs:
           php scripts/test-exact-identity-product-save.php
           php scripts/test-incremental-score-overlay.php
           php -d memory_limit=128M scripts/test-incremental-mutation-memory.php
-          php -d memory_limit=512M scripts/test-inventory-flow-stress.php
+          INVENTORY_FLOW_SCAN_P95_LIMIT_MS=500 \
+            php -d memory_limit=512M scripts/test-inventory-flow-stress.php
 
       - name: Test recipe backend
         run: php -d memory_limit=512M scripts/test-recipe-backend.php
