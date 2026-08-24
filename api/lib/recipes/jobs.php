@@ -1892,6 +1892,30 @@ function recipeJobClaimBatch(
                 ? ''
                 : "AND (connector IS NULL OR connector <> 'cookidoo')",
         };
+        $metadataClaimWhere = $lane === 'provider'
+            ? "
+                AND (
+                    job_type <> 'recipe_metadata_refresh'
+                    OR id = (
+                        SELECT MIN(metadata.id)
+                        FROM recipe_jobs metadata
+                        WHERE metadata.job_type =
+                                'recipe_metadata_refresh'
+                          AND metadata.connector = 'cookidoo'
+                          AND metadata.status IN ('pending', 'retry')
+                          AND metadata.attempts < MIN(
+                              metadata.max_attempts,
+                              {$maxAttempts}
+                          )
+                          AND (
+                              metadata.next_retry_at IS NULL
+                              OR metadata.next_retry_at
+                                  <= CURRENT_TIMESTAMP
+                          )
+                    )
+                )
+            "
+            : '';
         $fetch = static function (
             string $priorityWhere,
             int $rowLimit,
@@ -1899,7 +1923,8 @@ function recipeJobClaimBatch(
         ) use (
             $db,
             $maxAttempts,
-            $laneWhere
+            $laneWhere,
+            $metadataClaimWhere
         ): array {
             if ($rowLimit <= 0) {
                 return [];
@@ -1930,6 +1955,7 @@ function recipeJobClaimBatch(
                   {$priorityWhere}
                   {$excludeWhere}
                   {$laneWhere}
+                  {$metadataClaimWhere}
                 ORDER BY priority DESC, created_at ASC, id ASC
                 LIMIT {$rowLimit}
             ");
@@ -2370,13 +2396,15 @@ function recipeJobReleaseClaim(
             );
         }
 
-        recipeJobConnectorOutcomeInTransaction(
-            $db,
-            $claim,
-            false,
-            $error->getMessage(),
-            $forceCircuitBreak
-        );
+        if (!databaseIsLockError($error)) {
+            recipeJobConnectorOutcomeInTransaction(
+                $db,
+                $claim,
+                false,
+                $error->getMessage(),
+                $forceCircuitBreak
+            );
+        }
         $db->exec('COMMIT');
         return $status;
     } catch (Throwable $releaseError) {

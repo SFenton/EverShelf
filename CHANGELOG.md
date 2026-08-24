@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.20.9] - 2026-08-24
+
+### Fixed
+- Provider queue catch-up now claims at most one Cookidoo metadata batch per
+  run while still admitting other provider jobs.
+- Local SQLite lock retries no longer count as Cookidoo connector failures or
+  open the provider circuit.
+
 ## [1.20.8] - 2026-08-24
 
 ### Fixed

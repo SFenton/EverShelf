@@ -193,6 +193,80 @@ $db->exec("
     WHERE lease_name IN ('queue_local', 'queue_provider')
 ");
 
+$providerFixtureIds = [];
+for ($index = 0; $index < 3; $index++) {
+    $providerFixtureIds[] = (int)recipeJobEnqueue(
+        $db,
+        'recipe_metadata_refresh',
+        [
+            'scope' => 'provider-metadata-cap-' . $index,
+            'connector' => 'cookidoo',
+        ],
+        ['fixture' => $index],
+        'lease-test-provider-metadata-cap-' . $index
+    )['id'];
+}
+$providerDiscoveryId = (int)recipeJobEnqueue(
+    $db,
+    'connector_discovery',
+    [
+        'scope' => 'provider-discovery-cap',
+        'connector' => 'cookidoo',
+    ],
+    ['fixture' => 'discovery'],
+    'lease-test-provider-discovery-cap'
+)['id'];
+$providerFixtureIds[] = $providerDiscoveryId;
+$providerClaims = recipeJobClaimBatch(
+    $db,
+    6,
+    3,
+    true,
+    null,
+    'provider'
+);
+$metadataClaims = array_values(array_filter(
+    $providerClaims,
+    static fn(array $claim): bool =>
+        (string)$claim['job_type'] === 'recipe_metadata_refresh'
+));
+$discoveryClaims = array_values(array_filter(
+    $providerClaims,
+    static fn(array $claim): bool =>
+        (string)$claim['job_type'] === 'connector_discovery'
+));
+$db->exec("
+    UPDATE recipe_connector_state
+    SET last_error = '',
+        failure_count = 0,
+        circuit_open_until = NULL
+    WHERE connector = 'cookidoo'
+");
+$lockRetryStatus = recipeJobReleaseClaim(
+    $db,
+    $metadataClaims[0],
+    new PDOException('database is locked'),
+    3
+);
+$lockRetryConnector = $db->query("
+    SELECT failure_count, circuit_open_until
+    FROM recipe_connector_state
+    WHERE connector = 'cookidoo'
+")->fetch(PDO::FETCH_ASSOC);
+$assert(
+    count($metadataClaims) === 1
+    && count($discoveryClaims) === 1
+    && $lockRetryStatus === 'retry'
+    && (int)$lockRetryConnector['failure_count'] === 0
+    && $lockRetryConnector['circuit_open_until'] === null,
+    'Provider claims must cap metadata at one batch and ignore local lock '
+        . 'errors for connector health'
+);
+$db->exec("
+    DELETE FROM recipe_jobs
+    WHERE id IN (" . implode(',', $providerFixtureIds) . ")
+");
+
 $socketPath = $path . '.recipe-worker.sock';
 $heartbeatPath = $path . '.recipe-worker-heartbeat';
 $statusPath = $path . '.recipe-worker-status';
