@@ -19,9 +19,9 @@ PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 * * * * * www-data sleep 5 && flock -n /var/www/html/data/.background-writer.lock php /var/www/html/scripts/rebuild-recipe-scores.php >> /var/www/html/data/cron.log 2>&1
 # Dropped-wake fallback for the resident local recipe queue worker.
 */5 * * * * www-data sleep 10 && php /var/www/html/scripts/process-recipe-queue.php --limit=20 --max-attempts=20 --local-only >> /var/www/html/data/cron.log 2>&1
-# The optional direct-ID metadata backfill schedules six one-recipe jobs per
+# The optional direct-ID metadata backfill schedules one six-recipe request per
 # minute. Provider processing remains capped at six jobs per minute.
-* * * * * www-data sleep 5 && php /var/www/html/scripts/backfill-cookidoo-metadata-v2.php --enqueue-if-enabled --locale=en-US --batch-size=1 --max-recipes=6 > /dev/null 2>> /var/www/html/data/cron.log
+* * * * * www-data sleep 5 && php /var/www/html/scripts/backfill-cookidoo-metadata-v2.php --enqueue-if-enabled --locale=en-US --batch-size=6 --max-recipes=6 > /dev/null 2>> /var/www/html/data/cron.log
 * * * * * www-data sleep 15 && php /var/www/html/scripts/process-recipe-queue.php --limit=6 --max-attempts=3 --respect-cookidoo-cadence --provider-only >> /var/www/html/data/cron.log 2>&1
 * * * * * www-data sleep 25 && php /var/www/html/scripts/prune-recipe-scores.php --max-chunks=20 >> /var/www/html/data/cron.log 2>&1
 12 * * * * www-data php /var/www/html/scripts/compact-recipe-scores.php >> /var/www/html/data/cron.log 2>&1

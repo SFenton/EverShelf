@@ -153,9 +153,9 @@ $assert(
         $metadataBackfillCronLine,
         'backfill-cookidoo-metadata-v2.php'
     )
-    && str_contains($metadataBackfillCronLine, '--batch-size=1')
+    && str_contains($metadataBackfillCronLine, '--batch-size=6')
     && str_contains($metadataBackfillCronLine, '--max-recipes=6'),
-    'Cookidoo metadata backfill must remain capped at six recipes per minute'
+    'Cookidoo metadata backfill must use one six-recipe request per minute'
 );
 $db->prepare("DELETE FROM recipe_jobs WHERE id = ?")
     ->execute([(int)$legacyLease['id']]);
