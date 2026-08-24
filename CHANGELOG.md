@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.20.3] - 2026-08-24
+
+### Fixed
+- Approved maintenance score refreshes now run before advisory ontology
+  generation intents when the active ontology is already current, preventing
+  large review backlogs from starving score freshness.
+
 ## [1.20.2] - 2026-08-23
 
 ### Fixed

@@ -10724,6 +10724,65 @@ try {
             >= (int)$postValidationExtension['created_revision'],
         'Score activation must atomically publish ranking and consume intents'
     );
+    $activationTarget->exec('BEGIN IMMEDIATE');
+    try {
+        $priorityIntent = $activationTarget->query("
+            SELECT id, source_job_id
+            FROM ontology_generation_intents
+            ORDER BY id
+            LIMIT 1
+        ")->fetch(PDO::FETCH_ASSOC);
+        if (!is_array($priorityIntent)) {
+            throw new RuntimeException(
+                'Maintenance score priority fixture requires an intent'
+            );
+        }
+        $activationTarget->prepare("
+            UPDATE ontology_generation_intents
+            SET status = 'pending',
+                finished_at = NULL,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+        ")->execute([(int)$priorityIntent['id']]);
+        $activationTarget->prepare("
+            UPDATE ontology_controller_jobs
+            SET next_attempt_at = NULL,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+        ")->execute([(int)$priorityIntent['source_job_id']]);
+        recipeScoreMarkCatalogDirty($activationTarget);
+        recipeScoreMarkRecipesDirtyBatch(
+            $activationTarget,
+            [(int)$recipeIds[0]],
+            'replace',
+            'maintenance_score_priority_fixture',
+            false,
+            'maintenance'
+        );
+        controllerTestAssert(
+            ingredientOntologyActivationNeedsScoreBuild(
+                $activationTarget
+            )
+            && ingredientOntologyActivationNeedsOntologyBuild(
+                $activationTarget
+            )
+            && !ingredientOntologyActivationOntologyStateRequiresBuild(
+                $activationTarget
+            )
+            && ingredientOntologyActivationShouldPrioritizeMaintenanceScoreRefresh(
+                $activationTarget
+            ),
+            'Approved maintenance score debt must outrank advisory intents '
+                . 'when the active ontology itself is current'
+        );
+        $activationTarget->exec('ROLLBACK');
+    } catch (Throwable $error) {
+        try {
+            $activationTarget->exec('ROLLBACK');
+        } catch (Throwable $ignored) {
+        }
+        throw $error;
+    }
     controllerTestAssert(
         ingredientOntologyActivationStaleOntologyImport(
             $activationTarget
@@ -12518,6 +12577,14 @@ try {
             $noWorkBranch
         )
         : false;
+    $maintenanceScorePriority = strpos(
+        $activationSource,
+        'ingredientOntologyActivationShouldPrioritizeMaintenanceScoreRefresh'
+    );
+    $ontologyBuildPriority = strpos(
+        $activationSource,
+        'if (ingredientOntologyActivationNeedsOntologyBuild($db))'
+    );
     controllerTestAssert(
         str_contains($cronSource, "'intake_only' => true")
         && str_contains(
@@ -12585,6 +12652,9 @@ try {
             $activationSource,
             "'incremental_score_pending'"
         )
+        && is_int($maintenanceScorePriority)
+        && is_int($ontologyBuildPriority)
+        && $maintenanceScorePriority < $ontologyBuildPriority
         && str_contains(
             $activationWorkerSource,
             "'serving_score_pending'"

@@ -7491,14 +7491,11 @@ function ingredientOntologyActivationAssertActiveDatabase(PDO $db): void {
         return $row ?: null;
     }
 
-    function ingredientOntologyActivationNeedsOntologyBuild(
-        PDO $db
+    function ingredientOntologyActivationOntologyStateRequiresBuild(
+        PDO $db,
+        ?array $active = null
     ): bool {
-        $pending = ingredientOntologyActivationPendingIntentCount($db);
-        if ($pending > 0) {
-            return true;
-        }
-        $active = recipeScoreActiveRevision($db);
+        $active ??= recipeScoreActiveRevision($db);
         if ($active === null || $active['ontology_version_id'] === null) {
             return false;
         }
@@ -7568,6 +7565,35 @@ function ingredientOntologyActivationAssertActiveDatabase(PDO $db): void {
             || !hash_equals(
                 (string)$version['controller_policy_hash'],
                 ingredientOntologyControllerPolicyHash()
+            );
+    }
+
+    function ingredientOntologyActivationNeedsOntologyBuild(
+        PDO $db
+    ): bool {
+        return ingredientOntologyActivationPendingIntentCount($db) > 0
+            || ingredientOntologyActivationOntologyStateRequiresBuild(
+               $db
+            );
+    }
+
+    function ingredientOntologyActivationShouldPrioritizeMaintenanceScoreRefresh(
+        PDO $db
+    ): bool {
+        $maintenancePending = (int)$db->query("
+            SELECT COUNT(*)
+            FROM recipe_score_pending_recipes
+            WHERE lane = 'maintenance'
+        ")->fetchColumn();
+        if ($maintenancePending <= 0) {
+            return false;
+        }
+        $active = recipeScoreActiveRevision($db);
+        return $active !== null
+            && ingredientOntologyActivationNeedsScoreBuild($db)
+            && !ingredientOntologyActivationOntologyStateRequiresBuild(
+               $db,
+               $active
             );
     }
 
@@ -8328,6 +8354,27 @@ function ingredientOntologyActivationAssertActiveDatabase(PDO $db): void {
             return [
                 'action' => 'none',
                 'reason' => 'incremental_score_pending',
+                'work_cleanup' => $workCleanup,
+                'cdc_pruned' => $cdcPruned,
+            ];
+        }
+
+        if (
+            ingredientOntologyActivationShouldPrioritizeMaintenanceScoreRefresh(
+                $db
+            )
+        ) {
+            return ingredientOntologyActivationStartScoreRefresh(
+                $db,
+                $options
+            ) + [
+                'generation_deferred' => [
+                    'reason' => 'maintenance_score_refresh_priority',
+                    'pending_intent_count' =>
+                        ingredientOntologyActivationPendingIntentCount(
+                            $db
+                        ),
+                ],
                 'work_cleanup' => $workCleanup,
                 'cdc_pruned' => $cdcPruned,
             ];
