@@ -25,7 +25,7 @@
 [![SQLite](https://img.shields.io/badge/SQLite-3-blue.svg)](https://www.sqlite.org/)
 [![Docker](https://img.shields.io/badge/Docker-Ready-2496ED.svg)](Dockerfile)
 [![i18n](https://img.shields.io/badge/i18n-IT%20%7C%20EN%20%7C%20DE%20%7C%20FR%20%7C%20ES-orange.svg)](translations/)
-[![Version](https://img.shields.io/badge/version-1.20.4-brightgreen.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-1.20.5-brightgreen.svg)](CHANGELOG.md)
 [![GitHub stars](https://img.shields.io/github/stars/dadaloop82/EverShelf?style=social)](https://github.com/dadaloop82/EverShelf/stargazers)
 [![Last commit](https://img.shields.io/github/last-commit/dadaloop82/EverShelf/main)](https://github.com/dadaloop82/EverShelf/commits/main)
 [![Contributors](https://img.shields.io/github/contributors/dadaloop82/EverShelf)](https://github.com/dadaloop82/EverShelf/graphs/contributors)
@@ -804,8 +804,11 @@ php /path/to/evershelf/scripts/recipe-queue-worker.php \
 # Copied ontology/score activation, every minute
 * * * * * php /path/to/evershelf/scripts/process-ontology-activation.php --write --allow-active-db --allow-network >> /path/to/evershelf/data/cron.log 2>&1
 
+# Optional resumable Cookidoo metadata backfill, six one-recipe jobs per minute
+* * * * * php /path/to/evershelf/scripts/backfill-cookidoo-metadata-v2.php --enqueue-if-enabled --locale=en-US --batch-size=1 --max-recipes=6 > /dev/null 2>> /path/to/evershelf/data/cron.log
+
 # Rate-limited provider recipe discovery and policy cleanup, every minute
-* * * * * php /path/to/evershelf/scripts/process-recipe-queue.php --limit=2 --max-attempts=3 --respect-cookidoo-cadence --provider-only >> /path/to/evershelf/data/cron.log 2>&1
+* * * * * php /path/to/evershelf/scripts/process-recipe-queue.php --limit=6 --max-attempts=3 --respect-cookidoo-cadence --provider-only >> /path/to/evershelf/data/cron.log 2>&1
 ```
 
 These jobs are **not optional** when their features are enabled. The resident
@@ -814,6 +817,8 @@ job provides dropped-wake recovery. The resident recipe queue worker drains
 local identity, taxonomy-ready, and inventory jobs immediately, while the
 minute job retains Cookidoo cadence and provider cleanup. Activation imports
 copied ontology/score revisions and keeps recipe browse scores current.
+When `COOKIDOO_METADATA_BACKFILL_ENABLED=true`, the metadata scheduler resumes
+from its durable locale checkpoint and hydrates at most six recipes per minute.
 Without them, new products never receive
 taxonomy terms, durable ontology intents remain pending, large recipe catalogs
 remain temporarily unavailable, and stale provider work remains queued. Overlapping

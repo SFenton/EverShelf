@@ -119,12 +119,18 @@ foreach (preg_split('/\R/', $cron) ?: [] as $line) {
 }
 $providerCronLine = '';
 $localCronLine = '';
+$metadataBackfillCronLine = '';
 foreach ($recipeCronLines as $line) {
     if (str_contains($line, '--provider-only')) {
         $providerCronLine = $line;
     }
     if (str_contains($line, '--local-only')) {
         $localCronLine = $line;
+    }
+}
+foreach (preg_split('/\R/', $cron) ?: [] as $line) {
+    if (str_contains($line, '--enqueue-if-enabled')) {
+        $metadataBackfillCronLine = $line;
     }
 }
 $assert(
@@ -138,8 +144,18 @@ $assert(
 );
 $assert(
     str_contains($providerCronLine, '--provider-only')
+    && str_contains($providerCronLine, '--limit=6')
     && str_contains($localCronLine, '--local-only'),
     'Recipe cron lanes must remain isolated'
+);
+$assert(
+    str_contains(
+        $metadataBackfillCronLine,
+        'backfill-cookidoo-metadata-v2.php'
+    )
+    && str_contains($metadataBackfillCronLine, '--batch-size=1')
+    && str_contains($metadataBackfillCronLine, '--max-recipes=6'),
+    'Cookidoo metadata backfill must remain capped at six recipes per minute'
 );
 $db->prepare("DELETE FROM recipe_jobs WHERE id = ?")
     ->execute([(int)$legacyLease['id']]);

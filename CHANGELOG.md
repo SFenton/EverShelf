@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.20.5] - 2026-08-24
+
+### Added
+- A cron-safe, resumable Cookidoo detail-metadata backfill schedules six
+  one-recipe jobs per minute when explicitly enabled.
+
+### Changed
+- Provider recipe processing now accepts up to six jobs per minute.
+- Permanent content-language rejections are reported as blocked failures
+  instead of remaining backfill work.
+
 ## [1.20.4] - 2026-08-24
 
 ### Fixed

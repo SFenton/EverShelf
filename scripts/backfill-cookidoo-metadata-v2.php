@@ -18,6 +18,7 @@ function recipeCookidooMetadataBackfillUsage(): string {
         '  --status             Show version coverage, checkpoint, and job counts',
         '  --dry-run            Plan bounded metadata batches without writing',
         '  --enqueue            Enqueue bounded direct-ID metadata batches',
+        '  --enqueue-if-enabled Cron-safe enqueue; skip when backfill is disabled',
         'Options:',
         '  --locale=LOCALE      One exact regional/script Cookidoo locale (default: discovery locale)',
         '  --batch-size=N       IDs per bridge job, 1-20 (default: configured value)',
@@ -39,7 +40,11 @@ $maxRecipes = 200;
 $json = false;
 
 foreach (array_slice($argv, 1) as $arg) {
-    if (in_array($arg, ['--status', '--dry-run', '--enqueue'], true)) {
+    if (in_array(
+        $arg,
+        ['--status', '--dry-run', '--enqueue', '--enqueue-if-enabled'],
+        true
+    )) {
         if ($modeWasSet) {
             fwrite(STDERR, "Choose exactly one mode.\n");
             exit(2);
@@ -57,6 +62,13 @@ foreach (array_slice($argv, 1) as $arg) {
         $batchSize = (int)substr($arg, 13);
     } elseif (str_starts_with($arg, '--max-recipes=')) {
         $maxRecipes = (int)substr($arg, 14);
+    } elseif ($mode === 'enqueue-if-enabled' && !$status['enabled']) {
+        $result = [
+            'mode' => $mode,
+            'skipped' => true,
+            'reason' => 'cookidoo_metadata_backfill_disabled',
+            'status' => $status,
+        ];
     } else {
         fwrite(STDERR, 'Unknown option: ' . $arg . PHP_EOL);
         fwrite(STDERR, recipeCookidooMetadataBackfillUsage());

@@ -1349,7 +1349,8 @@ function recipeCookidooMetadataBackfillStatus(
                     WHEN o.metadata_failure_version = ?
                      AND (
                          o.metadata_failure_kind IN (
-                             'invalid_id', 'locale_mismatch'
+                             'invalid_id', 'locale_mismatch',
+                             'content_language_rejected'
                          )
                          OR (
                              o.metadata_failure_kind = 'not_found'
@@ -1378,7 +1379,8 @@ function recipeCookidooMetadataBackfillStatus(
                     WHEN o.metadata_failure_version = ?
                      AND o.metadata_failure_kind IN (
                          'invalid_id', 'invalid_metadata',
-                         'locale_mismatch', 'not_found'
+                         'locale_mismatch', 'not_found',
+                         'content_language_rejected'
                      )
                     THEN 1 ELSE 0
                 END AS has_failure
