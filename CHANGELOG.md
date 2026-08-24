@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.20.4] - 2026-08-24
+
+### Fixed
+- Bounded maintenance recipe changes now publish as incremental maintenance
+  deltas, including recipe-scoped source changes, instead of forcing a copied
+  ontology rebuild.
+
 ## [1.20.3] - 2026-08-24
 
 ### Fixed

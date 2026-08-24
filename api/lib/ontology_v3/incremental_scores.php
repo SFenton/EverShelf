@@ -2110,6 +2110,7 @@ function ingredientOntologyV3IncrementalRebuild(
             $db,
             'serving'
         );
+    $recipeLane = 'serving';
     $servingOnly = (bool)($pendingProducts || $pendingRecipes);
     if ($requireServing && !$servingOnly) {
         return [
@@ -2151,6 +2152,14 @@ function ingredientOntologyV3IncrementalRebuild(
                 'serving'
             );
         $servingOnly = (bool)($pendingProducts || $pendingRecipes);
+        if (!$servingOnly) {
+            $pendingRecipes =
+                ingredientOntologyV3IncrementalPendingRecipes(
+                    $db,
+                    'maintenance'
+                );
+            $recipeLane = 'maintenance';
+        }
     }
     $pending = array_merge($pendingProducts, $pendingRecipes);
     if (!$pending) {
@@ -2204,7 +2213,16 @@ function ingredientOntologyV3IncrementalRebuild(
                 $db,
                 'serving'
             );
+        $recipeLane = 'serving';
         $servingOnly = (bool)($pendingProducts || $pendingRecipes);
+        if (!$servingOnly) {
+            $pendingRecipes =
+                ingredientOntologyV3IncrementalPendingRecipes(
+                    $db,
+                    'maintenance'
+                );
+            $recipeLane = 'maintenance';
+        }
         if ($requireServing && !$servingOnly) {
             recipeScoreReconcileWorkState($db);
             return [
@@ -2228,7 +2246,7 @@ function ingredientOntologyV3IncrementalRebuild(
             ingredientOntologyV3IncrementalPendingRecipeOverflow(
                 $db,
                 count($pendingRecipes),
-                'serving'
+                $recipeLane
             );
         if ($productOverflow || $recipeOverflow) {
             $limit = ingredientOntologyV3IncrementalProductLimit();
@@ -2423,9 +2441,18 @@ function ingredientOntologyV3IncrementalRebuild(
                     $db,
                     'serving'
                 );
+            $recipeLane = 'serving';
             $servingOnly = (bool)(
                 $pendingProducts || $pendingRecipes
             );
+            if (!$servingOnly) {
+                $pendingRecipes =
+                    ingredientOntologyV3IncrementalPendingRecipes(
+                        $db,
+                        'maintenance'
+                    );
+                $recipeLane = 'maintenance';
+            }
             if ($requireServing && !$servingOnly) {
                 recipeScoreReconcileWorkState($db);
                 return [
@@ -2441,7 +2468,7 @@ function ingredientOntologyV3IncrementalRebuild(
                 || ingredientOntologyV3IncrementalPendingRecipeOverflow(
                     $db,
                     count($pendingRecipes),
-                    'serving'
+                    $recipeLane
                 )
             ) {
                 throw new RuntimeException(

@@ -220,6 +220,138 @@ recipeScoreBuildEffectiveProjection($db, $parentRevisionId);
 $db->exec('DELETE FROM recipe_score_mutations');
 $db->exec('COMMIT');
 
+$maintenancePath = $path . '.maintenance';
+@unlink($maintenancePath);
+databaseMaintenanceOnlineBackup($path, $maintenancePath);
+$maintenanceDb = new PDO('sqlite:' . $maintenancePath);
+$maintenanceDb->setAttribute(
+    PDO::ATTR_ERRMODE,
+    PDO::ERRMODE_EXCEPTION
+);
+$maintenanceDb->setAttribute(
+    PDO::ATTR_DEFAULT_FETCH_MODE,
+    PDO::FETCH_ASSOC
+);
+$maintenanceDb->exec('PRAGMA foreign_keys=ON');
+$maintenanceDb->exec('PRAGMA journal_mode=WAL');
+$maintenanceDb->exec('PRAGMA busy_timeout=10000');
+ingredientOntologyV3RegisterGuardFunctions($maintenanceDb);
+do {
+    $maintenanceIdentity =
+        ingredientOntologyV3IdentityAdmissionSync($maintenanceDb);
+    $maintenanceIdentityRemaining = max(
+        (int)(
+            $maintenanceIdentity['resolver_migration']['remaining']
+                ?? 0
+        ),
+        (int)(
+            $maintenanceIdentity[
+                'recipe_resolver_migration'
+            ]['remaining'] ?? 0
+        )
+    );
+} while ($maintenanceIdentityRemaining > 0);
+$maintenanceBaselineState = recipeScoreState($maintenanceDb);
+$maintenanceBaselineHash =
+    ingredientOntologyV3CorpusHash($maintenanceDb);
+ingredientOntologyV3SetReadyMutationGuard($maintenanceDb, true);
+ingredientOntologyV3SetPublicationGuard($maintenanceDb, true);
+$maintenanceDb->prepare("
+    UPDATE recipe_score_revisions
+    SET catalog_revision = ?,
+        covered_catalog_revision = ?,
+        ontology_source_revision = ?,
+        covered_ontology_source_revision = ?,
+        ontology_source_hash = ?
+    WHERE id = ?
+")->execute([
+    (int)$maintenanceBaselineState['catalog_revision'],
+    (int)$maintenanceBaselineState['catalog_revision'],
+    (int)$maintenanceBaselineState['ontology_source_revision'],
+    (int)$maintenanceBaselineState['ontology_source_revision'],
+    $maintenanceBaselineHash,
+    $parentRevisionId,
+]);
+ingredientOntologyV3SetPublicationGuard($maintenanceDb, false);
+ingredientOntologyV3SetReadyMutationGuard($maintenanceDb, false);
+$maintenanceDb->prepare("
+    UPDATE recipe_score_state
+    SET ontology_source_hash = ?
+    WHERE id = 1
+")->execute([$maintenanceBaselineHash]);
+$maintenanceDb->exec('DELETE FROM recipe_score_pending_products');
+$maintenanceDb->exec('DELETE FROM recipe_score_pending_recipes');
+$maintenanceDb->exec('DELETE FROM recipe_score_mutations');
+recipeCatalogSetFavorite(
+    $maintenanceDb,
+    $baselineRecipeId,
+    true
+);
+$maintenanceDb->prepare("
+    UPDATE recipe_score_pending_recipes
+    SET lane = 'maintenance'
+    WHERE recipe_id = ?
+")->execute([$baselineRecipeId]);
+$maintenanceDb->prepare("
+    UPDATE recipe_score_mutations
+    SET lane = 'maintenance'
+    WHERE domain = 'catalog'
+      AND owner_type = 'recipe'
+      AND owner_id = ?
+")->execute([$baselineRecipeId]);
+$maintenanceParent = recipeScoreActiveRevision($maintenanceDb);
+$assert(
+    is_array($maintenanceParent)
+    && ingredientOntologyActivationMaintenanceDriftIsIncremental(
+        $maintenanceDb,
+        $maintenanceParent
+    )
+    && !ingredientOntologyActivationNeedsScoreBuild($maintenanceDb),
+    'Bounded recipe maintenance must stay on the incremental lane'
+);
+$maintenanceDelta = ingredientOntologyV3IncrementalRebuild(
+    $maintenanceDb,
+    true
+);
+$maintenanceRevision = recipeScoreRevision(
+    $maintenanceDb,
+    (int)($maintenanceDelta['revision_id'] ?? 0)
+);
+$assert(
+    !empty($maintenanceDelta['rebuilt'])
+    && empty($maintenanceDelta['serving_only'])
+    && is_array($maintenanceRevision)
+    && (string)$maintenanceRevision['revision_kind']
+        === 'maintenance_delta'
+    && (int)$maintenanceDb->query("
+        SELECT COUNT(*)
+        FROM recipe_score_pending_recipes
+        WHERE lane = 'maintenance'
+    ")->fetchColumn() === 0,
+    'A bounded maintenance recipe batch must publish incrementally: '
+        . ingredientOntologyV3Json([
+            'result' => $maintenanceDelta,
+            'revision' => $maintenanceRevision,
+            'mutations' => $maintenanceDb->query("
+                SELECT domain, revision, lane, owner_type, owner_id,
+                       operation, reason
+                FROM recipe_score_mutations
+                ORDER BY domain, revision
+            ")->fetchAll(PDO::FETCH_ASSOC),
+        ])
+);
+$maintenanceDb = null;
+foreach ([
+    $maintenancePath,
+    $maintenancePath . '-wal',
+    $maintenancePath . '-shm',
+    $maintenancePath . '.migration.lock',
+    dirname($maintenancePath) . '/.'
+        . basename($maintenancePath) . '.recipe-score.lock',
+] as $maintenanceArtifact) {
+    @unlink($maintenanceArtifact);
+}
+
 $db->exec("
     INSERT INTO products (name, brand, category)
     VALUES ('Serving Lane Fixture', '', 'food')

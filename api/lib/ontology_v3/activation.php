@@ -211,6 +211,61 @@ function ingredientOntologyActivationProductDriftIsIncremental(
     );
 }
 
+function ingredientOntologyActivationMaintenanceDriftIsIncremental(
+    PDO $db,
+    array $active
+): bool {
+    if (
+        !function_exists(
+            'ingredientOntologyV3IncrementalScopedParentErrors'
+        )
+        || !ingredientOntologyV3TableExists(
+            $db,
+            'recipe_score_pending_products'
+        )
+        || !ingredientOntologyV3TableExists(
+            $db,
+            'recipe_score_pending_recipes'
+        )
+    ) {
+        return false;
+    }
+    if ((int)$db->query("
+        SELECT COUNT(*) FROM recipe_score_pending_products
+    ")->fetchColumn() > 0) {
+        return false;
+    }
+    $limit = ingredientOntologyV3IncrementalProductLimit();
+    $recipeIds = array_map(
+        'intval',
+        $db->query("
+            SELECT recipe_id
+            FROM recipe_score_pending_recipes
+            WHERE lane = 'maintenance'
+            ORDER BY updated_at, recipe_id
+            LIMIT " . ($limit + 1)
+        )->fetchAll(PDO::FETCH_COLUMN)
+    );
+    if (!$recipeIds || count($recipeIds) > $limit) {
+        return false;
+    }
+    $state = recipeScoreState($db);
+    $productIds = ingredientOntologyV3IncrementalSourceProductIds(
+        $db,
+        $active,
+        $state
+    );
+    return count($productIds) <= $limit
+        && !ingredientOntologyV3IncrementalScopedParentErrors(
+            $db,
+            $active,
+            $state,
+            $productIds,
+            $recipeIds,
+            false
+        );
+}
+
 function ingredientOntologyActivationProductDriftWithinLimit(
     PDO $db
 ): bool {
@@ -7709,6 +7764,9 @@ function ingredientOntologyActivationAssertActiveDatabase(PDO $db): void {
             return false;
         }
         if (ingredientOntologyActivationProductDriftIsIncremental(
+            $db,
+            $active
+        ) || ingredientOntologyActivationMaintenanceDriftIsIncremental(
             $db,
             $active
         )) {
