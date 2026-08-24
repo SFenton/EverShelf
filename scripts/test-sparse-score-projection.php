@@ -442,17 +442,14 @@ $db->prepare("
     $childRevisionId,
 ]);
 ingredientOntologyV3SetReadyMutationGuard($db, false);
-$pendingInventoryRevision = recipeScoreMarkDirty($db);
-$db->prepare("
-    INSERT INTO recipe_score_pending_products (
-        product_id, first_inventory_revision,
-        latest_inventory_revision, reason
-    )
-    VALUES (999999, ?, ?, 'compaction_depth_test')
-")->execute([
-    $pendingInventoryRevision,
-    $pendingInventoryRevision,
-]);
+recipeScoreMarkRecipeDirty(
+    $db,
+    $firstRecipeId,
+    'replace',
+    'compaction_depth_test',
+    false,
+    'maintenance'
+);
 $depthGate = ingredientOntologyV3IncrementalRebuild($db, true);
 $assert(
     empty($depthGate['rebuilt'])
@@ -463,23 +460,6 @@ $db->prepare("
     DELETE FROM recipe_ingredients
     WHERE id = ?
 ")->execute([$secondIngredientId]);
-$db->prepare("
-    UPDATE recipe_score_state
-    SET ontology_source_revision = ?,
-        ontology_source_hash = ?,
-        ontology_source_lineage_hash = ''
-    WHERE id = 1
-")->execute([
-    (int)recipeScoreRevision(
-        $db,
-        $childRevisionId
-    )['ontology_source_revision'],
-    (string)recipeScoreRevision(
-        $db,
-        $childRevisionId
-    )['ontology_source_hash'],
-]);
-$db->exec("DELETE FROM recipe_score_mutations");
 $compaction = ingredientOntologyV3CompactActiveScores($db, true);
 $compacted = recipeScoreActiveRevision($db);
 $compactedReport = recipeScoreRevisionReport($compacted);
@@ -495,10 +475,11 @@ $assert(
     )->fetchColumn() === 2
     && (int)$compaction['match_count'] === 1
     && (int)$db->query("
-        SELECT COUNT(*) FROM recipe_score_pending_products
-        WHERE product_id = 999999
+        SELECT COUNT(*) FROM recipe_score_pending_recipes
+        WHERE recipe_id = {$firstRecipeId}
+          AND lane = 'maintenance'
     ")->fetchColumn() === 1,
-    'Background compaction must collapse the sparse projection into one full revision'
+    'Background compaction must collapse the sparse projection while preserving pending recipe work'
 );
 recipeScorePruneRevisions($db);
 $assert(

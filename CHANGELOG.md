@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.20.8] - 2026-08-24
+
+### Fixed
+- Sparse score compaction now flattens the active covered snapshot while
+  preserving newer pending recipe/source work, preventing continuous metadata
+  hydration from deadlocking at the ancestry limit.
+
 ## [1.20.7] - 2026-08-24
 
 ### Fixed

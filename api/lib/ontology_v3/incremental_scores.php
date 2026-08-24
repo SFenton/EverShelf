@@ -3757,20 +3757,14 @@ function ingredientOntologyV3CompactActiveScores(
                 'depth' => $depth,
             ];
         }
-        if (
+        $pendingInputChanges =
             (int)$db->query("
                 SELECT COUNT(*) FROM recipe_score_pending_recipes
             ")->fetchColumn() > 0
             || (int)$state['catalog_revision']
                 !== (int)$parent['catalog_revision']
             || (int)$state['ontology_source_revision']
-                !== (int)$parent['ontology_source_revision']
-        ) {
-            return [
-                'compacted' => false,
-                'reason' => 'pending_catalog_or_source_changes',
-            ];
-        }
+                !== (int)$parent['ontology_source_revision'];
         recipeScoreEnsureEffectiveProjection($db, $parent);
         $effectiveMatchCount =
             ingredientOntologyV3EffectiveProjectionMatchCount($db);
@@ -3788,13 +3782,20 @@ function ingredientOntologyV3CompactActiveScores(
         $versionId = (int)$parent['ontology_version_id'];
         $inventoryFingerprint =
             (string)$parent['inventory_fingerprint'];
-        $catalogFingerprint = recipeScoreCatalogFingerprint($db);
+        $catalogFingerprint = $pendingInputChanges
+            ? (string)$parent['catalog_fingerprint']
+            : recipeScoreCatalogFingerprint($db);
+        $catalogLineageHash = $pendingInputChanges
+            ? (string)($parent['catalog_lineage_hash'] ?? '')
+            : '';
         $sourceLineageHash = (string)(
             $parent['ontology_source_lineage_hash'] ?? ''
         );
-        $sourceHash = $sourceLineageHash !== ''
+        $sourceHash = $pendingInputChanges
             ? (string)$parent['ontology_source_hash']
-            : ingredientOntologyV3CorpusHash($db);
+            : ($sourceLineageHash !== ''
+            ? (string)$parent['ontology_source_hash']
+            : ingredientOntologyV3CorpusHash($db));
         $idSetHashes =
             ingredientOntologyV3MaterializedIdSetHashes(
                 $db,
@@ -3808,6 +3809,7 @@ function ingredientOntologyV3CompactActiveScores(
                 status, recipe_count, ontology_version_id,
                 scoring_model, scoring_config_hash,
                 parent_score_revision_id, catalog_fingerprint,
+                catalog_lineage_hash,
                 ontology_schema_hash, ontology_prompt_hash,
                 ontology_model_hash, ontology_corpus_hash,
                 ontology_content_hash,
@@ -3820,7 +3822,7 @@ function ingredientOntologyV3CompactActiveScores(
                 catalog_id_set_hash, ingredient_id_set_hash
             )
             VALUES (
-                ?, ?, ?, ?, ?, 'building', ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                ?, ?, ?, ?, ?, 'building',                 ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                 ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
             )
         ");
@@ -3829,13 +3831,16 @@ function ingredientOntologyV3CompactActiveScores(
             (int)$parent['catalog_revision'],
             $inventoryFingerprint,
             (string)$parent['score_date'],
-            recipeScoreCatalogMaxId($db),
+            $pendingInputChanges
+                ? (int)$parent['catalog_max_id']
+                : recipeScoreCatalogMaxId($db),
             (int)$parent['recipe_count'],
             $versionId,
             (string)$parent['scoring_model'],
             (string)$parent['scoring_config_hash'],
             (int)$parent['id'],
             $catalogFingerprint,
+            $catalogLineageHash,
             (string)$parent['ontology_schema_hash'],
             (string)$parent['ontology_prompt_hash'],
             (string)$parent['ontology_model_hash'],
@@ -4005,7 +4010,12 @@ function ingredientOntologyV3CompactActiveScores(
         $report['overlay_ready'] = false;
         $report['materialized_hash_algorithm'] = 'full-v1';
         unset($report['materialized_id_set_algorithm']);
-        unset($report['catalog_lineage_hash']);
+        if ($catalogLineageHash === '') {
+            unset($report['catalog_lineage_hash']);
+        } else {
+            $report['catalog_lineage_hash'] =
+                $catalogLineageHash;
+        }
         if ($sourceLineageHash === '') {
             unset($report['ontology_source_lineage_hash']);
         } else {
@@ -4050,9 +4060,9 @@ function ingredientOntologyV3CompactActiveScores(
                 || (int)$lockedState['inventory_revision']
                     < (int)$parent['inventory_revision']
                 || (int)$lockedState['catalog_revision']
-                    !== (int)$parent['catalog_revision']
+                    < (int)$parent['catalog_revision']
                 || (int)$lockedState['ontology_source_revision']
-                    !== (int)$parent['ontology_source_revision']
+                    < (int)$parent['ontology_source_revision']
             ) {
                 throw new RuntimeException(
                     'score compaction publication fence changed'
@@ -4095,8 +4105,8 @@ function ingredientOntologyV3CompactActiveScores(
                   AND active_score_revision_id = ?
                   AND active_score_projection_revision_id = ?
                   AND inventory_revision >= ?
-                  AND catalog_revision = ?
-                  AND ontology_source_revision = ?
+                  AND catalog_revision >= ?
+                  AND ontology_source_revision >= ?
             ");
             $pointer->execute([
                 $revisionId,
