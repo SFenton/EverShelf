@@ -111,6 +111,9 @@ $assert(
 $cron = (string)file_get_contents(
     __DIR__ . '/../docker/evershelf-cron'
 );
+$metadataBackfillSource = (string)file_get_contents(
+    __DIR__ . '/backfill-cookidoo-metadata-v2.php'
+);
 $recipeCronLines = [];
 foreach (preg_split('/\R/', $cron) ?: [] as $line) {
     if (str_contains($line, 'process-recipe-queue.php')) {
@@ -156,6 +159,21 @@ $assert(
     && str_contains($metadataBackfillCronLine, '--batch-size=6')
     && str_contains($metadataBackfillCronLine, '--max-recipes=6'),
     'Cookidoo metadata backfill must use one six-recipe request per minute'
+);
+$assert(
+    str_contains(
+        $metadataBackfillSource,
+        'cookidoo_metadata_backfill_queue_not_empty'
+    )
+    && str_contains(
+        $metadataBackfillSource,
+        "(int)\$status['jobs']['queued']"
+    )
+    && str_contains(
+        $metadataBackfillSource,
+        "(int)\$status['jobs']['running']"
+    ),
+    'Cron-safe metadata enqueue must apply pending-work backpressure'
 );
 $db->prepare("DELETE FROM recipe_jobs WHERE id = ?")
     ->execute([(int)$legacyLease['id']]);

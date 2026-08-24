@@ -69,6 +69,19 @@ foreach (array_slice($argv, 1) as $arg) {
             'reason' => 'cookidoo_metadata_backfill_disabled',
             'status' => $status,
         ];
+    } elseif (
+        $mode === 'enqueue-if-enabled'
+        && (
+            (int)$status['jobs']['queued']
+            + (int)$status['jobs']['running']
+        ) > 0
+    ) {
+        $result = [
+            'mode' => $mode,
+            'skipped' => true,
+            'reason' => 'cookidoo_metadata_backfill_queue_not_empty',
+            'status' => $status,
+        ];
     } else {
         fwrite(STDERR, 'Unknown option: ' . $arg . PHP_EOL);
         fwrite(STDERR, recipeCookidooMetadataBackfillUsage());

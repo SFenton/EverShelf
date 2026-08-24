@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.20.10] - 2026-08-24
+
+### Fixed
+- Cron-safe Cookidoo metadata enqueue now pauses whenever a metadata batch is
+  pending or running, preventing transient SQLite retries from growing a
+  provider backlog.
+
 ## [1.20.9] - 2026-08-24
 
 ### Fixed
