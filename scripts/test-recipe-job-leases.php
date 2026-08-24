@@ -175,6 +175,14 @@ $assert(
     ),
     'Cron-safe metadata enqueue must apply pending-work backpressure'
 );
+$assert(
+    strpos($metadataBackfillSource, 'try {')
+        < strpos(
+            $metadataBackfillSource,
+            'cookidoo_metadata_backfill_queue_not_empty'
+        ),
+    'Metadata backpressure must execute after status is loaded'
+);
 $db->prepare("DELETE FROM recipe_jobs WHERE id = ?")
     ->execute([(int)$legacyLease['id']]);
 

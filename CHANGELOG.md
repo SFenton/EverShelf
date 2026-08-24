@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.20.11] - 2026-08-24
+
+### Fixed
+- The metadata queue backpressure decision now runs after status loading
+  instead of being unreachable inside CLI option parsing.
+
 ## [1.20.10] - 2026-08-24
 
 ### Fixed

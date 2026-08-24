@@ -62,26 +62,6 @@ foreach (array_slice($argv, 1) as $arg) {
         $batchSize = (int)substr($arg, 13);
     } elseif (str_starts_with($arg, '--max-recipes=')) {
         $maxRecipes = (int)substr($arg, 14);
-    } elseif ($mode === 'enqueue-if-enabled' && !$status['enabled']) {
-        $result = [
-            'mode' => $mode,
-            'skipped' => true,
-            'reason' => 'cookidoo_metadata_backfill_disabled',
-            'status' => $status,
-        ];
-    } elseif (
-        $mode === 'enqueue-if-enabled'
-        && (
-            (int)$status['jobs']['queued']
-            + (int)$status['jobs']['running']
-        ) > 0
-    ) {
-        $result = [
-            'mode' => $mode,
-            'skipped' => true,
-            'reason' => 'cookidoo_metadata_backfill_queue_not_empty',
-            'status' => $status,
-        ];
     } else {
         fwrite(STDERR, 'Unknown option: ' . $arg . PHP_EOL);
         fwrite(STDERR, recipeCookidooMetadataBackfillUsage());
@@ -113,6 +93,26 @@ try {
                 $batchSize,
                 $maxRecipes
             ),
+        ];
+    } elseif ($mode === 'enqueue-if-enabled' && !$status['enabled']) {
+        $result = [
+            'mode' => $mode,
+            'skipped' => true,
+            'reason' => 'cookidoo_metadata_backfill_disabled',
+            'status' => $status,
+        ];
+    } elseif (
+        $mode === 'enqueue-if-enabled'
+        && (
+            (int)$status['jobs']['queued']
+            + (int)$status['jobs']['running']
+        ) > 0
+    ) {
+        $result = [
+            'mode' => $mode,
+            'skipped' => true,
+            'reason' => 'cookidoo_metadata_backfill_queue_not_empty',
+            'status' => $status,
         ];
     } else {
         $result = [
