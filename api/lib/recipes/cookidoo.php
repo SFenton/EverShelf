@@ -109,6 +109,40 @@ function recipeCookidooMetadataBackfillEnabled(): bool {
         && recipeCookidooDetailHydrationPolicyAllows();
 }
 
+function recipeCookidooMetadataBackfillHasPendingWork(
+    PDO $db,
+    ?string $locale = null
+): bool {
+    if (
+        !recipeCookidooMetadataBackfillEnabled()
+        || !recipeConnectorIsEnabled($db, RECIPE_COOKIDOO_CONNECTOR)
+    ) {
+        return false;
+    }
+    $locale = $locale !== null
+        ? recipeCookidooNormalizeLocale($locale)
+        : recipeCookidooDiscoveryLocale();
+    if (recipeCookidooLocaleIsLanguageOnly($locale)) {
+        return false;
+    }
+    $openJob = $db->prepare("
+        SELECT 1
+        FROM recipe_jobs
+        WHERE job_type = 'recipe_metadata_refresh'
+          AND connector = ?
+          AND status IN ('pending', 'retry', 'in_progress')
+        LIMIT 1
+    ");
+    $openJob->execute([RECIPE_COOKIDOO_CONNECTOR]);
+    return $openJob->fetchColumn() !== false
+        || recipeCookidooMetadataBackfillCandidates(
+            $db,
+            $locale,
+            0,
+            1
+        ) !== [];
+}
+
 function recipeCookidooMetadataBackfillBatchSize(): int {
     return max(1, min(20, (int)recipeCookidooConfigValue(
         'COOKIDOO_METADATA_BACKFILL_BATCH_SIZE',

@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.20.6] - 2026-08-24
+
+### Fixed
+- Advisory copied ontology builds are deferred while the operator-enabled
+  Cookidoo metadata backfill has pending work, preventing expected source-fence
+  failures while incremental recipe scoring remains live.
+
 ## [1.20.5] - 2026-08-24
 
 ### Added

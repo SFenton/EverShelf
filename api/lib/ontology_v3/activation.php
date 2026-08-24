@@ -8438,7 +8438,41 @@ function ingredientOntologyActivationAssertActiveDatabase(PDO $db): void {
             ];
         }
 
-        if (ingredientOntologyActivationNeedsOntologyBuild($db)) {
+        $needsOntologyBuild =
+            ingredientOntologyActivationNeedsOntologyBuild($db);
+        if (
+            $needsOntologyBuild
+            && function_exists(
+                'recipeCookidooMetadataBackfillHasPendingWork'
+            )
+            && recipeCookidooMetadataBackfillHasPendingWork($db)
+        ) {
+            $deferred =
+                ingredientOntologyActivationWithLiveReservation(
+                    $options,
+                    'record_metadata_backfill_deferred',
+                    static fn(): array =>
+                        ingredientOntologyActivationRecordOutcome(
+                            $db,
+                            'metadata_backfill_deferred',
+                            [
+                                'reason' =>
+                                    'cookidoo_metadata_backfill_active',
+                            ],
+                            true,
+                            60
+                        )
+                );
+            return [
+                'action' => 'policy_deferred',
+                'reason' => 'cookidoo_metadata_backfill_active',
+                'outcome' => $deferred,
+                'work_cleanup' => $workCleanup,
+                'cdc_pruned' => $cdcPruned,
+            ];
+        }
+
+        if ($needsOntologyBuild) {
             $reviewedManifestRefresh =
                 ingredientOntologyActivationShouldRebuildReviewedManifest(
                     $db,

@@ -7461,6 +7461,10 @@ try {
     $GLOBALS['RECIPE_COOKIDOO_CONFIG'][
         'COOKIDOO_DETAIL_HYDRATION_ENABLED'
     ] = 'true';
+    recipeTestAssert(
+        recipeCookidooMetadataBackfillHasPendingWork($db, 'en-GB'),
+        'Enabled metadata backfill must expose pending work'
+    );
     $languageOnlyEnqueueRejected = false;
     try {
         recipeCookidooEnqueueMetadataBackfill($db, 'en', 20, 200);

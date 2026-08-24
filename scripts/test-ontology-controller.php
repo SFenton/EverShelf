@@ -12581,9 +12581,13 @@ try {
         $activationSource,
         'ingredientOntologyActivationShouldPrioritizeMaintenanceScoreRefresh'
     );
+    $metadataBackfillPriority = strpos(
+        $activationSource,
+        'recipeCookidooMetadataBackfillHasPendingWork'
+    );
     $ontologyBuildPriority = strpos(
         $activationSource,
-        'if (ingredientOntologyActivationNeedsOntologyBuild($db))'
+        'if ($needsOntologyBuild)'
     );
     controllerTestAssert(
         str_contains($cronSource, "'intake_only' => true")
@@ -12653,8 +12657,10 @@ try {
             "'incremental_score_pending'"
         )
         && is_int($maintenanceScorePriority)
+        && is_int($metadataBackfillPriority)
         && is_int($ontologyBuildPriority)
         && $maintenanceScorePriority < $ontologyBuildPriority
+        && $metadataBackfillPriority < $ontologyBuildPriority
         && str_contains(
             $activationWorkerSource,
             "'serving_score_pending'"
