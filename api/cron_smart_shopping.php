@@ -130,7 +130,15 @@ try {
     // Exact correction constraints are already durable before HTTP response.
     // This fallback drain supplements the low-latency polling worker and cannot
     // call a model or move an active pointer unless its independent gates are on.
-    if (ingredientOntologyControllerEnabled()) {
+    if (
+        ingredientOntologyControllerEnabled()
+        && !(
+            function_exists(
+                'recipeCookidooMetadataBackfillHasPendingWork'
+            )
+            && recipeCookidooMetadataBackfillHasPendingWork($db)
+        )
+    ) {
         try {
             $controllerResult =
                 ingredientOntologyControllerProcessQueue(

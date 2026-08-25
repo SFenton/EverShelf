@@ -12614,6 +12614,10 @@ try {
         && str_contains($cronSource, "'run_generation' => false")
         && str_contains($cronSource, "'promote' => false")
         && str_contains(
+            $cronSource,
+            'recipeCookidooMetadataBackfillHasPendingWork'
+        )
+        && str_contains(
             $controllerCliSource,
             '--minimum-priority=50'
         )

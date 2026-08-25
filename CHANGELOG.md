@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.20.18] - 2026-08-25
+
+### Fixed
+- The smart-shopping ontology-controller fallback now defers alongside the
+  resident intake worker during Cookidoo metadata backfill.
+
 ## [1.20.17] - 2026-08-25
 
 ### Fixed
