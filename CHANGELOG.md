@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.20.12] - 2026-08-25
+
+### Fixed
+- Metadata enqueue pauses while recipe scores are not fresh, allowing daily
+  expiry-score rollover to reach a stable source snapshot.
+- Backfill deferral now yields to copied score refresh when the active score
+  date is stale, then resumes automatically after activation.
+
 ## [1.20.11] - 2026-08-24
 
 ### Fixed

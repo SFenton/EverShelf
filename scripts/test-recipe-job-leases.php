@@ -167,13 +167,17 @@ $assert(
     )
     && str_contains(
         $metadataBackfillSource,
+        'recipe_score_not_fresh'
+    )
+    && str_contains(
+        $metadataBackfillSource,
         "(int)\$status['jobs']['queued']"
     )
     && str_contains(
         $metadataBackfillSource,
         "(int)\$status['jobs']['running']"
     ),
-    'Cron-safe metadata enqueue must apply pending-work backpressure'
+    'Cron-safe metadata enqueue must apply score and pending-work backpressure'
 );
 $assert(
     strpos($metadataBackfillSource, 'try {')

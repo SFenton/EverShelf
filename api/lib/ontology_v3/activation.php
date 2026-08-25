@@ -8442,6 +8442,11 @@ function ingredientOntologyActivationAssertActiveDatabase(PDO $db): void {
             ingredientOntologyActivationNeedsOntologyBuild($db);
         if (
             $needsOntologyBuild
+            && (
+                $activeScore === null
+                || (string)$activeScore['score_date']
+                    === recipeScoreCurrentDate()
+            )
             && function_exists(
                 'recipeCookidooMetadataBackfillHasPendingWork'
             )

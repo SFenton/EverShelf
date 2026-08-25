@@ -12585,6 +12585,10 @@ try {
         $activationSource,
         'recipeCookidooMetadataBackfillHasPendingWork'
     );
+    $metadataBackfillDateGate = strpos(
+        $activationSource,
+        "=== recipeScoreCurrentDate()"
+    );
     $ontologyBuildPriority = strpos(
         $activationSource,
         'if ($needsOntologyBuild)'
@@ -12658,9 +12662,11 @@ try {
         )
         && is_int($maintenanceScorePriority)
         && is_int($metadataBackfillPriority)
+        && is_int($metadataBackfillDateGate)
         && is_int($ontologyBuildPriority)
         && $maintenanceScorePriority < $ontologyBuildPriority
         && $metadataBackfillPriority < $ontologyBuildPriority
+        && $metadataBackfillDateGate < $ontologyBuildPriority
         && str_contains(
             $activationWorkerSource,
             "'serving_score_pending'"

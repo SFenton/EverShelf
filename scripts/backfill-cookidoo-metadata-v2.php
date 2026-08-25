@@ -81,6 +81,9 @@ if ($maxRecipes < 1 || $maxRecipes > 200) {
 try {
     $db = getDB();
     $status = recipeCookidooMetadataBackfillStatus($db, $locale);
+    $activeScore = recipeScoreActiveRevision($db);
+    $scoreFresh = $activeScore !== null
+        && recipeScoreRevisionStatus($db, $activeScore) === 'fresh';
     if ($mode === 'status') {
         $result = ['mode' => $mode, 'status' => $status];
     } elseif ($mode === 'dry-run') {
@@ -99,6 +102,13 @@ try {
             'mode' => $mode,
             'skipped' => true,
             'reason' => 'cookidoo_metadata_backfill_disabled',
+            'status' => $status,
+        ];
+    } elseif ($mode === 'enqueue-if-enabled' && !$scoreFresh) {
+        $result = [
+            'mode' => $mode,
+            'skipped' => true,
+            'reason' => 'recipe_score_not_fresh',
             'status' => $status,
         ];
     } elseif (
