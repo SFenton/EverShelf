@@ -12589,6 +12589,10 @@ try {
         $activationSource,
         "=== recipeScoreCurrentDate()"
     );
+    $dailyScorePriority = strpos(
+        $activationSource,
+        'daily_score_rollover_priority'
+    );
     $ontologyBuildPriority = strpos(
         $activationSource,
         'if ($needsOntologyBuild)'
@@ -12663,10 +12667,12 @@ try {
         && is_int($maintenanceScorePriority)
         && is_int($metadataBackfillPriority)
         && is_int($metadataBackfillDateGate)
+        && is_int($dailyScorePriority)
         && is_int($ontologyBuildPriority)
         && $maintenanceScorePriority < $ontologyBuildPriority
         && $metadataBackfillPriority < $ontologyBuildPriority
         && $metadataBackfillDateGate < $ontologyBuildPriority
+        && $dailyScorePriority < $ontologyBuildPriority
         && str_contains(
             $activationWorkerSource,
             "'serving_score_pending'"

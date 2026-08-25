@@ -8405,6 +8405,26 @@ function ingredientOntologyActivationAssertActiveDatabase(PDO $db): void {
         $activeScore = recipeScoreActiveRevision($db);
         if (
             $activeScore !== null
+            && (string)$activeScore['score_date']
+                !== recipeScoreCurrentDate()
+        ) {
+            return ingredientOntologyActivationStartScoreRefresh(
+                $db,
+                $options
+            ) + [
+                'generation_deferred' => [
+                    'reason' => 'daily_score_rollover_priority',
+                    'pending_intent_count' =>
+                        ingredientOntologyActivationPendingIntentCount(
+                            $db
+                        ),
+                ],
+                'work_cleanup' => $workCleanup,
+                'cdc_pruned' => $cdcPruned,
+            ];
+        }
+        if (
+            $activeScore !== null
             && recipeScoreRevisionStatus($db, $activeScore)
                 !== 'fresh'
             && !ingredientOntologyActivationNeedsScoreBuild($db)
