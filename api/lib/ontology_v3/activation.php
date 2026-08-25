@@ -8407,6 +8407,10 @@ function ingredientOntologyActivationAssertActiveDatabase(PDO $db): void {
             $activeScore !== null
             && (string)$activeScore['score_date']
                 !== recipeScoreCurrentDate()
+            && !ingredientOntologyActivationOntologyStateRequiresBuild(
+                $db,
+                $activeScore
+            )
         ) {
             return ingredientOntologyActivationStartScoreRefresh(
                 $db,

@@ -12593,6 +12593,10 @@ try {
         $activationSource,
         'daily_score_rollover_priority'
     );
+    $dailyScoreOntologyFence = strpos(
+        $activationSource,
+        '!ingredientOntologyActivationOntologyStateRequiresBuild'
+    );
     $ontologyBuildPriority = strpos(
         $activationSource,
         'if ($needsOntologyBuild)'
@@ -12668,11 +12672,13 @@ try {
         && is_int($metadataBackfillPriority)
         && is_int($metadataBackfillDateGate)
         && is_int($dailyScorePriority)
+        && is_int($dailyScoreOntologyFence)
         && is_int($ontologyBuildPriority)
         && $maintenanceScorePriority < $ontologyBuildPriority
         && $metadataBackfillPriority < $ontologyBuildPriority
         && $metadataBackfillDateGate < $ontologyBuildPriority
         && $dailyScorePriority < $ontologyBuildPriority
+        && $dailyScoreOntologyFence < $ontologyBuildPriority
         && str_contains(
             $activationWorkerSource,
             "'serving_score_pending'"

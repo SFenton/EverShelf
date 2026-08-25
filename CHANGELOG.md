@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.20.15] - 2026-08-25
+
+### Fixed
+- Score-only daily rollover now requires the active ontology to cover the
+  current corpus; source drift correctly performs ontology+score activation.
+
 ## [1.20.14] - 2026-08-25
 
 ### Fixed
