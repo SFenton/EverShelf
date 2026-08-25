@@ -8466,6 +8466,7 @@ function ingredientOntologyActivationAssertActiveDatabase(PDO $db): void {
             ingredientOntologyActivationNeedsOntologyBuild($db);
         if (
             $needsOntologyBuild
+            && !ingredientOntologyActivationNeedsScoreBuild($db)
             && (
                 $activeScore === null
                 || (string)$activeScore['score_date']

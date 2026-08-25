@@ -12589,6 +12589,10 @@ try {
         $activationSource,
         "=== recipeScoreCurrentDate()"
     );
+    $metadataBackfillScoreFence = strpos(
+        $activationSource,
+        '!ingredientOntologyActivationNeedsScoreBuild($db)'
+    );
     $dailyScorePriority = strpos(
         $activationSource,
         'daily_score_rollover_priority'
@@ -12679,12 +12683,14 @@ try {
         && is_int($maintenanceScorePriority)
         && is_int($metadataBackfillPriority)
         && is_int($metadataBackfillDateGate)
+        && is_int($metadataBackfillScoreFence)
         && is_int($dailyScorePriority)
         && is_int($dailyScoreOntologyFence)
         && is_int($ontologyBuildPriority)
         && $maintenanceScorePriority < $ontologyBuildPriority
         && $metadataBackfillPriority < $ontologyBuildPriority
         && $metadataBackfillDateGate < $ontologyBuildPriority
+        && $metadataBackfillScoreFence < $ontologyBuildPriority
         && $dailyScorePriority < $ontologyBuildPriority
         && $dailyScoreOntologyFence < $ontologyBuildPriority
         && str_contains(

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.20.17] - 2026-08-25
+
+### Fixed
+- Backfill deferral now applies only to advisory ontology work; required score
+  or ontology coverage rebuilds proceed before hydration resumes.
+
 ## [1.20.16] - 2026-08-25
 
 ### Fixed
