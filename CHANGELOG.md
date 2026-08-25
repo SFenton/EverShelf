@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.20.16] - 2026-08-25
+
+### Fixed
+- The active-database ontology intake worker now remains healthy but defers
+  review mutations while Cookidoo metadata backfill is active.
+
 ## [1.20.15] - 2026-08-25
 
 ### Fixed

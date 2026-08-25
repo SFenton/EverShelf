@@ -12627,6 +12627,14 @@ try {
         )
         && str_contains(
             $controllerCliSource,
+            'recipeCookidooMetadataBackfillHasPendingWork'
+        )
+        && str_contains(
+            $controllerCliSource,
+            "'cookidoo_metadata_backfill_active'"
+        )
+        && str_contains(
+            $controllerCliSource,
             "case 'bundle-build':"
         )
         && is_int($mainActivationTry)
