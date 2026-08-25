@@ -238,7 +238,7 @@ function ingredientOntologyV3ResolutionManifest(): array {
             !== INGREDIENT_ONTOLOGY_V3_RESOLUTION_MANIFEST_VERSION
         || (string)($manifest['reviewer'] ?? '') === ''
         || (string)($manifest['review_batch'] ?? '') === ''
-        || (string)($manifest['corrective_version'] ?? '') !== 'v3.18'
+        || (string)($manifest['corrective_version'] ?? '') !== 'v3.19'
         || (string)($manifest['activation_policy'] ?? '')
             !== 'manual_review'
         || trim((string)($manifest['activation_block_reason'] ?? '')) === ''

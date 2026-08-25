@@ -7,7 +7,7 @@
   "review_batch": "full-ontology-resolution-production-v4",
   "activation_policy": "manual_review",
   "activation_block_reason": "Manual activation requires the complete frozen-corpus, integrity, gold, materialization, and explicit CLI confirmation gates.",
-  "corrective_version": "v3.18",
+  "corrective_version": "v3.19",
   "gold_review_metadata": {
     "status": "maintainer_adjudicated",
     "reviewer": "operator-corrective-review-v3",
@@ -146,7 +146,7 @@
     "provider-facet-waivers.csv": "b7bd19a5eaf9c19dfab582baecc8eb3b8270c6a2db3af7ff11a76282c1f67c74",
     "provider-local-reviews.csv": "a71e3fe519654c1c6280ee7306ffffbcfb305b4932065a2636ae4626370445c5",
     "provider-term-facet-waivers.csv": "658faf9d90090466bcae69d9f7db13227dadc89dd1562c24884f79ce9267b820",
-    "provider-terms.csv": "63c04b8b73dfb5a21595cb0739386ef7361b213ae3340c9c6962b714c17bb74b",
+    "provider-terms.csv": "4d5e951e737146989946f9c05cffa991b53ea4dd295166ee54be1756cc270062",
     "recipe-semantic-dispositions.csv": "083aa111420311b798d1b08ecb37dbba1450f6f916d2ef396faf7a35e97cf052",
     "resolution-gold-adjudicated.csv": "976833b562c3e0f87dcb3299b0477f8f9736f91fcc358638ae67a9df993168ea",
     "rule-adjudications.csv": "d5d12726ecdc8eb92710579c72f5463df37541d23ebec84c590be4e67d78edc3",
