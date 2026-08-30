@@ -434,6 +434,7 @@ function evershelfProcessingStatusOntologyQueue(PDO $db): array {
             'deferred_count' => 0,
             'generation_intent_pending_count' => 0,
             'generation_intent_due_count' => 0,
+            'generation_intent_deferred_count' => 0,
             'generation_intent_policy_deferred_count' => 0,
             'generation_intent_oldest_at' => null,
             'generation_intent_oldest_age_seconds' => null,
@@ -521,6 +522,7 @@ function evershelfProcessingStatusOntologyQueue(PDO $db): array {
     $intent = [
         'pending_count' => 0,
         'due_count' => 0,
+        'deferred_count' => 0,
         'policy_deferred_count' => 0,
         'oldest_at' => null,
         'oldest_due_at' => null,
@@ -529,28 +531,45 @@ function evershelfProcessingStatusOntologyQueue(PDO $db): array {
         $db,
         'ontology_generation_intents'
     )) {
-        $intent = $db->query("
-            SELECT COUNT(*) AS pending_count,
+        $intentStmt = $db->prepare("
+            SELECT COALESCE(SUM(CASE
+                       WHEN job.priority >= ?
+                       THEN 1 ELSE 0 END), 0) AS pending_count,
                    COALESCE(SUM(CASE
-                       WHEN job.next_attempt_at IS NULL
-                         OR job.next_attempt_at <= CURRENT_TIMESTAMP
+                       WHEN job.priority >= ?
+                        AND (
+                            job.next_attempt_at IS NULL
+                            OR job.next_attempt_at <= CURRENT_TIMESTAMP
+                        )
                        THEN 1 ELSE 0 END), 0) AS due_count,
                    COALESCE(SUM(CASE
-                       WHEN job.last_error_kind =
+                       WHEN job.priority < ?
+                       THEN 1 ELSE 0 END), 0) AS deferred_count,
+                   COALESCE(SUM(CASE
+                       WHEN job.priority >= ?
+                        AND job.last_error_kind =
                             'generation_policy_deferred'
                        THEN 1 ELSE 0 END), 0)
                        AS policy_deferred_count,
-                   MIN(intent.created_at) AS oldest_at,
                    MIN(CASE
-                       WHEN job.next_attempt_at IS NULL
-                         OR job.next_attempt_at <= CURRENT_TIMESTAMP
+                       WHEN job.priority >= ?
+                       THEN intent.created_at ELSE NULL END)
+                       AS oldest_at,
+                   MIN(CASE
+                       WHEN job.priority >= ?
+                        AND (
+                            job.next_attempt_at IS NULL
+                            OR job.next_attempt_at <= CURRENT_TIMESTAMP
+                        )
                        THEN intent.created_at ELSE NULL END)
                        AS oldest_due_at
             FROM ontology_generation_intents intent
             JOIN ontology_controller_jobs job
               ON job.id = intent.source_job_id
             WHERE intent.status = 'pending'
-        ")->fetch(PDO::FETCH_ASSOC) ?: $intent;
+        ");
+        $intentStmt->execute(array_fill(0, 6, $minimumPriority));
+        $intent = $intentStmt->fetch(PDO::FETCH_ASSOC) ?: $intent;
     }
     $coverageGap = [
         'open_count' => 0,
@@ -587,6 +606,8 @@ function evershelfProcessingStatusOntologyQueue(PDO $db): array {
             (int)($intent['pending_count'] ?? 0),
         'generation_intent_due_count' =>
             (int)($intent['due_count'] ?? 0),
+        'generation_intent_deferred_count' =>
+            (int)($intent['deferred_count'] ?? 0),
         'generation_intent_policy_deferred_count' =>
             (int)($intent['policy_deferred_count'] ?? 0),
         'generation_intent_oldest_at' => $intentOldest,

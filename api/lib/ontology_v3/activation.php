@@ -7655,12 +7655,16 @@ function ingredientOntologyActivationAssertActiveDatabase(PDO $db): void {
     function ingredientOntologyActivationPendingIntentCount(
         PDO $db
     ): int {
+        $minimumPriority = function_exists(
+            'ingredientOntologyControllerMinimumPriority'
+        ) ? ingredientOntologyControllerMinimumPriority() : 0;
         return (int)$db->query("
             SELECT COUNT(*)
             FROM ontology_generation_intents intent
             JOIN ontology_controller_jobs job
               ON job.id = intent.source_job_id
             WHERE intent.status = 'pending'
+              AND job.priority >= {$minimumPriority}
               AND (
                   job.next_attempt_at IS NULL
                   OR job.next_attempt_at <= CURRENT_TIMESTAMP
@@ -7835,6 +7839,8 @@ function ingredientOntologyActivationAssertActiveDatabase(PDO $db): void {
                     'bypass_debounce' => true,
                     'promote' => false,
                     'disable_automatic_promotion' => true,
+                    'minimum_priority' =>
+                        ingredientOntologyControllerMinimumPriority(),
                 ]
             );
             $copy = null;

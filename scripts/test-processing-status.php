@@ -203,9 +203,14 @@ try {
         $status['schema_version']
             === EVERSHELF_PROCESSING_STATUS_SCHEMA
         && $status['recipe_source_ontology']['missing_row_count'] === 0
-        && $status['ontology_queue']['intake_open_count'] >= 1
+        && $status['ontology_queue']['minimum_priority'] === 51
+        && $status['ontology_queue']['deferred_count'] >= 1
         && array_key_exists(
             'generation_intent_due_count',
+            $status['ontology_queue']
+        )
+        && array_key_exists(
+            'generation_intent_deferred_count',
             $status['ontology_queue']
         )
         && array_key_exists(

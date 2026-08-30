@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.20.20] - 2026-08-29
+
+### Fixed
+- Ontology intake now rebases historical jobs to the active ready ontology
+  before deterministic admission and keeps annex/score mutations inside the
+  occurrence fence, preventing cross-version identity ping-pong.
+- Activation and provisional intent intake now honor the configured minimum
+  priority. Production defaults to `51`, retaining priority-50 recipe review
+  debt for explicit maintenance while priority-60/100 work continues.
+
 ## [1.20.19] - 2026-08-29
 
 ### Fixed

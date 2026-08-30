@@ -25,7 +25,7 @@
 [![SQLite](https://img.shields.io/badge/SQLite-3-blue.svg)](https://www.sqlite.org/)
 [![Docker](https://img.shields.io/badge/Docker-Ready-2496ED.svg)](Dockerfile)
 [![i18n](https://img.shields.io/badge/i18n-IT%20%7C%20EN%20%7C%20DE%20%7C%20FR%20%7C%20ES-orange.svg)](translations/)
-[![Version](https://img.shields.io/badge/version-1.20.19-brightgreen.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-1.20.20-brightgreen.svg)](CHANGELOG.md)
 [![GitHub stars](https://img.shields.io/github/stars/dadaloop82/EverShelf?style=social)](https://github.com/dadaloop82/EverShelf/stargazers)
 [![Last commit](https://img.shields.io/github/last-commit/dadaloop82/EverShelf/main)](https://github.com/dadaloop82/EverShelf/commits/main)
 [![Contributors](https://img.shields.io/github/contributors/dadaloop82/EverShelf)](https://github.com/dadaloop82/EverShelf/graphs/contributors)
@@ -471,10 +471,11 @@ php scripts/ontology-controller.php benchmark-import \
 `backfill` is dry-run unless `--write` is supplied and refuses the active DB
 without `--allow-active-db`. It uses keyset batches and durable checkpoints
 rather than one corpus-sized transaction. Its subject jobs remain at priority
-`0`; production cron/work filters them out with a minimum priority of `50`.
-Live recipe observations enqueue at `50`, while live product observations use
-`100`, raise an existing queued historical job, and safely revive terminal work
-with fresh input and lease fences. Copied offline workers can explicitly select
+`0`; production cron/work filters them out with a minimum priority of `51`.
+Live recipe observations enqueue at `50` and remain durable for explicit
+maintenance windows, while live product observations use `100`, raise an
+existing queued historical job, and safely revive terminal work with fresh
+input and lease fences. Copied offline workers can explicitly select
 historical work with `--minimum-priority=0`. Google Interactions API support uses a separate key,
 strict JSON Schema, an exact model ID, `thinking_level`, and no silent fallback.
 Generalized repairs require an immutable measured benchmark policy and a

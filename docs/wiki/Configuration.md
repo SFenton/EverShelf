@@ -181,7 +181,7 @@ INGREDIENT_ONTOLOGY_CONTROLLER_POLL_MS=250
 INGREDIENT_ONTOLOGY_CONTROLLER_LOW_SIGNAL_SHORTCUT_ENABLED=false
 INGREDIENT_ONTOLOGY_CONTROLLER_LEASE_SECONDS=600
 INGREDIENT_ONTOLOGY_CONTROLLER_CRON_LIMIT=10
-INGREDIENT_ONTOLOGY_CONTROLLER_MINIMUM_PRIORITY=50
+INGREDIENT_ONTOLOGY_CONTROLLER_MINIMUM_PRIORITY=51
 INGREDIENT_ONTOLOGY_CONTROLLER_CANDIDATE_LIMIT=64
 INGREDIENT_ONTOLOGY_CONTROLLER_GENERATION_QUIET_SECONDS=300
 INGREDIENT_ONTOLOGY_CONTROLLER_GENERATION_MAXIMUM_LATENCY_SECONDS=1800
@@ -294,9 +294,11 @@ without another proposer call.
 Live product observations enqueue subject resolution at priority `100`, and
 live recipe ingestion uses priority `50`; both refresh queued/retry work and
 safely revive terminal jobs with fresh immutable input and lease fences.
-Historical backfill remains priority `0`. Production cron and the dedicated
-live worker use `INGREDIENT_ONTOLOGY_CONTROLLER_MINIMUM_PRIORITY=50`, so
-historical work is retained but not drained:
+Historical backfill remains priority `0`. Production uses
+`INGREDIENT_ONTOLOGY_CONTROLLER_MINIMUM_PRIORITY=51`, so catalog recipe review
+work remains durable without competing with priority `60+` manual work or
+priority `100` live product ingestion. Set the threshold to `50` only for an
+explicit recipe-maintenance window:
 
 ```bash
 php scripts/ontology-controller.php work \

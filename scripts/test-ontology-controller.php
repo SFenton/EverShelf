@@ -1177,7 +1177,7 @@ try {
         && $priorityCoverageAfter['dropped_owner_count'] === 0
         && $priorityCoverageAfter['expected_non_prepared_owners']
             === $priorityCoverageBefore['expected_non_prepared_owners']
-        && $priorityStatus['intake_minimum_priority'] === 50
+        && $priorityStatus['intake_minimum_priority'] === 51
         && $priorityStatus['pending_priority_counts'][
             'below_minimum'
         ] >= 30001,
@@ -3803,6 +3803,475 @@ try {
         ) === $repeatPendingCount,
         'Unchanged reviewed admissions must not dirty recipes again'
     );
+    $staleAdmissionFork = ingredientOntologyV3ForkVersion(
+        $db,
+        $baseVersionId,
+        [
+            'generation_key' => ingredientOntologyV3Hash([
+                'test' => 'stale-reviewed-intake',
+            ]),
+            'activation_policy' => 'manual',
+        ]
+    );
+    $staleAdmissionVersionId =
+        (int)$staleAdmissionFork['version_id'];
+    $staleAdmissionContentHash =
+        ingredientOntologyV3ContentHash(
+            $db,
+            $staleAdmissionVersionId
+        );
+    ingredientOntologyV3SetPublicationGuard($db, true);
+    $db->prepare("
+        UPDATE ingredient_ontology_versions
+        SET content_hash = ?,
+            status = 'ready',
+            ready_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+    ")->execute([
+        $staleAdmissionContentHash,
+        $staleAdmissionVersionId,
+    ]);
+    ingredientOntologyV3SetPublicationGuard($db, false);
+    $staleAdmissionStateBefore = recipeScoreState($db);
+    $staleAdmissionPendingBefore = controllerTestCount(
+        $db,
+        "SELECT COUNT(*)
+         FROM recipe_score_pending_recipes
+         WHERE recipe_id IN ({$reviewedRecipeList})"
+    );
+    $staleAdmissionMutationBefore = controllerTestCount(
+        $db,
+        "SELECT COUNT(*) FROM recipe_score_mutations"
+    );
+    $staleAdmissionGuarded = false;
+    try {
+        ingredientOntologyControllerReviewedAdmission(
+            $db,
+            $reviewedRecipeJob,
+            $staleAdmissionVersionId
+        );
+    } catch (RuntimeException $error) {
+        $staleAdmissionGuarded = $error->getMessage()
+            === 'reviewed_admission_requires_active_ontology_version';
+    }
+    controllerTestAssert(
+        $staleAdmissionGuarded
+        && recipeScoreState($db) === $staleAdmissionStateBefore
+        && controllerTestCount(
+            $db,
+            "SELECT COUNT(*)
+             FROM recipe_score_pending_recipes
+             WHERE recipe_id IN ({$reviewedRecipeList})"
+        ) === $staleAdmissionPendingBefore
+        && controllerTestCount(
+            $db,
+            "SELECT COUNT(*) FROM recipe_score_mutations"
+        ) === $staleAdmissionMutationBefore,
+        'Reviewed admission must reject non-active ontology versions before writes'
+    );
+    $controllerGeneration = (int)$db->query("
+        SELECT controller_generation
+        FROM ontology_controller_state
+        WHERE id = 1
+    ")->fetchColumn();
+    $db->prepare("
+        UPDATE ontology_controller_jobs
+        SET status = 'queued',
+            priority = 1000000,
+            base_ontology_version_id = ?,
+            base_content_hash = ?,
+            controller_generation = ?,
+            controller_policy_hash = ?,
+            attempts = 0,
+            lease_token = NULL,
+            leased_until = NULL,
+            next_attempt_at = NULL,
+            change_set_id = NULL,
+            mutation_plan_id = NULL,
+            candidate_version_id = NULL,
+            candidate_score_revision_id = NULL,
+            last_error_kind = NULL,
+            last_error = '',
+            finished_at = NULL,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+    ")->execute([
+        $staleAdmissionVersionId,
+        $staleAdmissionContentHash,
+        $controllerGeneration,
+        ingredientOntologyControllerPolicyHash(),
+        (int)$reviewedRecipeJob['id'],
+    ]);
+    $staleIntakeAnnexBefore = $db->query("
+        SELECT *
+        FROM ingredient_ontology_recipe_identity_annex
+        WHERE recipe_ingredient_id IN ({$reviewedIngredientList})
+        ORDER BY recipe_ingredient_id
+    ")->fetchAll(PDO::FETCH_ASSOC);
+    $staleIntakeStateBefore = recipeScoreState($db);
+    $staleIntakePendingBefore = controllerTestCount(
+        $db,
+        "SELECT COUNT(*)
+         FROM recipe_score_pending_recipes
+         WHERE recipe_id IN ({$reviewedRecipeList})"
+    );
+    $staleIntakeMutationBefore = controllerTestCount(
+        $db,
+        "SELECT COUNT(*) FROM recipe_score_mutations"
+    );
+    $staleIntakeRun = ingredientOntologyControllerProcessQueue(
+        $db,
+        1,
+        [
+            'provider' => 'fake_stale_reviewed_should_not_run',
+            'model' => 'fake-stale-reviewed-model',
+            'job_types' => ['subject_resolution'],
+            'intake_only' => true,
+            'minimum_priority' => 1000000,
+        ]
+    );
+    $staleIntakeJob = $db->query("
+        SELECT status, base_ontology_version_id,
+               base_content_hash, candidate_version_id
+        FROM ontology_controller_jobs
+        WHERE id = " . (int)$reviewedRecipeJob['id']
+    )->fetch(PDO::FETCH_ASSOC);
+    controllerTestAssert(
+        $staleIntakeRun['results'][0]['status'] === 'promoted'
+        && empty($staleIntakeRun['results'][0]['model_called'])
+        && ($staleIntakeRun['results'][0][
+            'deterministic_admission'
+        ]['changed_recipe_ids'] ?? null) === []
+        && (int)$staleIntakeJob['base_ontology_version_id']
+            === $baseVersionId
+        && hash_equals(
+            (string)$staleIntakeJob['base_content_hash'],
+            (string)ingredientOntologyV3Version(
+                $db,
+                $baseVersionId
+            )['content_hash']
+        )
+        && (int)$staleIntakeJob['candidate_version_id']
+            === $baseVersionId
+        && $db->query("
+            SELECT *
+            FROM ingredient_ontology_recipe_identity_annex
+            WHERE recipe_ingredient_id IN ({$reviewedIngredientList})
+            ORDER BY recipe_ingredient_id
+        ")->fetchAll(PDO::FETCH_ASSOC) === $staleIntakeAnnexBefore
+        && recipeScoreState($db) === $staleIntakeStateBefore
+        && controllerTestCount(
+            $db,
+            "SELECT COUNT(*)
+             FROM recipe_score_pending_recipes
+             WHERE recipe_id IN ({$reviewedRecipeList})"
+        ) === $staleIntakePendingBefore
+        && controllerTestCount(
+            $db,
+            "SELECT COUNT(*) FROM recipe_score_mutations"
+        ) === $staleIntakeMutationBefore,
+        'Historical intake must rebase to the active ontology without annex or score ping-pong'
+    );
+    $priorityGateJob = $db->query("
+        SELECT *
+        FROM ontology_controller_jobs
+        WHERE id = " . (int)$reviewedRecipeJob['id']
+    )->fetch(PDO::FETCH_ASSOC);
+    $db->prepare("
+        UPDATE ontology_controller_jobs
+        SET priority = 50
+        WHERE id = ?
+    ")->execute([(int)$reviewedRecipeJob['id']]);
+    $priorityGateJob['priority'] = 50;
+    $priorityGateIntent =
+        ingredientOntologyControllerStoreGenerationIntent(
+            $db,
+            $priorityGateJob,
+            'provisional'
+        );
+    $previousMinimumPriority = getenv(
+        'INGREDIENT_ONTOLOGY_CONTROLLER_MINIMUM_PRIORITY'
+    );
+    putenv('INGREDIENT_ONTOLOGY_CONTROLLER_MINIMUM_PRIORITY=51');
+    $priorityGateExpected = (int)$db->query("
+        SELECT COUNT(*)
+        FROM ontology_generation_intents intent
+        JOIN ontology_controller_jobs job
+          ON job.id = intent.source_job_id
+        WHERE intent.status = 'pending'
+          AND job.priority >= 51
+          AND (
+              job.next_attempt_at IS NULL
+              OR job.next_attempt_at <= CURRENT_TIMESTAMP
+          )
+    ")->fetchColumn();
+    $priorityGateActual =
+        ingredientOntologyActivationPendingIntentCount($db);
+    if ($previousMinimumPriority === false) {
+        putenv('INGREDIENT_ONTOLOGY_CONTROLLER_MINIMUM_PRIORITY');
+    } else {
+        putenv(
+            'INGREDIENT_ONTOLOGY_CONTROLLER_MINIMUM_PRIORITY='
+            . $previousMinimumPriority
+        );
+    }
+    controllerTestAssert(
+        $priorityGateActual === $priorityGateExpected
+        && (string)$db->query("
+            SELECT status
+            FROM ontology_generation_intents
+            WHERE id = " . (int)$priorityGateIntent['id']
+        )->fetchColumn() === 'pending',
+        'Activation intent intake must honor the configured minimum priority'
+    );
+    $db->prepare("
+        DELETE FROM ontology_generation_intents
+        WHERE id = ?
+    ")->execute([(int)$priorityGateIntent['id']]);
+    $db->prepare("
+        UPDATE ontology_controller_jobs
+        SET priority = 1000000
+        WHERE id = ?
+    ")->execute([(int)$reviewedRecipeJob['id']]);
+    $controllerGeneration = (int)$db->query("
+        SELECT controller_generation
+        FROM ontology_controller_state
+        WHERE id = 1
+    ")->fetchColumn();
+    $db->prepare("
+        UPDATE ontology_controller_jobs
+        SET status = 'queued',
+            base_ontology_version_id = ?,
+            base_content_hash = ?,
+            controller_generation = ?,
+            controller_policy_hash = ?,
+            attempts = 0,
+            lease_token = NULL,
+            leased_until = NULL,
+            next_attempt_at = NULL,
+            change_set_id = NULL,
+            mutation_plan_id = NULL,
+            candidate_version_id = NULL,
+            candidate_score_revision_id = NULL,
+            last_error_kind = NULL,
+            last_error = '',
+            finished_at = NULL,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+    ")->execute([
+        $staleAdmissionVersionId,
+        $staleAdmissionContentHash,
+        $controllerGeneration,
+        ingredientOntologyControllerPolicyHash(),
+        (int)$reviewedRecipeJob['id'],
+    ]);
+    $rebaseFailureIntentCount = controllerTestCount(
+        $db,
+        "SELECT COUNT(*) FROM ontology_generation_intents"
+    );
+    $rebaseFailureProvisionalCount = controllerTestCount(
+        $db,
+        "SELECT COUNT(*) FROM ontology_provisional_queue"
+    );
+    $GLOBALS['ONTOLOGY_CONTROLLER_TEST_HOOK'] =
+        static function (
+            string $name,
+            array $context
+        ) use (
+            $db,
+            $reviewedRecipeJob
+        ): void {
+            if (
+                $name === 'controller_before_intake_rebase'
+                && (int)($context['job_id'] ?? 0)
+                    === (int)$reviewedRecipeJob['id']
+            ) {
+                $db->prepare("
+                    UPDATE ontology_controller_jobs
+                    SET controller_generation =
+                            controller_generation + 1
+                    WHERE id = ?
+                ")->execute([(int)$reviewedRecipeJob['id']]);
+            }
+        };
+    try {
+        $rebaseFailureRun = ingredientOntologyControllerProcessQueue(
+            $db,
+            1,
+            [
+                'provider' => 'fake_rebase_failure_should_not_run',
+                'model' => 'fake-rebase-failure-model',
+                'job_types' => ['subject_resolution'],
+                'intake_only' => true,
+                'minimum_priority' => 1000000,
+            ]
+        );
+    } finally {
+        unset($GLOBALS['ONTOLOGY_CONTROLLER_TEST_HOOK']);
+    }
+    $rebaseFailureJob = $db->query("
+        SELECT status, attempts, base_ontology_version_id,
+               next_attempt_at, last_error_kind
+        FROM ontology_controller_jobs
+        WHERE id = " . (int)$reviewedRecipeJob['id']
+    )->fetch(PDO::FETCH_ASSOC);
+    controllerTestAssert(
+        $rebaseFailureRun['results'][0]['status'] === 'retry'
+        && $rebaseFailureRun['results'][0]['reason']
+            === 'controller_intake_rebase_fence_lost'
+        && (string)$rebaseFailureJob['status'] === 'retry'
+        && (int)$rebaseFailureJob['attempts'] === 0
+        && (int)$rebaseFailureJob['base_ontology_version_id']
+            === $staleAdmissionVersionId
+        && (string)$rebaseFailureJob['next_attempt_at'] !== ''
+        && (string)$rebaseFailureJob['last_error_kind']
+            === 'active_ontology_retry'
+        && controllerTestCount(
+            $db,
+            "SELECT COUNT(*) FROM ontology_generation_intents"
+        ) === $rebaseFailureIntentCount
+        && controllerTestCount(
+            $db,
+            "SELECT COUNT(*) FROM ontology_provisional_queue"
+        ) === $rebaseFailureProvisionalCount,
+        'Rebase fence loss must retry without exhausting attempts or minting fallback work'
+    );
+    $activeVersion = ingredientOntologyV3Version(
+        $db,
+        $baseVersionId
+    );
+    $db->prepare("
+        UPDATE ontology_controller_jobs
+        SET status = 'queued',
+            base_ontology_version_id = ?,
+            base_content_hash = ?,
+            controller_generation = ?,
+            controller_policy_hash = ?,
+            attempts = 0,
+            lease_token = NULL,
+            leased_until = NULL,
+            next_attempt_at = NULL,
+            candidate_version_id = NULL,
+            candidate_score_revision_id = NULL,
+            last_error_kind = NULL,
+            last_error = '',
+            finished_at = NULL,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+    ")->execute([
+        $baseVersionId,
+        (string)$activeVersion['content_hash'],
+        $controllerGeneration,
+        ingredientOntologyControllerPolicyHash(),
+        (int)$reviewedRecipeJob['id'],
+    ]);
+    $db->prepare("
+        DELETE FROM ingredient_ontology_recipe_identity_annex
+        WHERE recipe_ingredient_id = ?
+    ")->execute([$reviewedIngredientIds[0]]);
+    $recipeFenceAnnexBefore = $db->query("
+        SELECT *
+        FROM ingredient_ontology_recipe_identity_annex
+        WHERE recipe_ingredient_id IN ({$reviewedIngredientList})
+        ORDER BY recipe_ingredient_id
+    ")->fetchAll(PDO::FETCH_ASSOC);
+    $recipeFenceStateBefore = recipeScoreState($db);
+    $recipeFencePendingBefore = controllerTestCount(
+        $db,
+        "SELECT COUNT(*)
+         FROM recipe_score_pending_recipes
+         WHERE recipe_id IN ({$reviewedRecipeList})"
+    );
+    $recipeFenceMutationBefore = controllerTestCount(
+        $db,
+        "SELECT COUNT(*) FROM recipe_score_mutations"
+    );
+    $recipeFenceOccurrencesBefore = $db->query("
+        SELECT *
+        FROM ontology_subject_occurrences
+        WHERE subject_id = {$reviewedRecipeSubjectId}
+        ORDER BY id
+    ")->fetchAll(PDO::FETCH_ASSOC);
+    $GLOBALS['ONTOLOGY_CONTROLLER_TEST_HOOK'] =
+        static function (
+            string $name,
+            array $context
+        ) use (
+            $db,
+            $reviewedRecipeJob
+        ): void {
+            if (
+                $name
+                    === 'controller_before_reviewed_admission_transition'
+                && (int)($context['job_id'] ?? 0)
+                    === (int)$reviewedRecipeJob['id']
+            ) {
+                $db->prepare("
+                    UPDATE ontology_subject_occurrences
+                    SET active = 0,
+                        last_seen_at = CURRENT_TIMESTAMP
+                    WHERE subject_id = ?
+                ")->execute([
+                    (int)$reviewedRecipeJob['subject_id'],
+                ]);
+            }
+        };
+    try {
+        $recipeFenceRun = ingredientOntologyControllerProcessQueue(
+            $db,
+            1,
+            [
+                'provider' => 'fake_recipe_fence_should_not_run',
+                'model' => 'fake-recipe-fence-model',
+                'job_types' => ['subject_resolution'],
+                'intake_only' => true,
+                'minimum_priority' => 1000000,
+            ]
+        );
+    } finally {
+        unset($GLOBALS['ONTOLOGY_CONTROLLER_TEST_HOOK']);
+    }
+    controllerTestAssert(
+        $recipeFenceRun['results'][0]['status'] === 'superseded'
+        && $recipeFenceRun['results'][0]['reason']
+            === 'reviewed_admission_occurrence_fence_lost'
+        && $db->query("
+            SELECT status
+            FROM ontology_controller_jobs
+            WHERE id = " . (int)$reviewedRecipeJob['id']
+        )->fetchColumn() === 'superseded'
+        && $db->query("
+            SELECT *
+            FROM ingredient_ontology_recipe_identity_annex
+            WHERE recipe_ingredient_id IN ({$reviewedIngredientList})
+            ORDER BY recipe_ingredient_id
+        ")->fetchAll(PDO::FETCH_ASSOC) === $recipeFenceAnnexBefore
+        && recipeScoreState($db) === $recipeFenceStateBefore
+        && controllerTestCount(
+            $db,
+            "SELECT COUNT(*)
+             FROM recipe_score_pending_recipes
+             WHERE recipe_id IN ({$reviewedRecipeList})"
+        ) === $recipeFencePendingBefore
+        && controllerTestCount(
+            $db,
+            "SELECT COUNT(*) FROM recipe_score_mutations"
+        ) === $recipeFenceMutationBefore
+        && $db->query("
+            SELECT *
+            FROM ontology_subject_occurrences
+            WHERE subject_id = {$reviewedRecipeSubjectId}
+            ORDER BY id
+        ")->fetchAll(PDO::FETCH_ASSOC)
+            === $recipeFenceOccurrencesBefore,
+        'Recipe occurrence fence loss must roll back annex, score, and occurrence writes'
+    );
+    ingredientOntologyV3SetReadyMutationGuard($db, true);
+    $db->prepare("
+        DELETE FROM ingredient_ontology_versions
+        WHERE id = ?
+    ")->execute([$staleAdmissionVersionId]);
+    ingredientOntologyV3SetReadyMutationGuard($db, false);
     $db->prepare("
         UPDATE ontology_subject_occurrences
         SET active = 0,
@@ -10746,7 +11215,8 @@ try {
         ")->execute([(int)$priorityIntent['id']]);
         $activationTarget->prepare("
             UPDATE ontology_controller_jobs
-            SET next_attempt_at = NULL,
+            SET priority = 51,
+                next_attempt_at = NULL,
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = ?
         ")->execute([(int)$priorityIntent['source_job_id']]);
@@ -11580,6 +12050,59 @@ try {
             . implode(',', $fairSourceJobIds)
             . ")
           AND status IN ('pending', 'queued')
+    ");
+    $GLOBALS['ONTOLOGY_CONTROLLER_ACTIVE_DB_PATH_OVERRIDE'] =
+        $activationTargetDbPath;
+    try {
+        $priorityFairQueued =
+            ingredientOntologyControllerQueueGenerationIntents(
+                $fairDb,
+                50,
+                1000
+            );
+    } finally {
+        unset($GLOBALS['ONTOLOGY_CONTROLLER_ACTIVE_DB_PATH_OVERRIDE']);
+    }
+    $priorityFairQueuedIds = array_map('intval', $fairDb->query("
+        SELECT source_job_id
+        FROM ontology_generation_intents
+        WHERE status = 'queued'
+          AND source_job_id IN ("
+            . implode(',', $fairSourceJobIds)
+            . ")
+        ORDER BY source_job_id
+    ")->fetchAll(PDO::FETCH_COLUMN));
+    controllerTestAssert(
+        $priorityFairQueued['queued'] === 10
+        && $priorityFairQueuedIds === array_slice(
+            $fairSourceJobIds,
+            50,
+            10
+        ),
+        'Generation intent selection must honor the configured minimum priority'
+    );
+    $fairDb->exec("
+        UPDATE ontology_generation_intents
+        SET status = 'pending',
+            attempts = 0,
+            finished_at = NULL,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE source_job_id IN ("
+            . implode(',', $fairSourceJobIds)
+            . ");
+        UPDATE ontology_controller_jobs
+        SET status = 'promoted',
+            attempts = 0,
+            lease_token = NULL,
+            leased_until = NULL,
+            next_attempt_at = NULL,
+            last_error_kind = NULL,
+            last_error = '',
+            finished_at = CURRENT_TIMESTAMP,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id IN ("
+            . implode(',', $fairSourceJobIds)
+            . ")
     ");
     $GLOBALS['ONTOLOGY_CONTROLLER_ACTIVE_DB_PATH_OVERRIDE'] =
         $activationTargetDbPath;
