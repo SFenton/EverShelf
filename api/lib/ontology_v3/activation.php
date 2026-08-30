@@ -7658,6 +7658,12 @@ function ingredientOntologyActivationAssertActiveDatabase(PDO $db): void {
         $minimumPriority = function_exists(
             'ingredientOntologyControllerMinimumPriority'
         ) ? ingredientOntologyControllerMinimumPriority() : 0;
+        $activeVersionId = function_exists(
+            'ingredientOntologyControllerActiveVersionId'
+        ) ? ingredientOntologyControllerActiveVersionId($db) : null;
+        if ($activeVersionId === null) {
+            return 0;
+        }
         return (int)$db->query("
             SELECT COUNT(*)
             FROM ontology_generation_intents intent
@@ -7665,6 +7671,10 @@ function ingredientOntologyActivationAssertActiveDatabase(PDO $db): void {
               ON job.id = intent.source_job_id
             WHERE intent.status = 'pending'
               AND job.priority >= {$minimumPriority}
+              AND (
+                  intent.intent_kind = 'exact_constraint'
+                  OR job.base_ontology_version_id = {$activeVersionId}
+              )
               AND (
                   job.next_attempt_at IS NULL
                   OR job.next_attempt_at <= CURRENT_TIMESTAMP

@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.20.22] - 2026-08-30
+
+### Fixed
+- Non-constraint generation intents now require an active-ontology base before
+  activation. Historical copied plans remain deferred until a fresh
+  observation safely rebases them, preventing repeat final-fence failures.
+- Processing status now reports stale-base intents as deferred rather than
+  active ontology work.
+
 ## [1.20.21] - 2026-08-29
 
 ### Fixed

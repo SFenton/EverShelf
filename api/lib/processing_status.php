@@ -463,6 +463,9 @@ function evershelfProcessingStatusOntologyQueue(PDO $db): array {
     $runtimeEnabled = function_exists(
         'ingredientOntologyControllerEnabled'
     ) && ingredientOntologyControllerEnabled();
+    $activeVersionId = function_exists(
+        'ingredientOntologyControllerActiveVersionId'
+    ) ? (int)(ingredientOntologyControllerActiveVersionId($db) ?? 0) : 0;
     $openStatuses = [
         'queued', 'leased', 'model_running', 'responses_ready',
         'staged', 'validating', 'generation_pending', 'shadowing',
@@ -534,9 +537,17 @@ function evershelfProcessingStatusOntologyQueue(PDO $db): array {
         $intentStmt = $db->prepare("
             SELECT COALESCE(SUM(CASE
                        WHEN job.priority >= ?
+                        AND (
+                            intent.intent_kind = 'exact_constraint'
+                            OR job.base_ontology_version_id = ?
+                        )
                        THEN 1 ELSE 0 END), 0) AS pending_count,
                    COALESCE(SUM(CASE
                        WHEN job.priority >= ?
+                        AND (
+                            intent.intent_kind = 'exact_constraint'
+                            OR job.base_ontology_version_id = ?
+                        )
                         AND (
                             job.next_attempt_at IS NULL
                             OR job.next_attempt_at <= CURRENT_TIMESTAMP
@@ -544,19 +555,35 @@ function evershelfProcessingStatusOntologyQueue(PDO $db): array {
                        THEN 1 ELSE 0 END), 0) AS due_count,
                    COALESCE(SUM(CASE
                        WHEN job.priority < ?
+                         OR (
+                            intent.intent_kind <> 'exact_constraint'
+                            AND job.base_ontology_version_id <> ?
+                         )
                        THEN 1 ELSE 0 END), 0) AS deferred_count,
                    COALESCE(SUM(CASE
                        WHEN job.priority >= ?
+                        AND (
+                            intent.intent_kind = 'exact_constraint'
+                            OR job.base_ontology_version_id = ?
+                        )
                         AND job.last_error_kind =
                             'generation_policy_deferred'
                        THEN 1 ELSE 0 END), 0)
                        AS policy_deferred_count,
                    MIN(CASE
                        WHEN job.priority >= ?
+                        AND (
+                            intent.intent_kind = 'exact_constraint'
+                            OR job.base_ontology_version_id = ?
+                        )
                        THEN intent.created_at ELSE NULL END)
                        AS oldest_at,
                    MIN(CASE
                        WHEN job.priority >= ?
+                        AND (
+                            intent.intent_kind = 'exact_constraint'
+                            OR job.base_ontology_version_id = ?
+                        )
                         AND (
                             job.next_attempt_at IS NULL
                             OR job.next_attempt_at <= CURRENT_TIMESTAMP
@@ -568,7 +595,20 @@ function evershelfProcessingStatusOntologyQueue(PDO $db): array {
               ON job.id = intent.source_job_id
             WHERE intent.status = 'pending'
         ");
-        $intentStmt->execute(array_fill(0, 6, $minimumPriority));
+        $intentStmt->execute([
+            $minimumPriority,
+            $activeVersionId,
+            $minimumPriority,
+            $activeVersionId,
+            $minimumPriority,
+            $activeVersionId,
+            $minimumPriority,
+            $activeVersionId,
+            $minimumPriority,
+            $activeVersionId,
+            $minimumPriority,
+            $activeVersionId,
+        ]);
         $intent = $intentStmt->fetch(PDO::FETCH_ASSOC) ?: $intent;
     }
     $coverageGap = [

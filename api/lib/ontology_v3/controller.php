@@ -16523,6 +16523,11 @@ function ingredientOntologyControllerResumeDurableJob(
                         WHERE intent.status = 'pending'
                           AND job.priority >= {$minimumPriority}
                           AND (
+                              intent.intent_kind = 'exact_constraint'
+                              OR job.base_ontology_version_id =
+                                    {$activeVersionId}
+                          )
+                          AND (
                               job.next_attempt_at IS NULL
                               OR job.next_attempt_at <= CURRENT_TIMESTAMP
                           )
@@ -16553,6 +16558,8 @@ function ingredientOntologyControllerResumeDurableJob(
                         WHERE intent.status = 'pending'
                           AND intent.intent_kind = 'validated_plan'
                           AND job.priority >= {$minimumPriority}
+                          AND job.base_ontology_version_id =
+                                {$activeVersionId}
                           AND (
                               job.next_attempt_at IS NULL
                               OR job.next_attempt_at
@@ -16745,6 +16752,13 @@ function ingredientOntologyControllerResumeDurableJob(
                     WHERE intent.status = 'pending'
                       AND intent.intent_kind = 'provisional'
                       AND job.priority >= {$minimumPriority}
+                      AND job.base_ontology_version_id = (
+                          SELECT active.ontology_version_id
+                          FROM recipe_score_state state
+                          JOIN recipe_score_revisions active
+                            ON active.id = state.active_score_revision_id
+                          WHERE state.id = 1
+                      )
                 ")->fetchColumn();
                 return [
                     'queued' => $queued,

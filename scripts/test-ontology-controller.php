@@ -3993,6 +3993,8 @@ try {
         'INGREDIENT_ONTOLOGY_CONTROLLER_MINIMUM_PRIORITY'
     );
     putenv('INGREDIENT_ONTOLOGY_CONTROLLER_MINIMUM_PRIORITY=51');
+    $priorityGateActiveVersionId =
+        ingredientOntologyControllerActiveVersionId($db);
     $priorityGateExpected = (int)$db->query("
         SELECT COUNT(*)
         FROM ontology_generation_intents intent
@@ -4000,6 +4002,11 @@ try {
           ON job.id = intent.source_job_id
         WHERE intent.status = 'pending'
           AND job.priority >= 51
+          AND (
+              intent.intent_kind = 'exact_constraint'
+              OR job.base_ontology_version_id =
+                    {$priorityGateActiveVersionId}
+          )
           AND (
               job.next_attempt_at IS NULL
               OR job.next_attempt_at <= CURRENT_TIMESTAMP
@@ -4023,6 +4030,41 @@ try {
             WHERE id = " . (int)$priorityGateIntent['id']
         )->fetchColumn() === 'pending',
         'Activation intent intake must honor the configured minimum priority'
+    );
+    $db->prepare("
+        UPDATE ontology_controller_jobs
+        SET priority = 100,
+            base_ontology_version_id = ?,
+            base_content_hash = ?
+        WHERE id = ?
+    ")->execute([
+        $staleAdmissionVersionId,
+        $staleAdmissionContentHash,
+        (int)$reviewedRecipeJob['id'],
+    ]);
+    controllerTestAssert(
+        ingredientOntologyActivationPendingIntentCount($db)
+            === $priorityGateActual,
+        'Historical non-constraint intents must remain deferred above the priority threshold'
+    );
+    $activePriorityVersion = ingredientOntologyV3Version(
+        $db,
+        $baseVersionId
+    );
+    $db->prepare("
+        UPDATE ontology_controller_jobs
+        SET base_ontology_version_id = ?,
+            base_content_hash = ?
+        WHERE id = ?
+    ")->execute([
+        $baseVersionId,
+        (string)$activePriorityVersion['content_hash'],
+        (int)$reviewedRecipeJob['id'],
+    ]);
+    controllerTestAssert(
+        ingredientOntologyActivationPendingIntentCount($db)
+            === $priorityGateActual + 1,
+        'Current-base non-constraint intents must become activation-eligible'
     );
     $db->prepare("
         DELETE FROM ontology_generation_intents
@@ -11564,8 +11606,8 @@ try {
         $mixedTemplate['subject_id'],
         $mixedTemplate['trigger_event_id'],
         (int)$mixedTemplate['controller_generation'],
-        (int)$mixedTemplate['base_ontology_version_id'],
-        (string)$mixedTemplate['base_content_hash'],
+        (int)$activationVersion['id'],
+        (string)$activationVersion['content_hash'],
         (string)$mixedTemplate['controller_policy_hash'],
         hash('sha256', 'provenance-source-input'),
         ingredientOntologyControllerStableJson([
@@ -11996,6 +12038,8 @@ try {
         'Mixed semantic no-op acknowledgements must apply or defer exactly without moving the pointer'
     );
 
+    $fairActiveSourceVersion =
+        ingredientOntologyV3ActiveVersion($activationTarget);
     $fairSourceJobIds = [];
     for ($index = 0; $index < 60; $index++) {
         $activationTarget->prepare("
@@ -12016,8 +12060,8 @@ try {
             $mixedTemplate['subject_id'],
             $mixedTemplate['trigger_event_id'],
             (int)$mixedTemplate['controller_generation'],
-            (int)$mixedTemplate['base_ontology_version_id'],
-            (string)$mixedTemplate['base_content_hash'],
+            (int)$fairActiveSourceVersion['id'],
+            (string)$fairActiveSourceVersion['content_hash'],
             (string)$mixedTemplate['controller_policy_hash'],
             $index >= 50 ? 1000 : 1,
             hash('sha256', 'fair-intent-input-' . $index),
@@ -12070,6 +12114,26 @@ try {
             . ")
           AND status IN ('pending', 'queued')
     ");
+    $fairActiveVersionId =
+        ingredientOntologyControllerActiveVersionId($fairDb);
+    $fairHistoricalVersion = $fairDb->query("
+        SELECT id, content_hash
+        FROM ingredient_ontology_versions
+        WHERE status = 'ready'
+          AND id <> {$fairActiveVersionId}
+        ORDER BY id
+        LIMIT 1
+    ")->fetch(PDO::FETCH_ASSOC);
+    $fairDb->prepare("
+        UPDATE ontology_controller_jobs
+        SET base_ontology_version_id = ?,
+            base_content_hash = ?
+        WHERE id = ?
+    ")->execute([
+        (int)$fairHistoricalVersion['id'],
+        (string)$fairHistoricalVersion['content_hash'],
+        (int)$fairSourceJobIds[50],
+    ]);
     $GLOBALS['ONTOLOGY_CONTROLLER_ACTIVE_DB_PATH_OVERRIDE'] =
         $activationTargetDbPath;
     try {
@@ -12092,13 +12156,28 @@ try {
         ORDER BY source_job_id
     ")->fetchAll(PDO::FETCH_COLUMN));
     controllerTestAssert(
-        $priorityFairQueued['queued'] === 10
+        $priorityFairQueued['queued'] === 9
         && $priorityFairQueuedIds === array_slice(
             $fairSourceJobIds,
-            50,
-            10
+            51,
+            9
         ),
-        'Generation intent selection must honor the configured minimum priority'
+        'Generation intent selection must honor priority and active-version gates: '
+            . ingredientOntologyControllerStableJson([
+                'result' => $priorityFairQueued,
+                'queued_ids' => $priorityFairQueuedIds,
+                'expected_ids' => array_slice(
+                    $fairSourceJobIds,
+                    51,
+                    9
+                ),
+                'active_version_id' => $fairActiveVersionId,
+                'historical_version' => $fairHistoricalVersion,
+            ])
+    );
+    $fairActiveVersion = ingredientOntologyV3Version(
+        $fairDb,
+        $fairActiveVersionId
     );
     $fairDb->exec("
         UPDATE ontology_generation_intents
@@ -12123,6 +12202,16 @@ try {
             . implode(',', $fairSourceJobIds)
             . ")
     ");
+    $fairDb->prepare("
+        UPDATE ontology_controller_jobs
+        SET base_ontology_version_id = ?,
+            base_content_hash = ?
+        WHERE id = ?
+    ")->execute([
+        $fairActiveVersionId,
+        (string)$fairActiveVersion['content_hash'],
+        (int)$fairSourceJobIds[50],
+    ]);
     $GLOBALS['ONTOLOGY_CONTROLLER_ACTIVE_DB_PATH_OVERRIDE'] =
         $activationTargetDbPath;
     try {
@@ -12193,8 +12282,8 @@ try {
             $mixedTemplate['subject_id'],
             $mixedTemplate['trigger_event_id'],
             (int)$mixedTemplate['controller_generation'],
-            (int)$mixedTemplate['base_ontology_version_id'],
-            (string)$mixedTemplate['base_content_hash'],
+            $fairActiveVersionId,
+            (string)$fairActiveVersion['content_hash'],
             (string)$mixedTemplate['controller_policy_hash'],
             hash('sha256', 'limit-one-fair-input-' . $index),
             ingredientOntologyControllerStableJson([
