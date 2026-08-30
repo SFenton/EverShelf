@@ -25,7 +25,7 @@
 [![SQLite](https://img.shields.io/badge/SQLite-3-blue.svg)](https://www.sqlite.org/)
 [![Docker](https://img.shields.io/badge/Docker-Ready-2496ED.svg)](Dockerfile)
 [![i18n](https://img.shields.io/badge/i18n-IT%20%7C%20EN%20%7C%20DE%20%7C%20FR%20%7C%20ES-orange.svg)](translations/)
-[![Version](https://img.shields.io/badge/version-1.20.18-brightgreen.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-1.20.19-brightgreen.svg)](CHANGELOG.md)
 [![GitHub stars](https://img.shields.io/github/stars/dadaloop82/EverShelf?style=social)](https://github.com/dadaloop82/EverShelf/stargazers)
 [![Last commit](https://img.shields.io/github/last-commit/dadaloop82/EverShelf/main)](https://github.com/dadaloop82/EverShelf/commits/main)
 [![Contributors](https://img.shields.io/github/contributors/dadaloop82/EverShelf)](https://github.com/dadaloop82/EverShelf/graphs/contributors)
@@ -286,6 +286,7 @@ COOKIDOO_METADATA_BACKFILL_JITTER_SECONDS=20
 COOKIDOO_PLANNER_ENABLED=false
 COOKIDOO_QUEUE_CADENCE_MINUTES=1
 COOKIDOO_DISCOVERY_LOCALE=en-US
+COOKIDOO_PERIODIC_REFRESH_ENABLED=false
 COOKIDOO_REFRESH_ENQUEUE_LIMIT=2
 # Metadata hydration remains default-off until both EverShelf and bridge gates are enabled.
 

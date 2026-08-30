@@ -102,13 +102,17 @@ $candidateIds = array_column(
     ),
     'origin_id'
 );
+$backfillStatus = recipeCookidooMetadataBackfillStatus($db, 'en-GB');
 $assert(
     !empty($cached['is_stale'])
     && !empty($detail['freshness']['is_stale'])
     && $search['total'] === 1
     && in_array($recipeId, $suggestions, true)
-    && in_array($originId, $candidateIds, true),
-    'Stale metadata-v2 rows did not remain visible and refreshable'
+    && !in_array($originId, $candidateIds, true)
+    && $backfillStatus['origins']['current'] === 1
+    && $backfillStatus['origins']['refresh_due'] === 1
+    && $backfillStatus['origins']['remaining'] === 0,
+    'Stale metadata-v2 rows must remain visible without reopening bulk backfill'
 );
 
 $_GET = ['id' => (string)$recipeId];

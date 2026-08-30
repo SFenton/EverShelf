@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.20.19] - 2026-08-29
+
+### Fixed
+- Direct-ID Cookidoo backfill now converges after metadata coverage is complete
+  instead of continuously absorbing routine 14-day TTL refreshes; due refreshes
+  remain observable and use the separate demand/periodic refresh paths.
+
 ## [1.20.18] - 2026-08-25
 
 ### Fixed

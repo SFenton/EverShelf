@@ -1201,14 +1201,6 @@ function recipeCookidooMetadataBackfillCandidates(
               OR o.metadata_version <> ?
               OR o.metadata_schema_version IS NULL
               OR o.metadata_schema_version <> ?
-              OR (
-                  c.stale_at IS NOT NULL
-                  AND c.stale_at < CURRENT_TIMESTAMP
-              )
-              OR (
-                  c.cache_expires_at IS NOT NULL
-                  AND c.cache_expires_at < CURRENT_TIMESTAMP
-              )
           )
           AND (
               o.metadata_failure_version IS NULL
@@ -1369,16 +1361,23 @@ function recipeCookidooMetadataBackfillStatus(
                 CASE
                     WHEN o.metadata_version = ?
                      AND o.metadata_schema_version = ?
-                     AND (
-                         c.stale_at IS NULL
-                         OR c.stale_at >= CURRENT_TIMESTAMP
-                     )
-                     AND (
-                         c.cache_expires_at IS NULL
-                         OR c.cache_expires_at >= CURRENT_TIMESTAMP
-                     )
                     THEN 0 ELSE 1
-                END AS needs_refresh,
+                END AS needs_backfill,
+                CASE
+                    WHEN o.metadata_version = ?
+                     AND o.metadata_schema_version = ?
+                     AND (
+                         (
+                             c.stale_at IS NOT NULL
+                             AND c.stale_at < CURRENT_TIMESTAMP
+                         )
+                         OR (
+                             c.cache_expires_at IS NOT NULL
+                             AND c.cache_expires_at < CURRENT_TIMESTAMP
+                         )
+                     )
+                    THEN 1 ELSE 0
+                END AS refresh_due,
                 CASE
                     WHEN o.metadata_failure_version = ?
                      AND (
@@ -1428,16 +1427,17 @@ function recipeCookidooMetadataBackfillStatus(
               AND c.deleted_at IS NULL
         )
         SELECT COUNT(*) AS total,
-               SUM(CASE WHEN needs_refresh = 0 THEN 1 ELSE 0 END)
+               SUM(CASE WHEN needs_backfill = 0 THEN 1 ELSE 0 END)
                    AS current,
+               SUM(refresh_due) AS refresh_due,
                SUM(CASE
-                   WHEN needs_refresh = 1 AND blocked = 1 THEN 1 ELSE 0
+                   WHEN needs_backfill = 1 AND blocked = 1 THEN 1 ELSE 0
                END) AS failed,
                SUM(CASE
-                   WHEN needs_refresh = 1 AND blocked = 0 THEN 1 ELSE 0
+                   WHEN needs_backfill = 1 AND blocked = 0 THEN 1 ELSE 0
                END) AS remaining,
                SUM(CASE
-                   WHEN needs_refresh = 1
+                   WHEN needs_backfill = 1
                     AND blocked = 0
                     AND has_failure = 1
                    THEN 1 ELSE 0
@@ -1445,6 +1445,8 @@ function recipeCookidooMetadataBackfillStatus(
         FROM scoped
     ");
     $counts->execute([
+        RECIPE_COOKIDOO_METADATA_VERSION,
+        RECIPE_COOKIDOO_METADATA_SCHEMA_VERSION,
         RECIPE_COOKIDOO_METADATA_VERSION,
         RECIPE_COOKIDOO_METADATA_SCHEMA_VERSION,
         RECIPE_COOKIDOO_METADATA_VERSION,
@@ -1759,6 +1761,7 @@ function recipeCookidooMetadataBackfillStatus(
         'origins' => [
             'total' => (int)($counts['total'] ?? 0),
             'current' => (int)($counts['current'] ?? 0),
+            'refresh_due' => (int)($counts['refresh_due'] ?? 0),
             'failed' => (int)($counts['failed'] ?? 0),
             'probe_due' => (int)($counts['probe_due'] ?? 0),
             'remaining' => $refreshable ? $pending : 0,

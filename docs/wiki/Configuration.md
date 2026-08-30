@@ -463,7 +463,10 @@ jobs remain pending while gates are off. Only known superseded or historically
 absent discovery policy values are migrated; unknown values fail closed. Recipe
 queue processes coordinate through an expiring database singleton lease, so a
 second cron/manual invocation skips without holding SQLite or flock across
-provider traffic.
+provider traffic. Bulk backfill covers missing or version-outdated metadata and
+due failed probes only. Normal TTL expiry is reported separately as
+`refresh_due` and is handled by demand refresh or the independently gated
+periodic refresh path.
 
 ### FoodOn exact-identity audit
 

@@ -163,6 +163,7 @@ echo 'Versions: metadata=' . $status['metadata_version']
     . ', failure_schema=' . $status['failure_schema_version'] . PHP_EOL;
 echo 'Origins: total=' . $status['origins']['total']
     . ', current=' . $status['origins']['current']
+    . ', refresh_due=' . $status['origins']['refresh_due']
     . ', failed=' . $status['origins']['failed']
     . ', probe_due=' . $status['origins']['probe_due']
     . ', remaining=' . $status['origins']['remaining']
