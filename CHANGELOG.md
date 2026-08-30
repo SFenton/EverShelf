@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.20.21] - 2026-08-29
+
+### Fixed
+- The activation regression fixture now isolates its intended generation
+  intent, eliminating priority-order nondeterminism in release CI.
+
 ## [1.20.20] - 2026-08-29
 
 ### Fixed

@@ -10264,10 +10264,29 @@ try {
     );
     $db->prepare("
         UPDATE ontology_controller_jobs
-        SET status = 'failed',
+        SET priority = CASE
+                WHEN id = ? THEN 1000000
+                ELSE priority
+            END,
+            status = CASE
+                WHEN id = ? THEN status
+                ELSE 'failed'
+            END,
             finished_at = CURRENT_TIMESTAMP
-        WHERE id <> ?
-          AND status IN ('queued', 'retry')
+        WHERE id = ?
+           OR status IN ('queued', 'retry')
+    ")->execute([
+        (int)$liveIntakeJob['id'],
+        (int)$liveIntakeJob['id'],
+        (int)$liveIntakeJob['id'],
+    ]);
+    $db->prepare("
+        UPDATE ontology_generation_intents
+        SET status = 'applied',
+            finished_at = CURRENT_TIMESTAMP,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE source_job_id <> ?
+          AND status IN ('pending', 'queued')
     ")->execute([(int)$liveIntakeJob['id']]);
     $db->exec("
         UPDATE ontology_generations
