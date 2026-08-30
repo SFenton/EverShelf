@@ -12541,6 +12541,26 @@ try {
             >= (int)$transportedExtension['created_revision'],
         'Failed score imports must retain transported identity extensions, drain other children before the root, and preserve the active pointer'
     );
+    controllerTestAssert(
+        ingredientOntologyActivationCleanupRetainsRoot(
+            $activationTarget,
+            'ontology',
+            (int)ingredientOntologyV3ActiveVersion(
+                $activationTarget
+            )['id']
+        )
+        && !ingredientOntologyActivationCleanupRetainsRoot(
+            $activationTarget,
+            'score',
+            $activatedScoreId
+        )
+        && !ingredientOntologyActivationCleanupRetainsRoot(
+            $activationTarget,
+            'ontology',
+            PHP_INT_MAX
+        ),
+        'Cleanup must retain ready ontology roots without retaining score or missing roots'
+    );
     unset(
         $GLOBALS[
             'INGREDIENT_ONTOLOGY_EXACT_SELF_IDENTITY_ENABLED_OVERRIDE'

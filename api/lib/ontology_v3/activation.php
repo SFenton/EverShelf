@@ -6127,6 +6127,25 @@ function ingredientOntologyActivationAssertActiveDatabase(PDO $db): void {
         return ingredientOntologyActivationImportRow($db, $importId);
     }
 
+    function ingredientOntologyActivationCleanupRetainsRoot(
+        PDO $db,
+        string $kind,
+        int $candidateId
+    ): bool {
+        if ($kind !== 'ontology' || $candidateId <= 0) {
+            return false;
+        }
+        $stmt = $db->prepare("
+            SELECT 1
+            FROM ingredient_ontology_versions
+            WHERE id = ?
+              AND status = 'ready'
+            LIMIT 1
+        ");
+        $stmt->execute([$candidateId]);
+        return $stmt->fetchColumn() !== false;
+    }
+
     function ingredientOntologyActivationCleanupImport(
         PDO $db,
         int $importId,
@@ -6211,6 +6230,20 @@ function ingredientOntologyActivationAssertActiveDatabase(PDO $db): void {
                     throw new RuntimeException(
                         'ontology activation cleanup root reached before children'
                     );
+                }
+                if (ingredientOntologyActivationCleanupRetainsRoot(
+                    $db,
+                    $kind,
+                    $candidateId
+                )) {
+                    $db->prepare("
+                        UPDATE ontology_activation_import_tables
+                        SET status = 'purged',
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE import_id = ? AND table_name = ?
+                    ")->execute([$importId, $tableName]);
+                    $chunks++;
+                    continue;
                 }
             }
             $guardWas =
@@ -6310,6 +6343,12 @@ function ingredientOntologyActivationAssertActiveDatabase(PDO $db): void {
                     updated_at = CURRENT_TIMESTAMP
                 WHERE id = ? AND status = 'purging'
             ")->execute([$importId]);
+            ingredientOntologyActivationRecordOutcome(
+                $db,
+                'cleanup_complete',
+                ['import_id' => $importId],
+                true
+            );
         }
         return ingredientOntologyActivationImportRow($db, $importId);
     }

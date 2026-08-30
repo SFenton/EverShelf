@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.20.23] - 2026-08-30
+
+### Fixed
+- Failed activation cleanup now retains ontology roots that later became ready
+  ancestors, allowing legacy imports to finish cleanup without foreign-key
+  failures and clearing the resolved worker health error.
+
 ## [1.20.22] - 2026-08-30
 
 ### Fixed
