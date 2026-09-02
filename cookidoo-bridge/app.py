@@ -45,6 +45,19 @@ from yarl import URL
 LOGGER = logging.getLogger("cookidoo_bridge")
 logging.getLogger("cookidoo_api").setLevel(logging.WARNING)
 
+BUILD_REVISION_PATH = Path(__file__).with_name(".build-revision")
+
+
+def _build_revision() -> str:
+    try:
+        revision = BUILD_REVISION_PATH.read_text(encoding="ascii").strip()
+    except OSError:
+        return "unknown"
+    return revision if re.fullmatch(r"[0-9a-f]{40}(?:[0-9a-f]{24})?", revision) else "unknown"
+
+
+BUILD_REVISION = _build_revision()
+
 MAX_BODY_BYTES = 2 * 1024 * 1024
 MAX_RESPONSE_BYTES = 1_000_000
 MAX_UPSTREAM_RESPONSE_BYTES = 2_000_000
@@ -66,8 +79,8 @@ MAX_RECIPE_SECONDS = 366 * 24 * 60 * 60
 MAX_SOURCE_NUMBER = 1_000_000_000
 MAX_EXCLUDED_RECIPE_IDS = 100000
 METADATA_SCHEMA_VERSION = "ingredient-topology-v1"
-DETAIL_HYDRATION_POLICY_VERSION = "metadata-v2-detail-disabled"
-DETAIL_HYDRATION_POLICY_REASON = "provider_detail_policy_disabled"
+DETAIL_HYDRATION_POLICY_VERSION = "metadata-v3-operator-enabled"
+DETAIL_HYDRATION_POLICY_REASON = "metadata_hydration_disabled"
 ALLOWED_TMV = frozenset({"TM31", "TM5", "TM6", "TM7"})
 SAFE_SOURCE_UNIT_ALIASES = {
     "mg": "mg",
@@ -264,13 +277,13 @@ class GatewayConfigurationError(BridgeError):
 
 
 class GatewayPolicyDisabledError(BridgeError):
-    """Runtime configuration disables detail-bearing provider requests."""
+    """Runtime configuration disables metadata hydration."""
 
     def __init__(self) -> None:
         super().__init__(
             503,
-            "metadata_hydration_disabled_policy",
-            "Cookidoo metadata hydration is disabled",
+            DETAIL_HYDRATION_POLICY_REASON,
+            "Cookidoo metadata hydration is disabled by configuration",
         )
 
 
@@ -386,7 +399,9 @@ class BridgeConfig:
                 "COOKIDOO_DETAIL_CONCURRENCY", 1, 1, 4
             ),
             max_results=_env_int("COOKIDOO_MAX_RESULTS", 20, 1, 20),
-            detail_hydration_enabled=False,
+            detail_hydration_enabled=_env_bool(
+                "COOKIDOO_DETAIL_HYDRATION_ENABLED", False
+            ),
             password_login_enabled=_env_bool(
                 "COOKIDOO_PASSWORD_LOGIN_ENABLED", False
             ),
@@ -2768,6 +2783,7 @@ async def health_handler(request: web.Request) -> web.Response:
         {
             "status": "ok",
             "service": "cookidoo-bridge",
+            "build_revision": BUILD_REVISION,
             "capabilities": _policy_capabilities(request.app[CONFIG_KEY]),
         }
     )

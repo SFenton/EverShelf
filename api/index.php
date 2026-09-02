@@ -715,9 +715,17 @@ if (($_GET['action'] ?? '') === 'health_check') {
     $allOk = array_reduce($criticalKeys, fn($c, $k) => $c && ($checks[$k]['ok'] ?? false), true);
 
     header('Content-Type: application/json');
+    $buildRevisionPath = dirname(__DIR__) . '/.build-revision';
+    $buildRevision = is_readable($buildRevisionPath)
+        ? trim((string)file_get_contents($buildRevisionPath))
+        : '';
+    if (!preg_match('/^[a-f0-9]{7,64}$/D', $buildRevision)) {
+        $buildRevision = 'unknown';
+    }
     echo json_encode([
         'ok'             => $allOk,
         'scope'          => $scope,
+        'build_revision' => $buildRevision,
         'checks'         => $checks,
         'fresh'          => $isFresh,
         'skipped_checks' => $skippedChecks,
@@ -3414,7 +3422,8 @@ function productSaveRefreshIdentity(
     PDO $db,
     int $productId,
     bool $scoreAlreadyQueued = false,
-    bool $lookupExistingExtension = true
+    bool $lookupExistingExtension = true,
+    bool $preparedFood = false
 ): array {
     if (!function_exists(
         'ingredientOntologyV3IdentityAdmissionPublishProduct'
@@ -3424,6 +3433,27 @@ function productSaveRefreshIdentity(
             'accepted' => false,
             'changed' => false,
             'reason' => 'identity_annex_unavailable',
+        ];
+    }
+    if (
+        !$lookupExistingExtension
+        && !$preparedFood
+        && ingredientOntologyV3ExactSelfIdentityEnabled()
+    ) {
+        $job = recipeJobEnqueueIdentityAdmission(
+            $db,
+            $productId,
+            'product_save_background_exact_self'
+        );
+        return [
+            'available' => true,
+            'accepted' => false,
+            'changed' => false,
+            'status' => 'retry',
+            'reason' => 'background_exact_self_admission_queued',
+            'source' => 'none',
+            'score_queued' => $scoreAlreadyQueued,
+            'background_job_id' => (int)$job['id'],
         ];
     }
     $admission =
@@ -3644,6 +3674,60 @@ function productSaveResolvedInput(
     ];
 }
 
+function productSaveRunSideEffect(
+    PDO $db,
+    string $name,
+    callable $operation,
+    array $fallback
+): array {
+    static $sequence = 0;
+    $savepoint = 'product_save_side_effect_' . (++$sequence);
+    $db->exec("SAVEPOINT {$savepoint}");
+    try {
+        productSaveTestHook('before_side_effect', ['name' => $name]);
+        $result = $operation();
+        $db->exec("RELEASE SAVEPOINT {$savepoint}");
+        return [
+            'result' => is_array($result) ? $result : [],
+            'degraded' => null,
+        ];
+    } catch (Throwable $error) {
+        try {
+            $db->exec("ROLLBACK TO SAVEPOINT {$savepoint}");
+            $db->exec("RELEASE SAVEPOINT {$savepoint}");
+        } catch (Throwable $rollbackError) {
+            throw $rollbackError;
+        }
+        $message = mb_substr(
+            $error->getMessage(),
+            0,
+            300,
+            'UTF-8'
+        );
+        if (class_exists('EverLog', false)) {
+            EverLog::warn(
+                'product save side effect degraded',
+                [
+                    'subsystem' => $name,
+                    'error' => $message,
+                ],
+                'product_save'
+            );
+        }
+        return [
+            'result' => $fallback + [
+                'degraded' => true,
+                'error' => 'subsystem_failed',
+            ],
+            'degraded' => [
+                'subsystem' => $name,
+                'reason' => 'subsystem_failed',
+                'reconciliation_required' => true,
+            ],
+        ];
+    }
+}
+
 function saveProduct(PDO $db): void {
     $input = (
         defined('RECIPE_BACKEND_TEST_MODE')
@@ -3673,6 +3757,7 @@ function saveProduct(PDO $db): void {
         'changed' => false,
         'reason' => 'identity_annex_unavailable',
     ];
+    $degradedSubsystems = [];
     productSaveTestHook('before_transaction', [
         'id' => $requestedId,
         'barcode' => $requestedBarcode,
@@ -3788,19 +3873,48 @@ function saveProduct(PDO $db): void {
                 $id = (int)$db->lastInsertId();
         }
 
-        productSaveRecordShoppingIntent(
+        productSaveTestHook(
+            'before_commit',
+            [
+                'id' => $id,
+                'mode' => $existing !== null ? 'update' : 'create',
+            ]
+        );
+        $db->exec('COMMIT');
+        $transactionStarted = false;
+
+        $shoppingOutcome = productSaveRunSideEffect(
+            $db,
+            'shopping_intent',
+            static fn(): array => productSaveRecordShoppingIntent(
                 $db,
                 $id,
                 $shoppingNameProvenance
+            ),
+            ['recorded' => false]
         );
+        if ($shoppingOutcome['degraded'] !== null) {
+            $degradedSubsystems[] = $shoppingOutcome['degraded'];
+        }
         if (array_key_exists('prepared_food', $input)) {
-                recipeJobEnqueueInventoryChanged(
+            $recipeOutcome = productSaveRunSideEffect(
+                $db,
+                'prepared_food_recipe_scoring',
+                static fn(): array => recipeJobEnqueueInventoryChanged(
                     $db,
                     $id,
                     'product_save_prepared_food'
-                );
+                ),
+                ['queued' => false]
+            );
+            if ($recipeOutcome['degraded'] !== null) {
+                $degradedSubsystems[] = $recipeOutcome['degraded'];
+            }
         }
-        $queue = canonicalIngredientEnqueueProduct(
+        $canonicalOutcome = productSaveRunSideEffect(
+            $db,
+            'canonical_enqueue',
+            static fn(): array => canonicalIngredientEnqueueProduct(
                 $db,
                 $id,
                 $existing !== null
@@ -3810,27 +3924,53 @@ function saveProduct(PDO $db): void {
                             : 'product_save_update'
                     )
                     : 'product_save_create'
+            ),
+            ['queued' => false, 'status' => 'degraded']
         );
-        $controllerObservation =
+        $queue = $canonicalOutcome['result'];
+        if ($canonicalOutcome['degraded'] !== null) {
+            $degradedSubsystems[] = $canonicalOutcome['degraded'];
+        }
+        $controllerOutcome = productSaveRunSideEffect(
+            $db,
+            'controller_observation',
+            static fn(): array =>
                 ingredientOntologyControllerObserveProductSafely(
                     $db,
                     $id
-                );
-        $identityAdmission = productSaveRefreshIdentity(
+                ),
+            [
+                'observed' => false,
+                'disabled' => false,
+                'degraded' => true,
+                'surface' => 'product',
+            ]
+        );
+        $controllerObservation = $controllerOutcome['result'];
+        if ($controllerOutcome['degraded'] !== null) {
+            $degradedSubsystems[] = $controllerOutcome['degraded'];
+        }
+        $identityOutcome = productSaveRunSideEffect(
+            $db,
+            'identity_admission',
+            static fn(): array => productSaveRefreshIdentity(
                 $db,
                 $id,
                 array_key_exists('prepared_food', $input),
-                $existing !== null
+                $existing !== null,
+                $preparedFood === 1
+            ),
+            [
+                'available' => false,
+                'accepted' => false,
+                'changed' => false,
+                'reason' => 'identity_admission_degraded',
+            ]
         );
-        productSaveTestHook(
-                'before_commit',
-                [
-                    'id' => $id,
-                    'mode' => $existing !== null ? 'update' : 'create',
-                ]
-        );
-        $db->exec('COMMIT');
-        $transactionStarted = false;
+        $identityAdmission = $identityOutcome['result'];
+        if ($identityOutcome['degraded'] !== null) {
+            $degradedSubsystems[] = $identityOutcome['degraded'];
+        }
         if (!empty($queue['queued'])) {
             canonicalIngredientWake();
         }
@@ -3847,7 +3987,8 @@ function saveProduct(PDO $db): void {
                     $merged,
                     $queue,
                     $controllerObservation,
-                    $identityAdmission
+                    $identityAdmission,
+                    $degradedSubsystems
             ),
             JSON_UNESCAPED_UNICODE
         );
@@ -3994,7 +4135,8 @@ function productSaveResponse(
     bool $merged,
     array $queue,
     array $controllerObservation = [],
-    array $identityAdmission = []
+    array $identityAdmission = [],
+    array $degradedSubsystems = []
 ): array {
     $canonicalRows = canonicalIngredientRowsForProduct($db, $id);
     $productStmt = $db->prepare("
@@ -4018,6 +4160,8 @@ function productSaveResponse(
         'canonical_queue_status' => $queue['status'] ?? 'pending',
         'controller_observation' => $controllerObservation,
         'identity_admission' => $identityAdmission,
+        'degraded' => $degradedSubsystems !== [],
+        'degraded_subsystems' => $degradedSubsystems,
         'canonical_count' => count($canonicalRows),
         'canonical_ingredients' => $canonicalRows,
     ];

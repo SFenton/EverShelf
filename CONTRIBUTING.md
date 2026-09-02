@@ -110,7 +110,9 @@ node -c assets/js/app.js
 python3 -c "import json; json.load(open('translations/it.json'))"
 
 # Test Docker build
-docker build -t evershelf-test .
+docker build \
+  --build-arg VCS_REF="$(git rev-parse HEAD)" \
+  -t evershelf-test .
 ```
 
 ## 📝 Pull Request Process

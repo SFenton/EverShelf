@@ -36,7 +36,7 @@ Usually a permission issue on the mounted `data/` volume. Try:
 docker compose down
 rm -rf data/
 mkdir data/
-docker compose up -d
+./scripts/compose-up-exact.sh
 ```
 
 ---

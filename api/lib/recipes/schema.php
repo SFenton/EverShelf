@@ -8,7 +8,56 @@
 require_once __DIR__ . '/../ontology_v3/schema.php';
 
 const RECIPE_MAX_FACTUAL_DURATION_SECONDS = 366 * 24 * 60 * 60;
-const RECIPE_ONTOLOGY_SOURCE_TRIGGER_VERSION = 31502;
+const RECIPE_SCHEMA_VERSION = 31704;
+const RECIPE_ONTOLOGY_SOURCE_TRIGGER_VERSION = 31704;
+
+function recipeSchemaTestHook(
+    string $stage,
+    array $context = []
+): void {
+    if (
+        defined('RECIPE_BACKEND_TEST_MODE')
+        && RECIPE_BACKEND_TEST_MODE
+        && is_callable($GLOBALS['RECIPE_SCHEMA_TEST_HOOK'] ?? null)
+    ) {
+        ($GLOBALS['RECIPE_SCHEMA_TEST_HOOK'])($stage, $context);
+    }
+}
+
+function recipeSchemaRunOnce(
+    PDO $db,
+    string $migrationKey,
+    callable $migration
+): bool {
+    static $savepointSequence = 0;
+    $savepoint = 'recipe_schema_once_' . (++$savepointSequence);
+    $db->exec("SAVEPOINT {$savepoint}");
+    try {
+        $marker = $db->prepare("
+            INSERT OR IGNORE INTO recipe_schema_migrations (
+                migration_key, schema_version
+            )
+            VALUES (?, ?)
+        ");
+        $marker->execute([$migrationKey, RECIPE_SCHEMA_VERSION]);
+        $applied = $marker->rowCount() === 1;
+        if ($applied) {
+            recipeSchemaTestHook('after_marker_insert', [
+                'migration_key' => $migrationKey,
+            ]);
+            $migration();
+        }
+        $db->exec("RELEASE SAVEPOINT {$savepoint}");
+        return $applied;
+    } catch (Throwable $error) {
+        try {
+            $db->exec("ROLLBACK TO SAVEPOINT {$savepoint}");
+            $db->exec("RELEASE SAVEPOINT {$savepoint}");
+        } catch (Throwable $ignored) {
+        }
+        throw $error;
+    }
+}
 
 function recipeArrayIsList(array $value): bool {
     $expected = 0;
@@ -124,6 +173,8 @@ function recipeSchemaMigrate(PDO $db): void {
                 CHECK(metadata_failure_count BETWEEN 0 AND 255),
             metadata_next_probe_at DATETIME DEFAULT NULL,
             metadata_failure_schema_version TEXT DEFAULT NULL,
+            last_applied_request_epoch INTEGER NOT NULL DEFAULT 0
+                CHECK(last_applied_request_epoch >= 0),
             first_seen_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
             last_seen_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
             availability TEXT NOT NULL DEFAULT 'available',
@@ -656,12 +707,43 @@ function recipeSchemaMigrate(PDO $db): void {
             next_retry_at DATETIME DEFAULT NULL,
             last_error TEXT NOT NULL DEFAULT '',
             last_result_json TEXT DEFAULT NULL,
+            request_epoch INTEGER NOT NULL DEFAULT 0
+                CHECK(request_epoch >= 0),
+            request_generation INTEGER NOT NULL DEFAULT 1
+                CHECK(request_generation > 0),
+            request_hash TEXT NOT NULL DEFAULT '',
+            lease_token TEXT DEFAULT NULL,
+            lease_generation INTEGER NOT NULL DEFAULT 0
+                CHECK(lease_generation >= 0),
+            lease_expires_at DATETIME DEFAULT NULL,
             created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
             updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
             started_at DATETIME DEFAULT NULL,
             finished_at DATETIME DEFAULT NULL,
             FOREIGN KEY (ingredient_id) REFERENCES canonical_ingredients(id) ON DELETE SET NULL,
             FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS recipe_job_request_epoch (
+            id INTEGER PRIMARY KEY CHECK(id = 1),
+            next_epoch INTEGER NOT NULL DEFAULT 1
+                CHECK(next_epoch > 0)
+        );
+
+        CREATE TABLE IF NOT EXISTS recipe_schema_migrations (
+            migration_key TEXT PRIMARY KEY,
+            schema_version INTEGER NOT NULL,
+            applied_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE IF NOT EXISTS recipe_worker_leases (
+            lease_name TEXT PRIMARY KEY,
+            lease_token TEXT DEFAULT NULL,
+            lease_generation INTEGER NOT NULL DEFAULT 0
+                CHECK(lease_generation >= 0),
+            lease_expires_at DATETIME DEFAULT NULL,
+            owner_started_at DATETIME DEFAULT NULL,
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
 
         CREATE TABLE IF NOT EXISTS recipe_score_state (
@@ -707,6 +789,8 @@ function recipeSchemaMigrate(PDO $db): void {
             recipe_id INTEGER PRIMARY KEY,
             operation TEXT NOT NULL
                 CHECK(operation IN ('replace', 'delete')),
+            lane TEXT NOT NULL DEFAULT 'serving'
+                CHECK(lane IN ('serving', 'maintenance')),
             first_catalog_revision INTEGER NOT NULL
                 CHECK(first_catalog_revision > 0),
             latest_catalog_revision INTEGER NOT NULL
@@ -725,6 +809,8 @@ function recipeSchemaMigrate(PDO $db): void {
             domain TEXT NOT NULL
                 CHECK(domain IN ('catalog', 'source')),
             revision INTEGER NOT NULL CHECK(revision > 0),
+            lane TEXT NOT NULL DEFAULT 'serving'
+                CHECK(lane IN ('serving', 'maintenance')),
             owner_type TEXT NOT NULL
                 CHECK(owner_type IN ('recipe', 'product', 'global')),
             owner_id INTEGER DEFAULT NULL,
@@ -732,10 +818,262 @@ function recipeSchemaMigrate(PDO $db): void {
                 CHECK(operation IN (
                     'insert', 'update', 'delete', 'replace', 'global'
                 )),
+            source_table TEXT NOT NULL DEFAULT ''
+                CHECK(length(source_table) <= 80),
+            source_row_id INTEGER DEFAULT NULL,
             reason TEXT NOT NULL DEFAULT ''
                 CHECK(length(reason) <= 160),
             created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
             UNIQUE(domain, revision)
+        );
+
+        CREATE TABLE IF NOT EXISTS recipe_score_mutation_scopes (
+            mutation_id INTEGER NOT NULL,
+            ordinal INTEGER NOT NULL CHECK(ordinal > 0),
+            aggregate_type TEXT NOT NULL
+                CHECK(aggregate_type IN (
+                    'product', 'recipe', 'overlay'
+                )),
+            aggregate_id INTEGER DEFAULT NULL
+                CHECK(aggregate_id IS NULL OR aggregate_id > 0),
+            scope_role TEXT NOT NULL DEFAULT 'affected'
+                CHECK(scope_role IN (
+                    'affected', 'before', 'after', 'dependency'
+                )),
+            source_table TEXT NOT NULL
+                CHECK(length(source_table) BETWEEN 1 AND 80),
+            source_row_id INTEGER DEFAULT NULL,
+            source_key TEXT NOT NULL DEFAULT ''
+                CHECK(length(source_key) <= 320),
+            metadata_json TEXT NOT NULL DEFAULT '{}'
+                CHECK(
+                    json_valid(metadata_json)
+                    AND json_type(metadata_json) = 'object'
+                    AND length(metadata_json) <= 32768
+                ),
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (mutation_id, ordinal),
+            UNIQUE(
+                mutation_id, aggregate_type, aggregate_id,
+                scope_role, source_key
+            ),
+            FOREIGN KEY (mutation_id)
+                REFERENCES recipe_score_mutations(id)
+                    ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS
+            recipe_score_source_reconciliation_events (
+            source_revision INTEGER PRIMARY KEY
+                CHECK(source_revision > 0),
+            event_lane TEXT NOT NULL
+                CHECK(event_lane IN ('serving', 'maintenance')),
+            event_owner_type TEXT NOT NULL
+                CHECK(event_owner_type IN (
+                    'recipe', 'product', 'global'
+                )),
+            event_owner_id INTEGER DEFAULT NULL,
+            event_operation TEXT NOT NULL,
+            event_reason TEXT NOT NULL DEFAULT '',
+            source_table TEXT NOT NULL DEFAULT '',
+            source_row_id INTEGER DEFAULT NULL,
+            expected_scope_count INTEGER NOT NULL DEFAULT 0
+                CHECK(expected_scope_count >= 0),
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE TABLE IF NOT EXISTS
+            recipe_score_source_reconciliation_backfill (
+            id INTEGER PRIMARY KEY CHECK(id = 1),
+            last_mutation_id INTEGER NOT NULL DEFAULT 0,
+            complete INTEGER NOT NULL DEFAULT 0
+                CHECK(complete IN (0, 1)),
+            scope_backfill_version INTEGER NOT NULL DEFAULT 0,
+            scope_backfill_started INTEGER NOT NULL DEFAULT 0
+                CHECK(scope_backfill_started IN (0, 1)),
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE IF NOT EXISTS
+            recipe_score_source_reconciliation_scopes (
+            source_revision INTEGER NOT NULL CHECK(source_revision > 0),
+            ordinal INTEGER NOT NULL CHECK(ordinal > 0),
+            event_lane TEXT NOT NULL
+                CHECK(event_lane IN ('serving', 'maintenance')),
+            event_owner_type TEXT NOT NULL
+                CHECK(event_owner_type IN (
+                    'recipe', 'product', 'global'
+                )),
+            event_owner_id INTEGER DEFAULT NULL,
+            event_operation TEXT NOT NULL,
+            event_reason TEXT NOT NULL DEFAULT '',
+            aggregate_type TEXT NOT NULL
+                CHECK(aggregate_type IN (
+                    'product', 'recipe', 'overlay'
+                )),
+            aggregate_id INTEGER DEFAULT NULL,
+            scope_role TEXT NOT NULL,
+            source_table TEXT NOT NULL,
+            source_row_id INTEGER DEFAULT NULL,
+            source_key TEXT NOT NULL DEFAULT '',
+            metadata_json TEXT NOT NULL DEFAULT '{}'
+                CHECK(json_valid(metadata_json)),
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (source_revision, ordinal)
+        );
+
+        CREATE TABLE IF NOT EXISTS
+            recipe_score_identity_projection_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ontology_version_id INTEGER NOT NULL,
+            event_key TEXT NOT NULL,
+            required_revision INTEGER NOT NULL
+                CHECK(required_revision > 0),
+            required_hash TEXT NOT NULL
+                CHECK(length(required_hash) = 64),
+            extension_entity_id INTEGER NOT NULL,
+            product_id INTEGER DEFAULT NULL,
+            source_revision INTEGER DEFAULT NULL,
+            after_recipe_id INTEGER NOT NULL DEFAULT 0
+                CHECK(after_recipe_id >= 0),
+            completed INTEGER NOT NULL DEFAULT 0
+                CHECK(completed IN (0, 1)),
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(ontology_version_id, event_key),
+            FOREIGN KEY (extension_entity_id)
+                REFERENCES ingredient_ontology_identity_extension_entities(id)
+                    ON DELETE RESTRICT
+        );
+
+        CREATE TABLE IF NOT EXISTS
+            recipe_score_identity_projection_work (
+            ontology_version_id INTEGER NOT NULL,
+            recipe_id INTEGER NOT NULL,
+            first_event_id INTEGER NOT NULL DEFAULT 0
+                CHECK(first_event_id >= 0),
+            latest_event_id INTEGER NOT NULL DEFAULT 0
+                CHECK(latest_event_id >= first_event_id),
+            first_required_revision INTEGER NOT NULL
+                CHECK(first_required_revision > 0),
+            latest_required_revision INTEGER NOT NULL
+                CHECK(latest_required_revision >= first_required_revision),
+            latest_required_hash TEXT NOT NULL
+                CHECK(length(latest_required_hash) = 64),
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (ontology_version_id, recipe_id),
+            FOREIGN KEY (recipe_id)
+                REFERENCES recipe_catalog(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS
+            recipe_score_identity_projection_state (
+            ontology_version_id INTEGER PRIMARY KEY,
+            work_head_annex_revision_id INTEGER DEFAULT NULL,
+            work_head_annex_hash TEXT DEFAULT NULL
+                CHECK(
+                    work_head_annex_hash IS NULL
+                    OR length(work_head_annex_hash) = 64
+                ),
+            discovered_revision INTEGER NOT NULL DEFAULT 0
+                CHECK(discovered_revision >= 0),
+            discovered_hash TEXT NOT NULL
+                DEFAULT '0000000000000000000000000000000000000000000000000000000000000000'
+                CHECK(length(discovered_hash) = 64),
+            covered_revision INTEGER NOT NULL DEFAULT 0
+                CHECK(covered_revision >= 0),
+            covered_hash TEXT NOT NULL
+                DEFAULT '0000000000000000000000000000000000000000000000000000000000000000'
+                CHECK(length(covered_hash) = 64),
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            CHECK(covered_revision <= discovered_revision)
+        );
+
+        CREATE TABLE IF NOT EXISTS recipe_score_product_fanout_state (
+            product_id INTEGER PRIMARY KEY,
+            after_recipe_id INTEGER NOT NULL DEFAULT 0
+                CHECK(after_recipe_id >= 0),
+            started_score_revision_id INTEGER NOT NULL,
+            input_hash TEXT NOT NULL
+                CHECK(length(input_hash) = 64),
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE IF NOT EXISTS recipe_processing_status_snapshot (
+            id INTEGER PRIMARY KEY CHECK(id = 1),
+            observed_source_revision INTEGER NOT NULL DEFAULT 0,
+            observed_inventory_revision INTEGER NOT NULL DEFAULT 0,
+            ontology_version_id INTEGER DEFAULT NULL,
+            recipe_coverage_json TEXT NOT NULL DEFAULT '{}'
+                CHECK(json_valid(recipe_coverage_json)),
+            identity_annex_json TEXT NOT NULL DEFAULT '{}'
+                CHECK(json_valid(identity_annex_json)),
+            computed_at DATETIME DEFAULT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS recipe_score_projection_status (
+            id INTEGER PRIMARY KEY CHECK(id = 1),
+            active_score_revision_id INTEGER DEFAULT NULL,
+            active_annex_revision_id INTEGER DEFAULT NULL,
+            active_annex_hash TEXT DEFAULT NULL
+                CHECK(
+                    active_annex_hash IS NULL
+                    OR length(active_annex_hash) = 64
+                ),
+            ontology_version_id INTEGER DEFAULT NULL,
+            verdict TEXT NOT NULL DEFAULT 'unavailable'
+                CHECK(length(verdict) BETWEEN 1 AND 80),
+            requires_full_seal INTEGER NOT NULL DEFAULT 0
+                CHECK(requires_full_seal IN (0, 1)),
+            pending_suffix INTEGER NOT NULL DEFAULT 0
+                CHECK(pending_suffix IN (0, 1)),
+            repair_needed INTEGER NOT NULL DEFAULT 0
+                CHECK(repair_needed IN (0, 1)),
+            score_projection_repair_pending INTEGER NOT NULL DEFAULT 0
+                CHECK(score_projection_repair_pending IN (0, 1)),
+            journal_complete INTEGER NOT NULL DEFAULT 0
+                CHECK(journal_complete IN (0, 1)),
+            scope_reconciliation_complete INTEGER NOT NULL DEFAULT 0
+                CHECK(scope_reconciliation_complete IN (0, 1)),
+            reconciliation_mode TEXT NOT NULL DEFAULT 'unavailable'
+                CHECK(length(reconciliation_mode) BETWEEN 1 AND 40),
+            covered_ontology_source_revision INTEGER DEFAULT NULL,
+            captured_ontology_source_revision INTEGER DEFAULT NULL,
+            observed_ontology_source_revision INTEGER DEFAULT NULL,
+            covered_identity_extension_revision INTEGER DEFAULT NULL,
+            covered_identity_extension_hash TEXT DEFAULT NULL
+                CHECK(
+                    covered_identity_extension_hash IS NULL
+                    OR length(covered_identity_extension_hash) = 64
+                ),
+            captured_identity_extension_revision INTEGER DEFAULT NULL,
+            captured_identity_extension_hash TEXT DEFAULT NULL
+                CHECK(
+                    captured_identity_extension_hash IS NULL
+                    OR length(captured_identity_extension_hash) = 64
+                ),
+            observed_identity_extension_revision INTEGER DEFAULT NULL,
+            observed_identity_extension_hash TEXT DEFAULT NULL
+                CHECK(
+                    observed_identity_extension_hash IS NULL
+                    OR length(observed_identity_extension_hash) = 64
+                ),
+            pending_identity_recipe_count INTEGER NOT NULL DEFAULT 0
+                CHECK(pending_identity_recipe_count >= 0),
+            entry_count INTEGER NOT NULL DEFAULT 0
+                CHECK(entry_count >= 0),
+            aggregate_count INTEGER NOT NULL DEFAULT 0
+                CHECK(aggregate_count >= 0),
+            chain_depth INTEGER NOT NULL DEFAULT 0
+                CHECK(chain_depth >= 0),
+            compaction_due INTEGER NOT NULL DEFAULT 0
+                CHECK(compaction_due IN (0, 1)),
+            base_maxima_json TEXT NOT NULL DEFAULT '{}'
+                CHECK(json_valid(base_maxima_json)),
+            last_error TEXT NOT NULL DEFAULT ''
+                CHECK(length(last_error) <= 1000),
+            computed_at DATETIME DEFAULT NULL,
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
 
         CREATE TABLE IF NOT EXISTS recipe_score_work_state (
@@ -863,6 +1201,8 @@ function recipeSchemaMigrate(PDO $db): void {
             recipe_ingredient_id INTEGER NOT NULL,
             recipe_id INTEGER DEFAULT NULL,
             product_id INTEGER NOT NULL,
+            semantic INTEGER NOT NULL DEFAULT 1
+                CHECK(semantic IN (0, 1)),
             created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
             PRIMARY KEY (
                 score_revision_id,
@@ -887,6 +1227,7 @@ function recipeSchemaMigrate(PDO $db): void {
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             inventory_revision INTEGER NOT NULL,
             catalog_revision INTEGER NOT NULL DEFAULT 1,
+            covered_catalog_revision INTEGER DEFAULT NULL,
             inventory_fingerprint TEXT NOT NULL,
             score_date DATE NOT NULL,
             catalog_max_id INTEGER NOT NULL DEFAULT 0,
@@ -913,12 +1254,29 @@ function recipeSchemaMigrate(PDO $db): void {
             ontology_corpus_hash TEXT DEFAULT NULL,
             ontology_content_hash TEXT DEFAULT NULL,
             ontology_source_revision INTEGER NOT NULL DEFAULT 1,
+            covered_ontology_source_revision INTEGER DEFAULT NULL,
             ontology_source_hash TEXT NOT NULL DEFAULT '',
+            revision_kind TEXT NOT NULL DEFAULT 'baseline'
+                CHECK(revision_kind IN (
+                    'baseline', 'serving_delta', 'maintenance_delta'
+                )),
             identity_extension_revision INTEGER NOT NULL DEFAULT 0
                 CHECK(identity_extension_revision >= 0),
             identity_extension_hash TEXT NOT NULL
                 DEFAULT '0000000000000000000000000000000000000000000000000000000000000000'
                 CHECK(length(identity_extension_hash) = 64),
+            covered_identity_extension_revision INTEGER NOT NULL
+                DEFAULT 0
+                CHECK(covered_identity_extension_revision >= 0),
+            covered_identity_extension_hash TEXT NOT NULL
+                DEFAULT '0000000000000000000000000000000000000000000000000000000000000000'
+                CHECK(length(covered_identity_extension_hash) = 64),
+            corpus_annex_revision_id INTEGER DEFAULT NULL,
+            corpus_annex_hash TEXT DEFAULT NULL
+                CHECK(
+                    corpus_annex_hash IS NULL
+                    OR length(corpus_annex_hash) = 64
+                ),
             ontology_source_lineage_hash TEXT NOT NULL DEFAULT ''
                 CHECK(
                     ontology_source_lineage_hash = ''
@@ -978,6 +1336,8 @@ function recipeSchemaMigrate(PDO $db): void {
             last_error TEXT NOT NULL DEFAULT '',
             failure_count INTEGER NOT NULL DEFAULT 0,
             circuit_open_until DATETIME DEFAULT NULL,
+            last_outcome_request_epoch INTEGER NOT NULL DEFAULT 0
+                CHECK(last_outcome_request_epoch >= 0),
             quota_json TEXT NOT NULL DEFAULT '{}',
             quota_reset_at DATETIME DEFAULT NULL,
             updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -1013,6 +1373,8 @@ function recipeSchemaMigrate(PDO $db): void {
             ON recipe_ingredients(recipe_id, position);
         CREATE INDEX IF NOT EXISTS idx_recipe_ingredients_canonical
             ON recipe_ingredients(canonical_ingredient_id);
+        CREATE INDEX IF NOT EXISTS idx_recipe_ingredients_normalized
+            ON recipe_ingredients(normalized_name, recipe_id);
         CREATE INDEX IF NOT EXISTS idx_recipe_ingredients_taxonomy
             ON recipe_ingredients(taxonomy_node_id);
         CREATE INDEX IF NOT EXISTS idx_recipe_grocery_requests_recipe
@@ -1040,6 +1402,12 @@ function recipeSchemaMigrate(PDO $db): void {
         CREATE INDEX IF NOT EXISTS idx_recipe_score_pending_recipe_revision
             ON recipe_score_pending_recipes(
                 latest_catalog_revision, updated_at, recipe_id
+            );
+        CREATE INDEX IF NOT EXISTS
+            idx_recipe_score_identity_projection_work_due
+            ON recipe_score_identity_projection_work(
+                ontology_version_id, first_required_revision,
+                updated_at, recipe_id
             );
         CREATE INDEX IF NOT EXISTS idx_recipe_score_mutations_revision
             ON recipe_score_mutations(domain, revision, owner_type, owner_id);
@@ -1120,6 +1488,8 @@ function recipeSchemaMigrate(PDO $db): void {
                 recipe_ingredient_id INTEGER NOT NULL,
                 recipe_id INTEGER DEFAULT NULL,
                 product_id INTEGER NOT NULL,
+                semantic INTEGER NOT NULL DEFAULT 1
+                    CHECK(semantic IN (0, 1)),
                 created_at DATETIME NOT NULL
                     DEFAULT CURRENT_TIMESTAMP,
                 PRIMARY KEY (
@@ -1133,12 +1503,28 @@ function recipeSchemaMigrate(PDO $db): void {
             );
             INSERT INTO recipe_score_match_contributors_next (
                 score_revision_id, recipe_ingredient_id,
-                recipe_id, product_id, created_at
+                recipe_id, product_id, semantic, created_at
             )
             SELECT contributor.score_revision_id,
                    contributor.recipe_ingredient_id,
                    ingredient.recipe_id,
                    contributor.product_id,
+                   CASE
+                       WHEN EXISTS (
+                           SELECT 1
+                           FROM ingredient_ontology_shadow_matches match
+                           WHERE match.score_revision_id =
+                                   contributor.score_revision_id
+                             AND match.recipe_ingredient_id =
+                                   contributor.recipe_ingredient_id
+                             AND match.outcome IN (
+                                 'exact', 'compatible_variant',
+                                 'possible_substitute',
+                                 'insufficient_quantity', 'staple'
+                             )
+                       )
+                       THEN 1 ELSE 0
+                   END,
                    contributor.created_at
             FROM recipe_score_match_contributors contributor
             LEFT JOIN recipe_ingredients ingredient
@@ -1157,6 +1543,40 @@ function recipeSchemaMigrate(PDO $db): void {
                     score_revision_id, recipe_id,
                     recipe_ingredient_id
                 );
+        ");
+    }
+    $contributorColumns = array_column(
+        $db->query("
+            PRAGMA table_info(recipe_score_match_contributors)
+        ")->fetchAll(PDO::FETCH_ASSOC),
+        'name'
+    );
+    if (!in_array('semantic', $contributorColumns, true)) {
+        $db->exec("
+            ALTER TABLE recipe_score_match_contributors
+            ADD COLUMN semantic INTEGER NOT NULL DEFAULT 1
+                CHECK(semantic IN (0, 1))
+        ");
+        $db->exec("
+            UPDATE recipe_score_match_contributors
+            SET semantic = CASE
+                WHEN EXISTS (
+                    SELECT 1
+                    FROM ingredient_ontology_shadow_matches match
+                    WHERE match.score_revision_id =
+                            recipe_score_match_contributors
+                                .score_revision_id
+                      AND match.recipe_ingredient_id =
+                            recipe_score_match_contributors
+                                .recipe_ingredient_id
+                      AND match.outcome IN (
+                          'exact', 'compatible_variant',
+                          'possible_substitute',
+                          'insufficient_quantity', 'staple'
+                      )
+                )
+                THEN 1 ELSE 0
+            END
         ");
     }
     $db->exec("
@@ -1263,6 +1683,8 @@ function recipeSchemaMigrate(PDO $db): void {
         'metadata_failure_count' => 'INTEGER NOT NULL DEFAULT 0',
         'metadata_next_probe_at' => 'DATETIME DEFAULT NULL',
         'metadata_failure_schema_version' => 'TEXT DEFAULT NULL',
+        'last_applied_request_epoch' =>
+            'INTEGER NOT NULL DEFAULT 0',
     ] as $column => $definition) {
         if (in_array($column, $originColumns, true)) {
             continue;
@@ -1456,6 +1878,9 @@ function recipeSchemaMigrate(PDO $db): void {
             WHERE source_unit_ref IS NOT NULL;
         CREATE INDEX IF NOT EXISTS idx_recipe_source_ingredients_canonical
             ON recipe_source_ingredients(canonical_ingredient_id);
+        CREATE INDEX IF NOT EXISTS
+            idx_recipe_source_ingredients_normalized
+            ON recipe_source_ingredients(normalized_name, recipe_id);
         CREATE INDEX IF NOT EXISTS idx_recipe_source_ingredients_taxonomy
             ON recipe_source_ingredients(taxonomy_node_id);
         CREATE INDEX IF NOT EXISTS idx_recipe_quantity_proposals_review
@@ -1586,11 +2011,96 @@ function recipeSchemaMigrate(PDO $db): void {
         $db->query("PRAGMA table_info(recipe_jobs)")->fetchAll(PDO::FETCH_ASSOC),
         'name'
     );
-    if (!in_array('priority', $jobColumns, true)) {
+    foreach ([
+        'priority' => 'INTEGER NOT NULL DEFAULT 0',
+        'request_epoch' => 'INTEGER NOT NULL DEFAULT 0',
+        'request_generation' => 'INTEGER NOT NULL DEFAULT 1',
+        'request_hash' => "TEXT NOT NULL DEFAULT ''",
+        'lease_token' => 'TEXT DEFAULT NULL',
+        'lease_generation' => 'INTEGER NOT NULL DEFAULT 0',
+        'lease_expires_at' => 'DATETIME DEFAULT NULL',
+    ] as $column => $definition) {
+        if (in_array($column, $jobColumns, true)) {
+            continue;
+        }
         try {
-            $db->exec("ALTER TABLE recipe_jobs ADD COLUMN priority INTEGER NOT NULL DEFAULT 0");
+            $db->exec("
+                ALTER TABLE recipe_jobs
+                ADD COLUMN {$column} {$definition}
+            ");
         } catch (PDOException $e) {
             if (!str_contains(strtolower($e->getMessage()), 'duplicate column')) {
+                throw $e;
+            }
+        }
+    }
+    $db->exec("
+        CREATE TABLE IF NOT EXISTS recipe_job_request_epoch (
+            id INTEGER PRIMARY KEY CHECK(id = 1),
+            next_epoch INTEGER NOT NULL DEFAULT 1
+                CHECK(next_epoch > 0)
+        );
+        INSERT OR IGNORE INTO recipe_job_request_epoch (id, next_epoch)
+        VALUES (
+            1,
+            COALESCE(
+                (SELECT MAX(request_epoch) + 1 FROM recipe_jobs),
+                1
+            )
+        );
+        UPDATE recipe_jobs
+        SET request_epoch = id
+        WHERE request_epoch <= 0;
+        UPDATE recipe_job_request_epoch
+        SET next_epoch = MAX(
+            next_epoch,
+            COALESCE(
+                (SELECT MAX(request_epoch) + 1 FROM recipe_jobs),
+                1
+            )
+        )
+        WHERE id = 1;
+        UPDATE recipe_jobs
+        SET status = 'retry',
+            next_retry_at = CURRENT_TIMESTAMP,
+            last_error = 'legacy lease reclaimed during migration',
+            lease_token = NULL,
+            lease_expires_at = NULL,
+            started_at = NULL,
+            finished_at = NULL,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE status = 'in_progress'
+          AND (
+              lease_token IS NULL
+              OR TRIM(lease_token) = ''
+              OR lease_expires_at IS NULL
+          );
+    ");
+    $db->exec("
+        CREATE INDEX IF NOT EXISTS idx_recipe_jobs_lease
+            ON recipe_jobs(status, lease_expires_at, id)
+    ");
+    $connectorStateColumns = array_column(
+        $db->query("PRAGMA table_info(recipe_connector_state)")
+            ->fetchAll(PDO::FETCH_ASSOC),
+        'name'
+    );
+    if (!in_array(
+        'last_outcome_request_epoch',
+        $connectorStateColumns,
+        true
+    )) {
+        try {
+            $db->exec("
+                ALTER TABLE recipe_connector_state
+                ADD COLUMN last_outcome_request_epoch
+                    INTEGER NOT NULL DEFAULT 0
+            ");
+        } catch (PDOException $e) {
+            if (!str_contains(
+                strtolower($e->getMessage()),
+                'duplicate column'
+            )) {
                 throw $e;
             }
         }
@@ -1599,11 +2109,18 @@ function recipeSchemaMigrate(PDO $db): void {
         SELECT sql FROM sqlite_master
         WHERE type = 'index' AND name = 'idx_recipe_jobs_ready'
     ")->fetchColumn() ?: '');
-    if ($jobIndexSql === '' || !str_contains(strtolower($jobIndexSql), 'priority')) {
+    if (
+        $jobIndexSql === ''
+        || !str_contains(strtolower($jobIndexSql), 'priority')
+        || !str_contains(strtolower($jobIndexSql), 'lease_expires_at')
+    ) {
         $db->exec("
             DROP INDEX IF EXISTS idx_recipe_jobs_ready;
             CREATE INDEX idx_recipe_jobs_ready
-                ON recipe_jobs(status, priority DESC, next_retry_at, created_at);
+                ON recipe_jobs(
+                    status, priority DESC, next_retry_at,
+                    lease_expires_at, created_at
+                );
         ");
     }
     $scoreRevisionColumns = array_column(
@@ -1640,6 +2157,22 @@ function recipeSchemaMigrate(PDO $db): void {
         'catalog_lineage_hash' => "TEXT NOT NULL DEFAULT ''",
         'ontology_source_lineage_hash' =>
             "TEXT NOT NULL DEFAULT ''",
+        'covered_catalog_revision' => 'INTEGER DEFAULT NULL',
+        'covered_ontology_source_revision' =>
+            'INTEGER DEFAULT NULL',
+        'revision_kind' =>
+            "TEXT NOT NULL DEFAULT 'baseline'",
+        'covered_identity_extension_revision' =>
+            'INTEGER NOT NULL DEFAULT 0',
+        'covered_identity_extension_hash' =>
+            "TEXT NOT NULL DEFAULT '"
+                . str_repeat('0', 64)
+                . "'",
+        'corpus_annex_revision_id' => 'INTEGER DEFAULT NULL',
+        'corpus_annex_hash' =>
+            'TEXT DEFAULT NULL CHECK('
+                . 'corpus_annex_hash IS NULL '
+                . 'OR length(corpus_annex_hash) = 64)',
     ] as $column => $definition) {
         if (in_array($column, $scoreRevisionColumns, true)) {
             continue;
@@ -1655,6 +2188,459 @@ function recipeSchemaMigrate(PDO $db): void {
             }
         }
     }
+    $pendingRecipeColumns = array_column(
+        $db->query("PRAGMA table_info(recipe_score_pending_recipes)")
+            ->fetchAll(PDO::FETCH_ASSOC),
+        'name'
+    );
+    if (!in_array('lane', $pendingRecipeColumns, true)) {
+        $db->exec("
+            ALTER TABLE recipe_score_pending_recipes
+            ADD COLUMN lane TEXT NOT NULL DEFAULT 'maintenance'
+        ");
+    }
+    $mutationColumns = array_column(
+        $db->query("PRAGMA table_info(recipe_score_mutations)")
+            ->fetchAll(PDO::FETCH_ASSOC),
+        'name'
+    );
+    if (!in_array('lane', $mutationColumns, true)) {
+        $db->exec("
+            ALTER TABLE recipe_score_mutations
+            ADD COLUMN lane TEXT NOT NULL DEFAULT 'maintenance'
+        ");
+    }
+    if (!in_array('source_table', $mutationColumns, true)) {
+        $db->exec("
+            ALTER TABLE recipe_score_mutations
+            ADD COLUMN source_table TEXT NOT NULL DEFAULT ''
+        ");
+    }
+    if (!in_array('source_row_id', $mutationColumns, true)) {
+        $db->exec("
+            ALTER TABLE recipe_score_mutations
+            ADD COLUMN source_row_id INTEGER DEFAULT NULL
+        ");
+    }
+    $db->exec("
+        CREATE TABLE IF NOT EXISTS recipe_score_mutation_scopes (
+            mutation_id INTEGER NOT NULL,
+            ordinal INTEGER NOT NULL CHECK(ordinal > 0),
+            aggregate_type TEXT NOT NULL
+                CHECK(aggregate_type IN (
+                    'product', 'recipe', 'overlay'
+                )),
+            aggregate_id INTEGER DEFAULT NULL
+                CHECK(aggregate_id IS NULL OR aggregate_id > 0),
+            scope_role TEXT NOT NULL DEFAULT 'affected'
+                CHECK(scope_role IN (
+                    'affected', 'before', 'after', 'dependency'
+                )),
+            source_table TEXT NOT NULL
+                CHECK(length(source_table) BETWEEN 1 AND 80),
+            source_row_id INTEGER DEFAULT NULL,
+            source_key TEXT NOT NULL DEFAULT ''
+                CHECK(length(source_key) <= 320),
+            metadata_json TEXT NOT NULL DEFAULT '{}'
+                CHECK(
+                    json_valid(metadata_json)
+                    AND json_type(metadata_json) = 'object'
+                    AND length(metadata_json) <= 32768
+                ),
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (mutation_id, ordinal),
+            UNIQUE(
+                mutation_id, aggregate_type, aggregate_id,
+                scope_role, source_key
+            ),
+            FOREIGN KEY (mutation_id)
+                REFERENCES recipe_score_mutations(id)
+                    ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS
+            recipe_score_source_reconciliation_events (
+            source_revision INTEGER PRIMARY KEY
+                CHECK(source_revision > 0),
+            event_lane TEXT NOT NULL
+                CHECK(event_lane IN ('serving', 'maintenance')),
+            event_owner_type TEXT NOT NULL
+                CHECK(event_owner_type IN (
+                    'recipe', 'product', 'global'
+                )),
+            event_owner_id INTEGER DEFAULT NULL,
+            event_operation TEXT NOT NULL,
+            event_reason TEXT NOT NULL DEFAULT '',
+            source_table TEXT NOT NULL DEFAULT '',
+            source_row_id INTEGER DEFAULT NULL,
+            expected_scope_count INTEGER NOT NULL DEFAULT 0
+                CHECK(expected_scope_count >= 0),
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE TABLE IF NOT EXISTS
+            recipe_score_source_reconciliation_backfill (
+            id INTEGER PRIMARY KEY CHECK(id = 1),
+            last_mutation_id INTEGER NOT NULL DEFAULT 0,
+            complete INTEGER NOT NULL DEFAULT 0
+                CHECK(complete IN (0, 1)),
+            scope_backfill_version INTEGER NOT NULL DEFAULT 0,
+            scope_backfill_started INTEGER NOT NULL DEFAULT 0
+                CHECK(scope_backfill_started IN (0, 1)),
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE TABLE IF NOT EXISTS
+            recipe_score_identity_projection_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ontology_version_id INTEGER NOT NULL,
+            event_key TEXT NOT NULL,
+            required_revision INTEGER NOT NULL
+                CHECK(required_revision > 0),
+            required_hash TEXT NOT NULL
+                CHECK(length(required_hash) = 64),
+            extension_entity_id INTEGER NOT NULL,
+            product_id INTEGER DEFAULT NULL,
+            source_revision INTEGER DEFAULT NULL,
+            after_recipe_id INTEGER NOT NULL DEFAULT 0
+                CHECK(after_recipe_id >= 0),
+            completed INTEGER NOT NULL DEFAULT 0
+                CHECK(completed IN (0, 1)),
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(ontology_version_id, event_key)
+        );
+        CREATE TABLE IF NOT EXISTS recipe_processing_status_snapshot (
+            id INTEGER PRIMARY KEY CHECK(id = 1),
+            observed_source_revision INTEGER NOT NULL DEFAULT 0,
+            observed_inventory_revision INTEGER NOT NULL DEFAULT 0,
+            ontology_version_id INTEGER DEFAULT NULL,
+            recipe_coverage_json TEXT NOT NULL DEFAULT '{}'
+                CHECK(json_valid(recipe_coverage_json)),
+            identity_annex_json TEXT NOT NULL DEFAULT '{}'
+                CHECK(json_valid(identity_annex_json)),
+            computed_at DATETIME DEFAULT NULL
+        );
+        CREATE TABLE IF NOT EXISTS recipe_score_product_fanout_state (
+            product_id INTEGER PRIMARY KEY,
+            after_recipe_id INTEGER NOT NULL DEFAULT 0
+                CHECK(after_recipe_id >= 0),
+            started_score_revision_id INTEGER NOT NULL,
+            input_hash TEXT NOT NULL
+                CHECK(length(input_hash) = 64),
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_recipe_score_pending_recipe_lane
+            ON recipe_score_pending_recipes(
+                lane, updated_at, recipe_id
+            );
+        CREATE INDEX IF NOT EXISTS idx_recipe_score_mutations_lane_revision
+            ON recipe_score_mutations(
+                lane, domain, revision, owner_type, owner_id
+            );
+        CREATE INDEX IF NOT EXISTS idx_recipe_score_mutation_scopes_aggregate
+            ON recipe_score_mutation_scopes(
+                aggregate_type, aggregate_id, mutation_id
+            );
+        CREATE INDEX IF NOT EXISTS idx_recipe_score_mutation_scopes_source
+            ON recipe_score_mutation_scopes(
+                source_table, source_row_id, mutation_id
+            );
+        CREATE INDEX IF NOT EXISTS
+            idx_recipe_score_source_reconciliation_scope
+            ON recipe_score_source_reconciliation_scopes(
+                source_revision, aggregate_type, aggregate_id
+            );
+        CREATE INDEX IF NOT EXISTS
+            idx_recipe_score_identity_projection_events_pending
+            ON recipe_score_identity_projection_events(
+                ontology_version_id, completed, id
+            );
+        CREATE INDEX IF NOT EXISTS
+            idx_recipe_score_identity_projection_work_due
+            ON recipe_score_identity_projection_work(
+                ontology_version_id, first_required_revision,
+                updated_at, recipe_id
+            );
+        CREATE TRIGGER IF NOT EXISTS
+            recipe_score_source_reconciliation_event_capture
+        AFTER INSERT ON recipe_score_mutations
+        WHEN NEW.domain = 'source'
+        BEGIN
+            INSERT INTO recipe_score_source_reconciliation_events (
+                source_revision, event_lane, event_owner_type,
+                event_owner_id, event_operation, event_reason,
+                source_table, source_row_id, created_at
+            )
+            VALUES (
+                NEW.revision, NEW.lane, NEW.owner_type,
+                NEW.owner_id, NEW.operation, NEW.reason,
+                NEW.source_table, NEW.source_row_id, NEW.created_at
+            )
+            ON CONFLICT(source_revision) DO UPDATE SET
+                event_lane = excluded.event_lane,
+                event_owner_type = excluded.event_owner_type,
+                event_owner_id = excluded.event_owner_id,
+                event_operation = excluded.event_operation,
+                event_reason = excluded.event_reason,
+                source_table = excluded.source_table,
+                source_row_id = excluded.source_row_id;
+        END
+        ;
+        CREATE TRIGGER IF NOT EXISTS
+            recipe_score_mutation_scope_default
+        AFTER INSERT ON recipe_score_mutations
+        WHEN NEW.owner_type IN ('product', 'recipe')
+         AND NEW.owner_id IS NOT NULL
+        BEGIN
+            INSERT OR IGNORE INTO recipe_score_mutation_scopes (
+                mutation_id, ordinal, aggregate_type, aggregate_id,
+                scope_role, source_table, source_row_id,
+                source_key, metadata_json
+            )
+            VALUES (
+                NEW.id, 1, NEW.owner_type, NEW.owner_id,
+                'affected',
+                CASE
+                    WHEN NEW.source_table <> '' THEN NEW.source_table
+                    ELSE NEW.reason
+                END,
+                NEW.source_row_id, '', '{}'
+            );
+        END
+        ;
+        CREATE TRIGGER IF NOT EXISTS
+            recipe_score_source_reconciliation_scope_capture
+        AFTER INSERT ON recipe_score_mutation_scopes
+        WHEN EXISTS (
+            SELECT 1
+            FROM recipe_score_mutations mutation
+            WHERE mutation.id = NEW.mutation_id
+              AND mutation.domain = 'source'
+        )
+        BEGIN
+            INSERT INTO recipe_score_source_reconciliation_scopes (
+                source_revision, ordinal, event_lane,
+                event_owner_type, event_owner_id,
+                event_operation, event_reason,
+                aggregate_type, aggregate_id, scope_role,
+                source_table, source_row_id, source_key,
+                metadata_json
+            )
+            SELECT mutation.revision, NEW.ordinal, mutation.lane,
+                   mutation.owner_type, mutation.owner_id,
+                   mutation.operation, mutation.reason,
+                   NEW.aggregate_type, NEW.aggregate_id,
+                   NEW.scope_role, NEW.source_table,
+                   NEW.source_row_id, NEW.source_key,
+                   NEW.metadata_json
+            FROM recipe_score_mutations mutation
+            WHERE mutation.id = NEW.mutation_id
+            ON CONFLICT(source_revision, ordinal) DO UPDATE SET
+                event_lane = excluded.event_lane,
+                event_owner_type = excluded.event_owner_type,
+                event_owner_id = excluded.event_owner_id,
+                event_operation = excluded.event_operation,
+                event_reason = excluded.event_reason,
+                aggregate_type = excluded.aggregate_type,
+                aggregate_id = excluded.aggregate_id,
+                scope_role = excluded.scope_role,
+                source_table = excluded.source_table,
+                source_row_id = excluded.source_row_id,
+                source_key = excluded.source_key,
+                metadata_json = excluded.metadata_json;
+        END
+    ");
+    $reconciliationEventColumns = array_column(
+        $db->query(
+            "PRAGMA table_info(
+                recipe_score_source_reconciliation_events
+            )"
+        )->fetchAll(PDO::FETCH_ASSOC),
+        'name'
+    );
+    if (!in_array(
+        'expected_scope_count',
+        $reconciliationEventColumns,
+        true
+    )) {
+        $db->exec("
+            ALTER TABLE recipe_score_source_reconciliation_events
+            ADD COLUMN expected_scope_count INTEGER NOT NULL DEFAULT 0
+        ");
+    }
+    $reconciliationTriggerRows = $db->query("
+        SELECT name, sql
+        FROM sqlite_master
+        WHERE type = 'trigger'
+          AND name IN (
+              'recipe_score_source_reconciliation_event_capture',
+              'recipe_score_source_reconciliation_scope_count'
+          )
+        ORDER BY name
+    ")->fetchAll(PDO::FETCH_ASSOC);
+    $reconciliationTriggerSql = array_column(
+        $reconciliationTriggerRows,
+        'sql',
+        'name'
+    );
+    $reconciliationTriggersCurrent =
+        count($reconciliationTriggerSql) === 2
+        && str_contains(
+            (string)$reconciliationTriggerSql[
+                'recipe_score_source_reconciliation_event_capture'
+            ],
+            'expected_scope_count'
+        )
+        && str_contains(
+            (string)$reconciliationTriggerSql[
+                'recipe_score_source_reconciliation_scope_count'
+            ],
+            'FROM recipe_score_mutation_scopes'
+        );
+    if (!$reconciliationTriggersCurrent) {
+        $db->exec("
+        DROP TRIGGER IF EXISTS
+            recipe_score_source_reconciliation_event_capture;
+        CREATE TRIGGER
+            recipe_score_source_reconciliation_event_capture
+        AFTER INSERT ON recipe_score_mutations
+        WHEN NEW.domain = 'source'
+        BEGIN
+            INSERT INTO recipe_score_source_reconciliation_events (
+                source_revision, event_lane, event_owner_type,
+                event_owner_id, event_operation, event_reason,
+                source_table, source_row_id,
+                expected_scope_count, created_at
+            )
+            VALUES (
+                NEW.revision, NEW.lane, NEW.owner_type,
+                NEW.owner_id, NEW.operation, NEW.reason,
+                NEW.source_table, NEW.source_row_id,
+                (
+                    SELECT COUNT(*)
+                    FROM recipe_score_mutation_scopes scope
+                    WHERE scope.mutation_id = NEW.id
+                ),
+                NEW.created_at
+            )
+            ON CONFLICT(source_revision) DO UPDATE SET
+                event_lane = excluded.event_lane,
+                event_owner_type = excluded.event_owner_type,
+                event_owner_id = excluded.event_owner_id,
+                event_operation = excluded.event_operation,
+                event_reason = excluded.event_reason,
+                source_table = excluded.source_table,
+                source_row_id = excluded.source_row_id,
+                expected_scope_count = MAX(
+                    recipe_score_source_reconciliation_events
+                        .expected_scope_count,
+                    excluded.expected_scope_count
+                );
+        END;
+        DROP TRIGGER IF EXISTS
+            recipe_score_source_reconciliation_scope_count;
+        CREATE TRIGGER
+            recipe_score_source_reconciliation_scope_count
+        AFTER INSERT ON recipe_score_source_reconciliation_scopes
+        BEGIN
+            UPDATE recipe_score_source_reconciliation_events
+            SET expected_scope_count = (
+                SELECT COUNT(*)
+                FROM recipe_score_mutation_scopes scope
+                JOIN recipe_score_mutations mutation
+                  ON mutation.id = scope.mutation_id
+                 AND mutation.domain = 'source'
+                WHERE mutation.revision = NEW.source_revision
+            )
+            WHERE source_revision = NEW.source_revision;
+        END
+        ");
+    }
+    $identityWorkColumns = array_column(
+        $db->query(
+            "PRAGMA table_info(recipe_score_identity_projection_work)"
+        )->fetchAll(PDO::FETCH_ASSOC),
+        'name'
+    );
+    if (!in_array('first_event_id', $identityWorkColumns, true)) {
+        $db->exec("
+            ALTER TABLE recipe_score_identity_projection_work
+            ADD COLUMN first_event_id INTEGER NOT NULL DEFAULT 0
+        ");
+    }
+    if (!in_array('latest_event_id', $identityWorkColumns, true)) {
+        $db->exec("
+            ALTER TABLE recipe_score_identity_projection_work
+            ADD COLUMN latest_event_id INTEGER NOT NULL DEFAULT 0
+        ");
+    }
+    $reconciliationBackfillColumns = array_column(
+        $db->query(
+            "PRAGMA table_info(
+                recipe_score_source_reconciliation_backfill
+            )"
+        )->fetchAll(PDO::FETCH_ASSOC),
+        'name'
+    );
+    $scopeBackfillAdded = false;
+    if (!in_array(
+        'scope_backfill_version',
+        $reconciliationBackfillColumns,
+        true
+    )) {
+        $db->exec("
+            ALTER TABLE recipe_score_source_reconciliation_backfill
+            ADD COLUMN scope_backfill_version INTEGER NOT NULL DEFAULT 0
+        ");
+        $scopeBackfillAdded = true;
+    }
+    if (!in_array(
+        'scope_backfill_started',
+        $reconciliationBackfillColumns,
+        true
+    )) {
+        $db->exec("
+            ALTER TABLE recipe_score_source_reconciliation_backfill
+            ADD COLUMN scope_backfill_started INTEGER NOT NULL DEFAULT 0
+        ");
+        $scopeBackfillAdded = true;
+    }
+    $productFanoutColumns = array_column(
+        $db->query(
+            "PRAGMA table_info(recipe_score_product_fanout_state)"
+        )->fetchAll(PDO::FETCH_ASSOC),
+        'name'
+    );
+    if (!in_array('input_hash', $productFanoutColumns, true)) {
+        $db->exec("
+            ALTER TABLE recipe_score_product_fanout_state
+            ADD COLUMN input_hash TEXT NOT NULL
+                DEFAULT '0000000000000000000000000000000000000000000000000000000000000000'
+        ");
+    }
+    $db->exec("
+        INSERT OR IGNORE INTO
+            recipe_score_source_reconciliation_backfill (id)
+        VALUES (1);
+    ");
+    if ($scopeBackfillAdded) {
+        $db->exec("
+            UPDATE recipe_score_source_reconciliation_backfill
+            SET last_mutation_id = 0,
+                complete = 0,
+                scope_backfill_version = 0,
+                scope_backfill_started = 0,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = 1
+        ");
+    }
+    $db->exec("
+        UPDATE recipe_score_source_reconciliation_backfill
+        SET complete = 0,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = 1;
+        INSERT OR IGNORE INTO recipe_processing_status_snapshot (id)
+        VALUES (1)
+    ");
     $scoreStateExists = (int)$db->query("
         SELECT COUNT(*) FROM recipe_score_state WHERE id = 1
     ")->fetchColumn();
@@ -1663,6 +2649,10 @@ function recipeSchemaMigrate(PDO $db): void {
     }
     $db->exec("
         INSERT OR IGNORE INTO recipe_score_work_state (id)
+        VALUES (1)
+    ");
+    $db->exec("
+        INSERT OR IGNORE INTO recipe_score_projection_status (id)
         VALUES (1)
     ");
     $projectionState = $db->query("
@@ -1674,56 +2664,24 @@ function recipeSchemaMigrate(PDO $db): void {
     $projectionActiveId = (int)(
         $projectionState['active_score_revision_id'] ?? 0
     );
-    if (
+    $projectionRepairPending =
         $projectionActiveId > 0
         && (int)(
             $projectionState[
                 'active_score_projection_revision_id'
             ] ?? 0
-        ) === 0
-    ) {
-        $projectionRevision = $db->prepare("
-            SELECT recipe_count
-            FROM recipe_score_revisions
-            WHERE id = ? AND status = 'ready'
-        ");
-        $projectionRevision->execute([$projectionActiveId]);
-        $expectedProjectionCount =
-            $projectionRevision->fetchColumn();
-        if ($expectedProjectionCount !== false) {
-            $db->exec("DELETE FROM recipe_score_effective_sources");
-            $projectionInsert = $db->prepare("
-                INSERT INTO recipe_score_effective_sources (
-                    recipe_id, score_revision_id, updated_at
-                )
-                SELECT recipe_id, ?, CURRENT_TIMESTAMP
-                FROM recipe_inventory_scores
-                WHERE score_revision_id = ?
-                ORDER BY recipe_id
-            ");
-            $projectionInsert->execute([
-                $projectionActiveId,
-                $projectionActiveId,
-            ]);
-            if (
-                $projectionInsert->rowCount()
-                    === (int)$expectedProjectionCount
-            ) {
-                $db->prepare("
-                    UPDATE recipe_score_state
-                    SET active_score_projection_revision_id = ?
-                    WHERE id = 1
-                      AND active_score_revision_id = ?
-                ")->execute([
-                    $projectionActiveId,
-                    $projectionActiveId,
-                ]);
-            } else {
-                $db->exec(
-                    "DELETE FROM recipe_score_effective_sources"
-                );
-            }
-        }
+        ) !== $projectionActiveId;
+    if ($projectionRepairPending) {
+        $db->prepare("
+            UPDATE recipe_score_projection_status
+            SET active_score_revision_id = ?,
+                score_projection_repair_pending = 1,
+                repair_needed = 1,
+                pending_suffix = 1,
+                verdict = 'score_projection_repair_pending',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = 1
+        ")->execute([$projectionActiveId]);
     }
     $ontologySourceTableCount = (int)$db->query("
         SELECT COUNT(*)
@@ -1743,6 +2701,15 @@ function recipeSchemaMigrate(PDO $db): void {
         'recipe_ontology_source_products_insert',
         'recipe_ontology_source_products_update',
         'recipe_ontology_source_products_delete',
+        'recipe_ontology_source_product_ingredients_insert',
+        'recipe_ontology_source_product_ingredients_update',
+        'recipe_ontology_source_product_ingredients_delete',
+        'recipe_ontology_source_taxonomy_aliases_insert',
+        'recipe_ontology_source_taxonomy_aliases_update',
+        'recipe_ontology_source_taxonomy_aliases_delete',
+        'recipe_ontology_source_canonical_ingredients_insert',
+        'recipe_ontology_source_canonical_ingredients_update',
+        'recipe_ontology_source_canonical_ingredients_delete',
         'recipe_ontology_source_catalog_insert',
         'recipe_ontology_source_catalog_update',
         'recipe_ontology_source_catalog_delete',
@@ -1787,7 +2754,8 @@ function recipeSchemaMigrate(PDO $db): void {
         )
         && !$ontologySourceTriggersCurrent
     ) {
-        $ownsOntologySourceTransaction = !$db->inTransaction();
+        $ownsOntologySourceTransaction =
+            !databaseTransactionIsActive($db);
         $ontologySourceTransactionStarted = false;
         try {
             if ($ownsOntologySourceTransaction) {
@@ -1822,6 +2790,15 @@ function recipeSchemaMigrate(PDO $db): void {
         DROP TRIGGER IF EXISTS recipe_ontology_source_products_insert;
         DROP TRIGGER IF EXISTS recipe_ontology_source_products_update;
         DROP TRIGGER IF EXISTS recipe_ontology_source_products_delete;
+        DROP TRIGGER IF EXISTS recipe_ontology_source_product_ingredients_insert;
+        DROP TRIGGER IF EXISTS recipe_ontology_source_product_ingredients_update;
+        DROP TRIGGER IF EXISTS recipe_ontology_source_product_ingredients_delete;
+        DROP TRIGGER IF EXISTS recipe_ontology_source_taxonomy_aliases_insert;
+        DROP TRIGGER IF EXISTS recipe_ontology_source_taxonomy_aliases_update;
+        DROP TRIGGER IF EXISTS recipe_ontology_source_taxonomy_aliases_delete;
+        DROP TRIGGER IF EXISTS recipe_ontology_source_canonical_ingredients_insert;
+        DROP TRIGGER IF EXISTS recipe_ontology_source_canonical_ingredients_update;
+        DROP TRIGGER IF EXISTS recipe_ontology_source_canonical_ingredients_delete;
         DROP TRIGGER IF EXISTS recipe_ontology_source_catalog_insert;
         DROP TRIGGER IF EXISTS recipe_ontology_source_catalog_update;
         DROP TRIGGER IF EXISTS recipe_ontology_source_catalog_delete;
@@ -1845,11 +2822,12 @@ function recipeSchemaMigrate(PDO $db): void {
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = 1;
             INSERT INTO recipe_score_mutations (
-                domain, revision, owner_type, owner_id,
-                operation, reason
+                domain, revision, lane, owner_type, owner_id,
+                operation, source_table, source_row_id, reason
             )
             SELECT 'source', ontology_source_revision,
-                   'product', NEW.id, 'insert', 'products'
+                   'serving', 'product', NEW.id, 'insert',
+                   'products', NEW.id, 'products'
             FROM recipe_score_state WHERE id = 1;
         END;
         CREATE TRIGGER recipe_ontology_source_products_update
@@ -1866,11 +2844,12 @@ function recipeSchemaMigrate(PDO $db): void {
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = 1;
             INSERT INTO recipe_score_mutations (
-                domain, revision, owner_type, owner_id,
-                operation, reason
+                domain, revision, lane, owner_type, owner_id,
+                operation, source_table, source_row_id, reason
             )
             SELECT 'source', ontology_source_revision,
-                   'product', NEW.id, 'update', 'products'
+                   'serving', 'product', NEW.id, 'update',
+                   'products', NEW.id, 'products'
             FROM recipe_score_state WHERE id = 1;
         END;
         CREATE TRIGGER recipe_ontology_source_products_delete
@@ -1883,11 +2862,12 @@ function recipeSchemaMigrate(PDO $db): void {
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = 1;
             INSERT INTO recipe_score_mutations (
-                domain, revision, owner_type, owner_id,
-                operation, reason
+                domain, revision, lane, owner_type, owner_id,
+                operation, source_table, source_row_id, reason
             )
             SELECT 'source', ontology_source_revision,
-                   'product', OLD.id, 'delete', 'products'
+                   'serving', 'product', OLD.id, 'delete',
+                   'products', OLD.id, 'products'
             FROM recipe_score_state WHERE id = 1;
         END;
 
@@ -1901,17 +2881,20 @@ function recipeSchemaMigrate(PDO $db): void {
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = 1;
             INSERT INTO recipe_score_mutations (
-                domain, revision, owner_type, owner_id,
-                operation, reason
+                domain, revision, lane, owner_type, owner_id,
+                operation, source_table, source_row_id, reason
             )
             SELECT 'source', ontology_source_revision,
-                   'recipe', NEW.id, 'insert', 'recipe_catalog'
+                   'maintenance', 'recipe', NEW.id, 'insert',
+                   'recipe_catalog', NEW.id, 'recipe_catalog'
             FROM recipe_score_state WHERE id = 1;
         END;
         CREATE TRIGGER recipe_ontology_source_catalog_update
-        AFTER UPDATE OF primary_connector, language ON recipe_catalog
+        AFTER UPDATE OF primary_connector, language, deleted_at
+        ON recipe_catalog
         WHEN OLD.primary_connector IS NOT NEW.primary_connector
           OR OLD.language IS NOT NEW.language
+          OR OLD.deleted_at IS NOT NEW.deleted_at
         BEGIN
             UPDATE recipe_score_state
             SET ontology_source_revision =
@@ -1920,11 +2903,16 @@ function recipeSchemaMigrate(PDO $db): void {
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = 1;
             INSERT INTO recipe_score_mutations (
-                domain, revision, owner_type, owner_id,
-                operation, reason
+                domain, revision, lane, owner_type, owner_id,
+                operation, source_table, source_row_id, reason
             )
             SELECT 'source', ontology_source_revision,
-                   'recipe', NEW.id, 'update', 'recipe_catalog'
+                   'maintenance', 'recipe', NEW.id,
+                   CASE
+                       WHEN NEW.deleted_at IS NOT NULL
+                       THEN 'delete' ELSE 'update'
+                   END,
+                   'recipe_catalog', NEW.id, 'recipe_catalog'
             FROM recipe_score_state WHERE id = 1;
         END;
         CREATE TRIGGER recipe_ontology_source_catalog_delete
@@ -1937,11 +2925,12 @@ function recipeSchemaMigrate(PDO $db): void {
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = 1;
             INSERT INTO recipe_score_mutations (
-                domain, revision, owner_type, owner_id,
-                operation, reason
+                domain, revision, lane, owner_type, owner_id,
+                operation, source_table, source_row_id, reason
             )
             SELECT 'source', ontology_source_revision,
-                   'recipe', OLD.id, 'delete', 'recipe_catalog'
+                   'maintenance', 'recipe', OLD.id, 'delete',
+                   'recipe_catalog', OLD.id, 'recipe_catalog'
             FROM recipe_score_state WHERE id = 1;
         END;
 
@@ -1955,21 +2944,24 @@ function recipeSchemaMigrate(PDO $db): void {
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = 1;
             INSERT INTO recipe_score_mutations (
-                domain, revision, owner_type, owner_id,
-                operation, reason
+                domain, revision, lane, owner_type, owner_id,
+                operation, source_table, source_row_id, reason
             )
             SELECT 'source', ontology_source_revision,
-                   'recipe', NEW.recipe_id, 'insert', 'recipe_origins'
+                   'maintenance', 'recipe', NEW.recipe_id, 'insert',
+                   'recipe_origins', NEW.id, 'recipe_origins'
             FROM recipe_score_state WHERE id = 1;
         END;
         CREATE TRIGGER recipe_ontology_source_origins_update
         AFTER UPDATE OF recipe_id, connector, external_id, locale,
+                        content_language,
                         metadata_version, metadata_schema_version
         ON recipe_origins
         WHEN OLD.recipe_id IS NOT NEW.recipe_id
           OR OLD.connector IS NOT NEW.connector
           OR OLD.external_id IS NOT NEW.external_id
           OR OLD.locale IS NOT NEW.locale
+          OR OLD.content_language IS NOT NEW.content_language
           OR OLD.metadata_version IS NOT NEW.metadata_version
           OR OLD.metadata_schema_version
                 IS NOT NEW.metadata_schema_version
@@ -1981,20 +2973,59 @@ function recipeSchemaMigrate(PDO $db): void {
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = 1;
             INSERT INTO recipe_score_mutations (
-                domain, revision, owner_type, owner_id,
-                operation, reason
+                domain, revision, lane, owner_type, owner_id,
+                operation, source_table, source_row_id, reason
             )
             SELECT 'source', ontology_source_revision,
-                   CASE
-                       WHEN OLD.recipe_id IS NOT NEW.recipe_id
-                       THEN 'global' ELSE 'recipe'
-                   END,
-                   CASE
-                       WHEN OLD.recipe_id IS NOT NEW.recipe_id
-                       THEN NULL ELSE NEW.recipe_id
-                   END,
-                   'update', 'recipe_origins'
+                   'maintenance', 'recipe', NEW.recipe_id,
+                   'update', 'recipe_origins', NEW.id,
+                   'recipe_origins'
             FROM recipe_score_state WHERE id = 1;
+            INSERT OR IGNORE INTO recipe_score_mutation_scopes (
+                mutation_id, ordinal, aggregate_type, aggregate_id,
+                scope_role, source_table, source_row_id,
+                source_key, metadata_json
+            )
+            SELECT mutation.id, 2, 'recipe', OLD.recipe_id,
+                   'before', 'recipe_origins', OLD.id, '', '{}'
+            FROM recipe_score_mutations mutation
+            JOIN recipe_score_state state ON state.id = 1
+            WHERE mutation.domain = 'source'
+              AND mutation.revision = state.ontology_source_revision
+              AND OLD.recipe_id IS NOT NEW.recipe_id;
+            INSERT INTO recipe_score_pending_recipes (
+                recipe_id, operation, lane,
+                first_catalog_revision,
+                latest_catalog_revision,
+                latest_ontology_source_revision,
+                reason, created_at, updated_at
+            )
+            SELECT NEW.recipe_id, 'replace', 'maintenance',
+                   catalog_revision, catalog_revision,
+                   ontology_source_revision,
+                   'recipe_origin_identity_changed',
+                   CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+            FROM recipe_score_state
+            WHERE id = 1
+            ON CONFLICT(recipe_id) DO UPDATE SET
+                operation = 'replace',
+                lane = CASE
+                    WHEN recipe_score_pending_recipes.lane = 'serving'
+                    THEN 'serving'
+                    ELSE 'maintenance'
+                END,
+                latest_catalog_revision = MAX(
+                    recipe_score_pending_recipes
+                        .latest_catalog_revision,
+                    excluded.latest_catalog_revision
+                ),
+                latest_ontology_source_revision = MAX(
+                    recipe_score_pending_recipes
+                        .latest_ontology_source_revision,
+                    excluded.latest_ontology_source_revision
+                ),
+                reason = excluded.reason,
+                updated_at = CURRENT_TIMESTAMP;
         END;
         CREATE TRIGGER recipe_ontology_source_origins_delete
         AFTER DELETE ON recipe_origins
@@ -2006,11 +3037,12 @@ function recipeSchemaMigrate(PDO $db): void {
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = 1;
             INSERT INTO recipe_score_mutations (
-                domain, revision, owner_type, owner_id,
-                operation, reason
+                domain, revision, lane, owner_type, owner_id,
+                operation, source_table, source_row_id, reason
             )
             SELECT 'source', ontology_source_revision,
-                   'recipe', OLD.recipe_id, 'delete', 'recipe_origins'
+                   'maintenance', 'recipe', OLD.recipe_id, 'delete',
+                   'recipe_origins', OLD.id, 'recipe_origins'
             FROM recipe_score_state WHERE id = 1;
         END;
 
@@ -2024,12 +3056,12 @@ function recipeSchemaMigrate(PDO $db): void {
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = 1;
             INSERT INTO recipe_score_mutations (
-                domain, revision, owner_type, owner_id,
-                operation, reason
+                domain, revision, lane, owner_type, owner_id,
+                operation, source_table, source_row_id, reason
             )
             SELECT 'source', ontology_source_revision,
-                   'recipe', NEW.recipe_id, 'insert',
-                   'recipe_ingredients'
+                   'maintenance', 'recipe', NEW.recipe_id, 'insert',
+                   'recipe_ingredients', NEW.id, 'recipe_ingredients'
             FROM recipe_score_state WHERE id = 1;
         END;
         CREATE TRIGGER recipe_ontology_source_ingredients_update
@@ -2059,20 +3091,26 @@ function recipeSchemaMigrate(PDO $db): void {
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = 1;
             INSERT INTO recipe_score_mutations (
-                domain, revision, owner_type, owner_id,
-                operation, reason
+                domain, revision, lane, owner_type, owner_id,
+                operation, source_table, source_row_id, reason
             )
             SELECT 'source', ontology_source_revision,
-                   CASE
-                       WHEN OLD.recipe_id IS NOT NEW.recipe_id
-                       THEN 'global' ELSE 'recipe'
-                   END,
-                   CASE
-                       WHEN OLD.recipe_id IS NOT NEW.recipe_id
-                       THEN NULL ELSE NEW.recipe_id
-                   END,
-                   'update', 'recipe_ingredients'
+                   'maintenance', 'recipe', NEW.recipe_id,
+                   'update', 'recipe_ingredients', NEW.id,
+                   'recipe_ingredients'
             FROM recipe_score_state WHERE id = 1;
+            INSERT OR IGNORE INTO recipe_score_mutation_scopes (
+                mutation_id, ordinal, aggregate_type, aggregate_id,
+                scope_role, source_table, source_row_id,
+                source_key, metadata_json
+            )
+            SELECT mutation.id, 2, 'recipe', OLD.recipe_id,
+                   'before', 'recipe_ingredients', OLD.id, '', '{}'
+            FROM recipe_score_mutations mutation
+            JOIN recipe_score_state state ON state.id = 1
+            WHERE mutation.domain = 'source'
+              AND mutation.revision = state.ontology_source_revision
+              AND OLD.recipe_id IS NOT NEW.recipe_id;
         END;
         CREATE TRIGGER recipe_ontology_source_ingredients_delete
         AFTER DELETE ON recipe_ingredients
@@ -2084,12 +3122,12 @@ function recipeSchemaMigrate(PDO $db): void {
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = 1;
             INSERT INTO recipe_score_mutations (
-                domain, revision, owner_type, owner_id,
-                operation, reason
+                domain, revision, lane, owner_type, owner_id,
+                operation, source_table, source_row_id, reason
             )
             SELECT 'source', ontology_source_revision,
-                   'recipe', OLD.recipe_id, 'delete',
-                   'recipe_ingredients'
+                   'maintenance', 'recipe', OLD.recipe_id, 'delete',
+                   'recipe_ingredients', OLD.id, 'recipe_ingredients'
             FROM recipe_score_state WHERE id = 1;
         END;
 
@@ -2103,11 +3141,12 @@ function recipeSchemaMigrate(PDO $db): void {
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = 1;
             INSERT INTO recipe_score_mutations (
-                domain, revision, owner_type, owner_id,
-                operation, reason
+                domain, revision, lane, owner_type, owner_id,
+                operation, source_table, source_row_id, reason
             )
             SELECT 'source', ontology_source_revision,
-                   'recipe', NEW.recipe_id, 'insert',
+                   'maintenance', 'recipe', NEW.recipe_id, 'insert',
+                   'recipe_source_ingredients', NEW.id,
                    'recipe_source_ingredients'
             FROM recipe_score_state WHERE id = 1;
         END;
@@ -2140,20 +3179,27 @@ function recipeSchemaMigrate(PDO $db): void {
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = 1;
             INSERT INTO recipe_score_mutations (
-                domain, revision, owner_type, owner_id,
-                operation, reason
+                domain, revision, lane, owner_type, owner_id,
+                operation, source_table, source_row_id, reason
             )
             SELECT 'source', ontology_source_revision,
-                   CASE
-                       WHEN OLD.recipe_id IS NOT NEW.recipe_id
-                       THEN 'global' ELSE 'recipe'
-                   END,
-                   CASE
-                       WHEN OLD.recipe_id IS NOT NEW.recipe_id
-                       THEN NULL ELSE NEW.recipe_id
-                   END,
-                   'update', 'recipe_source_ingredients'
+                   'maintenance', 'recipe', NEW.recipe_id,
+                   'update', 'recipe_source_ingredients', NEW.id,
+                   'recipe_source_ingredients'
             FROM recipe_score_state WHERE id = 1;
+            INSERT OR IGNORE INTO recipe_score_mutation_scopes (
+                mutation_id, ordinal, aggregate_type, aggregate_id,
+                scope_role, source_table, source_row_id,
+                source_key, metadata_json
+            )
+            SELECT mutation.id, 2, 'recipe', OLD.recipe_id,
+                   'before', 'recipe_source_ingredients',
+                   OLD.id, '', '{}'
+            FROM recipe_score_mutations mutation
+            JOIN recipe_score_state state ON state.id = 1
+            WHERE mutation.domain = 'source'
+              AND mutation.revision = state.ontology_source_revision
+              AND OLD.recipe_id IS NOT NEW.recipe_id;
         END;
         CREATE TRIGGER recipe_ontology_source_rows_delete
         AFTER DELETE ON recipe_source_ingredients
@@ -2165,13 +3211,369 @@ function recipeSchemaMigrate(PDO $db): void {
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = 1;
             INSERT INTO recipe_score_mutations (
-                domain, revision, owner_type, owner_id,
-                operation, reason
+                domain, revision, lane, owner_type, owner_id,
+                operation, source_table, source_row_id, reason
             )
             SELECT 'source', ontology_source_revision,
-                   'recipe', OLD.recipe_id, 'delete',
+                   'maintenance', 'recipe', OLD.recipe_id, 'delete',
+                   'recipe_source_ingredients', OLD.id,
                    'recipe_source_ingredients'
             FROM recipe_score_state WHERE id = 1;
+        END;
+
+        CREATE TRIGGER recipe_ontology_source_product_ingredients_insert
+        AFTER INSERT ON product_ingredients
+        BEGIN
+            UPDATE recipe_score_state
+            SET ontology_source_revision =
+                    ontology_source_revision + 1,
+                ontology_source_hash = '',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = 1;
+            INSERT INTO recipe_score_mutations (
+                domain, revision, lane, owner_type, owner_id,
+                operation, source_table, source_row_id, reason
+            )
+            SELECT 'source', ontology_source_revision,
+                   'maintenance', 'product', NEW.product_id,
+                   'insert', 'product_ingredients', NEW.id,
+                   'product_ingredients'
+            FROM recipe_score_state WHERE id = 1;
+        END;
+        CREATE TRIGGER recipe_ontology_source_product_ingredients_update
+        AFTER UPDATE OF product_id, ingredient_id, role, confidence,
+                        source, evidence
+        ON product_ingredients
+        WHEN OLD.product_id IS NOT NEW.product_id
+          OR OLD.ingredient_id IS NOT NEW.ingredient_id
+          OR OLD.role IS NOT NEW.role
+          OR OLD.confidence IS NOT NEW.confidence
+          OR OLD.source IS NOT NEW.source
+          OR OLD.evidence IS NOT NEW.evidence
+        BEGIN
+            UPDATE recipe_score_state
+            SET ontology_source_revision =
+                    ontology_source_revision + 1,
+                ontology_source_hash = '',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = 1;
+            INSERT INTO recipe_score_mutations (
+                domain, revision, lane, owner_type, owner_id,
+                operation, source_table, source_row_id, reason
+            )
+            SELECT 'source', ontology_source_revision,
+                   'maintenance', 'product', NEW.product_id,
+                   'update', 'product_ingredients', NEW.id,
+                   'product_ingredients'
+            FROM recipe_score_state WHERE id = 1;
+            INSERT OR IGNORE INTO recipe_score_mutation_scopes (
+                mutation_id, ordinal, aggregate_type, aggregate_id,
+                scope_role, source_table, source_row_id,
+                source_key, metadata_json
+            )
+            SELECT mutation.id, 2, 'product', OLD.product_id,
+                   'before', 'product_ingredients', OLD.id, '',
+                   json_object(
+                       'ingredient_id', OLD.ingredient_id,
+                       'role', OLD.role
+                   )
+            FROM recipe_score_mutations mutation
+            JOIN recipe_score_state state ON state.id = 1
+            WHERE mutation.domain = 'source'
+              AND mutation.revision = state.ontology_source_revision
+              AND OLD.product_id IS NOT NEW.product_id;
+        END;
+        CREATE TRIGGER recipe_ontology_source_product_ingredients_delete
+        AFTER DELETE ON product_ingredients
+        BEGIN
+            UPDATE recipe_score_state
+            SET ontology_source_revision =
+                    ontology_source_revision + 1,
+                ontology_source_hash = '',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = 1;
+            INSERT INTO recipe_score_mutations (
+                domain, revision, lane, owner_type, owner_id,
+                operation, source_table, source_row_id, reason
+            )
+            SELECT 'source', ontology_source_revision,
+                   'maintenance', 'product', OLD.product_id,
+                   'delete', 'product_ingredients', OLD.id,
+                   'product_ingredients'
+            FROM recipe_score_state WHERE id = 1;
+        END;
+
+        CREATE TRIGGER recipe_ontology_source_taxonomy_aliases_insert
+        AFTER INSERT ON taxonomy_aliases
+        BEGIN
+            UPDATE recipe_score_state
+            SET ontology_source_revision =
+                    ontology_source_revision + 1,
+                ontology_source_hash = '',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = 1;
+            INSERT INTO recipe_score_mutations (
+                domain, revision, lane, owner_type, owner_id,
+                operation, source_table, source_row_id, reason
+            )
+            SELECT 'source', ontology_source_revision,
+                   'maintenance', 'global', NULL, 'insert',
+                   'taxonomy_aliases', NEW.id, 'taxonomy_aliases'
+            FROM recipe_score_state WHERE id = 1;
+            INSERT INTO recipe_score_mutation_scopes (
+                mutation_id, ordinal, aggregate_type, aggregate_id,
+                scope_role, source_table, source_row_id,
+                source_key, metadata_json
+            )
+            SELECT mutation.id, 1, 'overlay', NEW.id, 'after',
+                   'taxonomy_aliases', NEW.id,
+                   NEW.normalized_alias,
+                   json_object(
+                       'tree_id', NEW.tree_id,
+                       'node_id', NEW.node_id,
+                       'normalized_alias', NEW.normalized_alias,
+                       'source', NEW.source,
+                       'active', NEW.active
+                   )
+            FROM recipe_score_mutations mutation
+            JOIN recipe_score_state state ON state.id = 1
+            WHERE mutation.domain = 'source'
+              AND mutation.revision = state.ontology_source_revision;
+        END;
+        CREATE TRIGGER recipe_ontology_source_taxonomy_aliases_update
+        AFTER UPDATE OF tree_id, node_id, alias, normalized_alias,
+                        source, active
+        ON taxonomy_aliases
+        WHEN OLD.tree_id IS NOT NEW.tree_id
+          OR OLD.node_id IS NOT NEW.node_id
+          OR OLD.alias IS NOT NEW.alias
+          OR OLD.normalized_alias IS NOT NEW.normalized_alias
+          OR OLD.source IS NOT NEW.source
+          OR OLD.active IS NOT NEW.active
+        BEGIN
+            UPDATE recipe_score_state
+            SET ontology_source_revision =
+                    ontology_source_revision + 1,
+                ontology_source_hash = '',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = 1;
+            INSERT INTO recipe_score_mutations (
+                domain, revision, lane, owner_type, owner_id,
+                operation, source_table, source_row_id, reason
+            )
+            SELECT 'source', ontology_source_revision,
+                   'maintenance', 'global', NULL, 'update',
+                   'taxonomy_aliases', NEW.id, 'taxonomy_aliases'
+            FROM recipe_score_state WHERE id = 1;
+            INSERT INTO recipe_score_mutation_scopes (
+                mutation_id, ordinal, aggregate_type, aggregate_id,
+                scope_role, source_table, source_row_id,
+                source_key, metadata_json
+            )
+            SELECT mutation.id, 1, 'overlay', OLD.id, 'before',
+                   'taxonomy_aliases', OLD.id,
+                   OLD.normalized_alias,
+                   json_object(
+                       'tree_id', OLD.tree_id,
+                       'node_id', OLD.node_id,
+                       'normalized_alias', OLD.normalized_alias,
+                       'source', OLD.source,
+                       'active', OLD.active
+                   )
+            FROM recipe_score_mutations mutation
+            JOIN recipe_score_state state ON state.id = 1
+            WHERE mutation.domain = 'source'
+              AND mutation.revision = state.ontology_source_revision;
+            INSERT INTO recipe_score_mutation_scopes (
+                mutation_id, ordinal, aggregate_type, aggregate_id,
+                scope_role, source_table, source_row_id,
+                source_key, metadata_json
+            )
+            SELECT mutation.id, 2, 'overlay', NEW.id, 'after',
+                   'taxonomy_aliases', NEW.id,
+                   NEW.normalized_alias,
+                   json_object(
+                       'tree_id', NEW.tree_id,
+                       'node_id', NEW.node_id,
+                       'normalized_alias', NEW.normalized_alias,
+                       'source', NEW.source,
+                       'active', NEW.active
+                   )
+            FROM recipe_score_mutations mutation
+            JOIN recipe_score_state state ON state.id = 1
+            WHERE mutation.domain = 'source'
+              AND mutation.revision = state.ontology_source_revision;
+        END;
+        CREATE TRIGGER recipe_ontology_source_taxonomy_aliases_delete
+        AFTER DELETE ON taxonomy_aliases
+        BEGIN
+            UPDATE recipe_score_state
+            SET ontology_source_revision =
+                    ontology_source_revision + 1,
+                ontology_source_hash = '',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = 1;
+            INSERT INTO recipe_score_mutations (
+                domain, revision, lane, owner_type, owner_id,
+                operation, source_table, source_row_id, reason
+            )
+            SELECT 'source', ontology_source_revision,
+                   'maintenance', 'global', NULL, 'delete',
+                   'taxonomy_aliases', OLD.id, 'taxonomy_aliases'
+            FROM recipe_score_state WHERE id = 1;
+            INSERT INTO recipe_score_mutation_scopes (
+                mutation_id, ordinal, aggregate_type, aggregate_id,
+                scope_role, source_table, source_row_id,
+                source_key, metadata_json
+            )
+            SELECT mutation.id, 1, 'overlay', OLD.id, 'before',
+                   'taxonomy_aliases', OLD.id,
+                   OLD.normalized_alias,
+                   json_object(
+                       'tree_id', OLD.tree_id,
+                       'node_id', OLD.node_id,
+                       'normalized_alias', OLD.normalized_alias,
+                       'source', OLD.source,
+                       'active', OLD.active
+                   )
+            FROM recipe_score_mutations mutation
+            JOIN recipe_score_state state ON state.id = 1
+            WHERE mutation.domain = 'source'
+              AND mutation.revision = state.ontology_source_revision;
+        END;
+
+        CREATE TRIGGER recipe_ontology_source_canonical_ingredients_insert
+        AFTER INSERT ON canonical_ingredients
+        BEGIN
+            UPDATE recipe_score_state
+            SET ontology_source_revision =
+                    ontology_source_revision + 1,
+                ontology_source_hash = '',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = 1;
+            INSERT INTO recipe_score_mutations (
+                domain, revision, lane, owner_type, owner_id,
+                operation, source_table, source_row_id, reason
+            )
+            SELECT 'source', ontology_source_revision,
+                   'maintenance', 'global', NULL, 'insert',
+                   'canonical_ingredients', NEW.id,
+                   'canonical_ingredients'
+            FROM recipe_score_state WHERE id = 1;
+            INSERT INTO recipe_score_mutation_scopes (
+                mutation_id, ordinal, aggregate_type, aggregate_id,
+                scope_role, source_table, source_row_id,
+                source_key, metadata_json
+            )
+            SELECT mutation.id, 1, 'overlay', NEW.id, 'after',
+                   'canonical_ingredients', NEW.id, NEW.slug,
+                   json_object(
+                       'slug', NEW.slug,
+                       'name', NEW.name,
+                       'parent_slug', NEW.parent_slug,
+                       'category', NEW.category
+                   )
+            FROM recipe_score_mutations mutation
+            JOIN recipe_score_state state ON state.id = 1
+            WHERE mutation.domain = 'source'
+              AND mutation.revision = state.ontology_source_revision;
+        END;
+        CREATE TRIGGER recipe_ontology_source_canonical_ingredients_update
+        AFTER UPDATE OF slug, name, parent_slug, category, source,
+                        external_ids_json
+        ON canonical_ingredients
+        WHEN OLD.slug IS NOT NEW.slug
+          OR OLD.name IS NOT NEW.name
+          OR OLD.parent_slug IS NOT NEW.parent_slug
+          OR OLD.category IS NOT NEW.category
+          OR OLD.source IS NOT NEW.source
+          OR OLD.external_ids_json IS NOT NEW.external_ids_json
+        BEGIN
+            UPDATE recipe_score_state
+            SET ontology_source_revision =
+                    ontology_source_revision + 1,
+                ontology_source_hash = '',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = 1;
+            INSERT INTO recipe_score_mutations (
+                domain, revision, lane, owner_type, owner_id,
+                operation, source_table, source_row_id, reason
+            )
+            SELECT 'source', ontology_source_revision,
+                   'maintenance', 'global', NULL, 'update',
+                   'canonical_ingredients', NEW.id,
+                   'canonical_ingredients'
+            FROM recipe_score_state WHERE id = 1;
+            INSERT INTO recipe_score_mutation_scopes (
+                mutation_id, ordinal, aggregate_type, aggregate_id,
+                scope_role, source_table, source_row_id,
+                source_key, metadata_json
+            )
+            SELECT mutation.id, 1, 'overlay', OLD.id, 'before',
+                   'canonical_ingredients', OLD.id, OLD.slug,
+                   json_object(
+                       'slug', OLD.slug,
+                       'name', OLD.name,
+                       'parent_slug', OLD.parent_slug,
+                       'category', OLD.category
+                   )
+            FROM recipe_score_mutations mutation
+            JOIN recipe_score_state state ON state.id = 1
+            WHERE mutation.domain = 'source'
+              AND mutation.revision = state.ontology_source_revision;
+            INSERT INTO recipe_score_mutation_scopes (
+                mutation_id, ordinal, aggregate_type, aggregate_id,
+                scope_role, source_table, source_row_id,
+                source_key, metadata_json
+            )
+            SELECT mutation.id, 2, 'overlay', NEW.id, 'after',
+                   'canonical_ingredients', NEW.id, NEW.slug,
+                   json_object(
+                       'slug', NEW.slug,
+                       'name', NEW.name,
+                       'parent_slug', NEW.parent_slug,
+                       'category', NEW.category
+                   )
+            FROM recipe_score_mutations mutation
+            JOIN recipe_score_state state ON state.id = 1
+            WHERE mutation.domain = 'source'
+              AND mutation.revision = state.ontology_source_revision;
+        END;
+        CREATE TRIGGER recipe_ontology_source_canonical_ingredients_delete
+        AFTER DELETE ON canonical_ingredients
+        BEGIN
+            UPDATE recipe_score_state
+            SET ontology_source_revision =
+                    ontology_source_revision + 1,
+                ontology_source_hash = '',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = 1;
+            INSERT INTO recipe_score_mutations (
+                domain, revision, lane, owner_type, owner_id,
+                operation, source_table, source_row_id, reason
+            )
+            SELECT 'source', ontology_source_revision,
+                   'maintenance', 'global', NULL, 'delete',
+                   'canonical_ingredients', OLD.id,
+                   'canonical_ingredients'
+            FROM recipe_score_state WHERE id = 1;
+            INSERT INTO recipe_score_mutation_scopes (
+                mutation_id, ordinal, aggregate_type, aggregate_id,
+                scope_role, source_table, source_row_id,
+                source_key, metadata_json
+            )
+            SELECT mutation.id, 1, 'overlay', OLD.id, 'before',
+                   'canonical_ingredients', OLD.id, OLD.slug,
+                   json_object(
+                       'slug', OLD.slug,
+                       'name', OLD.name,
+                       'parent_slug', OLD.parent_slug,
+                       'category', OLD.category
+                   )
+            FROM recipe_score_mutations mutation
+            JOIN recipe_score_state state ON state.id = 1
+            WHERE mutation.domain = 'source'
+              AND mutation.revision = state.ontology_source_revision;
         END;
         ");
                 $installedTriggerHash =
@@ -2186,10 +3588,7 @@ function recipeSchemaMigrate(PDO $db): void {
                 }
                 $triggerStateUpdate = $db->prepare("
                     UPDATE recipe_score_state
-                    SET ontology_source_revision =
-                            ontology_source_revision + 1,
-                        ontology_source_hash = '',
-                        ontology_source_trigger_version = ?,
+                    SET ontology_source_trigger_version = ?,
                         ontology_source_trigger_hash = ?,
                         updated_at = CURRENT_TIMESTAMP
                     WHERE id = 1
@@ -2198,17 +3597,6 @@ function recipeSchemaMigrate(PDO $db): void {
                     RECIPE_ONTOLOGY_SOURCE_TRIGGER_VERSION,
                     $installedTriggerHash,
                 ]);
-                $db->exec("
-                    INSERT OR IGNORE INTO recipe_score_mutations (
-                        domain, revision, owner_type, owner_id,
-                        operation, reason
-                    )
-                    SELECT 'source', ontology_source_revision,
-                           'global', NULL, 'global',
-                           'ontology_source_trigger_upgrade'
-                    FROM recipe_score_state
-                    WHERE id = 1
-                ");
             }
             if ($ownsOntologySourceTransaction) {
                 $db->exec('COMMIT');
@@ -2382,15 +3770,112 @@ function recipeSchemaMigrate(PDO $db): void {
         'local' => '1',
         'generated' => '1',
         'manual' => '1',
-        'cookidoo' => 'metadata-v2',
+        'cookidoo' => 'metadata-v3-operator-enabled',
     ] as $connector => $policyVersion) {
         $connectorSeed->execute([$connector, $policyVersion]);
     }
     $db->exec("
         UPDATE recipe_connector_state
-        SET policy_version = 'metadata-v2', updated_at = CURRENT_TIMESTAMP
-        WHERE connector = 'cookidoo' AND policy_version <> 'metadata-v2'
+        SET policy_version = 'metadata-v3-operator-enabled',
+            updated_at = CURRENT_TIMESTAMP
+        WHERE connector = 'cookidoo'
+          AND policy_version IN (
+              'metadata-v1',
+              'metadata-v2',
+              'metadata-v2-detail-disabled',
+              'metadata-v2-allowlisted-opt-in'
+          )
     ");
+
+    $db->exec("
+        CREATE TABLE IF NOT EXISTS recipe_schema_migrations (
+            migration_key TEXT PRIMARY KEY,
+            schema_version INTEGER NOT NULL,
+            applied_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+    ");
+    recipeSchemaRunOnce(
+        $db,
+        'cookidoo_discovery_policy_v3_v1',
+        static function () use ($db): void {
+            $db->exec("
+                UPDATE recipe_jobs
+                SET payload_json = json_set(
+                        payload_json,
+                        '$._detail_policy_version',
+                        'metadata-v3-operator-enabled'
+                    ),
+                    request_generation = request_generation + 1,
+                    request_hash = '',
+                    status = CASE
+                        WHEN status = 'in_progress' THEN 'retry'
+                        ELSE status
+                    END,
+                    next_retry_at = CASE
+                        WHEN status = 'in_progress'
+                        THEN CURRENT_TIMESTAMP
+                        ELSE next_retry_at
+                    END,
+                    last_error = CASE
+                        WHEN status = 'in_progress'
+                        THEN 'policy migration reclaimed active discovery job'
+                        ELSE last_error
+                    END,
+                    lease_token = NULL,
+                    lease_expires_at = NULL,
+                    started_at = CASE
+                        WHEN status = 'in_progress' THEN NULL
+                        ELSE started_at
+                    END,
+                    finished_at = CASE
+                        WHEN status = 'in_progress' THEN NULL
+                        ELSE finished_at
+                    END,
+                    updated_at = CASE
+                        WHEN status = 'in_progress'
+                        THEN CURRENT_TIMESTAMP
+                        ELSE updated_at
+                    END
+                WHERE connector = 'cookidoo'
+                  AND job_type = 'connector_discovery'
+                  AND CASE
+                      WHEN json_valid(payload_json) = 0 THEN 0
+                      WHEN json_extract(
+                          payload_json,
+                          '$._detail_policy_version'
+                      ) IN (
+                          'metadata-v2-detail-disabled',
+                          'metadata-v2-allowlisted-opt-in'
+                      ) THEN 1
+                      WHEN json_type(
+                          payload_json,
+                          '$._detail_policy_version'
+                      ) IS NULL
+                      AND json_type(payload_json, '$.locale') = 'text'
+                      AND (
+                          json_type(payload_json, '$.query') = 'text'
+                          OR json_type(
+                              payload_json,
+                              '$.ingredients'
+                          ) = 'array'
+                      ) THEN 1
+                      ELSE 0
+                  END = 1
+            ");
+        }
+    );
+    recipeSchemaRunOnce(
+        $db,
+        'recipe_stale_while_revalidate_v1',
+        static function () use ($db): void {
+            $db->exec("
+            UPDATE recipe_score_state
+            SET cursor_revision = cursor_revision + 1,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = 1
+            ");
+        }
+    );
 
     ingredientOntologyV3SchemaMigrate($db);
 }

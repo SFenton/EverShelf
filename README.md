@@ -25,7 +25,7 @@
 [![SQLite](https://img.shields.io/badge/SQLite-3-blue.svg)](https://www.sqlite.org/)
 [![Docker](https://img.shields.io/badge/Docker-Ready-2496ED.svg)](Dockerfile)
 [![i18n](https://img.shields.io/badge/i18n-IT%20%7C%20EN%20%7C%20DE%20%7C%20FR%20%7C%20ES-orange.svg)](translations/)
-[![Version](https://img.shields.io/badge/version-1.16.2-brightgreen.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-1.20.24-brightgreen.svg)](CHANGELOG.md)
 [![GitHub stars](https://img.shields.io/github/stars/dadaloop82/EverShelf?style=social)](https://github.com/dadaloop82/EverShelf/stargazers)
 [![Last commit](https://img.shields.io/github/last-commit/dadaloop82/EverShelf/main)](https://github.com/dadaloop82/EverShelf/commits/main)
 [![Contributors](https://img.shields.io/github/contributors/dadaloop82/EverShelf)](https://github.com/dadaloop82/EverShelf/graphs/contributors)
@@ -109,7 +109,7 @@ Connect your pantry to your smart home in minutes — no YAML, no manual sensor 
 - **Local recipe catalog** — Generated and saved recipes accumulate in a durable SQLite catalog with title/ingredient FTS5 search, source provenance, favorites, and offline local lookup
 - **Taxonomy-aware suggestions** — Recipe ingredients match exact pantry terms and progressively broader taxonomy ancestors; suggestions rank pantry coverage and soon-to-expire stock deterministically
 - **Scan-driven discovery** — When a newly stocked product already has taxonomy—or once its queued taxonomy enrichment completes—EverShelf automatically queues both ingredient-filtered and text-only recipe discovery for the canonical ingredient and its full ancestor chain
-- **Cookidoo metadata cache (experimental)** — Existing `metadata-v2` rows retain bounded factual General metadata, ordered ingredient names and display-only source amounts, remote image/canonical URLs, locale, and timestamps; provider hydration is policy-disabled and official instructions and Guided Cooking data remain on Cookidoo
+- **Cookidoo metadata cache (experimental)** — Optional `metadata-v2` hydration retains bounded factual General metadata, ordered ingredient names and display-only source amounts, remote image/canonical URLs, locale, and timestamps; official instructions and Guided Cooking data remain on Cookidoo
 - **Recipe detail and missing groceries API** — A source-agnostic detail projection uses deterministic source-derived ingredient labels, reports separate grocery capability/state counts, and keeps Cookidoo instructions external-only; an idempotent action adds only revalidated missing ingredients to EverShelf's internal shopping list
 - **Scalable recipe browse and recommendations** — Materialized inventory score revisions power compact 50-card pages, coverage/expiry filtering, independent weights, snapshot cursors, and a deterministic responsive recommendation carousel without loading the full catalog into PHP
 - **Recipe stock hints** — Each pantry ingredient shows how much you have and what remains after use; when the leftover would be less than 5% of the full sealed package (10% for an already-opened partial pack), the recipe automatically uses everything on hand to avoid waste
@@ -221,8 +221,8 @@ cd EverShelf
 cp .env.example .env
 nano .env
 
-# 3. Start with Docker Compose
-docker compose up -d
+# 3. Build and start from one clean, exact source revision
+./scripts/compose-up-exact.sh
 
 # → Open http://localhost:8080
 ```
@@ -286,8 +286,9 @@ COOKIDOO_METADATA_BACKFILL_JITTER_SECONDS=20
 COOKIDOO_PLANNER_ENABLED=false
 COOKIDOO_QUEUE_CADENCE_MINUTES=1
 COOKIDOO_DISCOVERY_LOCALE=en-US
+COOKIDOO_PERIODIC_REFRESH_ENABLED=false
 COOKIDOO_REFRESH_ENQUEUE_LIMIT=2
-# Historical compatibility settings; provider hydration is policy-disabled.
+# Metadata hydration remains default-off until both EverShelf and bridge gates are enabled.
 
 # Optional: Vacuum-sealed expiry grace period
 VACUUM_EXPIRY_EXTENSION_DAYS=30 # extra days before vacuum-sealed items are flagged expired
@@ -331,13 +332,20 @@ The connector uses the unofficial, reverse-engineered
 [`miaucl/cookidoo-api`](https://github.com/miaucl/cookidoo-api). It is disabled by
 default and may break when Cookidoo changes authentication or private endpoints.
 
-**Current policy status:** Cookidoo card/detail hydration is disabled. The available
-provider detail response co-transports official steps, so bridge `/v1/search` and
-`/v1/metadata` return `503 metadata_hydration_disabled_policy` before any provider
-request. EverShelf does not enqueue discovery or metadata backfill jobs. Existing
-cached catalog rows and completed isolated pilot artifacts remain readable.
+**Hydration status:** Cookidoo card/detail hydration is default-off. Enable
+`COOKIDOO_CONNECTOR_ENABLED` and `COOKIDOO_DETAIL_HYDRATION_ENABLED` in EverShelf
+and `COOKIDOO_DETAIL_HYDRATION_ENABLED` in the bridge to permit discovery and
+direct metadata refresh. The provider response may co-transport official steps;
+the bridge immediately projects only the bounded factual allowlist below and
+never returns, logs, or persists instructions. Metadata backfill remains a
+separate explicit gate. Before provider work, EverShelf verifies that the bridge
+reports execution policy `metadata-v3-operator-enabled`; the persisted factual
+storage contract remains `metadata-v2`. Schema migration upgrades only known
+superseded or valid historical pre-policy discovery jobs and leaves unknown
+policy identifiers ineligible. Queue processes use an expiring database
+singleton lease and never hold SQLite or flock across bridge requests.
 
-Policy `metadata-v2` stores only bounded factual metadata: title, remote image and
+Storage contract `metadata-v2` stores only bounded factual metadata: title, remote image and
 canonical URLs/ID, locale/timestamps, optional bounded provider content-language
 evidence, yield quantity plus unit, explicit prep/cook/active/total seconds,
 explicit or deterministically derived inactive/rest seconds, bounded
@@ -463,10 +471,11 @@ php scripts/ontology-controller.php benchmark-import \
 `backfill` is dry-run unless `--write` is supplied and refuses the active DB
 without `--allow-active-db`. It uses keyset batches and durable checkpoints
 rather than one corpus-sized transaction. Its subject jobs remain at priority
-`0`; production cron/work filters them out with a minimum priority of `50`.
-Live recipe observations enqueue at `50`, while live product observations use
-`100`, raise an existing queued historical job, and safely revive terminal work
-with fresh input and lease fences. Copied offline workers can explicitly select
+`0`; production cron/work filters them out with a minimum priority of `51`.
+Live recipe observations enqueue at `50` and remain durable for explicit
+maintenance windows, while live product observations use `100`, raise an
+existing queued historical job, and safely revive terminal work with fresh
+input and lease fences. Copied offline workers can explicitly select
 historical work with `--minimum-priority=0`. Google Interactions API support uses a separate key,
 strict JSON Schema, an exact model ID, `thinking_level`, and no silent fallback.
 Generalized repairs require an immutable measured benchmark policy and a
@@ -533,11 +542,14 @@ suppressed regardless of confidence. `capabilities.grocery_add` means the comple
 nonempty list is supported, while the sibling `grocery` object reports missing,
 uncertain, in-stock, staple, eligible, and blocking state.
 
-Cookidoo search/detail access is policy-disabled. Changing
-`COOKIDOO_CONNECTOR_ENABLED`, `COOKIDOO_DETAIL_HYDRATION_ENABLED`, or
-`COOKIDOO_METADATA_BACKFILL_ENABLED` cannot enable provider requests.
-Discovery, direct-ID hydration, periodic refresh, and legacy queued jobs fail
-locally without contacting Cookidoo. Existing cached rows remain searchable.
+Cookidoo search/detail access is default-off. Provider requests require
+`COOKIDOO_CONNECTOR_ENABLED=true` and
+`COOKIDOO_DETAIL_HYDRATION_ENABLED=true` in EverShelf plus the matching detail
+flag in the bridge. Direct-ID backfill requires its additional backfill gate.
+Existing cached rows remain searchable whenever the connector is disabled.
+Freshness TTLs never remove cached rows from catalog membership. Stale cards and
+details expose `is_stale`, remain cursor-stable across refresh, and enqueue a
+bounded best-effort refresh after reads when connector and detail gates allow it.
 Planner use is a separate explicit dual-gate operation.
 
 ### Ingredient ontology v3 shadow workflow
@@ -783,24 +795,43 @@ php /path/to/evershelf/scripts/canonical-queue-worker.php \
   --db=/path/to/evershelf.db --allow-active-db \
   --loop --poll-seconds=30 --limit=5
 
+# Wake-driven local identity, taxonomy, and inventory recipe jobs
+php /path/to/evershelf/scripts/recipe-queue-worker.php \
+  --db=/path/to/evershelf.db --allow-active-db \
+  --loop --poll-ms=1000 --limit=20 --max-attempts=20
+
+# Dropped-wake local recipe fallback, every 5 minutes
+*/5 * * * * php /path/to/evershelf/scripts/process-recipe-queue.php --limit=20 --max-attempts=20 --local-only >> /path/to/evershelf/data/cron.log 2>&1
+
 # Copied ontology/score activation, every minute
 * * * * * php /path/to/evershelf/scripts/process-ontology-activation.php --write --allow-active-db --allow-network >> /path/to/evershelf/data/cron.log 2>&1
 
-# Local recipe jobs and policy cleanup, every minute
-* * * * * php /path/to/evershelf/scripts/process-recipe-queue.php --limit=2 --max-attempts=3 --respect-cookidoo-cadence >> /path/to/evershelf/data/cron.log 2>&1
+# Optional resumable Cookidoo metadata backfill, one six-recipe request per minute
+* * * * * php /path/to/evershelf/scripts/backfill-cookidoo-metadata-v2.php --enqueue-if-enabled --locale=en-US --batch-size=6 --max-recipes=6 > /dev/null 2>> /path/to/evershelf/data/cron.log
+
+# Rate-limited provider recipe discovery and policy cleanup, every minute
+* * * * * php /path/to/evershelf/scripts/process-recipe-queue.php --limit=6 --max-attempts=3 --respect-cookidoo-cadence --provider-only >> /path/to/evershelf/data/cron.log 2>&1
 ```
 
 These jobs are **not optional** when their features are enabled. The resident
 canonical worker normally drains ingredient/taxonomy work and the five-minute
-job provides dropped-wake recovery; activation imports copied ontology/score revisions and
-keeps recipe browse scores current, and the third processes local recipe jobs
-plus terminal cleanup of disabled provider work. Without them, new products never receive
+job provides dropped-wake recovery. The resident recipe queue worker drains
+local identity, taxonomy-ready, and inventory jobs immediately, while the
+minute job retains Cookidoo cadence and provider cleanup. Activation imports
+copied ontology/score revisions and keeps recipe browse scores current.
+When `COOKIDOO_METADATA_BACKFILL_ENABLED=true`, the metadata scheduler resumes
+from its durable locale checkpoint and hydrates at most six recipes per minute.
+Without them, new products never receive
 taxonomy terms, durable ontology intents remain pending, large recipe catalogs
 remain temporarily unavailable, and stale provider work remains queued. Overlapping
 activation and queue runs share the background-writer lock only during bounded
-live import and publication phases. Copied generation and validation run
-without it; web scans stay independent and force a safe rebase if their inputs
-change.
+live import and publication phases. Ordinary product, inventory, and
+user-facing recipe changes publish through a serving lane that remains
+independent of historical recipe and ontology maintenance debt. Serving
+revisions retain explicit covered-revision watermarks, so the active sparse
+projection stays available without claiming that deferred maintenance is
+fresh. Copied generation and validation run without the live lock; web scans
+stay independent and force a safe rebase if their inputs change.
 
 Canonical enrichment performs FoodOn/USDA work before opening a write
 transaction. Its short apply transaction rechecks the product fingerprint and

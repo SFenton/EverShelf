@@ -462,23 +462,24 @@ HTTP 409. Idempotency records have a 30-day retention window from the original
 command; older records may be pruned by later grocery commands.
 
 ### `recipe_catalog_discover` — POST
-The action returns local catalog results without queuing Cookidoo network work.
-Provider discovery remains policy-disabled because the available detail
-response co-transports official steps.
+The action always returns local catalog results and may queue bounded Cookidoo
+network discovery when the connector and detail hydration gates are enabled.
+Only allowlisted factual metadata is imported. Provider execution requires the
+bridge to report `metadata-v3-operator-enabled`; cached stale results remain
+visible while refresh is queued.
 
 ### `recipe_jobs_status` — GET
 Read one background job by `id`/`idempotency_key`, list recent jobs, or pass
 `search_id` to receive aggregate hydration status, queue position, polling delay,
 exhaustion state, and compact imported/updated cards. When the detail gate is
-disabled, Cookidoo network jobs terminate locally as
-`skipped` with `provider_detail_policy_disabled`; they do not retry or affect
-connector failure/circuit state.
+disabled, Cookidoo network jobs remain pending without provider or connector
+accounting. Claimed work uses opaque leases and request-order fences; lease tokens
+are never returned by this endpoint.
 
 ### `recipe_connectors` — GET
 List connector capabilities, enabled/configured state, and circuit-breaker health.
-Cookidoo reports its disabled detail/discovery gate, policy version,
-cached-catalog read, canonical-link, and external-instructions-link
-capabilities.
+Cookidoo reports its detail/discovery gate, policy version, cached-catalog read,
+canonical-link, and external-instructions-link capabilities.
 
 `ha_info` advertises `recipe_detail_v1`, `recipe_grocery_v1`,
 `recipe_ingredient_feedback_v1`, and `recipe_ingredient_feedback_v2` alongside

@@ -150,6 +150,83 @@ try {
         'An existing empty database must initialize and migrate completely'
     );
 
+    $upgradeDb = new PDO('sqlite::memory:');
+    $upgradeDb->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+    $upgradeDb->setAttribute(
+        PDO::ATTR_DEFAULT_FETCH_MODE,
+        PDO::FETCH_ASSOC
+    );
+    initializeDB($upgradeDb);
+    migrateDB($upgradeDb);
+    $upgradeDb->exec("
+        DROP TRIGGER IF EXISTS
+            recipe_score_source_reconciliation_event_capture;
+        DROP TRIGGER IF EXISTS
+            recipe_score_source_reconciliation_scope_count;
+        DROP TABLE recipe_score_source_reconciliation_backfill;
+        DROP TABLE recipe_score_source_reconciliation_events;
+        CREATE TABLE recipe_score_source_reconciliation_events (
+            source_revision INTEGER PRIMARY KEY,
+            event_lane TEXT NOT NULL,
+            event_owner_type TEXT NOT NULL,
+            event_owner_id INTEGER DEFAULT NULL,
+            event_operation TEXT NOT NULL,
+            event_reason TEXT NOT NULL DEFAULT '',
+            source_table TEXT NOT NULL DEFAULT '',
+            source_row_id INTEGER DEFAULT NULL,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE TABLE recipe_score_source_reconciliation_backfill (
+            id INTEGER PRIMARY KEY CHECK(id = 1),
+            last_mutation_id INTEGER NOT NULL DEFAULT 0,
+            complete INTEGER NOT NULL DEFAULT 0,
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        INSERT INTO recipe_score_source_reconciliation_backfill (id)
+        VALUES (1);
+        UPDATE app_settings
+        SET value = '2026083104'
+        WHERE key = 'database_schema_version'
+    ");
+    databaseEnsureMigrated($upgradeDb, $lockPath);
+    $upgradeEventColumns = array_column(
+        $upgradeDb->query("
+            PRAGMA table_info(
+                recipe_score_source_reconciliation_events
+            )
+        ")->fetchAll(PDO::FETCH_ASSOC),
+        'name'
+    );
+    $upgradeBackfillColumns = array_column(
+        $upgradeDb->query("
+            PRAGMA table_info(
+                recipe_score_source_reconciliation_backfill
+            )
+        ")->fetchAll(PDO::FETCH_ASSOC),
+        'name'
+    );
+    $assert(
+        databaseSchemaVersion($upgradeDb)
+            === EVERSHELF_DATABASE_SCHEMA_VERSION
+        && in_array(
+            'expected_scope_count',
+            $upgradeEventColumns,
+            true
+        )
+        && in_array(
+            'scope_backfill_version',
+            $upgradeBackfillColumns,
+            true
+        )
+        && in_array(
+            'scope_backfill_started',
+            $upgradeBackfillColumns,
+            true
+        ),
+        'The previous database marker must install reconciliation '
+            . 'scope evidence columns before the worker opens'
+    );
+
     $db->prepare("
         UPDATE app_settings
         SET value = ?

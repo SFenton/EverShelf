@@ -7,4 +7,5 @@ lemon-juice,lemon,derived_from,forward,1,operator-corrective-review-v3,Lemon jui
 lime-juice,lime,derived_from,forward,1,operator-corrective-review-v3,Lime juice derives from lime without satisfying lime identity,corrective-v3.13 culinary derivation review
 orange-juice,orange,derived_from,forward,1,operator-corrective-review-v3,Orange juice derives from orange without satisfying orange identity,corrective-v3.13 culinary derivation review
 pear-marmalade,pear,derived_from,forward,1,operator-corrective-review-v3,Pear marmalade derives from pear but remains a distinct fruit preserve identity,corrective-v3.13 culinary derivation review
+pecorino-romano,pecorino,variant_of,forward,1,operator-corrective-review-v3,Pecorino Romano is a reviewed named variant of generic Pecorino and remains non-satisfying evidence for a generic product,corrective-v3.18 pecorino identity adjudication
 pineapple-juice,pineapple,derived_from,forward,1,operator-corrective-review-v3,Pineapple juice derives from pineapple without satisfying pineapple identity,corrective-v3.13 culinary derivation review

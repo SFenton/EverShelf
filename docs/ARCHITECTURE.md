@@ -37,6 +37,10 @@ dispensa/
 - Product writes enqueue canonical work durably in the same foreground SQLite
   transaction and send a nonblocking Unix datagram only after commit. They do
   not perform provider or model calls.
+- Canonical, controller, identity, shopping-classification, and recipe-score
+  side effects use independent savepoints. A subsystem failure is returned as a
+  degraded outcome and reconciled by bounded workers without rolling back the
+  core product row.
 - The singleton canonical worker computes taxonomy, FoodOn, and USDA evidence
   without a database transaction and under a deadline derived from the crash
   lease minus a reserved apply window. Budget exhaustion explicitly releases
@@ -104,15 +108,30 @@ dispensa/
 - `recipe_catalog_grocery_add` revalidates inventory, canonicalizes selected
   ingredients, and writes only to EverShelf's internal shopping list with durable
   client idempotency. Home Assistant orchestration remains outside EverShelf.
-- Cookidoo provider detail hydration is policy-disabled because the available detail
-  response co-transports official steps. Bridge search/direct metadata fail locally
-  with `metadata_hydration_disabled_policy`; no production path calls raw/public
-  detail loaders. EverShelf refuses new discovery/backfill enqueue and marks legacy
-  queued jobs `skipped` without connector failure/circuit accounting.
-- Existing cached Cookidoo catalog rows remain readable and retain their historical
-  `metadata-v2`/`ingredient-topology-v1` facts. No policy-disabled path deletes
-  catalog data or changes search, clusters, scores, or revisions. Re-enabling would
-  require a separately reviewed step-free provider endpoint.
+- Cookidoo provider detail hydration is default-off and requires matching EverShelf
+  and bridge gates. The bounded bridge request may receive a response that
+  co-transports official steps, but only the `SafeRecipeMetadata` factual allowlist
+  crosses the bridge API boundary; prohibited fields are never inspected, returned,
+  logged, or persisted. EverShelf additionally requires the bridge execution-policy
+  capability `metadata-v3-operator-enabled`; factual rows retain the independent
+  `metadata-v2`/`ingredient-topology-v1` storage versions.
+- Recipe workers claim under a short SQLite write reservation using immutable
+  request hashes, monotonic request epochs, unpredictable lease tokens, lease
+  generations, and expiries. A separate database-backed singleton process lease
+  bounds concurrent cron/manual batches and is renewed between jobs; it is
+  logical state, not a held SQLite or file lock. All transactions and flock
+  probes finish before bridge I/O. A short catalog transaction then revalidates
+  the job lease and per-origin/connector request epoch before atomically applying
+  facts, pagination, connector outcome, and job completion.
+- Existing SQLite recipe-job tables gain ownership fields additively. Their
+  original table-level `CHECK` clauses are not rebuilt during upgrade; bounded
+  statuses, generations, tokens, and expiries are enforced by claim/update
+  predicates and migration regression tests instead.
+- When hydration is disabled, new discovery/backfill enqueue is refused and
+  existing queued jobs remain pending rather than being destroyed. Cached Cookidoo
+  rows remain searchable while stale; TTL controls refresh demand, not catalog
+  membership. Read-triggered refresh is bounded, best-effort, and independent of
+  the bulk-backfill gate.
 
 ## Ingredient ontology v3
 
@@ -134,6 +153,11 @@ dispensa/
   regexes, punctuation, alternatives, quantities, and modifier parsing are
   retained as evidence hints only; absent review, recipe rows terminate D9.
   Candidate assertions are snapshotted append-only before terminalization.
+- FoodOn hierarchy and `resolved_parent` remain compatibility evidence only.
+  They cannot lower controller risk, create accepted exact mappings, or satisfy
+  an ingredient identity. Exact-self admission defaults on for legitimate
+  unresolved foods and can be disabled only as an emergency operational guard;
+  unresolved foods remain retryable rather than becoming `needs_review`.
 - Entity `identity_role` is orthogonal to `entity_kind`. The graph has one
   connected `food` root; structural categories are identity-ineligible,
   prepared/composite identities can match only the identical base, and
@@ -291,6 +315,155 @@ dispensa/
   restores one of eight retained proven ancestors without freshness gates;
   non-ancestors use full activation validation and must be a v3 child of the
   current active revision.
+- Corpus Projection v2 separates mutable product/recipe bindings from the
+  immutable semantic graph generation. Every score revision pins one immutable,
+  hash-chained projection revision; there is no separately active projection
+  pointer. Initial reconstruction checkpoints contain complete product and
+  recipe aggregates. Routine rollover checkpoints instead reference the prior
+  immutable head, carry the exact captured/covered fences and continuation,
+  and contain only the current bounded delta. Subsequent revisions publish
+  deterministic aggregate `REPLACE` or `DELETE`
+  operations, including durable tombstone heads, while derived member and
+  reverse-dependency tables remain rebuildable caches.
+- Source journals capture old and new aggregate scopes for re-parenting.
+  Product ingredients, canonical ingredients, taxonomy aliases, and recipe
+  origin language are projection inputs. Dense journals load complete events
+  and all of their scopes in bounded pages; they never issue one scope query per
+  event or split one event across coverage commits. Missing journal rows use
+  the durable scope copy for the same complete-event page.
+  Every source event has an independent durable revision-indexed header, and
+  its old/new scopes are copied into the same reconciliation log. Upgrade
+  backfill copies headers and scopes in the same bounded page before advancing
+  its checkpoint. A durable header with missing scope evidence fails closed to
+  authoritative recovery rather than trusting only the new owner. A missing
+  durable event fails closed. Explicit global invalidation uses a keyset-paged
+  authoritative aggregate walk.
+  Only semantic-generation fence changes or corrupt immutable evidence fail
+  closed. Source-journal pruning and reconciliation GC are disabled until the
+  versioned header-and-scope backfill finishes, then remove only revisions at
+  or below every retained building/ready score and materialized projection
+  fence.
+- Publication makes the projection revision and sparse score child visible in
+  one guarded transaction. Existing ready score rows are never restamped:
+  migration publishes an immutable zero-score child. Rollback selects the prior
+  score/projection tuple, and score compaction preserves that exact pin.
+  Generic identity-event dedup accepts a physical score source only when its
+  covered identity fence includes the event or the source is a freshly computed
+  sparse delta whose pinned Corpus Annex is also the recipe aggregate's exact
+  physical head. Inventory-only fan-out rows and copied full-compaction rows
+  never manufacture per-recipe freshness.
+- The worker selects the source high-water mark, dense journal window,
+  aggregate closure, identity-extension snapshot, and owner fingerprints through
+  bounded write phases surrounding a WAL read snapshot. Identity and recipe
+  annex writes are chunked; aggregate resolution runs without a writer
+  reservation; the prepared immutable delta is persisted in a short write
+  phase. Coverage advances only through the last fully materialized contiguous
+  event, while a hashed aggregate cursor continues high-fan-out alias/canonical
+  work without retrying the first page. Publication requires exact inventory,
+  catalog, source, identity, and active-parent fences plus the stored entry-set
+  hash; it never rebuilds the plan while holding the publication lock.
+- Alias inversion uses the same normalized `source_label` semantics as recipe
+  aggregate construction (`raw_text`/source name before `normalized_name`).
+  The derived member cache stores and indexes that lookup key. Missing keys,
+  empty normalized aliases, or otherwise incomplete alias scope metadata fail
+  closed or continue through the bounded worker cursor instead of silently
+  dropping dependencies.
+- Source-projection product IDs and score-fan-out commands are separate.
+  Canonical/alias dependency closure may republish existing product aggregates,
+  but only an actually pending product, a direct product-owner source event, or
+  a non-scope-directed authoritative product mismatch opens a score fan-out
+  cursor. Routine product classification links existing canonical slugs without
+  rewriting their shared taxonomy/provider evidence; explicit enrichment jobs
+  own those shared canonical updates.
+- The reverse dependency cache indexes each accepted identity plus only
+  mapping-specific `equivalent_to`, `variant_of`, and `substitutes_for`
+  evidence. Non-satisfying `derived_from` and `component_of` relations remain
+  in immutable member evidence for diagnostics but never widen inventory score
+  fan-out through a shared ancestor key.
+- Identity-extension changes are projection inputs even when no source row
+  changed.   SQL discovery first records a monotonic durable identity event, then keyset
+  pages reverse-dependent recipes into a queue carrying first/latest event
+  identities and required identity-extension revision/hash. Former product
+  bindings are retained separately, so delete, detach, and rebind events page
+  both former and current dependencies. Each pass discovers and processes at
+  most the configured aggregate limit. Newer identity
+  revisions may be discovered while older pages remain, but the separately
+  stored covered identity prefix advances only after every required recipe
+  through that prefix has published. Score and projection revisions pin exact
+  captured and covered identity revision/hash pairs.
+- Product-to-recipe score contributors use a durable product cursor. Each
+  contributor source is keyset-paged, the combined page is capped by the
+  incremental limit, and the product remains pending until every historical
+  and current dependent recipe has been republished. A changed product or
+  inventory fingerprint resets only that product cursor.
+- Worker selection rotates serving recipes, products, and maintenance recipes,
+  while reserving capacity for pending source and identity projection work.
+  The low-latency serving bypass periodically yields to a coordinated fairness
+  cycle, so sustained serving traffic cannot permanently starve maintenance or
+  identity work. If the active score date is stale, identity-only or source
+  maintenance returns `score_date_refresh_required` without consuming its
+  durable queue or creating failed revisions; the activation worker owns the
+  daily refresh. Urgent serving work may publish first, but identity projection
+  remains deferred until that serving child advances the active score date.
+- Worker planning verifies bounded revision/manifest lineage and publication
+  fences; foreground reads validate only the exact pinned tuple and never scan
+  checkpoint entries. The deployment and
+  release deep-integrity audit streams every immutable entry and recomputes
+  entry-set, aggregate, source, and projection hashes under a fixed memory
+  ceiling, recursively following every rollover `checkpoint_source`. Derived
+  projection caches reject unguarded writes and can be rebuilt from the audited
+  chain. Replay independently verifies each revision's stored entry-set hash.
+  Repair is worker-only and refuses to replay a chain until that immutable
+  evidence passes the transitive deep audit.
+- Recipe browse, score resolution, and processing status are observational:
+  they never acquire the projection write lock or reconstruct derived rows.
+  HTTP reads consume only singleton worker-produced projection and processing
+  snapshots plus bounded active-pointer/high-water joins. The verdict exposes `computed_at`,
+  freshness, captured/covered/current source and identity fences, and pending
+  identity work. A cache-schema mismatch or missing materialization is reported
+  as `projection_repair_required`; a worker performs the guarded repair.
+- Each bounded projection page can roll over before the lineage limit, including
+  while source or identity coverage is partial. The rollover root references
+  the previous immutable head, preserves its continuation, applies only the
+  current delta to the materialized cache, and atomically publishes a zero-score
+  child. Entry-count rollover is delayed until 100,000 direct delta entries
+  (or the bounded lineage-depth limit), avoiding one marker per ordinary
+  production page. Checkpoint traversal is iterative and cycle-checked rather
+  than failing at an arbitrary reference count. Interrupted attempts remain
+  unreachable. Guarded cleanup may remove unreferenced failed or abandoned
+  building revisions and their entries, but ready revisions and entries remain
+  immutable and retained scores keep their exact historical prefixes.
+- The disposable production benchmark rejects unbounded identity
+  `GROUP_CONCAT`, constrains candidate fan-out to its page budget, records
+  named corpus-proportional operations, enforces a five-second maximum
+  contiguous write reservation, and verifies zero-entry rollover markers.
+  `--worker-lifecycle` runs scenario pages through the actual score worker and
+  its lock, cleanup, status, and compaction path. Snapshot-race and
+  identity-arrival probes are durable, database-visible fixture rows consumed
+  at the worker's exact snapshot phases, so subprocess execution exercises the
+  same races as direct mode. Each worker result reports its process-local
+  operation counters, full-corpus scan count, Linux peak RSS, and PHP allocator
+  peak; lifecycle limits use the worker RSS rather than the benchmark parent's
+  memory. The production-validated default work cap is 250 aggregates.
+- Schema migration installs projection storage and CDC only; it never performs
+  a synchronous full-corpus checkpoint or effective-score projection rebuild
+  on an API request. Replacing or repairing an equivalent CDC trigger set
+  updates only trigger metadata; it does not advance the semantic source fence
+  or invent a global mutation. Recipe identity resolver upgrades likewise page
+  stale annex rows and emit scoped maintenance recipe batches; they do not
+  advance the source fence or create a zero-scope authoritative event.
+  Semantic-generation transitions use the explicit fail-closed transition
+  reason. A legacy missing effective-projection pointer remains
+  unset and is surfaced as `score_projection_repair_pending` until the worker
+  reconstructs it. Legacy rows without an explicit identity-coverage field
+  start at the zero prefix and are selectively replayed rather than being
+  trusted as fully covered. Before enabling
+  projection-backed maintenance on an upgraded database, run one forced
+  incremental-score worker cycle on the writable deployment database (and first
+  on its disposable validation copy). A missing pin is reported as
+  `projection_bootstrap_pending`, remains handled without creating ontology
+  build intent, and the worker publishes the checkpoint through an immutable
+  zero-score child.
 - Full-resolution v3.17 data under ontology schema v3.17 uses
   `activation_policy=manual_review`. Candidate and score builds remain copy-only;
   activation requires the exact frozen production profile, reviewed subject

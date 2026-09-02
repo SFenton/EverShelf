@@ -7,6 +7,430 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.20.24] - 2026-09-01
+
+### Added
+- Immutable sparse Corpus Annex revisions and inherited score projections now
+  publish bounded product/recipe `REPLACE` and `DELETE` deltas while retaining
+  exact historical identity, source, and rollback evidence.
+- Durable identity and source-reconciliation queues preserve old/new bindings,
+  page high-fan-out work, expose named corpus-operation metrics, and support
+  production-sized timing and memory benchmarks.
+
+### Changed
+- Routine inventory, recipe, alias, taxonomy, re-parent, and journal-gap
+  changes reconcile only affected aggregates and recipes. Shared canonical
+  evidence is no longer rewritten by product-local linking, and non-identity
+  derivation/component evidence no longer widens score fan-out.
+- Incremental scoring uses short, fenced write phases around WAL read
+  snapshots, defaults to a production-validated 250-item work cap, and keeps
+  provider discovery asynchronous from local score convergence.
+- Corpus projection cache schema v4 rebuilds reverse dependencies once during
+  migration, then serves bounded selective updates.
+
+### Fixed
+- Full score compaction can no longer manufacture per-recipe identity
+  freshness or retire unprocessed generic identity events.
+- Deep integrity audits now traverse rollover checkpoint sources, verify every
+  immutable entry set, and refuse corrupted replay.
+- Historical reconciliation backfill now copies mutation scopes with headers
+  before source journals or durable evidence may be pruned.
+
+## [1.20.23] - 2026-08-30
+
+### Fixed
+- Failed activation cleanup now retains ontology roots that later became ready
+  ancestors, allowing legacy imports to finish cleanup without foreign-key
+  failures and clearing the resolved worker health error.
+
+## [1.20.22] - 2026-08-30
+
+### Fixed
+- Non-constraint generation intents now require an active-ontology base before
+  activation. Historical copied plans remain deferred until a fresh
+  observation safely rebases them, preventing repeat final-fence failures.
+- Processing status now reports stale-base intents as deferred rather than
+  active ontology work.
+
+## [1.20.21] - 2026-08-29
+
+### Fixed
+- The activation regression fixture now isolates its intended generation
+  intent, eliminating priority-order nondeterminism in release CI.
+
+## [1.20.20] - 2026-08-29
+
+### Fixed
+- Ontology intake now rebases historical jobs to the active ready ontology
+  before deterministic admission and keeps annex/score mutations inside the
+  occurrence fence, preventing cross-version identity ping-pong.
+- Activation and provisional intent intake now honor the configured minimum
+  priority. Production defaults to `51`, retaining priority-50 recipe review
+  debt for explicit maintenance while priority-60/100 work continues.
+
+## [1.20.19] - 2026-08-29
+
+### Fixed
+- Direct-ID Cookidoo backfill now converges after metadata coverage is complete
+  instead of continuously absorbing routine 14-day TTL refreshes; due refreshes
+  remain observable and use the separate demand/periodic refresh paths.
+
+## [1.20.18] - 2026-08-25
+
+### Fixed
+- The smart-shopping ontology-controller fallback now defers alongside the
+  resident intake worker during Cookidoo metadata backfill.
+
+## [1.20.17] - 2026-08-25
+
+### Fixed
+- Backfill deferral now applies only to advisory ontology work; required score
+  or ontology coverage rebuilds proceed before hydration resumes.
+
+## [1.20.16] - 2026-08-25
+
+### Fixed
+- The active-database ontology intake worker now remains healthy but defers
+  review mutations while Cookidoo metadata backfill is active.
+
+## [1.20.15] - 2026-08-25
+
+### Fixed
+- Score-only daily rollover now requires the active ontology to cover the
+  current corpus; source drift correctly performs ontology+score activation.
+
+## [1.20.14] - 2026-08-25
+
+### Fixed
+- Renewed the reviewed Cookidoo `rpf-7310` lemon-juice provider term for its
+  newly observed punctuation variant while preserving the accepted fresh-state
+  identity.
+
+## [1.20.13] - 2026-08-25
+
+### Fixed
+- Daily score-date rollover now starts a copied refresh for the current active
+  ontology before any advisory ontology generation work.
+
+## [1.20.12] - 2026-08-25
+
+### Fixed
+- Metadata enqueue pauses while recipe scores are not fresh, allowing daily
+  expiry-score rollover to reach a stable source snapshot.
+- Backfill deferral now yields to copied score refresh when the active score
+  date is stale, then resumes automatically after activation.
+
+## [1.20.11] - 2026-08-24
+
+### Fixed
+- The metadata queue backpressure decision now runs after status loading
+  instead of being unreachable inside CLI option parsing.
+
+## [1.20.10] - 2026-08-24
+
+### Fixed
+- Cron-safe Cookidoo metadata enqueue now pauses whenever a metadata batch is
+  pending or running, preventing transient SQLite retries from growing a
+  provider backlog.
+
+## [1.20.9] - 2026-08-24
+
+### Fixed
+- Provider queue catch-up now claims at most one Cookidoo metadata batch per
+  run while still admitting other provider jobs.
+- Local SQLite lock retries no longer count as Cookidoo connector failures or
+  open the provider circuit.
+
+## [1.20.8] - 2026-08-24
+
+### Fixed
+- Sparse score compaction now flattens the active covered snapshot while
+  preserving newer pending recipe/source work, preventing continuous metadata
+  hydration from deadlocking at the ancestry limit.
+
+## [1.20.7] - 2026-08-24
+
+### Fixed
+- The six-recipe Cookidoo metadata cadence now uses one batched provider
+  request per minute, avoiding the upstream request-rate circuit breaker.
+
+## [1.20.6] - 2026-08-24
+
+### Fixed
+- Advisory copied ontology builds are deferred while the operator-enabled
+  Cookidoo metadata backfill has pending work, preventing expected source-fence
+  failures while incremental recipe scoring remains live.
+
+## [1.20.5] - 2026-08-24
+
+### Added
+- A cron-safe, resumable Cookidoo detail-metadata backfill schedules six
+  one-recipe jobs per minute when explicitly enabled.
+
+### Changed
+- Provider recipe processing now accepts up to six jobs per minute.
+- Permanent content-language rejections are reported as blocked failures
+  instead of remaining backfill work.
+
+## [1.20.4] - 2026-08-24
+
+### Fixed
+- Bounded maintenance recipe changes now publish as incremental maintenance
+  deltas, including recipe-scoped source changes, instead of forcing a copied
+  ontology rebuild.
+
+## [1.20.3] - 2026-08-24
+
+### Fixed
+- Approved maintenance score refreshes now run before advisory ontology
+  generation intents when the active ontology is already current, preventing
+  large review backlogs from starving score freshness.
+
+## [1.20.2] - 2026-08-23
+
+### Fixed
+- The ontology activation wrapper now renews its heartbeat while a long copied
+  build or validation child is running, preventing healthy maintenance work
+  from being reported as a dead worker.
+
+## [1.20.1] - 2026-08-23
+
+### Fixed
+- Recipe identity migration no longer treats stale controller occurrence
+  fingerprints as proof that an accepted sealed mapping needs an annex,
+  preventing unchanged accepted mappings from looping forever.
+
+## [1.20.0] - 2026-08-23
+
+### Added
+- The reviewed ontology now contains distinct generic Pecorino and Pecorino
+  Romano identities, with exact generic aliases and non-satisfying Romano
+  variant evidence.
+- A production-copy identity-flow gate adds targeted generic, variety,
+  broad-category, and prepared-food products and verifies their full ingestion
+  and recipe-scoring behavior.
+
+### Fixed
+- Cookidoo recipes with an undetermined catalog language now use trusted
+  origin content language for ontology identity, with source invalidation when
+  that language changes.
+- Recipe identity migration backfills missing annex rows for unresolved sealed
+  mappings and batches semantically changed recipes into maintenance scoring.
+
+## [1.19.2] - 2026-08-23
+
+### Added
+- A resident datagram-woken recipe queue worker now drains local identity,
+  taxonomy-ready, and inventory jobs immediately.
+
+### Changed
+- Cookidoo discovery uses an independent provider lease and remains on its
+  rate-limited minute cadence instead of delaying local product readiness.
+
+## [1.19.1] - 2026-08-23
+
+### Fixed
+- Container health now remains unavailable until database migration finishes
+  and Apache is listening, preventing dependent workers from starting against
+  a held migration lock and restarting during deployment.
+
+## [1.19.0] - 2026-08-23
+
+### Added
+- Recipe scoring now separates latency-critical serving work from recipe and
+  ontology maintenance, with explicit covered-revision watermarks and lane
+  telemetry.
+- CI now validates 500,000-row mutation journals under a 128 MB PHP limit and
+  enforces per-item score visibility in the concurrent inventory stress gate.
+
+### Changed
+- Product, inventory, and user-facing recipe updates publish sparse serving
+  revisions without waiting for copied maintenance recovery.
+- Reviewed ontology admissions batch only genuinely changed recipe annex rows
+  into one maintenance invalidation.
+
+### Fixed
+- Mutation validation and lineage hashing are bounded-memory, annex refreshes
+  are batched, and affected-match counts use the indexed effective projection.
+- Serving publication uses short fenced writes so concurrent scans do not wait
+  behind recipe scoring, while recipe and product races remain pending for a
+  safe retry.
+
+## [1.18.12] - 2026-08-22
+
+### Fixed
+- Processing status no longer treats warnings retained on historical,
+  successfully completed activation imports as current system failures.
+
+## [1.18.11] - 2026-08-22
+
+### Fixed
+- Copied bundle registration now classifies concurrent parent and sequence
+  advancement as expected snapshot supersession rather than an integrity
+  failure, allowing a clean rebuild against the latest live state.
+
+## [1.18.10] - 2026-08-22
+
+### Fixed
+- Copied no-op acknowledgements whose live score parent has already advanced
+  are now recorded as expected superseded snapshots instead of activation
+  failures; their source intents remain pending for the next coherent build.
+
+## [1.18.9] - 2026-08-22
+
+### Fixed
+- Interrupted activation workspaces and their SQLite sidecars are reclaimed
+  after one minute, preventing repeated 61 GB copy failures from exhausting
+  the Docker data filesystem.
+- Successful ontology and score imports clear transient reservation warnings
+  while retaining reservation-duration metrics.
+
+## [1.18.8] - 2026-08-22
+
+### Fixed
+- Ontology intake now releases its subject lookup cursor before queuing a
+  provisional intent and retries that write under transient SQLite
+  contention.
+- The resident ontology worker keeps running after retryable lock conflicts
+  instead of exiting and relying on container restart recovery.
+
+## [1.18.7] - 2026-08-22
+
+### Fixed
+- Autonomous ontology builds now quarantine provider terms whose frozen review
+  fingerprint became stale, instead of aborting the entire generation.
+- Static and manually reviewed ontology builds continue to reject stale
+  provider evidence.
+
+## [1.18.6] - 2026-08-22
+
+### Fixed
+- Production-copy stress scanners now release barcode verification cursors
+  before inventory insertion, preventing the harness itself from retaining a
+  stale WAL snapshot during concurrent writes.
+
+## [1.18.5] - 2026-08-22
+
+### Fixed
+- Sparse score publication now closes completed SQLite read cursors before
+  acquiring its publication transaction, preventing normal concurrent WAL
+  commits from stranding a fully computed revision.
+- Incremental scoring recovers abandoned build rows when it acquires the
+  exclusive score lock and records failure cleanup atomically.
+- Aborted temporary stress runs now remove their per-wave synchronization
+  markers.
+
+## [1.18.4] - 2026-08-22
+
+### Fixed
+- Bounded user-visible incremental score work now publishes before queued
+  ontology generations, preventing historical generation intents from forcing
+  another full copied rebuild after each deployment.
+
+## [1.18.3] - 2026-08-22
+
+### Fixed
+- Incremental scoring classifies SQLite contention as retryable `locked`
+  work instead of terminal `failed` work, so rapid scan stress retries rather
+  than aborting the release gate.
+- Production-copy stress uses existing accepted recipe identities without
+  mutating the catalog, tolerates unrelated provider jobs, and limits integrity
+  scans to the tables touched by the test.
+
+## [1.18.2] - 2026-08-22
+
+### Fixed
+- Product create/update commits now contain only the core product mutation.
+  Shopping intent, canonical enqueue, controller observation, and identity
+  admission run as independently recoverable transactions, preventing rapid
+  concurrent scans from holding one long SQLite write reservation.
+- The production-shaped stress gate now reuses existing catalog recipes,
+  validates returned barcode ownership, refreshes its reader snapshot after
+  concurrent workers finish, and tolerates unrelated queued provider jobs.
+
+## [1.18.1] - 2026-08-22
+
+### Fixed
+- Copied database backup/scoring/validation and incremental score publication
+  now share a dedicated coordination lock, preventing either expensive path
+  from repeatedly invalidating the other while web scans remain independent.
+- Recipe identity migration runs under the shared live-writer reservation
+  before copied recovery starts.
+- Production-shaped held-out validation reuses existing catalog recipes,
+  synchronizes rapid scan starts, verifies returned product ownership, and
+  reopens SQLite before final assertions to avoid stale reader snapshots.
+
+## [1.18.0] - 2026-08-21
+
+### Added
+- Exact source-revision metadata on both container images and the public
+  startup-health response.
+- A concurrent two-wave, sixteen-food ingestion release gate covering product
+  save, inventory add, canonicalization, identity convergence, score
+  publication, expiry weighting, recipe search, and SQLite integrity.
+- Dedicated health checks for the canonical, ontology intake, ontology
+  activation, and recipe-score workers.
+
+### Changed
+- The dedicated ontology container now runs the supported live intake mode,
+  while a separate bounded activation worker performs copy-only ontology and
+  full-score work before short live import/publication phases.
+- Copy-safe activation defaults on while model execution and promotion remain
+  separately gated, so active-v3 installations cannot strand overflow work.
+- CI now runs on every pushed commit, exercises the Cookidoo bridge, verifies
+  image-to-commit provenance, and includes the concurrent ingestion gate.
+
+### Fixed
+- Full-rebuild-required score cycles are routed to copied score refresh, while
+  incremental scoring skips activation-owned live write phases through the
+  shared background-writer lock instead of repeatedly colliding with SQLite.
+- Incremental score worker output no longer reports success for failed,
+  missing-parent, compaction-required, or full-rebuild-required cycles.
+- Recipe identity resolver upgrades invalidate the active score source and
+  force a copied full refresh so existing recipe annex rows cannot remain on
+  obsolete identity extensions.
+- Possessive ingredient spellings such as `Confectioner's Sugar`,
+  `Confectioner’s Sugar`, and `confectioners sugar` converge without collapsing
+  the distinct phrase `confectioner sugar`.
+
+## [1.17.0] - 2026-08-21
+
+### Changed
+- Cookidoo search and direct metadata hydration are no longer hard-disabled by
+  repository policy. Matching default-off EverShelf and bridge flags now enable
+  the existing bounded factual allowlist while official instructions and other
+  prohibited provider content remain uninspected, unlogged, and unpersisted.
+- Cookidoo execution now requires bridge capability
+  `metadata-v3-operator-enabled` while persisted factual rows remain
+  `metadata-v2`. A one-shot guarded migration re-stamps only known superseded
+  discovery policies and valid historical pre-policy Cookidoo jobs; unknown
+  future policy identifiers remain unchanged and fail closed.
+- Recipe jobs use immutable request hashes, monotonic request epochs, expiring
+  lease tokens/generations, and per-origin/connector apply fences. Provider I/O
+  occurs after claim commit with no recipe/global queue flock or SQLite
+  transaction, followed by one short atomic apply/completion transaction.
+- Recipe queue invocations are bounded by a crash-recoverable database-backed
+  singleton lease. Competing cron/manual batches skip observably, while expiry
+  reclaim and token-fenced release require no provider-spanning file lock.
+- Cached recipes remain searchable and recommendable after either freshness
+  deadline. Reads expose `is_stale` and enqueue bounded best-effort refresh
+  without requiring the bulk-backfill gate; freshness transitions no longer
+  invalidate browse cursors.
+- Exact-self food admission and retry-safe readiness now default on with an
+  emergency disable. Product-save enrichment subsystems are savepoint-isolated
+  and report degraded outcomes without rolling back the core product.
+
+### Fixed
+- FoodOn hierarchy/ancestor evidence can no longer downgrade controller work to
+  R0, create `foodon_hierarchy` accepted identity, or satisfy exact ingredient
+  matching. A bounded copy-database audit can identify and requeue unsafe legacy
+  mappings into exact-self admission.
+- Legacy recipe migration now installs lease indexes only after their additive
+  columns, and stale-visibility cursor marker/bump publication is atomic.
+- Queued Cookidoo metadata refreshes now report `connector_disabled` instead of
+  the obsolete `metadata_backfill_disabled` reason when the connector itself is
+  unavailable; the bulk-backfill gate remains limited to bulk enqueue.
+
 ## [1.16.2] - 2026-08-21
 
 ### Fixed

@@ -203,14 +203,27 @@ try {
         $status['schema_version']
             === EVERSHELF_PROCESSING_STATUS_SCHEMA
         && $status['recipe_source_ontology']['missing_row_count'] === 0
-        && $status['ontology_queue']['intake_open_count'] >= 1
+        && $status['ontology_queue']['minimum_priority'] === 51
+        && $status['ontology_queue']['deferred_count'] >= 1
         && array_key_exists(
             'generation_intent_due_count',
             $status['ontology_queue']
         )
         && array_key_exists(
+            'generation_intent_deferred_count',
+            $status['ontology_queue']
+        )
+        && array_key_exists(
             'coverage_gap_open_count',
             $status['ontology_queue']
+        )
+        && array_key_exists(
+            'copied_recovery_required',
+            $status['incremental_scores']
+        )
+        && array_key_exists(
+            'recovery_strategy',
+            $status['incremental_scores']
         )
         && array_key_exists('advisories', $status)
         && $status['pending']['total'] >= 1
@@ -356,6 +369,32 @@ try {
         && $problemStatus['active'] === true
         && $problemStatus['problem'] === true,
         'Active work must remain visible when an independent problem exists'
+    );
+    $db->prepare("
+        UPDATE ontology_activation_imports
+        SET status = 'active',
+            last_error = 'activation reservation exceeded 100 ms',
+            completed_at = CURRENT_TIMESTAMP,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+    ")->execute([$scoreImportId]);
+    $db->exec("
+        UPDATE ontology_activation_state
+        SET failure_count = 0,
+            last_error = '',
+            last_outcome_kind = 'activated',
+            last_outcome_json =
+                '{\"reason\":\"score_import_activated\"}',
+            last_outcome_at = CURRENT_TIMESTAMP,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = 1
+    ");
+    $recoveredStatus = evershelfProcessingStatus($db);
+    $assert(
+        $recoveredStatus['activation']['last_error'] === null
+        && $recoveredStatus['problem'] === false,
+        'Historical successful-import warnings must not keep processing '
+            . 'in a failed state'
     );
     $db->exec("
         UPDATE ontology_activation_imports

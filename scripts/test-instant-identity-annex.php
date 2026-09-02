@@ -6,6 +6,13 @@ define('CRON_MODE', true);
 define('RECIPE_BACKEND_TEST_MODE', true);
 require_once __DIR__ . '/../api/bootstrap.php';
 
+$GLOBALS[
+    'INGREDIENT_ONTOLOGY_EXACT_SELF_IDENTITY_ENABLED_OVERRIDE'
+] = false;
+$GLOBALS[
+    'INGREDIENT_ONTOLOGY_IDENTITY_READINESS_V2_ENABLED_OVERRIDE'
+] = false;
+
 $assertions = 0;
 $assert = static function (bool $condition, string $message) use (
     &$assertions
@@ -978,9 +985,34 @@ $currentAdmissionManifest = [
     'version' => INGREDIENT_ONTOLOGY_IDENTITY_ANNEX_REVIEW_VERSION,
     'resolver_version' =>
         ingredientOntologyV3ProductIdentityResolverVersion(),
+    'recipe_resolver_version' => str_replace(
+        INGREDIENT_ONTOLOGY_IDENTITY_ANNEX_RESOLVER_VERSION,
+        'identity-annex-r0-v3',
+        ingredientOntologyV3RecipeIdentityResolverVersion()
+    ),
     'aliases' =>
         ingredientOntologyV3IdentityAnnexReviewedAliases(),
 ];
+$staleRecipeResolver =
+    (string)$currentAdmissionManifest['recipe_resolver_version'];
+$db->prepare("
+    UPDATE ingredient_ontology_recipe_identity_annex
+    SET resolver_version = ?
+    WHERE recipe_ingredient_id = ?
+")->execute([
+    $staleRecipeResolver,
+    $reviewedEggplantIngredientId,
+]);
+$db->prepare("
+    DELETE FROM ingredient_ontology_recipe_identity_annex
+    WHERE recipe_ingredient_id = ?
+")->execute([$qualifiedEggplantIngredientId]);
+$db->prepare("
+    DELETE FROM recipe_score_pending_recipes
+    WHERE recipe_id = ?
+")->execute([$eggplantRecipeId]);
+$sourceRevisionBeforeResolverMigration =
+    (int)recipeScoreState($db)['ontology_source_revision'];
 $db->prepare("
     UPDATE ingredient_ontology_identity_admission_state
     SET resolver_version = ?,
@@ -1000,8 +1032,90 @@ $migratedGarlicsReadiness =
         $db,
         $productIds['garlics']
     );
+$resolverMigrationEvidence = [
+    'source_revision_before' => $sourceRevisionBeforeResolverMigration,
+    'source_revision_after' =>
+        (int)recipeScoreState($db)['ontology_source_revision'],
+    'global_mutation_count' => (int)$db->query("
+        SELECT COUNT(*)
+        FROM recipe_score_mutations
+        WHERE domain = 'source'
+          AND owner_type = 'global'
+          AND reason = 'recipe_identity_resolver_changed'
+    ")->fetchColumn(),
+    'durable_global_event_count' => (int)$db->query("
+        SELECT COUNT(*)
+        FROM recipe_score_source_reconciliation_events
+        WHERE event_owner_type = 'global'
+          AND event_reason = 'recipe_identity_resolver_changed'
+    ")->fetchColumn(),
+    'pending_recipe_count' => (int)$db->query("
+        SELECT COUNT(*) FROM recipe_score_pending_recipes
+    ")->fetchColumn(),
+    'score_status' => recipeScoreRevisionStatus(
+        $db,
+        recipeScoreActiveRevision($db)
+    ),
+    'projection_decision' =>
+        ingredientOntologyV3CorpusProjectionV2DriftDecision($db),
+    'maintenance_incremental' =>
+        ingredientOntologyActivationMaintenanceDriftIsIncremental(
+            $db,
+            recipeScoreActiveRevision($db)
+        ),
+    'requires_score_build' =>
+        ingredientOntologyActivationNeedsScoreBuild($db),
+];
 $assert(
     !empty($resolverMigration['changed'])
+    && !empty($resolverMigration['recipe_resolver_changed'])
+    && (int)recipeScoreState($db)['ontology_source_revision']
+        === $sourceRevisionBeforeResolverMigration
+    && (int)$db->query("
+        SELECT COUNT(*)
+        FROM recipe_score_mutations
+        WHERE domain = 'source'
+          AND owner_type = 'global'
+          AND reason = 'recipe_identity_resolver_changed'
+    ")->fetchColumn() === 0
+    && (int)$db->query("
+        SELECT COUNT(*)
+        FROM recipe_score_source_reconciliation_events
+        WHERE event_owner_type = 'global'
+          AND event_reason = 'recipe_identity_resolver_changed'
+    ")->fetchColumn() === 0
+    && ingredientOntologyActivationNeedsScoreBuild($db)
+    && (int)(
+        $resolverMigration[
+            'recipe_resolver_migration'
+        ]['processed'] ?? 0
+    ) >= 1
+    && (int)(
+        $resolverMigration[
+            'recipe_resolver_migration'
+        ]['remaining'] ?? -1
+    ) === 0
+    && in_array(
+        $eggplantRecipeId,
+        (array)(
+            $resolverMigration[
+                'recipe_resolver_migration'
+            ]['changed_recipe_ids'] ?? []
+        ),
+        true
+    )
+    && (int)$db->query("
+        SELECT COUNT(*)
+        FROM ingredient_ontology_recipe_identity_annex
+        WHERE recipe_ingredient_id = {$qualifiedEggplantIngredientId}
+    ")->fetchColumn() === 1
+    && (int)$db->query("
+        SELECT COUNT(*)
+        FROM recipe_score_pending_recipes
+        WHERE recipe_id = {$eggplantRecipeId}
+          AND lane = 'maintenance'
+          AND reason = 'recipe_identity_resolver_migration'
+    ")->fetchColumn() === 1
     && (string)$migratedGarlicsReadiness['status'] === 'ready'
     && (int)$migratedGarlicsReadiness['score_revision_id']
         === $fixtureActiveRevisionId
@@ -1010,7 +1124,20 @@ $assert(
         FROM recipe_score_pending_products
         WHERE product_id = {$productIds['garlics']}
     ")->fetchColumn() === 0,
-    'Resolver migration must backfill unchanged accepted readiness without rescoring'
+    'Resolver migration must preserve the source fence, backfill unchanged '
+        . 'product readiness, and queue bounded copied refresh of stale '
+        . 'recipe identities without a global source event: '
+        . ingredientOntologyV3Json($resolverMigrationEvidence)
+);
+$assert(
+    (string)$db->query("
+        SELECT resolver_version
+        FROM ingredient_ontology_recipe_identity_annex
+        WHERE recipe_ingredient_id =
+            {$reviewedEggplantIngredientId}
+    ")->fetchColumn()
+        === ingredientOntologyV3RecipeIdentityResolverVersion(),
+    'Copied score refresh must migrate stale recipe annex rows'
 );
 $db->prepare("
     UPDATE ingredient_ontology_identity_annex
@@ -1103,10 +1230,24 @@ $unknownReadiness =
     );
 $assert(
     $unknownRetry['status'] === 'unresolved'
-    && (string)$unknownReadiness['status'] === 'needs_review'
+    && (string)$unknownReadiness['status'] === 'retry'
     && (int)$unknownReadiness['attempts'] === 4
-    && $unknownReadiness['next_retry_at'] === null,
-    'Unresolved identities must terminate visibly within a bounded retry budget'
+    && $unknownReadiness['next_retry_at'] !== null,
+    'Unresolved food identities must remain retryable without needs_review'
+);
+$db->prepare("
+    UPDATE ingredient_ontology_product_readiness
+    SET status = 'needs_review',
+        next_retry_at = NULL
+    WHERE product_id = ?
+")->execute([$productIds['unknown']]);
+ingredientOntologyV3ProductReadinessRetryDue($db);
+$assert(
+    (string)ingredientOntologyV3ProductReadinessRow(
+        $db,
+        $productIds['unknown']
+    )['status'] === 'retry',
+    'Historical needs_review identity work must be requeued'
 );
 $db->prepare("
     UPDATE ingredient_ontology_product_readiness
@@ -1116,10 +1257,11 @@ $db->prepare("
 $identityStatus =
     evershelfProcessingStatusIdentityReadiness($db);
 $assert(
-    (int)$identityStatus['needs_review_count'] >= 1
+    (int)$identityStatus['needs_review_count'] === 0
+    && (int)$identityStatus['retry_count'] >= 1
     && (string)($identityStatus['oldest_pending_at'] ?? '')
-        !== '2000-01-01 00:00:00',
-    'Terminal identity review rows must not pin pending-age telemetry'
+        === '2000-01-01 00:00:00',
+    'Retryable identity work must remain visible in pending-age telemetry'
 );
 $db->prepare("
     DELETE FROM ingredient_ontology_identity_annex
@@ -1288,8 +1430,8 @@ $legacySlicedHamReadiness =
 $assert(
     $legacySlicedHam['status'] === 'unresolved'
     && (string)$legacySlicedHamReadiness['status']
-        === 'needs_review',
-    'Legacy unknown-food behavior must be reproduced before exact fallback'
+        === 'retry',
+    'Emergency-disabled exact identity must still avoid needs_review'
 );
 
 $GLOBALS[
@@ -1747,6 +1889,235 @@ $assert(
     && (int)$undSlicedHam['effective_entity_id']
         !== (int)$slicedHamAdmission['entity_id'],
     'Undetermined language must not silently merge with an English exact identity'
+);
+
+$db->exec("
+    INSERT INTO recipe_catalog (
+        primary_connector, title, language
+    )
+    VALUES ('cookidoo', 'Trusted language fixture', 'und')
+");
+$trustedLanguageRecipeId = (int)$db->lastInsertId();
+$db->prepare("
+    INSERT INTO recipe_origins (
+        recipe_id, connector, external_id,
+        locale, content_language
+    )
+    VALUES (?, 'cookidoo', 'trusted-language-fixture', 'en-US', 'en')
+")->execute([$trustedLanguageRecipeId]);
+$trustedLanguageOriginId = (int)$db->lastInsertId();
+$db->prepare("
+    INSERT INTO recipe_ingredients (
+        recipe_id, position, raw_text, normalized_name,
+        is_required, is_optional, is_staple
+    )
+    VALUES (?, 0, 'Eggplant', 'eggplant', 1, 0, 0)
+")->execute([$trustedLanguageRecipeId]);
+$trustedLanguageIngredientId = (int)$db->lastInsertId();
+$trustedLanguageAnnex =
+    ingredientOntologyV3RecipeAnnexRefreshRecipe(
+        $db,
+        $trustedLanguageRecipeId,
+        $versionId
+    );
+$trustedLanguageRow = $db->query("
+    SELECT language, entity_id, extension_entity_id, status
+    FROM ingredient_ontology_recipe_identity_annex
+    WHERE recipe_ingredient_id = {$trustedLanguageIngredientId}
+")->fetch(PDO::FETCH_ASSOC);
+$assert(
+    !empty($trustedLanguageAnnex['ready'])
+    && (string)$trustedLanguageRow['language'] === 'en'
+    && (int)$trustedLanguageRow['entity_id']
+        === $entities['eggplant']
+    && $trustedLanguageRow['extension_entity_id'] === null
+    && (string)$trustedLanguageRow['status'] === 'accepted',
+    'Trusted Cookidoo content language must resolve an und recipe label'
+);
+$db->prepare("
+    DELETE FROM ingredient_ontology_recipe_identity_annex
+    WHERE recipe_ingredient_id = ?
+")->execute([$trustedLanguageIngredientId]);
+ingredientOntologyV3SetReadyMutationGuard($db, true);
+try {
+    $db->prepare("
+        INSERT OR REPLACE INTO ingredient_ontology_mappings (
+            ontology_version_id, owner_type, owner_id,
+            owner_fingerprint, source_label, normalized_label,
+            language, entity_id, status, confidence,
+            mapping_source, evidence_json, attributes_json,
+            is_staple, identity_basis, created_at, updated_at
+        )
+        VALUES (
+            ?, 'recipe_ingredient', ?, ?,
+            'Eggplant', 'eggplant', 'und', ?,
+            'accepted', 1, 'exact_alias', '{}', '{}',
+            0, 'local_label', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+        )
+    ")->execute([
+        $versionId,
+        $trustedLanguageIngredientId,
+        str_repeat('a', 64),
+        $entities['eggplant'],
+    ]);
+} finally {
+    ingredientOntologyV3SetReadyMutationGuard($db, false);
+}
+$db->prepare("
+    DELETE FROM recipe_score_pending_recipes
+    WHERE recipe_id = ?
+")->execute([$trustedLanguageRecipeId]);
+$acceptedMappingMigration =
+    ingredientOntologyV3IdentityAdmissionMigrateRecipeBatch(
+        $db,
+        100
+    );
+$acceptedMappingAnnex = $db->query("
+    SELECT language, entity_id, status
+    FROM ingredient_ontology_recipe_identity_annex
+    WHERE recipe_ingredient_id = {$trustedLanguageIngredientId}
+")->fetch(PDO::FETCH_ASSOC);
+$assert(
+    in_array(
+        $trustedLanguageRecipeId,
+        (array)($acceptedMappingMigration['changed_recipe_ids'] ?? []),
+        true
+    )
+    && (string)$acceptedMappingAnnex['language'] === 'en'
+    && (int)$acceptedMappingAnnex['entity_id']
+        === $entities['eggplant']
+    && (string)$acceptedMappingAnnex['status'] === 'accepted'
+    && (int)$db->query("
+        SELECT COUNT(*)
+        FROM recipe_score_pending_recipes
+        WHERE recipe_id = {$trustedLanguageRecipeId}
+          AND lane = 'maintenance'
+          AND reason = 'recipe_identity_resolver_migration'
+    ")->fetchColumn() === 1,
+    'Missing annexes with stale accepted mapping language must backfill '
+        . 'and enqueue scoped maintenance scoring'
+);
+ingredientOntologyV3SetReadyMutationGuard($db, true);
+try {
+    $db->prepare("
+        DELETE FROM ingredient_ontology_mappings
+        WHERE ontology_version_id = ?
+          AND owner_type = 'recipe_ingredient'
+          AND owner_id = ?
+    ")->execute([
+        $versionId,
+        $trustedLanguageIngredientId,
+    ]);
+} finally {
+    ingredientOntologyV3SetReadyMutationGuard($db, false);
+}
+$db->exec("
+    INSERT INTO recipe_catalog (
+        primary_connector, title, language
+    )
+    VALUES ('cookidoo', 'Regional accepted mapping fixture', 'en-US')
+");
+$regionalRecipeId = (int)$db->lastInsertId();
+$db->prepare("
+    INSERT INTO recipe_origins (
+        recipe_id, connector, external_id,
+        locale, content_language
+    )
+    VALUES (?, 'cookidoo', 'regional-mapping-fixture', 'en-US', 'en')
+")->execute([$regionalRecipeId]);
+$db->prepare("
+    INSERT INTO recipe_ingredients (
+        recipe_id, position, raw_text, normalized_name,
+        is_required, is_optional, is_staple
+    )
+    VALUES (?, 0, 'Eggplant', 'eggplant', 1, 0, 0)
+")->execute([$regionalRecipeId]);
+$regionalIngredientId = (int)$db->lastInsertId();
+ingredientOntologyV3SetReadyMutationGuard($db, true);
+try {
+    $db->prepare("
+        INSERT INTO ingredient_ontology_mappings (
+            ontology_version_id, owner_type, owner_id,
+            owner_fingerprint, source_label, normalized_label,
+            language, entity_id, status, confidence,
+            mapping_source, evidence_json, attributes_json,
+            is_staple, identity_basis
+        )
+        VALUES (
+            ?, 'recipe_ingredient', ?, ?,
+            'Eggplant', 'eggplant', 'en', ?,
+            'accepted', 1, 'exact_alias', '{}', '{}',
+            0, 'local_label'
+        )
+    ")->execute([
+        $versionId,
+        $regionalIngredientId,
+        str_repeat('b', 64),
+        $entities['eggplant'],
+    ]);
+} finally {
+    ingredientOntologyV3SetReadyMutationGuard($db, false);
+}
+$regionalMigration =
+    ingredientOntologyV3IdentityAdmissionMigrateRecipeBatch(
+        $db,
+        1000
+    );
+$assert(
+    !in_array(
+        $regionalRecipeId,
+        (array)($regionalMigration['changed_recipe_ids'] ?? []),
+        true
+    )
+    && (int)$db->query("
+        SELECT COUNT(*)
+        FROM ingredient_ontology_recipe_identity_annex
+        WHERE recipe_ingredient_id = {$regionalIngredientId}
+    ")->fetchColumn() === 0,
+    'Current accepted regional mappings must not loop through missing '
+        . 'annex migration'
+);
+ingredientOntologyV3SetReadyMutationGuard($db, true);
+try {
+    $db->prepare("
+        DELETE FROM ingredient_ontology_mappings
+        WHERE ontology_version_id = ?
+          AND owner_type = 'recipe_ingredient'
+          AND owner_id = ?
+    ")->execute([
+        $versionId,
+        $regionalIngredientId,
+    ]);
+} finally {
+    ingredientOntologyV3SetReadyMutationGuard($db, false);
+}
+$sourceRevisionBeforeLanguageChange =
+    (int)recipeScoreState($db)['ontology_source_revision'];
+$db->prepare("
+    UPDATE recipe_origins
+    SET content_language = 'de'
+    WHERE id = ?
+")->execute([$trustedLanguageOriginId]);
+$assert(
+    (int)recipeScoreState($db)['ontology_source_revision']
+        === $sourceRevisionBeforeLanguageChange + 1
+    && (int)$db->query("
+        SELECT COUNT(*)
+        FROM recipe_score_mutations
+        WHERE domain = 'source'
+          AND owner_type = 'recipe'
+          AND owner_id = {$trustedLanguageRecipeId}
+          AND revision =
+                " . ($sourceRevisionBeforeLanguageChange + 1)
+    )->fetchColumn() === 1
+    && (int)$db->query("
+        SELECT COUNT(*)
+        FROM recipe_score_pending_recipes
+        WHERE recipe_id = {$trustedLanguageRecipeId}
+          AND lane = 'maintenance'
+          AND reason = 'recipe_origin_identity_changed'
+    ")->fetchColumn() === 1,
+    'Trusted content-language changes must invalidate recipe identity'
 );
 
 $publishedSlicedHam =

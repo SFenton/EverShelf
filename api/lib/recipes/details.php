@@ -99,10 +99,15 @@ function recipeDetailLoadBase(PDO $db, int $recipeId): ?array {
                length(c.instruction_groups_json)
                    AS instruction_groups_json_length,
                c.storage_policy, substr(c.rights_basis, 1, 160) AS rights_basis,
-               c.retrieved_at, c.stale_at,
+               c.retrieved_at, c.stale_at, c.cache_expires_at,
                CASE
-                   WHEN c.stale_at IS NOT NULL
-                    AND c.stale_at < CURRENT_TIMESTAMP
+                   WHEN (
+                       c.stale_at IS NOT NULL
+                       AND c.stale_at < CURRENT_TIMESTAMP
+                   ) OR (
+                       c.cache_expires_at IS NOT NULL
+                       AND c.cache_expires_at < CURRENT_TIMESTAMP
+                   )
                    THEN 1 ELSE 0
                END AS is_stale,
                c.created_at, c.updated_at,
@@ -1479,6 +1484,7 @@ function recipeCatalogDetailBuild(
         'freshness' => [
             'retrieved_at' => $base['retrieved_at'],
             'stale_at' => $base['stale_at'],
+            'cache_expires_at' => $base['cache_expires_at'],
             'updated_at' => $base['updated_at'],
             'is_stale' => !empty($base['is_stale']),
         ],

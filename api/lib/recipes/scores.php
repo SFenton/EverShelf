@@ -167,15 +167,20 @@ function recipeScoreReconcileWorkState(PDO $db): void {
     $pendingProducts = (int)$db->query("
         SELECT COUNT(*) FROM recipe_score_pending_products
     ")->fetchColumn();
-    $pendingRecipes = (int)$db->query("
-        SELECT COUNT(*) FROM recipe_score_pending_recipes
+    $pendingServingRecipes = (int)$db->query("
+        SELECT COUNT(*)
+        FROM recipe_score_pending_recipes
+        WHERE lane = 'serving'
     ")->fetchColumn();
     $active = recipeScoreActiveRevision($db);
+    $activeStatus = $active !== null
+        ? recipeScoreRevisionStatus($db, $active)
+        : 'stale';
     if (
         $pendingProducts === 0
-        && $pendingRecipes === 0
+        && $pendingServingRecipes === 0
         && $active !== null
-        && recipeScoreRevisionStatus($db, $active) === 'fresh'
+        && in_array($activeStatus, ['fresh', 'partial'], true)
     ) {
         recipeScoreSetWorkState(
             $db,
@@ -346,6 +351,21 @@ function recipeScoreBuildEffectiveProjection(
         SET active_score_projection_revision_id = ?
         WHERE id = 1
     ")->execute([$revisionId]);
+    if (
+        function_exists('ingredientOntologyV3CorpusAnnexForScore')
+        && function_exists(
+            'ingredientOntologyV3CorpusAnnexRebuildEffectiveProjection'
+        )
+    ) {
+        $projection =
+            ingredientOntologyV3CorpusAnnexForScore($db, $target);
+        if ($projection !== null) {
+            ingredientOntologyV3CorpusAnnexEnsureProjection(
+                $db,
+                $projection
+            );
+        }
+    }
     return $projectionCount;
 }
 
@@ -483,9 +503,24 @@ function recipeScoreReadUsesEffectiveProjection(
     array $read,
     array $revision
 ): bool {
-    return empty($read['preview'])
+    $activeRead =
+        empty($read['preview'])
         && (int)($read['active_revision']['id'] ?? 0)
-            === (int)$revision['id']
+            === (int)$revision['id'];
+    if (
+        $activeRead
+        && recipeScoreRevisionIsSparseDelta($revision)
+        && !recipeScoreEffectiveProjectionReady(
+            $db,
+            (int)$revision['id'],
+            $read['state'] ?? null
+        )
+    ) {
+        throw new RuntimeException(
+            'recipe score projection is temporarily unavailable'
+        );
+    }
+    return $activeRead
         && recipeScoreEffectiveProjectionReady(
             $db,
             (int)$revision['id'],
@@ -599,10 +634,18 @@ function recipeScoreBackfillContributorRevision(
         $direct = $db->prepare("
             INSERT OR IGNORE INTO recipe_score_match_contributors (
                 score_revision_id, recipe_ingredient_id,
-                recipe_id, product_id
+                recipe_id, product_id, semantic
             )
             SELECT score_revision_id, recipe_ingredient_id,
-                   recipe_id, inventory_product_id
+                   recipe_id, inventory_product_id,
+                   CASE
+                       WHEN outcome IN (
+                           'exact', 'compatible_variant',
+                           'possible_substitute',
+                           'insufficient_quantity', 'staple'
+                       )
+                       THEN 1 ELSE 0
+                   END
             FROM ingredient_ontology_shadow_matches
             WHERE score_revision_id = ?
               AND inventory_product_id IS NOT NULL
@@ -612,12 +655,20 @@ function recipeScoreBackfillContributorRevision(
         $aggregate = $db->prepare("
             INSERT OR IGNORE INTO recipe_score_match_contributors (
                 score_revision_id, recipe_ingredient_id,
-                recipe_id, product_id
+                recipe_id, product_id, semantic
             )
             SELECT match.score_revision_id,
                    match.recipe_ingredient_id,
                    match.recipe_id,
-                   CAST(contributor.value AS INTEGER)
+                   CAST(contributor.value AS INTEGER),
+                   CASE
+                       WHEN match.outcome IN (
+                           'exact', 'compatible_variant',
+                           'possible_substitute',
+                           'insufficient_quantity', 'staple'
+                       )
+                       THEN 1 ELSE 0
+                   END
             FROM ingredient_ontology_shadow_matches match
             JOIN json_each(
                 CASE
@@ -832,7 +883,8 @@ function recipeScoreMarkRecipeDirty(
     int $recipeId,
     string $operation,
     string $reason,
-    bool $cursorUnsafe = true
+    bool $cursorUnsafe = true,
+    string $lane = 'serving'
 ): int {
     if ($recipeId <= 0) {
         throw new InvalidArgumentException(
@@ -842,6 +894,11 @@ function recipeScoreMarkRecipeDirty(
     if (!in_array($operation, ['replace', 'delete'], true)) {
         throw new InvalidArgumentException(
             'recipe score dirty operation is invalid'
+        );
+    }
+    if (!in_array($lane, ['serving', 'maintenance'], true)) {
+        throw new InvalidArgumentException(
+            'recipe score dirty lane is invalid'
         );
     }
     recipeScoreState($db);
@@ -858,14 +915,19 @@ function recipeScoreMarkRecipeDirty(
     $catalogRevision = (int)$state['catalog_revision'];
     $db->prepare("
         INSERT INTO recipe_score_mutations (
-            domain, revision, owner_type, owner_id,
-            operation, reason
+            domain, revision, lane, owner_type, owner_id,
+            operation, source_table, source_row_id, reason
         )
-        VALUES ('catalog', ?, 'recipe', ?, ?, ?)
+        VALUES (
+            'catalog', ?, ?, 'recipe', ?, ?,
+            'recipe_catalog', ?, ?
+        )
     ")->execute([
         $catalogRevision,
+        $lane,
         $recipeId,
         $operation,
+        $recipeId,
         mb_substr(trim($reason), 0, 160, 'UTF-8'),
     ]);
     $active = recipeScoreActiveRevision($db);
@@ -879,14 +941,20 @@ function recipeScoreMarkRecipeDirty(
     }
     $db->prepare("
         INSERT INTO recipe_score_pending_recipes (
-            recipe_id, operation, first_catalog_revision,
+            recipe_id, operation, lane, first_catalog_revision,
             latest_catalog_revision,
             latest_ontology_source_revision,
             reason, created_at, updated_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+        VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
         ON CONFLICT(recipe_id) DO UPDATE SET
             operation = excluded.operation,
+            lane = CASE
+                WHEN recipe_score_pending_recipes.lane = 'serving'
+                  OR excluded.lane = 'serving'
+                THEN 'serving'
+                ELSE 'maintenance'
+            END,
             latest_catalog_revision = MAX(
                 recipe_score_pending_recipes.latest_catalog_revision,
                 excluded.latest_catalog_revision
@@ -901,12 +969,150 @@ function recipeScoreMarkRecipeDirty(
     ")->execute([
         $recipeId,
         $operation,
+        $lane,
         $catalogRevision,
         $catalogRevision,
         (int)$state['ontology_source_revision'],
         mb_substr(trim($reason), 0, 160, 'UTF-8'),
     ]);
     return $catalogRevision;
+}
+
+function recipeScoreMarkRecipesDirtyBatch(
+    PDO $db,
+    array $recipeIds,
+    string $operation,
+    string $reason,
+    bool $cursorUnsafe = true,
+    string $lane = 'maintenance'
+): int {
+    $recipeIds = array_values(array_unique(array_filter(
+        array_map('intval', $recipeIds),
+        static fn(int $recipeId): bool => $recipeId > 0
+    )));
+    if (!$recipeIds) {
+        return (int)recipeScoreState($db)['catalog_revision'];
+    }
+    if (!in_array($operation, ['replace', 'delete'], true)) {
+        throw new InvalidArgumentException(
+            'recipe score dirty operation is invalid'
+        );
+    }
+    if (!in_array($lane, ['serving', 'maintenance'], true)) {
+        throw new InvalidArgumentException(
+            'recipe score dirty lane is invalid'
+        );
+    }
+    static $batchSequence = 0;
+    $savepoint = 'recipe_score_dirty_batch_' . (++$batchSequence);
+    $db->exec("SAVEPOINT {$savepoint}");
+    try {
+        recipeScoreState($db);
+        $db->prepare("
+        UPDATE recipe_score_state SET
+            catalog_revision = catalog_revision + 1,
+            cursor_revision = cursor_revision + ?,
+            active_score_overlay_revision_id = NULL,
+            dirty_at = CURRENT_TIMESTAMP,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = 1
+        ")->execute([$cursorUnsafe ? 1 : 0]);
+        $state = recipeScoreState($db);
+        $catalogRevision = (int)$state['catalog_revision'];
+        $reason = mb_substr(trim($reason), 0, 160, 'UTF-8');
+        $db->prepare("
+            INSERT INTO recipe_score_mutations (
+                domain, revision, lane, owner_type, owner_id,
+                operation, source_table, source_row_id, reason
+            )
+            VALUES (
+                'catalog', ?, ?, 'global', NULL, 'global',
+                'recipe_catalog', NULL, ?
+            )
+        ")->execute([
+            $catalogRevision,
+            $lane,
+            mb_substr($reason . '_batch', 0, 160, 'UTF-8'),
+        ]);
+        $mutationId = (int)$db->lastInsertId();
+        $active = recipeScoreActiveRevision($db);
+        if (
+            $active === null
+            || (string)($active['scoring_model'] ?? '')
+                !== 'faceted-ontology-v3'
+            || $active['ontology_version_id'] === null
+        ) {
+            $db->exec("RELEASE SAVEPOINT {$savepoint}");
+            return $catalogRevision;
+        }
+        $insert = $db->prepare("
+            INSERT INTO recipe_score_pending_recipes (
+                recipe_id, operation, lane,
+                first_catalog_revision, latest_catalog_revision,
+                latest_ontology_source_revision, reason,
+                created_at, updated_at
+            )
+            VALUES (
+                ?, ?, ?, ?, ?, ?, ?,
+                CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+            )
+            ON CONFLICT(recipe_id) DO UPDATE SET
+                operation = excluded.operation,
+                lane = CASE
+                    WHEN recipe_score_pending_recipes.lane = 'serving'
+                      OR excluded.lane = 'serving'
+                    THEN 'serving'
+                    ELSE 'maintenance'
+                END,
+                latest_catalog_revision = MAX(
+                    recipe_score_pending_recipes.latest_catalog_revision,
+                    excluded.latest_catalog_revision
+                ),
+                latest_ontology_source_revision = MAX(
+                    recipe_score_pending_recipes
+                        .latest_ontology_source_revision,
+                    excluded.latest_ontology_source_revision
+                ),
+                reason = excluded.reason,
+                updated_at = CURRENT_TIMESTAMP
+        ");
+        foreach ($recipeIds as $offset => $recipeId) {
+            $db->prepare("
+                INSERT INTO recipe_score_mutation_scopes (
+                    mutation_id, ordinal, aggregate_type,
+                    aggregate_id, scope_role, source_table,
+                    source_row_id, source_key, metadata_json
+                )
+                VALUES (
+                    ?, ?, 'recipe', ?, 'affected',
+                    'recipe_catalog', ?, '', '{}'
+                )
+            ")->execute([
+                $mutationId,
+                $offset + 1,
+                $recipeId,
+                $recipeId,
+            ]);
+            $insert->execute([
+                $recipeId,
+                $operation,
+                $lane,
+                $catalogRevision,
+                $catalogRevision,
+                (int)$state['ontology_source_revision'],
+                $reason,
+            ]);
+        }
+        $db->exec("RELEASE SAVEPOINT {$savepoint}");
+        return $catalogRevision;
+    } catch (Throwable $error) {
+        try {
+            $db->exec("ROLLBACK TO SAVEPOINT {$savepoint}");
+            $db->exec("RELEASE SAVEPOINT {$savepoint}");
+        } catch (Throwable $ignored) {
+        }
+        throw $error;
+    }
 }
 
 function recipeScoreClearPendingRecipes(
@@ -953,11 +1159,11 @@ function recipeScoreMarkCatalogDirty(PDO $db, bool $cursorUnsafe = false): int {
     $revision = recipeScoreState($db)['catalog_revision'];
     $db->prepare("
         INSERT INTO recipe_score_mutations (
-            domain, revision, owner_type, owner_id,
+            domain, revision, lane, owner_type, owner_id,
             operation, reason
         )
         VALUES (
-            'catalog', ?, 'global', NULL, 'global',
+            'catalog', ?, 'maintenance', 'global', NULL, 'global',
             'unscoped_catalog_mutation'
         )
     ")->execute([$revision]);
@@ -1129,15 +1335,29 @@ function recipeScoreRevision(PDO $db, int $revisionId): ?array {
     }
     foreach ([
         'id', 'inventory_revision', 'catalog_revision',
-        'ontology_source_revision', 'catalog_max_id', 'recipe_count',
+        'ontology_source_revision', 'identity_extension_revision',
+        'covered_identity_extension_revision',
+        'catalog_max_id', 'recipe_count',
     ] as $key) {
         $row[$key] = (int)$row[$key];
     }
+    $row['covered_catalog_revision'] =
+        ($row['covered_catalog_revision'] ?? null) !== null
+            ? (int)$row['covered_catalog_revision']
+            : (int)$row['catalog_revision'];
+    $row['covered_ontology_source_revision'] =
+        ($row['covered_ontology_source_revision'] ?? null) !== null
+            ? (int)$row['covered_ontology_source_revision']
+            : (int)$row['ontology_source_revision'];
+    $row['revision_kind'] = (string)(
+        $row['revision_kind'] ?? 'baseline'
+    );
     foreach ([
         'ontology_version_id',
         'parent_score_revision_id',
         'requirement_revision_id',
         'parity_baseline_score_revision_id',
+        'corpus_annex_revision_id',
     ] as $key) {
         if (array_key_exists($key, $row)) {
             $row[$key] = $row[$key] !== null ? (int)$row[$key] : null;
@@ -1154,6 +1374,9 @@ function recipeScoreRevision(PDO $db, int $revisionId): ?array {
         'ontology_content_hash',
         'ontology_source_hash',
         'ontology_source_lineage_hash',
+        'identity_extension_hash',
+        'covered_identity_extension_hash',
+        'corpus_annex_hash',
     ] as $key) {
         $row[$key] = array_key_exists($key, $row)
             && $row[$key] !== null
@@ -1768,6 +1991,64 @@ function recipeScoreReadResponseMetadata(array $metadata): array {
 function recipeScoreRevisionStatus(PDO $db, array $revision): string {
     $state = recipeScoreState($db);
     if (
+        (int)($state['active_score_revision_id'] ?? 0)
+            === (int)($revision['id'] ?? 0)
+        && recipeScoreRevisionIsSparseDelta($revision)
+        && !recipeScoreEffectiveProjectionReady(
+            $db,
+            (int)$revision['id'],
+            $state
+        )
+    ) {
+        return 'stale';
+    }
+    if (
+        (int)($state['active_score_revision_id'] ?? 0)
+            === (int)($revision['id'] ?? 0)
+        && (int)($revision['inventory_revision'] ?? -1)
+            === (int)$state['inventory_revision']
+        && (string)($revision['score_date'] ?? '')
+            === recipeScoreCurrentDate()
+        && (
+            (bool)$db->query("
+                SELECT 1
+                FROM recipe_score_pending_products
+                LIMIT 1
+            ")->fetchColumn()
+            || (
+                function_exists('ingredientOntologyV3TableExists')
+                && ingredientOntologyV3TableExists(
+                    $db,
+                    'recipe_score_product_fanout_state'
+                )
+                && (bool)$db->query("
+                    SELECT 1
+                    FROM recipe_score_product_fanout_state
+                    LIMIT 1
+                ")->fetchColumn()
+            )
+        )
+    ) {
+        return 'partial';
+    }
+    $annexDecision = null;
+    $annexPin = null;
+    $hasAnnexPin =
+        ($revision['corpus_annex_revision_id'] ?? null) !== null
+        || ($revision['corpus_annex_hash'] ?? null) !== null;
+    if ($hasAnnexPin) {
+        if (!function_exists('ingredientOntologyV3CorpusAnnexForScore')) {
+            return 'stale';
+        }
+        $annexPin = ingredientOntologyV3CorpusAnnexForScore(
+            $db,
+            $revision
+        );
+        if ($annexPin === null) {
+            return 'stale';
+        }
+    }
+    if (
         (string)($revision['scoring_model'] ?? '')
             === INGREDIENT_ONTOLOGY_V3_SCORING_MODEL
         && (
@@ -1781,7 +2062,7 @@ function recipeScoreRevisionStatus(PDO $db, array $revision): string {
     ) {
         return 'stale';
     }
-    if (
+    $ontologySourceChanged = (
         (string)($revision['scoring_model'] ?? '')
             === INGREDIENT_ONTOLOGY_V3_SCORING_MODEL
         && (
@@ -1800,8 +2081,92 @@ function recipeScoreRevisionStatus(PDO $db, array $revision): string {
                 )
             )
         )
-    ) {
+    );
+    if ($ontologySourceChanged) {
+        $annexDecision = function_exists(
+            'ingredientOntologyV3CorpusProjectionV2DriftDecision'
+        )
+            ? ingredientOntologyV3CorpusProjectionV2DriftDecision(
+                $db,
+                $revision
+            )
+            : ['handled' => false];
+        if (!empty($annexDecision['handled'])) {
+            $ontologySourceChanged = false;
+        }
+    }
+    if ($ontologySourceChanged) {
         return 'stale';
+    }
+    if (
+        $annexDecision === null
+        && (string)($revision['scoring_model'] ?? '')
+            === INGREDIENT_ONTOLOGY_V3_SCORING_MODEL
+        && (
+            (int)($revision[
+                'covered_ontology_source_revision'
+            ] ?? $revision['ontology_source_revision'])
+                !== (int)$state['ontology_source_revision']
+            || (
+                $annexPin !== null
+                && function_exists(
+                    'ingredientOntologyV3CorpusAnnexProjectionReady'
+                )
+                && !ingredientOntologyV3CorpusAnnexProjectionReady(
+                    $db,
+                    $annexPin
+                )
+            )
+            || (
+                $annexPin !== null
+                && function_exists(
+                    'ingredientOntologyV3IdentityExtensionSnapshot'
+                )
+                && (int)($revision[
+                    'covered_identity_extension_revision'
+                ] ?? 0) !== (int)(
+                    ingredientOntologyV3IdentityExtensionSnapshot(
+                        $db,
+                        (int)$revision['ontology_version_id']
+                    )['revision'] ?? 0
+                )
+            )
+        )
+        && function_exists(
+            'ingredientOntologyV3CorpusProjectionV2DriftDecision'
+        )
+    ) {
+        $annexDecision =
+            ingredientOntologyV3CorpusProjectionV2DriftDecision(
+                $db,
+                $revision
+            );
+    }
+    if (
+        is_array($annexDecision)
+        && !empty($annexDecision['handled'])
+        && !empty($annexDecision['pending_suffix'])
+        && (int)$revision['inventory_revision']
+            === $state['inventory_revision']
+        && (string)$revision['score_date']
+            === recipeScoreCurrentDate()
+    ) {
+        return 'partial';
+    }
+    if (
+        (string)($revision['revision_kind'] ?? 'baseline')
+            === 'serving_delta'
+        && (int)$revision['inventory_revision']
+            === $state['inventory_revision']
+        && (string)$revision['score_date']
+            === recipeScoreCurrentDate()
+    ) {
+        return (int)$revision['covered_catalog_revision']
+                === (int)$state['catalog_revision']
+            && (int)$revision['covered_ontology_source_revision']
+                === (int)$state['ontology_source_revision']
+                ? 'fresh'
+                : 'partial';
     }
     if (
         (int)$revision['inventory_revision'] === $state['inventory_revision']
@@ -2398,6 +2763,11 @@ function recipeScorePostCommitCleanup(PDO $db): ?string {
             ($GLOBALS['RECIPE_SCORE_BEFORE_PRUNE_CLEANUP'])($db);
         }
         recipeScorePruneRevisions($db);
+        if (function_exists(
+            'ingredientOntologyV3CorpusAnnexCleanupNonReady'
+        )) {
+            ingredientOntologyV3CorpusAnnexCleanupNonReady($db);
+        }
         return null;
     } catch (Throwable $e) {
         return mb_substr($e->getMessage(), 0, 500, 'UTF-8');
@@ -2768,36 +3138,6 @@ function recipeScoreResolveRevision(PDO $db, ?int $revisionId = null): array {
             'Recipe cursor score revision is not the configured read revision'
         );
     }
-    $catalogCount = (int)$db->query("
-        SELECT COUNT(*) FROM recipe_catalog WHERE deleted_at IS NULL
-    ")->fetchColumn();
-    $syncLimit = defined('RECIPE_BACKEND_TEST_MODE') && RECIPE_BACKEND_TEST_MODE
-        ? 5000
-        : max(0, (int)(function_exists('env') ? env('RECIPE_SCORE_SYNC_BOOTSTRAP_LIMIT', '250') : 250));
-    $activeUsesV3 = $revision !== null
-        && (string)($revision['scoring_model'] ?? '') === 'faceted-ontology-v3'
-        && $revision['ontology_version_id'] !== null;
-    $shouldSynchronouslyBuild = $revisionId === null
-        && empty($read['preview'])
-        && (
-            $revision === null
-            || (
-                !$activeUsesV3
-                && recipeScoreRevisionStatus($db, $revision) !== 'fresh'
-            )
-        );
-    if ($shouldSynchronouslyBuild) {
-        if ($catalogCount <= $syncLimit) {
-            if (function_exists('ingredientOntologyV3ScheduledRebuild')) {
-                ingredientOntologyV3ScheduledRebuild($db, true);
-            } else {
-                recipeScoreRebuild($db, true);
-            }
-            $read = recipeScoreReadRevision($db);
-            $state = $read['state'];
-            $revision = $read['revision'];
-        }
-    }
     if ($revision === null || $revision['status'] !== 'ready') {
         throw new RecipeScoreUnavailableException(
             'Recipe scores are being built; run scripts/rebuild-recipe-scores.php'
@@ -3141,13 +3481,6 @@ function recipeCatalogBrowseCte(
             LEFT JOIN recipe_user_state us ON us.recipe_id = c.id
             WHERE c.id <= :catalog_max_id
               AND c.deleted_at IS NULL
-              AND (
-                  (
-                      (c.cache_expires_at IS NULL OR c.cache_expires_at >= CURRENT_TIMESTAMP)
-                      AND (c.stale_at IS NULL OR c.stale_at >= CURRENT_TIMESTAMP)
-                  )
-                  OR COALESCE(us.favorite, 0) = 1
-              )
               AND COALESCE(us.hidden, 0) = 0
               AND scores.coverage >= :minimum_coverage
               {$queryWhere}
@@ -3228,6 +3561,7 @@ function recipeCatalogCardFromRow(array $row): array {
             : null,
         'score' => round((float)$row['weighted_score'], 6),
         'cookable' => !empty($row['cookable']),
+        'is_stale' => !empty($row['is_stale']),
     ];
 }
 
@@ -3325,6 +3659,16 @@ function recipeCatalogBrowseResult(PDO $db, array $options = []): array {
 
     $page = $db->prepare($built['cte'] . "
         SELECT d.*, c.title, c.image_url, c.primary_connector,
+               CASE
+                   WHEN (
+                       c.stale_at IS NOT NULL
+                       AND c.stale_at < CURRENT_TIMESTAMP
+                   ) OR (
+                       c.cache_expires_at IS NOT NULL
+                       AND c.cache_expires_at < CURRENT_TIMESTAMP
+                   )
+                   THEN 1 ELSE 0
+               END AS is_stale,
                (
                    SELECT origin.canonical_url
                    FROM recipe_origins origin
@@ -3514,6 +3858,16 @@ function recipeCatalogCardsByIds(PDO $db, array $recipeIds): array {
     $stmt = $db->prepare("
         SELECT c.id, COALESCE(cl.cluster_key, 'recipe:' || c.id) AS dedupe_key,
                c.title, c.image_url, c.primary_connector,
+               CASE
+                   WHEN (
+                       c.stale_at IS NOT NULL
+                       AND c.stale_at < CURRENT_TIMESTAMP
+                   ) OR (
+                       c.cache_expires_at IS NOT NULL
+                       AND c.cache_expires_at < CURRENT_TIMESTAMP
+                   )
+                   THEN 1 ELSE 0
+               END AS is_stale,
                (
                    SELECT origin.canonical_url
                    FROM recipe_origins origin

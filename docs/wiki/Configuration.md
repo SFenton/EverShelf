@@ -57,7 +57,6 @@ COOKIDOO_QUEUE_CADENCE_MINUTES=1
 # Language-only discovery values are allowed; stored recipes use the selected effective locale.
 COOKIDOO_DISCOVERY_LOCALE=en-US
 COOKIDOO_PERIODIC_REFRESH_ENABLED=false
-COOKIDOO_LEGACY_REFRESH_ENABLED=false
 COOKIDOO_REFRESH_ENQUEUE_LIMIT=2
 
 # ─────────────────────────────────────────────
@@ -127,21 +126,29 @@ Most settings can also be configured from the browser via **Settings → ⚙️*
 
 ## Cookidoo Metadata Bridge
 
-The provider-facing bridge profile and Cookidoo credentials must not be configured
-while the current policy gate is active. The available provider detail response
-co-transports official steps, so `/v1/search` and `/v1/metadata` return
-`503 metadata_hydration_disabled_policy` locally without provider requests.
-EverShelf does not enqueue discovery/detail/backfill jobs. Existing cached catalog
-rows and completed isolated pilot artifacts remain readable.
+The provider-facing bridge remains default-off. To enable metadata discovery and
+direct refresh, set `COOKIDOO_CONNECTOR_ENABLED=true` and
+`COOKIDOO_DETAIL_HYDRATION_ENABLED=true` in EverShelf and set the matching
+`COOKIDOO_DETAIL_HYDRATION_ENABLED=true` bridge flag. Provider responses may
+co-transport official steps, but only bounded allowlisted factual metadata crosses
+the bridge API boundary; instructions are never logged, returned, or persisted.
+Existing cached catalog rows remain readable while either gate is disabled.
+The app verifies bridge capability policy `metadata-v3-operator-enabled` before
+any provider request; persisted factual metadata remains `metadata-v2`. Cached
+rows remain searchable after either freshness deadline and enqueue bounded
+best-effort refresh on reads without requiring the bulk-backfill gate.
+Known superseded Cookidoo discovery policy markers and valid pre-policy
+discovery payloads are re-stamped once during schema migration. Unknown policy
+identifiers remain untouched and ineligible.
 
 `RECIPE_COOKIDOO_THUMBNAIL_REWRITE=true` returns the verified smaller named Cookidoo
 CDN transform alongside the original URL. Disable it to use only the original;
 clients retain the original URL as an image-error fallback.
 
-`RECIPE_SCORE_SYNC_BOOTSTRAP_LIMIT=250` controls whether a small catalog may build
-its first score revision during a request. Larger catalogs return a temporary 503
-until `scripts/rebuild-recipe-scores.php` (installed in the cron image) activates
-the revision.
+Recipe reads never build or repair score/projection state. Until the score
+worker or `scripts/rebuild-recipe-scores.php` publishes the first revision,
+requests return a temporary 503; stale derived corpus projection state is
+reported for worker repair without taking a request-path write lock.
 
 `RECIPE_SCORE_PREVIEW_REVISION_ID=` is a development/testing-only read override
 and is refused unless `EVERSHELF_ENV` normalizes to `development` or `test`.
@@ -166,6 +173,7 @@ INGREDIENT_ONTOLOGY_V3_PROMPT_MAX_ITEMS=50
 INGREDIENT_ONTOLOGY_V3_RAW_JSON_MAX_BYTES=65536
 INGREDIENT_ONTOLOGY_V3_QUANTITY_SUFFICIENCY_GATE=false
 RECIPE_SCORE_PREVIEW_REVISION_ID=
+RECIPE_SCORE_INCREMENTAL_PRODUCT_LIMIT=250
 
 INGREDIENT_ONTOLOGY_CONTROLLER_ENABLED=false
 INGREDIENT_ONTOLOGY_CONTROLLER_MODEL_ENABLED=false
@@ -174,7 +182,7 @@ INGREDIENT_ONTOLOGY_CONTROLLER_POLL_MS=250
 INGREDIENT_ONTOLOGY_CONTROLLER_LOW_SIGNAL_SHORTCUT_ENABLED=false
 INGREDIENT_ONTOLOGY_CONTROLLER_LEASE_SECONDS=600
 INGREDIENT_ONTOLOGY_CONTROLLER_CRON_LIMIT=10
-INGREDIENT_ONTOLOGY_CONTROLLER_MINIMUM_PRIORITY=50
+INGREDIENT_ONTOLOGY_CONTROLLER_MINIMUM_PRIORITY=51
 INGREDIENT_ONTOLOGY_CONTROLLER_CANDIDATE_LIMIT=64
 INGREDIENT_ONTOLOGY_CONTROLLER_GENERATION_QUIET_SECONDS=300
 INGREDIENT_ONTOLOGY_CONTROLLER_GENERATION_MAXIMUM_LATENCY_SECONDS=1800
@@ -287,9 +295,11 @@ without another proposer call.
 Live product observations enqueue subject resolution at priority `100`, and
 live recipe ingestion uses priority `50`; both refresh queued/retry work and
 safely revive terminal jobs with fresh immutable input and lease fences.
-Historical backfill remains priority `0`. Production cron and the dedicated
-live worker use `INGREDIENT_ONTOLOGY_CONTROLLER_MINIMUM_PRIORITY=50`, so
-historical work is retained but not drained:
+Historical backfill remains priority `0`. Production uses
+`INGREDIENT_ONTOLOGY_CONTROLLER_MINIMUM_PRIORITY=51`, so catalog recipe review
+work remains durable without competing with priority `60+` manual work or
+priority `100` live product ingestion. Set the threshold to `50` only for an
+explicit recipe-maintenance window:
 
 ```bash
 php scripts/ontology-controller.php work \
@@ -308,8 +318,11 @@ php scripts/ontology-controller.php bundle-build \
   --payload-dir=/path/to/activation-payloads
 ```
 
-Set `ONTOLOGY_ACTIVATION_ENABLED=true` to let
+`ONTOLOGY_ACTIVATION_ENABLED=true` is the default and lets
 `scripts/process-ontology-activation.php` run this workflow automatically.
+The model and promotion gates remain independently default-off, while
+deterministic copied refreshes keep active-v3 score and corpus state
+recoverable after incremental overflow or resolver migration.
 Copied generation, scoring, and validation run without the shared
 background-writer lock. The worker takes that lock nonblocking only for bounded
 live import, reservation, and publication phases, yielding between phases. It
@@ -318,6 +331,21 @@ through one short score-pointer CAS. Inventory-only drift rebuilds only the
 score sidecar; source, policy, or constraint drift rebases from a fresh copy
 without another proposer call. Imported intents are acknowledged only in the
 same transaction that activates their score revision.
+
+Docker deployments run two distinct ontology services: the live
+`ontology-worker` is intake-only, while `ontology-activation-worker` repeatedly
+invokes the copy-safe activation pipeline. Do not pass `--copy-generation` to
+the live intake worker; that mode intentionally rejects the active database.
+Both ontology workers and the recipe-score worker default to a 512 MB PHP
+memory limit and expose container health checks. The Docker web container
+retains a once-per-minute activation fallback so the default topology still
+recovers full-score work; the activation process lock prevents it from
+overlapping the dedicated worker. The incremental score worker takes the
+shared background-writer lock nonblocking and skips cleanly during activation's
+live import/publication phases instead of entering SQLite contention. A
+separate score-coordination lock spans copied database backup, scoring, and
+validation so the incremental scorer never wastes a full cycle against the
+same 61 GB snapshot operation; web scans do not take that coordination lock.
 
 Activation-only SQLite connections use file-backed temporary storage so large
 ordered verification queries stay within the worker memory limit. Generated
@@ -424,16 +452,35 @@ Guided Cooking data, image bytes, and raw payloads are excluded. Remote image by
 are not proxied or stored; displaying the image contacts Cookidoo's image host.
 Ingredient `preparation` is never accessed.
 
-Automatic taxonomy discovery, full crawls, periodic refresh, and crawl seeding are
-policy-disabled. Legacy queued jobs terminate as local `skipped` outcomes without
-connector failure or circuit accounting.
+Automatic taxonomy discovery, bounded crawls, periodic refresh, and crawl seeding
+run only when connector and detail hydration gates are enabled. Existing
+disabled-gate jobs remain pending without connector failure or circuit accounting.
 
 ### Direct-ID metadata-v2 backfill
 
-Direct-ID backfill and scan-triggered discovery are policy-disabled.
-`COOKIDOO_CONNECTOR_ENABLED`, `COOKIDOO_DETAIL_HYDRATION_ENABLED`, and
-`COOKIDOO_METADATA_BACKFILL_ENABLED` cannot override the policy gate. Existing
-cached recipes remain readable.
+Direct-ID backfill requires connector/detail hydration plus
+`COOKIDOO_METADATA_BACKFILL_ENABLED=true`. Scan-triggered discovery requires the
+connector and detail hydration gates but not the backfill gate. Existing cached
+recipes remain readable while network hydration is disabled. Existing v3-policy
+jobs remain pending while gates are off. Only known superseded or historically
+absent discovery policy values are migrated; unknown values fail closed. Recipe
+queue processes coordinate through an expiring database singleton lease, so a
+second cron/manual invocation skips without holding SQLite or flock across
+provider traffic. Bulk backfill covers missing or version-outdated metadata and
+due failed probes only. Normal TTL expiry is reported separately as
+`refresh_due` and is handled by demand refresh or the independently gated
+periodic refresh path.
+
+### FoodOn exact-identity audit
+
+Audit copied databases without mutation:
+
+```bash
+php scripts/audit-foodon-hierarchy-identity.php --db=copy.sqlite
+```
+
+`--write` is accepted only for a copied database and requeues affected products
+through exact-self admission; it never materializes FoodOn semantic parents.
 
 ---
 
@@ -499,6 +546,13 @@ directory.
 EverShelf uses **SQLite** stored at `data/evershelf.db`. The file is created automatically on first run.
 
 Schema migrations run automatically whenever `database.php` is loaded — no manual migration steps needed.
+
+`SQLITE_BUSY_TIMEOUT_MS` defaults to `1500` and is capped at five seconds.
+Sparse score publication keeps each contiguous writer reservation within that
+budget; aggregate resolution runs on a WAL read snapshot. The incremental score
+and identity work cap defaults to
+`RECIPE_SCORE_INCREMENTAL_PRODUCT_LIMIT=250`, the largest production-validated
+setting that stayed below the 256 MiB worker RSS gate.
 
 To back up the database:
 

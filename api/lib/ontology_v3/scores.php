@@ -475,6 +475,26 @@ function ingredientOntologyV3RevisionIntegrityAudit(
                 );
         }
     }
+    $corpusAnnex =
+        ingredientOntologyV3CorpusAnnexForScore($db, $revision);
+    $corpusAnnexIntegrity = $corpusAnnex !== null
+        ? ingredientOntologyV3CorpusProjectionV2IntegrityAudit(
+            $db,
+            (int)$corpusAnnex['id'],
+            (string)$corpusAnnex['revision_hash'],
+            true
+        )
+        : [
+            'valid' => false,
+            'errors' => ['score corpus annex pin is unavailable'],
+        ];
+    if (empty($corpusAnnexIntegrity['valid'])) {
+        $errors[] = 'corpus annex integrity failed: '
+            . implode(
+                ', ',
+                (array)$corpusAnnexIntegrity['errors']
+            );
+    }
     $scoreState = recipeScoreState($db);
     $sparseRevision = recipeScoreRevisionIsSparseDelta($revision);
     $revisionReport = recipeScoreRevisionReport($revision);
@@ -731,6 +751,7 @@ function ingredientOntologyV3RevisionIntegrityAudit(
         'ontology_version_id' => $versionId,
         'hashes' => $hashes,
         'source_owner_fingerprints' => $ownerFingerprints,
+        'corpus_annex' => $corpusAnnexIntegrity,
         'row_hash_integrity' => $hashIntegrity,
         'frozen_corpus' => $frozenCorpus,
         'subject_universe' => $subjectUniverse,
@@ -865,6 +886,8 @@ function ingredientOntologyV3LoadRecipeBatch(
                COALESCE(origin.external_id, '')
                    AS origin_external_id,
                COALESCE(origin.locale, '') AS origin_locale,
+               COALESCE(origin.content_language, '')
+                   AS origin_content_language,
                COALESCE(NULLIF(ri.raw_text, ''), ri.normalized_name)
                    AS current_source_label,
                CASE
@@ -1537,9 +1560,9 @@ function ingredientOntologyV3WriteScoreRows(
     $insertContributor = $db->prepare("
         INSERT OR IGNORE INTO recipe_score_match_contributors (
             score_revision_id, recipe_ingredient_id,
-            recipe_id, product_id
+            recipe_id, product_id, semantic
         )
-        VALUES (?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?)
     ");
     foreach ($matches as $row) {
         $productIds = [];
@@ -1596,12 +1619,22 @@ function ingredientOntologyV3WriteScoreRows(
             $revisionId,
             (int)$row['recipe_ingredient_id'],
         ]);
+        $semanticContributor = in_array(
+            (string)$row['outcome'],
+            [
+                'exact', 'compatible_variant',
+                'possible_substitute',
+                'insufficient_quantity', 'staple',
+            ],
+            true
+        ) ? 1 : 0;
         foreach ($productIds as $productId) {
             $insertContributor->execute([
                 $revisionId,
                 (int)$row['recipe_ingredient_id'],
                 (int)$row['recipe_id'],
                 $productId,
+                $semanticContributor,
             ]);
         }
     }
@@ -1800,10 +1833,13 @@ function ingredientOntologyV3BuildShadow(
                 ontology_review_manifest_hash,
                 ontology_resolution_gold_hash, ontology_seal_hash,
                 ontology_source_revision, ontology_source_hash,
-                identity_extension_revision, identity_extension_hash
+                identity_extension_revision, identity_extension_hash,
+                covered_identity_extension_revision,
+                covered_identity_extension_hash
             )
             VALUES (?, ?, ?, ?, ?, 'building', ?,
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                    ?, ?)
         ");
         $insert->execute([
             $state['inventory_revision'],
@@ -1827,6 +1863,8 @@ function ingredientOntologyV3BuildShadow(
             $version['seal_hash'],
             $state['ontology_source_revision'],
             $ontologySourceHash,
+            (int)$identityExtension['revision'],
+            (string)$identityExtension['hash'],
             (int)$identityExtension['revision'],
             (string)$identityExtension['hash'],
         ]);
@@ -2178,6 +2216,8 @@ function ingredientOntologyV3BuildShadow(
                 'ontology_source_revision' =>
                     $state['ontology_source_revision'],
                 'ontology_source_hash' => $ontologySourceHash,
+                'ontology_source_scope' =>
+                    INGREDIENT_ONTOLOGY_CORPUS_ANNEX_SCOPE_BASE,
                 'identity_extension_revision' =>
                     (int)$identityExtension['revision'],
                 'identity_extension_hash' =>
@@ -2191,6 +2231,32 @@ function ingredientOntologyV3BuildShadow(
                 ingredientOntologyV3PublicationGuardEnabled($db);
             ingredientOntologyV3SetPublicationGuard($db, true);
             try {
+                $buildingRevision = recipeScoreRevision(
+                    $db,
+                    $revisionId
+                );
+                $corpusProjection = $buildingRevision !== null
+                    ? ingredientOntologyV3CorpusProjectionV2EnsureScoreRoot(
+                        $db,
+                        $buildingRevision
+                    )
+                    : null;
+                if ($corpusProjection === null) {
+                    throw new RuntimeException(
+                        'full score corpus projection root creation failed'
+                    );
+                }
+                $report['corpus_annex'] = [
+                    'revision_id' =>
+                        (int)$corpusProjection['id'],
+                    'revision_hash' =>
+                        (string)$corpusProjection['revision_hash'],
+                    'entry_count' =>
+                        (int)$corpusProjection['entry_count'],
+                    'aggregate_count' =>
+                        (int)$corpusProjection['aggregate_count'],
+                    'reconciliation_mode' => 'checkpoint',
+                ];
                 $db->prepare("
                     UPDATE recipe_score_revisions SET
                         status = 'ready',
@@ -2315,6 +2381,35 @@ function ingredientOntologyV3ScheduledRebuild(
             throw new RuntimeException(
                 'active ontology revision has an unsupported scoring model'
             );
+        }
+        if (function_exists(
+            'ingredientOntologyV3CorpusProjectionV2DriftDecision'
+        )) {
+            if (function_exists(
+                'ingredientOntologyV3CorpusProjectionV2RefreshStatus'
+            )) {
+                ingredientOntologyV3CorpusProjectionV2RefreshStatus(
+                    $db
+                );
+            }
+            $projectionDecision =
+                ingredientOntologyV3CorpusProjectionV2DriftDecision(
+                    $db,
+                    $active
+                );
+            if (
+                !empty($projectionDecision['handled'])
+                && !empty($projectionDecision['pending_suffix'])
+            ) {
+                return [
+                    'rebuilt' => false,
+                    'reason' => 'incremental_projection_pending',
+                    'ontology_version_id' =>
+                        (int)$active['ontology_version_id'],
+                    'active_score_revision_id' => (int)$active['id'],
+                    'projection' => $projectionDecision,
+                ];
+            }
         }
         if (
             function_exists('ingredientOntologyControllerDatabaseIsActive')
@@ -2650,6 +2745,7 @@ function ingredientOntologyV3OrderedIdSetHash(
         while ($id = $stmt->fetchColumn()) {
             hash_update($hash, (string)(int)$id . "\n");
         }
+        $stmt->closeCursor();
         return hash_final($hash);
     }
 
@@ -2927,6 +3023,7 @@ function ingredientOntologyV3HashMaterializedRows(
         );
         $count++;
     }
+    $stmt->closeCursor();
     return ['hash' => hash_final($hash), 'count' => $count];
 }
 
@@ -4807,18 +4904,25 @@ function ingredientOntologyV3Activate(
         recipeScoreClearPendingRecipes(
             $db,
             (int)$revision['catalog_revision'],
-            (int)$revision['ontology_source_revision']
+            (int)$revision['covered_ontology_source_revision']
         );
         $db->prepare("
             DELETE FROM recipe_score_mutations
-            WHERE (
-                domain = 'catalog' AND revision <= ?
-            ) OR (
-                domain = 'source' AND revision <= ?
-            )
+            WHERE domain = 'catalog' AND revision <= ?
+        ")->execute([(int)$revision['catalog_revision']]);
+        $db->prepare("
+            DELETE FROM recipe_score_mutations
+            WHERE domain = 'source'
+              AND revision <= ?
+              AND EXISTS (
+                  SELECT 1
+                  FROM recipe_score_source_reconciliation_backfill
+                  WHERE id = 1
+                    AND complete = 1
+                    AND scope_backfill_version >= 1
+              )
         ")->execute([
-            (int)$revision['catalog_revision'],
-            (int)$revision['ontology_source_revision'],
+            (int)$revision['covered_ontology_source_revision'],
         ]);
         $db->exec('COMMIT');
     } catch (Throwable $e) {
@@ -4878,6 +4982,25 @@ function ingredientOntologyV3RetainedMaterializationErrors(
         $version = ingredientOntologyV3Version($db, $versionId);
         if ($version === null || $version['status'] !== 'ready') {
             $errors[] = 'rollback target ontology version is not ready';
+        }
+        $corpusAnnex =
+            ingredientOntologyV3CorpusAnnexForScore($db, $target);
+        $legacyTestFixture = defined('RECIPE_BACKEND_TEST_MODE')
+            && RECIPE_BACKEND_TEST_MODE;
+        if ($corpusAnnex === null && !$legacyTestFixture) {
+            $errors[] = 'rollback target corpus annex is unavailable';
+        } elseif ($corpusAnnex !== null) {
+            $corpusAnnexAudit =
+                ingredientOntologyV3CorpusProjectionV2IntegrityAudit(
+                    $db,
+                    (int)$corpusAnnex['id'],
+                    (string)$corpusAnnex['revision_hash'],
+                    true
+                );
+            if (empty($corpusAnnexAudit['valid'])) {
+                $errors[] =
+                    'rollback target corpus annex integrity failed';
+            }
         }
         $report = json_decode(
             (string)($target['validation_report_json'] ?? ''),
@@ -5028,6 +5151,10 @@ function ingredientOntologyV3Rollback(
                 . implode('; ', $targetErrors)
             );
         }
+        $target = recipeScoreRevision(
+            $db,
+            $targetRevisionId
+        ) ?? $target;
         recipeScoreBuildEffectiveProjection(
             $db,
             $targetRevisionId
@@ -5077,6 +5204,10 @@ function ingredientOntologyV3Rollback(
         'rolled_back' => true,
         'from_revision_id' => $activeId,
         'to_revision_id' => $targetRevisionId,
+        'corpus_annex_revision_id' =>
+            $target['corpus_annex_revision_id'] ?? null,
+        'corpus_annex_hash' =>
+            $target['corpus_annex_hash'] ?? null,
         'ranking_status' => recipeScoreRevisionStatus($db, $target),
         'active_ontology_version_id' =>
             ingredientOntologyV3ActiveVersion($db)['id'] ?? null,

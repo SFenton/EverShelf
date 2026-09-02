@@ -7,11 +7,14 @@
  * while product saves and backfills remain fast and offline-safe.
  */
 
-const CANONICAL_INGREDIENT_RULESET_VERSION = 'evershelf_common_ingredients_v3';
+require_once __DIR__ . '/food_identity_text.php';
+
+const CANONICAL_INGREDIENT_RULESET_VERSION = 'evershelf_common_ingredients_v4';
 const FOODON_LOOKUP_CACHE_VERSION = 'foodon_ols4_v6';
 const USDA_FDC_LOOKUP_CACHE_VERSION = 'usda_fdc_v5';
 
 function canonicalIngredientNormalizeText(string $text): string {
+    $text = foodIdentityNormalizePossessiveOrthography($text);
     $text = mb_strtolower(trim($text), 'UTF-8');
     $text = str_replace(
         ['’', "'", '`', '&', '/', '_', '+', '-'],
@@ -1991,9 +1994,13 @@ function canonicalIngredientResolveFoodOnParents(
     return $mappings;
 }
 
-function canonicalIngredientUpsert(PDO $db, array $mapping): int {
+function canonicalIngredientUpsert(
+    PDO $db,
+    array $mapping,
+    bool $updateExisting = true
+): int {
     $externalIds = $mapping['external_ids'] ?? [];
-    if (!empty($externalIds)) {
+    if ($updateExisting && !empty($externalIds)) {
         $existing = $db->prepare("SELECT external_ids_json FROM canonical_ingredients WHERE slug = ?");
         $existing->execute([$mapping['slug']]);
         $existingJson = $existing->fetchColumn() ?: null;
@@ -2003,9 +2010,8 @@ function canonicalIngredientUpsert(PDO $db, array $mapping): int {
             $externalIds
         );
     }
-    $stmt = $db->prepare("
-        INSERT INTO canonical_ingredients (slug, name, parent_slug, category, source, external_ids_json, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+    $conflictSql = $updateExisting
+        ? "
         ON CONFLICT(slug) DO UPDATE SET
             name = excluded.name,
             parent_slug = COALESCE(excluded.parent_slug, canonical_ingredients.parent_slug),
@@ -2013,6 +2019,29 @@ function canonicalIngredientUpsert(PDO $db, array $mapping): int {
             source = excluded.source,
             external_ids_json = COALESCE(excluded.external_ids_json, canonical_ingredients.external_ids_json),
             updated_at = CURRENT_TIMESTAMP
+        WHERE canonical_ingredients.name IS NOT excluded.name
+           OR canonical_ingredients.parent_slug IS NOT
+                COALESCE(
+                    excluded.parent_slug,
+                    canonical_ingredients.parent_slug
+                )
+           OR canonical_ingredients.category IS NOT
+                COALESCE(
+                    NULLIF(excluded.category, ''),
+                    canonical_ingredients.category
+                )
+           OR canonical_ingredients.source IS NOT excluded.source
+           OR canonical_ingredients.external_ids_json IS NOT
+                COALESCE(
+                    excluded.external_ids_json,
+                    canonical_ingredients.external_ids_json
+                )
+        "
+        : 'ON CONFLICT(slug) DO NOTHING';
+    $stmt = $db->prepare("
+        INSERT INTO canonical_ingredients (slug, name, parent_slug, category, source, external_ids_json, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        {$conflictSql}
     ");
     $externalJson = !empty($externalIds)
         ? json_encode($externalIds, JSON_UNESCAPED_UNICODE)
@@ -2151,7 +2180,11 @@ function canonicalIngredientApplyPreparedProduct(
             updated_at = CURRENT_TIMESTAMP
     ");
     foreach ((array)($result['mappings'] ?? []) as $mapping) {
-        $ingredientId = canonicalIngredientUpsert($db, $mapping);
+        $ingredientId = canonicalIngredientUpsert(
+            $db,
+            $mapping,
+            false
+        );
         $link->execute([
             $productId,
             $ingredientId,
@@ -2543,6 +2576,46 @@ function canonicalIngredientQueueStatusForProduct(PDO $db, int $productId): ?arr
     $row = $stmt->fetch(PDO::FETCH_ASSOC);
     $stmt->closeCursor();
     return $row ?: null;
+}
+
+function canonicalIngredientReconcileMissingProducts(
+    PDO $db,
+    int $limit = 25
+): array {
+    $limit = max(1, min(100, $limit));
+    $rows = $db->query("
+        SELECT p.id
+        FROM products p
+        WHERE NOT EXISTS (
+            SELECT 1
+            FROM canonical_processing_queue queue
+            WHERE queue.product_id = p.id
+        )
+          AND NOT EXISTS (
+            SELECT 1
+            FROM product_ingredients mapping
+            WHERE mapping.product_id = p.id
+              AND mapping.role = 'primary'
+          )
+        ORDER BY p.updated_at, p.id
+        LIMIT {$limit}
+    ")->fetchAll(PDO::FETCH_COLUMN);
+    $queued = [];
+    foreach ($rows as $productId) {
+        $result = canonicalIngredientEnqueueProduct(
+            $db,
+            (int)$productId,
+            'product_save_reconciliation'
+        );
+        if (!empty($result['queued'])) {
+            $queued[] = (int)$productId;
+        }
+    }
+    return [
+        'scanned' => count($rows),
+        'queued' => count($queued),
+        'product_ids' => $queued,
+    ];
 }
 
 function canonicalIngredientQueueStats(
@@ -3276,6 +3349,7 @@ function canonicalIngredientApplyQueueResultOnce(
         );
         $db->exec('COMMIT');
         $transactionStarted = false;
+        recipeJobWake();
         return [
             'status' => 'done',
             'identity_admission' => $identityAdmission,

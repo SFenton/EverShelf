@@ -18,6 +18,7 @@ function recipeCookidooMetadataBackfillUsage(): string {
         '  --status             Show version coverage, checkpoint, and job counts',
         '  --dry-run            Plan bounded metadata batches without writing',
         '  --enqueue            Enqueue bounded direct-ID metadata batches',
+        '  --enqueue-if-enabled Cron-safe enqueue; skip when backfill is disabled',
         'Options:',
         '  --locale=LOCALE      One exact regional/script Cookidoo locale (default: discovery locale)',
         '  --batch-size=N       IDs per bridge job, 1-20 (default: configured value)',
@@ -25,8 +26,9 @@ function recipeCookidooMetadataBackfillUsage(): string {
         '  --json               Emit machine-readable JSON',
         '  --help               Show this help',
         '',
-        'Provider metadata enqueue is disabled by repository policy.',
-        'Existing cached catalog rows are unchanged and remain readable.',
+        'Provider metadata enqueue requires the default-off connector, detail,',
+        'bulk-backfill, and metadata-v3 bridge capability gates.',
+        'Existing cached catalog rows remain readable while stale.',
     ]) . PHP_EOL;
 }
 
@@ -38,7 +40,11 @@ $maxRecipes = 200;
 $json = false;
 
 foreach (array_slice($argv, 1) as $arg) {
-    if (in_array($arg, ['--status', '--dry-run', '--enqueue'], true)) {
+    if (in_array(
+        $arg,
+        ['--status', '--dry-run', '--enqueue', '--enqueue-if-enabled'],
+        true
+    )) {
         if ($modeWasSet) {
             fwrite(STDERR, "Choose exactly one mode.\n");
             exit(2);
@@ -75,6 +81,9 @@ if ($maxRecipes < 1 || $maxRecipes > 200) {
 try {
     $db = getDB();
     $status = recipeCookidooMetadataBackfillStatus($db, $locale);
+    $activeScore = recipeScoreActiveRevision($db);
+    $scoreFresh = $activeScore !== null
+        && recipeScoreRevisionStatus($db, $activeScore) === 'fresh';
     if ($mode === 'status') {
         $result = ['mode' => $mode, 'status' => $status];
     } elseif ($mode === 'dry-run') {
@@ -87,6 +96,33 @@ try {
                 $batchSize,
                 $maxRecipes
             ),
+        ];
+    } elseif ($mode === 'enqueue-if-enabled' && !$status['enabled']) {
+        $result = [
+            'mode' => $mode,
+            'skipped' => true,
+            'reason' => 'cookidoo_metadata_backfill_disabled',
+            'status' => $status,
+        ];
+    } elseif ($mode === 'enqueue-if-enabled' && !$scoreFresh) {
+        $result = [
+            'mode' => $mode,
+            'skipped' => true,
+            'reason' => 'recipe_score_not_fresh',
+            'status' => $status,
+        ];
+    } elseif (
+        $mode === 'enqueue-if-enabled'
+        && (
+            (int)$status['jobs']['queued']
+            + (int)$status['jobs']['running']
+        ) > 0
+    ) {
+        $result = [
+            'mode' => $mode,
+            'skipped' => true,
+            'reason' => 'cookidoo_metadata_backfill_queue_not_empty',
+            'status' => $status,
         ];
     } else {
         $result = [
@@ -127,6 +163,7 @@ echo 'Versions: metadata=' . $status['metadata_version']
     . ', failure_schema=' . $status['failure_schema_version'] . PHP_EOL;
 echo 'Origins: total=' . $status['origins']['total']
     . ', current=' . $status['origins']['current']
+    . ', refresh_due=' . $status['origins']['refresh_due']
     . ', failed=' . $status['origins']['failed']
     . ', probe_due=' . $status['origins']['probe_due']
     . ', remaining=' . $status['origins']['remaining']

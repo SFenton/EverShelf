@@ -108,6 +108,10 @@ try {
     try {
         $queueLimit = max(0, (int)env('CANONICAL_QUEUE_CRON_LIMIT', '3'));
         $maxAttempts = max(1, (int)env('CANONICAL_QUEUE_MAX_ATTEMPTS', '3'));
+        canonicalIngredientReconcileMissingProducts(
+            $db,
+            max(1, min(25, $queueLimit > 0 ? $queueLimit : 3))
+        );
         $queueResult = canonicalIngredientProcessQueue($db, $queueLimit, $maxAttempts);
         if (!empty($queueResult['skipped'])) {
             echo '[' . date('Y-m-d H:i:s') . '] Canonical queue — skipped (' . $queueResult['skipped']
@@ -126,7 +130,15 @@ try {
     // Exact correction constraints are already durable before HTTP response.
     // This fallback drain supplements the low-latency polling worker and cannot
     // call a model or move an active pointer unless its independent gates are on.
-    if (ingredientOntologyControllerEnabled()) {
+    if (
+        ingredientOntologyControllerEnabled()
+        && !(
+            function_exists(
+                'recipeCookidooMetadataBackfillHasPendingWork'
+            )
+            && recipeCookidooMetadataBackfillHasPendingWork($db)
+        )
+    ) {
         try {
             $controllerResult =
                 ingredientOntologyControllerProcessQueue(

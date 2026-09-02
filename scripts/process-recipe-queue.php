@@ -1,10 +1,13 @@
 #!/usr/bin/env php
 <?php
 /**
- * Process bounded local recipe discovery/index jobs.
+ * Process bounded leased recipe jobs. Provider I/O runs only after claim
+ * commit and before the short fenced apply transaction.
  *
  * Usage:
- *   php scripts/process-recipe-queue.php [--limit=N] [--max-attempts=N] [--json]
+ *   php scripts/process-recipe-queue.php
+ *     [--limit=N] [--max-attempts=N]
+ *     [--local-only|--provider-only] [--json]
  */
 declare(strict_types=1);
 
@@ -16,6 +19,13 @@ $limit = (int)env('RECIPE_QUEUE_CLI_LIMIT', '50');
 $maxAttempts = (int)env('RECIPE_QUEUE_MAX_ATTEMPTS', '3');
 $json = in_array('--json', $argv, true);
 $respectCookidooCadence = in_array('--respect-cookidoo-cadence', $argv, true);
+$localOnly = in_array('--local-only', $argv, true);
+$providerOnly = in_array('--provider-only', $argv, true);
+if ($localOnly && $providerOnly) {
+    throw new InvalidArgumentException(
+        '--local-only and --provider-only are mutually exclusive'
+    );
+}
 foreach ($argv as $arg) {
     if (str_starts_with($arg, '--limit=')) {
         $limit = max(0, (int)substr($arg, 8));
@@ -29,11 +39,22 @@ $result = recipeJobProcessQueue(
     $db,
     $limit,
     $maxAttempts,
-    !$respectCookidooCadence || recipeCookidooQueueCadenceDue()
+    !$respectCookidooCadence || recipeCookidooQueueCadenceDue(),
+    $localOnly ? 'local' : ($providerOnly ? 'provider' : 'all')
 );
 
 if ($json) {
     echo json_encode(['success' => true] + $result, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE) . PHP_EOL;
+    exit;
+}
+
+if (!empty($result['worker_skipped'])) {
+    echo 'Worker skipped: '
+        . (string)($result['worker_skip_reason'] ?? 'worker_lease_active');
+    if (!empty($result['worker_lease_expires_at'])) {
+        echo ' until ' . $result['worker_lease_expires_at'];
+    }
+    echo PHP_EOL;
     exit;
 }
 

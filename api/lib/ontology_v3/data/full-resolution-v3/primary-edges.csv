@@ -17,6 +17,8 @@ lime-juice,juice,operator-corrective-review-v3,full-ontology-resolution-v3,Lime 
 nut-butter,spread,operator-corrective-review-v3,full-ontology-resolution-v3,Nut butter is a spread rather than a generic condiment fallback,corrective-v3.13 complete primary-edge semantic audit
 orange-juice,juice,operator-corrective-review-v3,full-ontology-resolution-v3,Orange juice is a subtype of juice,corrective-v3.13 complete primary-edge semantic audit
 pear-marmalade,fruit-preserve,operator-corrective-review-v3,full-ontology-resolution-v3,Pear marmalade is a fruit preserve and only derives from pear,corrective-v3.13 culinary identity audit
+pecorino,cheese,operator-corrective-review-v3,full-ontology-resolution-v3,Pecorino is a specific cheese identity while generic cheese ancestry remains non-satisfying,corrective-v3.18 pecorino identity adjudication
+pecorino-romano,pecorino,operator-corrective-review-v3,full-ontology-resolution-v3,Pecorino Romano is a specific Pecorino variety represented below generic Pecorino without broad identity satisfaction,corrective-v3.18 pecorino identity adjudication
 pineapple-juice,juice,operator-corrective-review-v3,full-ontology-resolution-v3,Pineapple juice is a subtype of juice,corrective-v3.13 complete primary-edge semantic audit
 soy-sauce,sauce,operator-corrective-review-v3,full-ontology-resolution-v3,Soy sauce is a subtype of sauce,corrective-v3.13 complete primary-edge semantic audit
 stock-paste,stock-base,operator-corrective-review-v3,full-ontology-resolution-v3,Stock paste is a concentrated stock base,corrective-v3.13 complete primary-edge semantic audit

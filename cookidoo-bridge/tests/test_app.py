@@ -713,6 +713,12 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             max_results=10,
         )
 
+    def test_operator_policy_version_is_v3(self) -> None:
+        self.assertEqual(
+            DETAIL_HYDRATION_POLICY_VERSION,
+            "metadata-v3-operator-enabled",
+        )
+
     def tearDown(self) -> None:
         for path in sorted(self.runtime.glob("*")):
             path.unlink()
@@ -729,6 +735,10 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                 await client.get("/v1/capabilities")
             ).json()
         self.assertEqual(health["capabilities"], capabilities)
+        self.assertRegex(
+            health["build_revision"],
+            r"^(?:unknown|[0-9a-f]{40}(?:[0-9a-f]{24})?)$",
+        )
         self.assertEqual(
             capabilities,
             {
@@ -743,7 +753,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             },
         )
 
-    def test_runtime_environment_cannot_enable_detail_hydration(self) -> None:
+    def test_runtime_environment_controls_detail_hydration(self) -> None:
         with patch.dict(
             os.environ,
             {
@@ -752,8 +762,18 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             },
             clear=False,
         ):
-            config = BridgeConfig.from_env()
-        self.assertFalse(config.detail_hydration_enabled)
+            enabled = BridgeConfig.from_env()
+        with patch.dict(
+            os.environ,
+            {
+                "COOKIDOO_BRIDGE_TOKEN": "test-token",
+                "COOKIDOO_DETAIL_HYDRATION_ENABLED": "false",
+            },
+            clear=False,
+        ):
+            disabled = BridgeConfig.from_env()
+        self.assertTrue(enabled.detail_hydration_enabled)
+        self.assertFalse(disabled.detail_hydration_enabled)
 
     async def test_enabled_health_and_capabilities_report_discovery(
         self,
@@ -796,7 +816,11 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_search_returns_only_allowlisted_metadata(self) -> None:
         gateway = FakeGateway()
-        async with TestClient(TestServer(create_app(self.config, gateway))) as client:
+        config = replace(
+            self.config,
+            detail_hydration_enabled=True,
+        )
+        async with TestClient(TestServer(create_app(config, gateway))) as client:
             response = await client.post(
                 "/v1/search",
                 headers={"Authorization": "Bearer test-token"},
@@ -808,13 +832,12 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                     "limit": 2,
                 },
             )
-            self.assertEqual(response.status, 503)
+            self.assertEqual(response.status, 200)
             body = await response.json()
-        self.assertEqual(
-            body["error"],
-            "metadata_hydration_disabled_policy",
-        )
-        self.assertEqual(gateway.requests, [])
+        self.assertEqual(body["count"], 1)
+        self.assertEqual(body["recipes"][0]["title"], "Tomato Soup")
+        self.assertNotIn("instructions", repr(body))
+        self.assertEqual(len(gateway.requests), 1)
 
     async def test_search_response_size_is_bounded(self) -> None:
         config = replace(
@@ -957,22 +980,29 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_search_uses_default_locale_and_accepts_script_subtags(self) -> None:
         gateway = FakeGateway()
-        async with TestClient(TestServer(create_app(self.config, gateway))) as client:
+        config = replace(
+            self.config,
+            detail_hydration_enabled=True,
+        )
+        async with TestClient(TestServer(create_app(config, gateway))) as client:
             default_response = await client.post(
                 "/v1/search",
                 headers={"Authorization": "Bearer " + "test-token"},
                 json={"query": "tomato", "limit": 1},
             )
-            self.assertEqual(default_response.status, 503)
+            self.assertEqual(default_response.status, 200)
 
             script_response = await client.post(
                 "/v1/search",
                 headers={"Authorization": "Bearer " + "test-token"},
                 json={"query": "tomato", "locale": "zh-Hans", "limit": 1},
             )
-            self.assertEqual(script_response.status, 503)
+            self.assertEqual(script_response.status, 200)
 
-        self.assertEqual(gateway.requests, [])
+        self.assertEqual(
+            [request.locale for request in gateway.requests],
+            ["en-GB", "zh-Hans"],
+        )
 
     def test_search_contract_forces_the_separate_language_filter_to_english(
         self,
@@ -997,7 +1027,11 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self,
     ) -> None:
         gateway = FakeGateway()
-        async with TestClient(TestServer(create_app(self.config, gateway))) as client:
+        config = replace(
+            self.config,
+            detail_hydration_enabled=True,
+        )
+        async with TestClient(TestServer(create_app(config, gateway))) as client:
             unauthorized = await client.post(
                 "/v1/metadata",
                 json={"locale": "en-GB", "external_ids": ["r1"]},
@@ -1042,18 +1076,21 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                 headers={"Authorization": "Bearer " + "test-token"},
                 json={"locale": "en-gb", "external_ids": ["r1", "r2"]},
             )
-            self.assertEqual(response.status, 503)
+            self.assertEqual(response.status, 200)
             body = await response.json()
 
-        self.assertEqual(
-            body["error"],
-            "metadata_hydration_disabled_policy",
-        )
-        self.assertEqual(gateway.metadata_requests, [])
+        self.assertEqual(body["count"], 2)
+        self.assertEqual(body["succeeded_count"], 2)
+        self.assertNotIn("instructions", repr(body))
+        self.assertEqual(len(gateway.metadata_requests), 1)
 
     async def test_metadata_rate_limit_fails_the_whole_batch(self) -> None:
         gateway = FakeGateway()
-        config = replace(self.config, rate_limit_per_minute=1)
+        config = replace(
+            self.config,
+            rate_limit_per_minute=1,
+            detail_hydration_enabled=True,
+        )
         async with TestClient(TestServer(create_app(config, gateway))) as client:
             first = await client.post(
                 "/v1/metadata",
@@ -1067,10 +1104,10 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             )
             limited_body = await limited.json()
 
-        self.assertEqual(first.status, 503)
+        self.assertEqual(first.status, 200)
         self.assertEqual(limited.status, 429)
         self.assertEqual(limited_body["error"], "rate_limited")
-        self.assertEqual(gateway.metadata_requests, [])
+        self.assertEqual(len(gateway.metadata_requests), 1)
 
     async def test_metadata_response_size_is_bounded(self) -> None:
         config = replace(
@@ -1452,7 +1489,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(raised.exception.status, 503)
                 self.assertEqual(
                     raised.exception.code,
-                    "metadata_hydration_disabled_policy",
+                    DETAIL_HYDRATION_POLICY_REASON,
                 )
         self.assertEqual(fake_client.requested_ids, [])
 
@@ -2031,7 +2068,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(
             raised.exception.code,
-            "metadata_hydration_disabled_policy",
+            DETAIL_HYDRATION_POLICY_REASON,
         )
         self.assertEqual(fake_client.search_calls, 0)
 

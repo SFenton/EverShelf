@@ -288,11 +288,50 @@ switch ($command) {
         );
         $cycle = 0;
         do {
-            $result = ingredientOntologyControllerProcessQueue(
-                $db,
-                $limit,
-                $workOptions
-            );
+            $metadataBackfillDeferred = false;
+            try {
+                if (
+                    $activeDatabase
+                    && function_exists(
+                        'recipeCookidooMetadataBackfillHasPendingWork'
+                    )
+                    && recipeCookidooMetadataBackfillHasPendingWork($db)
+                ) {
+                    $metadataBackfillDeferred = true;
+                    $result = [
+                        'claimed' => 0,
+                        'results' => [],
+                        'skipped' =>
+                            'cookidoo_metadata_backfill_active',
+                    ];
+                } else {
+                    $result = ingredientOntologyControllerProcessQueue(
+                        $db,
+                        $limit,
+                        $workOptions
+                    );
+                }
+            } catch (Throwable $error) {
+                try {
+                    databaseRollbackDanglingTransaction($db);
+                } catch (Throwable $ignored) {
+                }
+                if (!$loop || !databaseIsLockError($error)) {
+                    throw $error;
+                }
+                $result = [
+                    'claimed' => 0,
+                    'results' => [],
+                    'retryable' => true,
+                    'reason' => 'locked',
+                    'error' => mb_substr(
+                        $error->getMessage(),
+                        0,
+                        1000,
+                        'UTF-8'
+                    ),
+                ];
+            }
             $writeJson(['cycle' => $cycle + 1] + $result);
             $cycle++;
             if (
@@ -301,7 +340,10 @@ switch ($command) {
             ) {
                 break;
             }
-            usleep($pollMs * 1000);
+            usleep(
+                ($metadataBackfillDeferred ? 5000 : $pollMs)
+                    * 1000
+            );
         } while (true);
         break;
 

@@ -128,6 +128,27 @@ $maximumCycles = max(
     1,
     min(100, (int)($options['max-cycles'] ?? 1))
 );
+$resultFailed = static function (array $result): bool {
+    if (in_array(
+        (string)($result['action'] ?? ''),
+        ['failed', 'non_converging_expected_outcome'],
+        true
+    )) {
+        return true;
+    }
+    foreach (
+        ['import', 'score_import', 'ontology_import']
+        as $field
+    ) {
+        if (
+            is_array($result[$field] ?? null)
+            && (string)($result[$field]['status'] ?? '') === 'failed'
+        ) {
+            return true;
+        }
+    }
+    return false;
+};
 $results = [];
 $state = $db->query("
     SELECT failure_count, next_attempt_at
@@ -148,6 +169,55 @@ if (
         'outcome' => 'backoff',
         'reason' => 'ontology_activation_backoff',
         'next_attempt_at' => $state['next_attempt_at'],
+        'retryable' => true,
+    ], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . PHP_EOL;
+    exit(0);
+}
+$servingProductPending = (int)$db->query("
+    SELECT COUNT(*) FROM recipe_score_pending_products
+")->fetchColumn();
+$servingRecipePending = (int)$db->query("
+    SELECT COUNT(*)
+    FROM recipe_score_pending_recipes
+    WHERE lane = 'serving'
+")->fetchColumn();
+if ($servingProductPending + $servingRecipePending > 0) {
+    flock($lock, LOCK_UN);
+    fclose($backgroundLock);
+    fclose($lock);
+    echo json_encode([
+        'success' => true,
+        'skipped' => true,
+        'outcome' => 'incremental_score_pending',
+        'reason' => 'serving_score_pending',
+        'pending_product_count' => $servingProductPending,
+        'pending_recipe_count' => $servingRecipePending,
+        'retryable' => true,
+    ], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . PHP_EOL;
+    exit(0);
+}
+$coordinationLockPath =
+    $databaseDirectory . '/.recipe-score-coordination.lock';
+$coordinationLock = fopen($coordinationLockPath, 'c+');
+if ($coordinationLock === false) {
+    flock($lock, LOCK_UN);
+    fclose($backgroundLock);
+    fclose($lock);
+    throw new RuntimeException(
+        'ontology activation score coordination lock could not be opened'
+    );
+}
+if (!flock($coordinationLock, LOCK_EX | LOCK_NB)) {
+    flock($lock, LOCK_UN);
+    fclose($coordinationLock);
+    fclose($backgroundLock);
+    fclose($lock);
+    echo json_encode([
+        'success' => true,
+        'skipped' => true,
+        'outcome' => 'locked',
+        'reason' => 'score_coordination_locked',
+        'lock_scope' => 'score_coordination',
         'retryable' => true,
     ], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . PHP_EOL;
     exit(0);
@@ -186,6 +256,10 @@ try {
             ]
         );
         $results[] = ['cycle' => $cycle + 1] + $result;
+        if ($resultFailed($result)) {
+            $exitCode = 2;
+            break;
+        }
         if (($result['action'] ?? '') === 'none') {
             break;
         }
@@ -329,6 +403,8 @@ try {
     );
     $exitCode = 2;
 } finally {
+    flock($coordinationLock, LOCK_UN);
+    fclose($coordinationLock);
     flock($lock, LOCK_UN);
     fclose($backgroundLock);
     fclose($lock);

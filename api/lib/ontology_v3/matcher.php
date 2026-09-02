@@ -559,6 +559,7 @@ function ingredientOntologyV3MatchWithContext(
         'model_proposal',
         'lexical',
         'normalized_name',
+        'foodon_hierarchy',
     ];
     foreach ([
         'required' => $required,

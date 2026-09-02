@@ -1,6 +1,9 @@
 services:
   evershelf:
-    build: .
+    build:
+      context: .
+      args:
+        VCS_REF: ${EVERSHELF_BUILD_SHA:?Set EVERSHELF_BUILD_SHA to the exact git commit}
     container_name: evershelf
     ports:
       - "8080:80"
@@ -17,26 +20,39 @@ services:
     restart: unless-stopped
     environment:
       - TZ=Europe/Rome
+      - INGREDIENT_ONTOLOGY_CONTROLLER_MINIMUM_PRIORITY=51
     group_add:
       - "${EVERSHELF_ONTOLOGY_SOCKET_GID:-1000}"
+    healthcheck:
+      test:
+        - CMD
+        - php
+        - /var/www/html/scripts/container-health.php
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
 
   ontology-worker:
     profiles: ["ontology"]
-    build: .
+    build:
+      context: .
+      args:
+        VCS_REF: ${EVERSHELF_BUILD_SHA:?Set EVERSHELF_BUILD_SHA to the exact git commit}
     container_name: evershelf-ontology-worker
     user: "33:33"
-    entrypoint: ["php", "/var/www/html/scripts/ontology-controller.php"]
+    entrypoint:
+      - php
+      - -d
+      - memory_limit=${ONTOLOGY_WORKER_MEMORY_LIMIT:-512M}
+      - /var/www/html/scripts/ontology-controller.php
     command:
       - work
       - --db=/var/www/html/data/evershelf.db
       - --write
       - --allow-active-db
       - --loop
-      - --provider=copilot_socket
-      - --model=gemini-3.7-flash
-      - --critic-provider=copilot_socket
-      - --critic-model=claude-sonnet-5
-      - --minimum-priority=50
+      - --minimum-priority=51
       - --allow-network
     volumes:
       - evershelf_data:/var/www/html/data
@@ -46,10 +62,12 @@ services:
       - ./.env
     environment:
       - TZ=Europe/Rome
+      - INGREDIENT_ONTOLOGY_CONTROLLER_MINIMUM_PRIORITY=51
     group_add:
       - "${EVERSHELF_ONTOLOGY_SOCKET_GID:-1000}"
     depends_on:
-      - evershelf
+      evershelf:
+        condition: service_healthy
     restart: unless-stopped
     init: true
     read_only: true
@@ -60,12 +78,88 @@ services:
     security_opt:
       - no-new-privileges:true
     logging:
-      driver: "none"
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     healthcheck:
-      disable: true
+      test:
+        - CMD
+        - php
+        - /var/www/html/scripts/check-worker-health.php
+        - --needle=ontology-controller.php
+        - --db=/var/www/html/data/evershelf.db
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  ontology-activation-worker:
+    profiles: ["ontology"]
+    build:
+      context: .
+      args:
+        VCS_REF: ${EVERSHELF_BUILD_SHA:?Set EVERSHELF_BUILD_SHA to the exact git commit}
+    container_name: evershelf-ontology-activation-worker
+    user: "33:33"
+    entrypoint:
+      - /usr/local/bin/evershelf-ontology-activation-worker
+    command:
+      - --db=/var/www/html/data/evershelf.db
+      - --write
+      - --allow-active-db
+      - --allow-network
+      - --max-cycles=1
+      - --maximum-chunks=64
+    volumes:
+      - evershelf_data:/var/www/html/data
+      - ./.env:/var/www/html/.env:ro
+      - ${EVERSHELF_ONTOLOGY_SOCKET_DIR:-/run/evershelf-ontology-disabled}:/run/evershelf-ontology:ro
+    env_file:
+      - ./.env
+    environment:
+      - TZ=Europe/Rome
+      - INGREDIENT_ONTOLOGY_CONTROLLER_MINIMUM_PRIORITY=51
+    group_add:
+      - "${EVERSHELF_ONTOLOGY_SOCKET_GID:-1000}"
+    depends_on:
+      evershelf:
+        condition: service_healthy
+    restart: unless-stopped
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test:
+        - CMD
+        - php
+        - /var/www/html/scripts/check-worker-health.php
+        - --needle=evershelf-ontology-activation-worker
+        - --db=/var/www/html/data/evershelf.db
+        - --heartbeat=/var/www/html/data/.ontology-activation-worker.heartbeat
+        - --status-file=/var/www/html/data/.ontology-activation-worker.status
+        - --activation-state
+        - --max-age=900
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
 
   recipe-score-worker:
-    build: .
+    build:
+      context: .
+      args:
+        VCS_REF: ${EVERSHELF_BUILD_SHA:?Set EVERSHELF_BUILD_SHA to the exact git commit}
     container_name: evershelf-recipe-score-worker
     user: "33:33"
     entrypoint:
@@ -78,6 +172,9 @@ services:
       - --allow-active-db
       - --loop
       - --sleep-ms=200
+      - --coordination-lock=/var/www/html/data/.recipe-score-coordination.lock
+      - --heartbeat=/var/www/html/data/.recipe-score-worker.heartbeat
+      - --status-file=/var/www/html/data/.recipe-score-worker.status
     volumes:
       - evershelf_data:/var/www/html/data
       - ./.env:/var/www/html/.env:ro
@@ -86,7 +183,8 @@ services:
     environment:
       - TZ=Europe/Rome
     depends_on:
-      - evershelf
+      evershelf:
+        condition: service_healthy
     restart: unless-stopped
     init: true
     read_only: true
@@ -97,12 +195,92 @@ services:
     security_opt:
       - no-new-privileges:true
     logging:
-      driver: "none"
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     healthcheck:
-      disable: true
+      test:
+        - CMD
+        - php
+        - /var/www/html/scripts/check-worker-health.php
+        - --needle=incremental-score-worker.php
+        - --db=/var/www/html/data/evershelf.db
+        - --heartbeat=/var/www/html/data/.recipe-score-worker.heartbeat
+        - --status-file=/var/www/html/data/.recipe-score-worker.status
+        - --max-age=900
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  recipe-queue-worker:
+    build:
+      context: .
+      args:
+        VCS_REF: ${EVERSHELF_BUILD_SHA:?Set EVERSHELF_BUILD_SHA to the exact git commit}
+    container_name: evershelf-recipe-queue-worker
+    user: "33:33"
+    entrypoint:
+      - php
+      - -d
+      - memory_limit=${RECIPE_QUEUE_WORKER_MEMORY_LIMIT:-256M}
+      - /var/www/html/scripts/recipe-queue-worker.php
+    command:
+      - --db=/var/www/html/data/evershelf.db
+      - --allow-active-db
+      - --loop
+      - --poll-ms=${RECIPE_QUEUE_LOCAL_POLL_MS:-1000}
+      - --limit=${RECIPE_QUEUE_LOCAL_LIMIT:-20}
+      - --max-attempts=${RECIPE_QUEUE_LOCAL_MAX_ATTEMPTS:-20}
+      - --socket=/var/www/html/data/recipe-queue.sock
+      - --heartbeat=/var/www/html/data/.recipe-queue-worker.heartbeat
+      - --status-file=/var/www/html/data/.recipe-queue-worker.status
+    volumes:
+      - evershelf_data:/var/www/html/data
+      - ./.env:/var/www/html/.env:ro
+    env_file:
+      - ./.env
+    environment:
+      - TZ=Europe/Rome
+      - RECIPE_QUEUE_WAKE_SOCKET=/var/www/html/data/recipe-queue.sock
+    depends_on:
+      evershelf:
+        condition: service_healthy
+    restart: unless-stopped
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test:
+        - CMD
+        - php
+        - /var/www/html/scripts/check-worker-health.php
+        - --needle=recipe-queue-worker.php
+        - --db=/var/www/html/data/evershelf.db
+        - --heartbeat=/var/www/html/data/.recipe-queue-worker.heartbeat
+        - --status-file=/var/www/html/data/.recipe-queue-worker.status
+        - --max-age=120
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
 
   canonical-worker:
-    build: .
+    build:
+      context: .
+      args:
+        VCS_REF: ${EVERSHELF_BUILD_SHA:?Set EVERSHELF_BUILD_SHA to the exact git commit}
     container_name: evershelf-canonical-worker
     user: "33:33"
     entrypoint: ["php", "/var/www/html/scripts/canonical-queue-worker.php"]
@@ -122,7 +300,8 @@ services:
       - CANONICAL_QUEUE_APPLY_RETRY_SECONDS=${CANONICAL_QUEUE_APPLY_RETRY_SECONDS:-20}
       - CANONICAL_QUEUE_RELEASE_RETRY_SECONDS=${CANONICAL_QUEUE_RELEASE_RETRY_SECONDS:-45}
     depends_on:
-      - evershelf
+      evershelf:
+        condition: service_healthy
     restart: unless-stopped
     init: true
     read_only: true
@@ -138,12 +317,23 @@ services:
         max-size: "10m"
         max-file: "3"
     healthcheck:
-      disable: true
+      test:
+        - CMD
+        - php
+        - /var/www/html/scripts/check-worker-health.php
+        - --needle=canonical-queue-worker.php
+        - --db=/var/www/html/data/evershelf.db
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
 
   cookidoo-bridge:
     profiles: ["cookidoo"]
     build:
       context: ./cookidoo-bridge
+      args:
+        VCS_REF: ${EVERSHELF_BUILD_SHA:?Set EVERSHELF_BUILD_SHA to the exact git commit}
     expose:
       - "8081"
     env_file:

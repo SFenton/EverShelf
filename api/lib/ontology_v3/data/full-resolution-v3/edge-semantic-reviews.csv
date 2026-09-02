@@ -34,6 +34,8 @@ oyster,shellfish,subtype,operator-corrective-review-v3,Oyster is a shellfish typ
 parmesan,cheese,subtype,operator-corrective-review-v3,Parmesan is a cheese type,corrective-v3.13 complete identity-parent audit
 peanut-butter,nut-butter,subtype,operator-corrective-review-v3,Peanut butter is a nut-butter type,corrective-v3.13 complete identity-parent audit
 pear-marmalade,fruit-preserve,subtype,operator-corrective-review-v3,Pear marmalade is a fruit-preserve type while pear remains derivation evidence,corrective-v3.13 complete identity-parent audit
+pecorino,cheese,subtype,operator-corrective-review-v3,Pecorino is a cheese identity distinct from generic cheese and other named cheese varieties,corrective-v3.18 pecorino identity adjudication
+pecorino-romano,pecorino,subtype,operator-corrective-review-v3,Pecorino Romano is a named Pecorino variety that remains distinct from generic Pecorino,corrective-v3.18 pecorino identity adjudication
 pepper-jack-cheese,cheese,subtype,operator-corrective-review-v3,Pepper Jack is a cheese type,corrective-v3.13 complete identity-parent audit
 pineapple-juice,juice,subtype,operator-corrective-review-v3,Pineapple juice is a fruit-specific juice identity,corrective-v3.13 complete identity-parent audit
 plant-based-milk,milk-alternative,subtype,operator-corrective-review-v3,Plant-based milk is a milk-alternative type,corrective-v3.13 complete identity-parent audit

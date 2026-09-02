@@ -95,8 +95,11 @@
   component evidence use non-satisfying secondary relations and are covered by
   the edge-semantic fixture.
 - Connector work stays asynchronous and idempotent. Interactive discovery gets a
-  reserved queue lane but must not starve background crawl progress.
-- Cookidoo policy `metadata-v2` permits only factual General and Ingredients
+  reserved queue lane but must not starve background crawl progress. Provider
+  calls run only after a committed lease claim with no SQLite/file lock held;
+  short apply transactions revalidate lease and per-target request-order fences.
+- Cookidoo storage contract `metadata-v2` and execution capability
+  `metadata-v3-operator-enabled` permit only factual General and Ingredients
   metadata: title, canonical URL/ID, locale/timestamps, allowlisted remote image
   URLs, yield quantity/unit, explicit prep/cook/active/inactive/total time
   seconds, difficulty, one primary category label, bounded supported/required
@@ -129,21 +132,24 @@
   identity-satisfying in-stock match, or an exact identity match made missing
   solely by enforced insufficient quantity. Uncertain ancestry, component,
   derivation, and facet-conflict candidates remain internal.
-- Cookidoo detail hydration is policy-disabled because the available provider
-  detail response co-transports official steps. Production search and direct-ID
-  metadata routes must fail locally without requesting/materializing that response;
-  no discovery/detail/backfill job may be enqueued or retried. Existing cached
-  catalog rows remain readable. Synthetic adapter helpers/tests may validate
-  allowlisting, but must never become a production request path.
+- Cookidoo detail hydration is default-off and requires matching EverShelf and
+  bridge configuration gates. Provider responses may co-transport official steps,
+  but the bridge may only decode a bounded response and immediately project the
+  existing factual metadata allowlist. Search, direct-ID refresh, and backfill may
+  use that production path only while both gates are enabled.
+- Recipe freshness controls refresh demand, never catalog membership. Stale
+  cached rows remain searchable and cursor-stable while bounded best-effort
+  refresh is queued after reads.
 - Historical metadata-only writes may change only v2 General/freshness/version
   fields and the complete ordered source-ingredient list; they must not use the
   generic catalog save path or touch ranking ingredients, FTS, clusters, scores,
   or revisions.
-- Official Cookidoo instructions remain prohibited. Never retrieve, expose, log,
-  persist, cache, or test with real step text; exclude `recipeStepGroups` by
-  construction. Also prohibit provider notes/tips, category or collection
-  descriptions, nutrition, tags, preparation text/prose, unverified optionality,
-  guided-cooking content, image bytes, and raw source payloads. Never access or
-  persist ingredient `preparation`.
+- Official Cookidoo instructions remain prohibited. Co-transported step fields
+  must never be inspected, exposed, logged, persisted, cached, or tested with real
+  step text; `recipeStepGroups` is omitted from the safe projection. Also prohibit
+  provider notes/tips, category or collection descriptions, nutrition, tags,
+  preparation text/prose, unverified optionality, guided-cooking content, image
+  bytes, and raw source payload persistence. Never access or persist ingredient
+  `preparation`.
 - Test list endpoints against live-sized fixtures under PHP's 128 MB memory
   limit, with bounded SQL/query counts and empty/broad searches.

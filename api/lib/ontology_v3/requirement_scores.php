@@ -869,11 +869,13 @@ function ingredientOntologyV3BuildRequirementShadow(
                 ontology_resolution_gold_hash, ontology_seal_hash,
                 ontology_source_revision, ontology_source_hash,
                 identity_extension_revision, identity_extension_hash,
+                covered_identity_extension_revision,
+                covered_identity_extension_hash,
                 requirement_revision_id,
                 requirement_model, parity_baseline_score_revision_id
             )
             VALUES (?, ?, ?, ?, ?, 'building', ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ");
         $insert->execute([
             $state['inventory_revision'],
@@ -897,6 +899,8 @@ function ingredientOntologyV3BuildRequirementShadow(
             $version['seal_hash'],
             $state['ontology_source_revision'],
             $ontologySourceHash,
+            (int)$identityExtension['revision'],
+            (string)$identityExtension['hash'],
             (int)$identityExtension['revision'],
             (string)$identityExtension['hash'],
             $requirementRevisionId,

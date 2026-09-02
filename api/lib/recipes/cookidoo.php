@@ -6,8 +6,8 @@ const RECIPE_COOKIDOO_CONNECTOR = 'cookidoo';
 const RECIPE_COOKIDOO_METADATA_VERSION = 'metadata-v2';
 const RECIPE_COOKIDOO_METADATA_SCHEMA_VERSION = 'ingredient-topology-v1';
 const RECIPE_COOKIDOO_METADATA_FAILURE_SCHEMA_VERSION = 'metadata-parser-v10-complete-list';
-const RECIPE_COOKIDOO_DETAIL_POLICY_VERSION = 'metadata-v2-detail-disabled';
-const RECIPE_COOKIDOO_DETAIL_POLICY_REASON = 'provider_detail_policy_disabled';
+const RECIPE_COOKIDOO_DETAIL_POLICY_VERSION = 'metadata-v3-operator-enabled';
+const RECIPE_COOKIDOO_DETAIL_POLICY_REASON = 'metadata_hydration_disabled';
 const RECIPE_COOKIDOO_MAX_RESPONSE_BYTES = 1048576;
 const RECIPE_COOKIDOO_MAX_RECIPE_SECONDS =
     RECIPE_MAX_FACTUAL_DURATION_SECONDS;
@@ -94,9 +94,10 @@ function recipeCookidooMetadataRefreshDays(): int {
 }
 
 function recipeCookidooDetailHydrationPolicyAllows(): bool {
-    return defined('RECIPE_BACKEND_TEST_MODE')
-        && RECIPE_BACKEND_TEST_MODE
-        && !empty($GLOBALS['RECIPE_COOKIDOO_POLICY_TEST_OVERRIDE']);
+    return recipeCookidooEnvBool(
+        'COOKIDOO_DETAIL_HYDRATION_ENABLED',
+        false
+    );
 }
 
 function recipeCookidooMetadataBackfillConfigured(): bool {
@@ -106,6 +107,40 @@ function recipeCookidooMetadataBackfillConfigured(): bool {
 function recipeCookidooMetadataBackfillEnabled(): bool {
     return recipeCookidooMetadataBackfillConfigured()
         && recipeCookidooDetailHydrationPolicyAllows();
+}
+
+function recipeCookidooMetadataBackfillHasPendingWork(
+    PDO $db,
+    ?string $locale = null
+): bool {
+    if (
+        !recipeCookidooMetadataBackfillEnabled()
+        || !recipeConnectorIsEnabled($db, RECIPE_COOKIDOO_CONNECTOR)
+    ) {
+        return false;
+    }
+    $locale = $locale !== null
+        ? recipeCookidooNormalizeLocale($locale)
+        : recipeCookidooDiscoveryLocale();
+    if (recipeCookidooLocaleIsLanguageOnly($locale)) {
+        return false;
+    }
+    $openJob = $db->prepare("
+        SELECT 1
+        FROM recipe_jobs
+        WHERE job_type = 'recipe_metadata_refresh'
+          AND connector = ?
+          AND status IN ('pending', 'retry', 'in_progress')
+        LIMIT 1
+    ");
+    $openJob->execute([RECIPE_COOKIDOO_CONNECTOR]);
+    return $openJob->fetchColumn() !== false
+        || recipeCookidooMetadataBackfillCandidates(
+            $db,
+            $locale,
+            0,
+            1
+        ) !== [];
 }
 
 function recipeCookidooMetadataBackfillBatchSize(): int {
@@ -825,12 +860,23 @@ function recipeCookidooMetadataRefreshIdempotencyKey(array $input): string {
 function recipeCookidooEnqueueMetadataRefreshJob(
     PDO $db,
     array $input,
-    bool $requireEnabled = true
+    bool $requireEnabled = true,
+    bool $requireBulkBackfill = true
 ): array {
     if ($requireEnabled && !recipeCookidooDetailHydrationPolicyAllows()) {
         throw new RuntimeException(RECIPE_COOKIDOO_DETAIL_POLICY_REASON);
     }
-    if ($requireEnabled && !recipeCookidooMetadataBackfillConfigured()) {
+    if (
+        $requireEnabled
+        && !recipeConnectorIsEnabled($db, RECIPE_COOKIDOO_CONNECTOR)
+    ) {
+        throw new RuntimeException('connector_disabled');
+    }
+    if (
+        $requireEnabled
+        && $requireBulkBackfill
+        && !recipeCookidooMetadataBackfillConfigured()
+    ) {
         throw new RuntimeException('cookidoo_metadata_backfill_disabled');
     }
     $input = recipeCookidooNormalizeMetadataRefreshInput($input);
@@ -874,6 +920,141 @@ function recipeCookidooEnqueueMetadataRefreshJob(
         0
     );
     return $enqueue + ['requeued' => false];
+}
+
+function recipeCookidooDemandRefresh(
+    PDO $db,
+    array $recipeIds,
+    string $surface,
+    int $limit = 20
+): array {
+    $recipeIds = array_values(array_unique(array_filter(
+        array_map('intval', $recipeIds),
+        static fn(int $recipeId): bool => $recipeId > 0
+    )));
+    $limit = max(1, min(20, $limit));
+    if (!$recipeIds) {
+        return ['queued' => 0, 'reason' => 'no_recipes'];
+    }
+    if (databaseTransactionIsActive($db)) {
+        return ['queued' => 0, 'reason' => 'read_transaction_active'];
+    }
+    if (
+        !recipeCookidooDetailHydrationPolicyAllows()
+        || !recipeConnectorIsEnabled($db, RECIPE_COOKIDOO_CONNECTOR)
+        || !recipeCookidooBridgeConfigured()
+    ) {
+        return ['queued' => 0, 'reason' => 'hydration_unavailable'];
+    }
+    $previousBusyTimeout = (int)(
+        $db->query('PRAGMA busy_timeout')->fetchColumn() ?: 0
+    );
+    $db->exec('PRAGMA busy_timeout=25');
+    try {
+        $placeholders = implode(
+            ',',
+            array_fill(0, count($recipeIds), '?')
+        );
+        $stmt = $db->prepare("
+            SELECT o.recipe_id, o.id AS origin_id,
+                   o.external_id, o.locale,
+                   o.metadata_failure_version,
+                   o.metadata_failure_kind,
+                   o.metadata_failure_count,
+                   o.metadata_next_probe_at,
+                   o.metadata_failure_schema_version
+            FROM recipe_origins o
+            JOIN recipe_catalog c ON c.id = o.recipe_id
+            WHERE o.recipe_id IN ({$placeholders})
+              AND o.connector = ?
+              AND o.external_id IS NOT NULL
+              AND TRIM(o.external_id) <> ''
+              AND c.primary_connector = ?
+              AND c.deleted_at IS NULL
+              AND (
+                  (
+                      c.stale_at IS NOT NULL
+                      AND c.stale_at < CURRENT_TIMESTAMP
+                  )
+                  OR (
+                      c.cache_expires_at IS NOT NULL
+                      AND c.cache_expires_at < CURRENT_TIMESTAMP
+                  )
+              )
+            ORDER BY o.id
+            LIMIT {$limit}
+        ");
+        $stmt->execute([
+            ...$recipeIds,
+            RECIPE_COOKIDOO_CONNECTOR,
+            RECIPE_COOKIDOO_CONNECTOR,
+        ]);
+        $byLocale = [];
+        foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
+            if (recipeCookidooMetadataFailureBlocks($row)) {
+                continue;
+            }
+            $locale = recipeCookidooNormalizeLocale(
+                $row['locale'] ?? null
+            );
+            if (recipeCookidooLocaleIsLanguageOnly($locale)) {
+                continue;
+            }
+            $byLocale[strtolower($locale)][] = [
+                'recipe_id' => (int)$row['recipe_id'],
+                'origin_id' => (int)$row['origin_id'],
+                'external_id' => (string)$row['external_id'],
+            ];
+        }
+        $jobs = [];
+        foreach (
+            array_slice($byLocale, 0, 2, true)
+            as $locale => $recipes
+        ) {
+            $enqueue = recipeCookidooEnqueueMetadataRefreshJob(
+                $db,
+                ['locale' => $locale, 'recipes' => $recipes],
+                true,
+                false
+            );
+            $jobs[] = (int)$enqueue['job']['id'];
+        }
+        return [
+            'queued' => count($jobs),
+            'jobs' => $jobs,
+            'surface' => mb_substr($surface, 0, 40, 'UTF-8'),
+        ];
+    } catch (Throwable $error) {
+        if (class_exists('EverLog', false)) {
+            EverLog::warn(
+                'cookidoo demand refresh degraded',
+                [
+                    'surface' => mb_substr(
+                        $surface,
+                        0,
+                        40,
+                        'UTF-8'
+                    ),
+                    'error' => mb_substr(
+                        $error->getMessage(),
+                        0,
+                        300,
+                        'UTF-8'
+                    ),
+                ],
+                'recipes'
+            );
+        }
+        return [
+            'queued' => 0,
+            'reason' => 'enqueue_failed',
+            'degraded' => true,
+        ];
+    } finally {
+        $db->exec(
+            'PRAGMA busy_timeout=' . max(0, $previousBusyTimeout)
+        );
+    }
 }
 
 function recipeCookidooMetadataBackfillCursorKey(string $locale): string {
@@ -1079,8 +1260,14 @@ function recipeCookidooMetadataBackfillPlan(
     $maxRecipes = max(1, min(200, $maxRecipes));
     $cursor = recipeCookidooMetadataBackfillCursor($db, $locale);
     $policyAllowed = recipeCookidooDetailHydrationPolicyAllows();
+    $connectorEnabled = recipeConnectorIsEnabled(
+        $db,
+        RECIPE_COOKIDOO_CONNECTOR
+    );
+    $languageOnly = recipeCookidooLocaleIsLanguageOnly($locale);
     $refreshable = $policyAllowed
-        && !recipeCookidooLocaleIsLanguageOnly($locale);
+        && $connectorEnabled
+        && !$languageOnly;
     if (!$refreshable) {
         return [
             'metadata_version' => RECIPE_COOKIDOO_METADATA_VERSION,
@@ -1093,7 +1280,9 @@ function recipeCookidooMetadataBackfillPlan(
             'refreshable' => false,
             'unrefreshable_reason' => !$policyAllowed
                 ? RECIPE_COOKIDOO_DETAIL_POLICY_REASON
-                : 'language_only_locale',
+                : (!$connectorEnabled
+                    ? 'connector_disabled'
+                    : 'language_only_locale'),
             'cursor' => $cursor,
             'wrapped' => false,
             'batch_size' => $batchSize,
@@ -1158,8 +1347,14 @@ function recipeCookidooMetadataBackfillStatus(
 ): array {
     $locale = recipeCookidooNormalizeLocale($locale);
     $policyAllowed = recipeCookidooDetailHydrationPolicyAllows();
+    $connectorEnabled = recipeConnectorIsEnabled(
+        $db,
+        RECIPE_COOKIDOO_CONNECTOR
+    );
     $languageOnly = recipeCookidooLocaleIsLanguageOnly($locale);
-    $refreshable = $policyAllowed && !$languageOnly;
+    $refreshable = $policyAllowed
+        && $connectorEnabled
+        && !$languageOnly;
     $counts = $db->prepare("
         WITH scoped AS (
             SELECT
@@ -1167,12 +1362,28 @@ function recipeCookidooMetadataBackfillStatus(
                     WHEN o.metadata_version = ?
                      AND o.metadata_schema_version = ?
                     THEN 0 ELSE 1
-                END AS needs_refresh,
+                END AS needs_backfill,
+                CASE
+                    WHEN o.metadata_version = ?
+                     AND o.metadata_schema_version = ?
+                     AND (
+                         (
+                             c.stale_at IS NOT NULL
+                             AND c.stale_at < CURRENT_TIMESTAMP
+                         )
+                         OR (
+                             c.cache_expires_at IS NOT NULL
+                             AND c.cache_expires_at < CURRENT_TIMESTAMP
+                         )
+                     )
+                    THEN 1 ELSE 0
+                END AS refresh_due,
                 CASE
                     WHEN o.metadata_failure_version = ?
                      AND (
                          o.metadata_failure_kind IN (
-                             'invalid_id', 'locale_mismatch'
+                             'invalid_id', 'locale_mismatch',
+                             'content_language_rejected'
                          )
                          OR (
                              o.metadata_failure_kind = 'not_found'
@@ -1201,7 +1412,8 @@ function recipeCookidooMetadataBackfillStatus(
                     WHEN o.metadata_failure_version = ?
                      AND o.metadata_failure_kind IN (
                          'invalid_id', 'invalid_metadata',
-                         'locale_mismatch', 'not_found'
+                         'locale_mismatch', 'not_found',
+                         'content_language_rejected'
                      )
                     THEN 1 ELSE 0
                 END AS has_failure
@@ -1215,16 +1427,17 @@ function recipeCookidooMetadataBackfillStatus(
               AND c.deleted_at IS NULL
         )
         SELECT COUNT(*) AS total,
-               SUM(CASE WHEN needs_refresh = 0 THEN 1 ELSE 0 END)
+               SUM(CASE WHEN needs_backfill = 0 THEN 1 ELSE 0 END)
                    AS current,
+               SUM(refresh_due) AS refresh_due,
                SUM(CASE
-                   WHEN needs_refresh = 1 AND blocked = 1 THEN 1 ELSE 0
+                   WHEN needs_backfill = 1 AND blocked = 1 THEN 1 ELSE 0
                END) AS failed,
                SUM(CASE
-                   WHEN needs_refresh = 1 AND blocked = 0 THEN 1 ELSE 0
+                   WHEN needs_backfill = 1 AND blocked = 0 THEN 1 ELSE 0
                END) AS remaining,
                SUM(CASE
-                   WHEN needs_refresh = 1
+                   WHEN needs_backfill = 1
                     AND blocked = 0
                     AND has_failure = 1
                    THEN 1 ELSE 0
@@ -1232,6 +1445,8 @@ function recipeCookidooMetadataBackfillStatus(
         FROM scoped
     ");
     $counts->execute([
+        RECIPE_COOKIDOO_METADATA_VERSION,
+        RECIPE_COOKIDOO_METADATA_SCHEMA_VERSION,
         RECIPE_COOKIDOO_METADATA_VERSION,
         RECIPE_COOKIDOO_METADATA_SCHEMA_VERSION,
         RECIPE_COOKIDOO_METADATA_VERSION,
@@ -1516,9 +1731,11 @@ function recipeCookidooMetadataBackfillStatus(
     $observability = $observabilityStmt->fetch(PDO::FETCH_ASSOC) ?: [];
     $scoreState = recipeScoreState($db);
     return [
-        'enabled' => recipeCookidooMetadataBackfillEnabled(),
+        'enabled' => recipeCookidooMetadataBackfillEnabled()
+            && $connectorEnabled,
         'configured_enabled' =>
             recipeCookidooMetadataBackfillConfigured(),
+        'connector_enabled' => $connectorEnabled,
         'detail_hydration' => $policyAllowed,
         'detail_hydration_reason' => $policyAllowed
             ? null
@@ -1537,11 +1754,14 @@ function recipeCookidooMetadataBackfillStatus(
             ? null
             : (!$policyAllowed
                 ? RECIPE_COOKIDOO_DETAIL_POLICY_REASON
-                : 'language_only_locale'),
+                : (!$connectorEnabled
+                    ? 'connector_disabled'
+                    : 'language_only_locale')),
         'cursor' => recipeCookidooMetadataBackfillCursor($db, $locale),
         'origins' => [
             'total' => (int)($counts['total'] ?? 0),
             'current' => (int)($counts['current'] ?? 0),
+            'refresh_due' => (int)($counts['refresh_due'] ?? 0),
             'failed' => (int)($counts['failed'] ?? 0),
             'probe_due' => (int)($counts['probe_due'] ?? 0),
             'remaining' => $refreshable ? $pending : 0,
@@ -1717,6 +1937,9 @@ function recipeCookidooEnqueueMetadataBackfill(
     if (!recipeCookidooDetailHydrationPolicyAllows()) {
         throw new RuntimeException(RECIPE_COOKIDOO_DETAIL_POLICY_REASON);
     }
+    if (!recipeConnectorIsEnabled($db, RECIPE_COOKIDOO_CONNECTOR)) {
+        throw new RuntimeException('connector_disabled');
+    }
     if (!recipeCookidooMetadataBackfillConfigured()) {
         throw new RuntimeException('cookidoo_metadata_backfill_disabled');
     }
@@ -1731,7 +1954,7 @@ function recipeCookidooEnqueueMetadataBackfill(
             'cookidoo_metadata_backfill_requires_regional_or_script_locale'
         );
     }
-    $ownsTransaction = !$db->inTransaction();
+    $ownsTransaction = !databaseTransactionIsActive($db);
     if ($ownsTransaction) {
         $db->beginTransaction();
     }
@@ -1775,7 +1998,7 @@ function recipeCookidooEnqueueMetadataBackfill(
             $db->commit();
         }
     } catch (Throwable $e) {
-        if ($ownsTransaction && $db->inTransaction()) {
+        if ($ownsTransaction && databaseTransactionIsActive($db)) {
             $db->rollBack();
         }
         throw $e;
@@ -2016,21 +2239,19 @@ function recipeCookidooMigrateDiscoveryJob(
     if (!empty($job['payload'][RECIPE_COOKIDOO_CRAWL_REFRESH_FIELD])) {
         $payload[RECIPE_COOKIDOO_CRAWL_REFRESH_FIELD] = true;
     }
-    $db->prepare("
-        UPDATE recipe_jobs
-        SET scope = ?,
-            payload_json = ?,
-            updated_at = CURRENT_TIMESTAMP
-        WHERE id = ?
-          AND connector = ?
-          AND job_type = 'connector_discovery'
-    ")->execute([
-        recipeCookidooSearchId($request),
-        recipeCatalogJsonEncode($payload),
-        (int)$job['id'],
-        RECIPE_COOKIDOO_CONNECTOR,
-    ]);
-    return recipeJobGet($db, (int)$job['id']) ?? $job;
+    return recipeJobEnqueue(
+        $db,
+        'connector_discovery',
+        [
+            'scope' => recipeCookidooSearchId($request),
+            'connector' => RECIPE_COOKIDOO_CONNECTOR,
+            'query' => $request['query'],
+        ],
+        $payload,
+        (string)$job['idempotency_key'],
+        (int)$job['max_attempts'],
+        (int)($job['priority'] ?? 0)
+    );
 }
 
 function recipeCookidooEnqueueDiscoveryJob(
@@ -2724,15 +2945,12 @@ function recipeCookidooEnqueuePeriodicRefreshes(PDO $db, ?int $limit = null): ar
     }
 
     $cutoff = '-' . recipeCookidooMetadataRefreshDays() . ' days';
-    $legacyRefreshEnabled = recipeCookidooEnvBool(
-        'COOKIDOO_LEGACY_REFRESH_ENABLED',
-        false
-    );
     $stmt = $db->prepare("
         SELECT *
         FROM recipe_jobs
         WHERE connector = ?
           AND job_type = 'connector_discovery'
+          AND json_valid(payload_json)
           AND (
               (
                   json_extract(
@@ -2741,7 +2959,7 @@ function recipeCookidooEnqueuePeriodicRefreshes(PDO $db, ?int $limit = null): ar
                   ) = ?
                   AND (
                       (
-                          status = 'done'
+                          status IN ('done', 'skipped')
                           AND updated_at <= datetime('now', ?)
                       )
                       OR (
@@ -2749,17 +2967,6 @@ function recipeCookidooEnqueuePeriodicRefreshes(PDO $db, ?int $limit = null): ar
                           AND updated_at <= datetime('now', '-1 hour')
                       )
                   )
-              )
-              OR (
-                  CAST(? AS INTEGER) = 1
-                  AND COALESCE(
-                      json_extract(
-                          payload_json,
-                          '$." . RECIPE_COOKIDOO_POLICY_FIELD . "'
-                      ),
-                      ''
-                  ) <> ?
-                  AND status IN ('done', 'skipped', 'failed')
               )
           )
           AND (
@@ -2773,26 +2980,12 @@ function recipeCookidooEnqueuePeriodicRefreshes(PDO $db, ?int $limit = null): ar
         RECIPE_COOKIDOO_CONNECTOR,
         RECIPE_COOKIDOO_DETAIL_POLICY_VERSION,
         $cutoff,
-        $legacyRefreshEnabled ? 1 : 0,
-        RECIPE_COOKIDOO_DETAIL_POLICY_VERSION,
     ]);
     $queued = 0;
     $jobs = [];
-    $legacyMigrated = 0;
     foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
         $job = recipeJobDecodeRow($row);
         $request = recipeCookidooNormalizeDiscoveryInput($job['payload']);
-        $legacy = !recipeCookidooDiscoveryJobIsCurrent(
-            $job,
-            $request
-        );
-        if ($legacy) {
-            $job = recipeCookidooMigrateDiscoveryJob(
-                $db,
-                $job,
-                $request
-            );
-        }
         $request['page'] = 0;
         $request['max_pages'] = 1;
         $request['crawl_all'] = false;
@@ -2805,9 +2998,6 @@ function recipeCookidooEnqueuePeriodicRefreshes(PDO $db, ?int $limit = null): ar
             false,
             (int)$job['max_attempts']
         );
-        if ($legacy) {
-            $legacyMigrated++;
-        }
         $db->prepare("
             UPDATE recipe_jobs
             SET updated_at = CURRENT_TIMESTAMP
@@ -2819,8 +3009,8 @@ function recipeCookidooEnqueuePeriodicRefreshes(PDO $db, ?int $limit = null): ar
     return [
         'queued' => $queued,
         'jobs' => $jobs,
-        'legacy_refresh_enabled' => $legacyRefreshEnabled,
-        'legacy_migrated' => $legacyMigrated,
+        'legacy_refresh_enabled' => false,
+        'legacy_migrated' => 0,
         'crawl_refresh_strategy' => 'page_zero_only',
     ];
 }
@@ -3470,7 +3660,8 @@ function recipeCookidooApplyMetadataV2(
     int $recipeId,
     int $originId,
     array $item,
-    ?string $retrievedAt = null
+    ?string $retrievedAt = null,
+    int $requestEpoch = 0
 ): array {
     if ($recipeId <= 0 || $originId <= 0) {
         throw new InvalidArgumentException('metadata refresh identity is invalid');
@@ -3498,53 +3689,21 @@ function recipeCookidooApplyMetadataV2(
         recipeCookidooOntologySourceIdentityHash($sourceIngredients);
     $controllerObservation = null;
 
-    $ownsTransaction = !$db->inTransaction();
+    $ownsTransaction = !databaseTransactionIsActive($db);
     if ($ownsTransaction) {
         $db->beginTransaction();
     }
     try {
         $origin = $db->prepare("
             SELECT o.id, o.recipe_id, o.external_id, o.locale,
-                   c.primary_connector, c.deleted_at,
-                   CASE
-                       WHEN COALESCE(us.hidden, 0) = 0
-                        AND (
-                            (
-                                (
-                                    c.cache_expires_at IS NULL
-                                    OR c.cache_expires_at >= CURRENT_TIMESTAMP
-                                )
-                                AND (
-                                    c.stale_at IS NULL
-                                    OR c.stale_at >= CURRENT_TIMESTAMP
-                                )
-                            )
-                            OR COALESCE(us.favorite, 0) = 1
-                        )
-                       THEN 1 ELSE 0
-                   END AS was_visible,
-                   CASE
-                       WHEN COALESCE(us.hidden, 0) = 0
-                        AND (
-                            (
-                                (
-                                    c.cache_expires_at IS NULL
-                                    OR c.cache_expires_at >= CURRENT_TIMESTAMP
-                                )
-                                AND ? >= CURRENT_TIMESTAMP
-                            )
-                            OR COALESCE(us.favorite, 0) = 1
-                        )
-                       THEN 1 ELSE 0
-                   END AS will_be_visible
+                   o.last_applied_request_epoch,
+                   c.primary_connector, c.deleted_at
             FROM recipe_origins o
             JOIN recipe_catalog c ON c.id = o.recipe_id
-            LEFT JOIN recipe_user_state us ON us.recipe_id = c.id
             WHERE o.id = ? AND o.recipe_id = ? AND o.connector = ?
             LIMIT 1
         ");
         $origin->execute([
-            $staleAt,
             $originId,
             $recipeId,
             RECIPE_COOKIDOO_CONNECTOR,
@@ -3562,8 +3721,15 @@ function recipeCookidooApplyMetadataV2(
                 'metadata refresh origin does not match the stored recipe'
             );
         }
-        $visibilityChanged = (int)$origin['was_visible']
-            !== (int)$origin['will_be_visible'];
+        if (
+            $requestEpoch > 0
+            && (int)$origin['last_applied_request_epoch'] > $requestEpoch
+        ) {
+            throw new RecipeJobFenceException(
+                'cookidoo_origin_request_epoch_superseded'
+            );
+        }
+        $visibilityChanged = false;
         $currentSource = $db->prepare("
             SELECT position, name, normalized_name, source_optional,
                    source_ingredient_ref, source_default_title
@@ -3690,16 +3856,6 @@ function recipeCookidooApplyMetadataV2(
             WHERE recipe_id = ? AND position >= ?
         ")->execute([$recipeId, count($sourceIngredients)]);
 
-        if (function_exists(
-            'ingredientOntologyControllerObserveRecipeSafely'
-        )) {
-            $controllerObservation =
-                ingredientOntologyControllerObserveRecipeSafely(
-                    $db,
-                    $recipeId
-                );
-        }
-
         $versionUpdate = $db->prepare("
             UPDATE recipe_origins SET
                 metadata_version = ?,
@@ -3711,16 +3867,24 @@ function recipeCookidooApplyMetadataV2(
                 metadata_failure_count = 0,
                 metadata_next_probe_at = NULL,
                 metadata_failure_schema_version = NULL,
+                last_applied_request_epoch = MAX(
+                    last_applied_request_epoch,
+                    ?
+                ),
                 last_seen_at = CURRENT_TIMESTAMP
             WHERE id = ? AND recipe_id = ? AND connector = ?
+              AND (? = 0 OR last_applied_request_epoch <= ?)
         ");
         $versionUpdate->execute([
             RECIPE_COOKIDOO_METADATA_VERSION,
             RECIPE_COOKIDOO_METADATA_SCHEMA_VERSION,
             $item['provider_language'],
+            max(0, $requestEpoch),
             $originId,
             $recipeId,
             RECIPE_COOKIDOO_CONNECTOR,
+            max(0, $requestEpoch),
+            max(0, $requestEpoch),
         ]);
         if ($versionUpdate->rowCount() !== 1) {
             throw new RuntimeException('metadata refresh version update failed');
@@ -3733,6 +3897,15 @@ function recipeCookidooApplyMetadataV2(
         );
         $visibilityChanged = $visibilityChanged
             || !empty($languageChange['visibility_changed']);
+        if (function_exists(
+            'ingredientOntologyControllerObserveRecipeSafely'
+        )) {
+            $controllerObservation =
+                ingredientOntologyControllerObserveRecipeSafely(
+                    $db,
+                    $recipeId
+                );
+        }
         if ($visibilityChanged && $ownsTransaction) {
             recipeScoreInvalidateCursors($db);
         }
@@ -3740,7 +3913,7 @@ function recipeCookidooApplyMetadataV2(
             $db->commit();
         }
     } catch (Throwable $e) {
-        if ($ownsTransaction && $db->inTransaction()) {
+        if ($ownsTransaction && databaseTransactionIsActive($db)) {
             $db->rollBack();
         }
         throw $e;
@@ -3796,7 +3969,8 @@ function recipeCookidooRecordMetadataFailure(
     int $originId,
     string $externalId,
     string $locale,
-    string $errorKind
+    string $errorKind,
+    int $requestEpoch = 0
 ): array {
     if (
         $recipeId <= 0
@@ -3819,7 +3993,7 @@ function recipeCookidooRecordMetadataFailure(
     );
     $locale = recipeCookidooNormalizeLocale($locale);
     $current = $db->prepare("
-        SELECT metadata_failure_count
+        SELECT metadata_failure_count, last_applied_request_epoch
         FROM recipe_origins
         WHERE id = ?
           AND recipe_id = ?
@@ -3831,6 +4005,21 @@ function recipeCookidooRecordMetadataFailure(
               OR metadata_version <> ?
               OR metadata_schema_version IS NULL
               OR metadata_schema_version <> ?
+              OR EXISTS (
+                  SELECT 1
+                  FROM recipe_catalog c
+                  WHERE c.id = recipe_origins.recipe_id
+                    AND (
+                        (
+                            c.stale_at IS NOT NULL
+                            AND c.stale_at < CURRENT_TIMESTAMP
+                        )
+                        OR (
+                            c.cache_expires_at IS NOT NULL
+                            AND c.cache_expires_at < CURRENT_TIMESTAMP
+                        )
+                    )
+              )
           )
         LIMIT 1
     ");
@@ -3843,13 +4032,25 @@ function recipeCookidooRecordMetadataFailure(
         RECIPE_COOKIDOO_METADATA_VERSION,
         RECIPE_COOKIDOO_METADATA_SCHEMA_VERSION,
     ]);
-    $existingCount = $current->fetchColumn();
-    if ($existingCount === false) {
+    $currentRow = $current->fetch(PDO::FETCH_ASSOC);
+    if (!$currentRow) {
         throw new RuntimeException(
             'metadata refresh failure record was not applied'
         );
     }
-    $failureCount = min(255, max(0, (int)$existingCount) + 1);
+    if (
+        $requestEpoch > 0
+        && (int)$currentRow['last_applied_request_epoch']
+            > $requestEpoch
+    ) {
+        throw new RecipeJobFenceException(
+            'cookidoo_origin_failure_epoch_superseded'
+        );
+    }
+    $failureCount = min(
+        255,
+        max(0, (int)$currentRow['metadata_failure_count']) + 1
+    );
     $nextProbeAt = recipeCookidooMetadataFailureNextProbeAt(
         $errorKind,
         $failureCount
@@ -3861,17 +4062,37 @@ function recipeCookidooRecordMetadataFailure(
             metadata_failure_at = CURRENT_TIMESTAMP,
             metadata_failure_count = ?,
             metadata_next_probe_at = ?,
-            metadata_failure_schema_version = ?
+            metadata_failure_schema_version = ?,
+            last_applied_request_epoch = MAX(
+                last_applied_request_epoch,
+                ?
+            )
         WHERE id = ?
           AND recipe_id = ?
           AND connector = ?
           AND external_id = ?
           AND lower(locale) = lower(?)
+          AND (? = 0 OR last_applied_request_epoch <= ?)
           AND (
               metadata_version IS NULL
               OR metadata_version <> ?
               OR metadata_schema_version IS NULL
               OR metadata_schema_version <> ?
+              OR EXISTS (
+                  SELECT 1
+                  FROM recipe_catalog c
+                  WHERE c.id = recipe_origins.recipe_id
+                    AND (
+                        (
+                            c.stale_at IS NOT NULL
+                            AND c.stale_at < CURRENT_TIMESTAMP
+                        )
+                        OR (
+                            c.cache_expires_at IS NOT NULL
+                            AND c.cache_expires_at < CURRENT_TIMESTAMP
+                        )
+                    )
+              )
           )
     ");
     $stmt->execute([
@@ -3880,11 +4101,14 @@ function recipeCookidooRecordMetadataFailure(
         $failureCount,
         $nextProbeAt,
         RECIPE_COOKIDOO_METADATA_FAILURE_SCHEMA_VERSION,
+        max(0, $requestEpoch),
         $originId,
         $recipeId,
         RECIPE_COOKIDOO_CONNECTOR,
         $externalId,
         $locale,
+        max(0, $requestEpoch),
+        max(0, $requestEpoch),
         RECIPE_COOKIDOO_METADATA_VERSION,
         RECIPE_COOKIDOO_METADATA_SCHEMA_VERSION,
     ]);
@@ -3932,6 +4156,163 @@ function recipeCookidooBridgeEndpoint(): string {
 
 function recipeCookidooMetadataBridgeEndpoint(): string {
     return recipeCookidooBridgeEndpointFor('/v1/metadata');
+}
+
+function recipeCookidooCapabilitiesBridgeEndpoint(): string {
+    return recipeCookidooBridgeEndpointFor('/v1/capabilities');
+}
+
+function recipeCookidooCurlGet(
+    string $url,
+    string $token,
+    int $timeoutSeconds
+): array {
+    if (!extension_loaded('curl')) {
+        throw new RuntimeException('cURL is required for the Cookidoo bridge');
+    }
+    $responseBody = '';
+    $responseTooLarge = false;
+    $ch = curl_init($url);
+    if ($ch === false) {
+        throw new RuntimeException(
+            'Cookidoo capability request could not be initialized'
+        );
+    }
+    $options = [
+        CURLOPT_HTTPGET => true,
+        CURLOPT_HTTPHEADER => [
+            'Accept: application/json',
+            'Authorization: Bearer ' . $token,
+        ],
+        CURLOPT_CONNECTTIMEOUT_MS => min(5000, $timeoutSeconds * 1000),
+        CURLOPT_TIMEOUT_MS => $timeoutSeconds * 1000,
+        CURLOPT_FOLLOWLOCATION => false,
+        CURLOPT_HEADER => false,
+        CURLOPT_USERAGENT => 'EverShelf-Cookidoo-Connector/1',
+        CURLOPT_WRITEFUNCTION => static function (
+            $handle,
+            string $chunk
+        ) use (&$responseBody, &$responseTooLarge): int {
+            if (
+                strlen($responseBody) + strlen($chunk)
+                > RECIPE_COOKIDOO_MAX_RESPONSE_BYTES
+            ) {
+                $responseTooLarge = true;
+                return 0;
+            }
+            $responseBody .= $chunk;
+            return strlen($chunk);
+        },
+    ];
+    if (defined('CURLOPT_PROTOCOLS')) {
+        $options[CURLOPT_PROTOCOLS] = CURLPROTO_HTTP | CURLPROTO_HTTPS;
+    }
+    curl_setopt_array($ch, $options);
+    try {
+        $ok = curl_exec($ch);
+        $status = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $errno = curl_errno($ch);
+    } finally {
+        curl_close($ch);
+    }
+    if ($responseTooLarge) {
+        throw new RuntimeException(
+            'Cookidoo capability response is too large'
+        );
+    }
+    if ($ok === false || $errno !== 0) {
+        throw new RuntimeException(
+            'Cookidoo capability request failed (cURL '
+                . $errno . ')'
+        );
+    }
+    return ['status' => $status, 'body' => $responseBody];
+}
+
+function recipeCookidooBridgeCapabilities(): array {
+    $token = trim(recipeCookidooConfigValue(
+        'COOKIDOO_BRIDGE_TOKEN',
+        ''
+    ));
+    if ($token === '') {
+        throw new RuntimeException(
+            'Cookidoo bridge token is not configured'
+        );
+    }
+    $transport = null;
+    if (
+        defined('RECIPE_BACKEND_TEST_MODE')
+        && RECIPE_BACKEND_TEST_MODE
+    ) {
+        $candidate = $GLOBALS[
+            'RECIPE_COOKIDOO_CAPABILITIES_TRANSPORT'
+        ] ?? null;
+        if (is_callable($candidate)) {
+            $transport = $candidate;
+        } elseif (!array_key_exists(
+            'RECIPE_COOKIDOO_CAPABILITIES_TRANSPORT',
+            $GLOBALS
+        )) {
+            return [
+                'detail_hydration' => true,
+                'metadata_hydration' => true,
+                'ingredient_aware_discovery' => true,
+                'policy_version' =>
+                    RECIPE_COOKIDOO_DETAIL_POLICY_VERSION,
+            ];
+        }
+    }
+    $response = $transport !== null
+        ? $transport(
+            recipeCookidooCapabilitiesBridgeEndpoint(),
+            $token,
+            recipeCookidooBridgeTimeoutSeconds()
+        )
+        : recipeCookidooCurlGet(
+            recipeCookidooCapabilitiesBridgeEndpoint(),
+            $token,
+            recipeCookidooBridgeTimeoutSeconds()
+        );
+    $status = (int)($response['status'] ?? 0);
+    if ($status !== 200) {
+        throw new RuntimeException(
+            'Cookidoo capability preflight returned HTTP ' . $status
+        );
+    }
+    $decoded = json_decode(
+        (string)($response['body'] ?? ''),
+        true,
+        32,
+        JSON_THROW_ON_ERROR
+    );
+    if (!is_array($decoded)) {
+        throw new RuntimeException(
+            'Cookidoo capability response is invalid'
+        );
+    }
+    return $decoded;
+}
+
+function recipeCookidooAssertBridgeCapabilityPolicy(): array {
+    $capabilities = recipeCookidooBridgeCapabilities();
+    if (
+        (string)($capabilities['policy_version'] ?? '')
+            !== RECIPE_COOKIDOO_DETAIL_POLICY_VERSION
+        || empty($capabilities['detail_hydration'])
+        || empty($capabilities['metadata_hydration'])
+        || empty($capabilities['ingredient_aware_discovery'])
+    ) {
+        throw new RecipeCookidooCircuitBreakException(
+            'cookidoo_bridge_policy_mismatch'
+        );
+    }
+    return [
+        'policy_version' =>
+            RECIPE_COOKIDOO_DETAIL_POLICY_VERSION,
+        'detail_hydration' => true,
+        'metadata_hydration' => true,
+        'ingredient_aware_discovery' => true,
+    ];
 }
 
 function recipeCookidooCurlPost(
@@ -4088,10 +4469,15 @@ function recipeCookidooBridgeJsonPost(string $url, array $payload): mixed {
     return recipeCookidooBridgeJsonPostObserved($url, $payload)['payload'];
 }
 
-function recipeCookidooBridgeSearch(array $request): array {
+function recipeCookidooBridgeSearch(PDO $db, array $request): array {
     if (!recipeCookidooDetailHydrationPolicyAllows()) {
         throw new RuntimeException(RECIPE_COOKIDOO_DETAIL_POLICY_REASON);
     }
+    recipeJobAssertProviderIoSafe($db, [
+        'id' => 0,
+        'job_type' => 'cookidoo_bridge_search',
+    ]);
+    recipeCookidooAssertBridgeCapabilityPolicy();
     $request = recipeCookidooNormalizeDiscoveryInput($request);
     $bridgePayload = [
         'query' => $request['query'],
@@ -4117,10 +4503,18 @@ function recipeCookidooBridgeSearch(array $request): array {
     );
 }
 
-function recipeCookidooBridgeMetadataBatch(array $request): array {
+function recipeCookidooBridgeMetadataBatch(
+    PDO $db,
+    array $request
+): array {
     if (!recipeCookidooDetailHydrationPolicyAllows()) {
         throw new RuntimeException(RECIPE_COOKIDOO_DETAIL_POLICY_REASON);
     }
+    recipeJobAssertProviderIoSafe($db, [
+        'id' => 0,
+        'job_type' => 'cookidoo_bridge_metadata',
+    ]);
+    recipeCookidooAssertBridgeCapabilityPolicy();
     $request = recipeCookidooNormalizeMetadataRefreshInput($request);
     $payload = [
         'locale' => $request['locale'],
@@ -4244,7 +4638,7 @@ function recipeCookidooEnqueueNextCrawlPage(
 }
 
 function recipeCookidooDiscoveryCatalogLock(PDO $db): mixed {
-    if ($db->inTransaction()) {
+    if (databaseTransactionIsActive($db)) {
         throw new RuntimeException(
             'Cookidoo discovery must acquire the catalog lock before a write transaction'
         );
@@ -4264,11 +4658,16 @@ function recipeCookidooDispatchDiscovery(PDO $db, array $job, array $payload): a
         ];
     }
     $request = recipeCookidooNormalizeDiscoveryInput($payload);
-    $job = recipeCookidooMigrateDiscoveryJob(
-        $db,
-        $job,
-        $request
-    );
+    if (!recipeCookidooDiscoveryJobIsCurrent($job, $request)) {
+        return [
+            'status' => 'skipped',
+            'result' => [
+                'reason' => 'cookidoo_policy_job_mismatch',
+                'policy_version' =>
+                    RECIPE_COOKIDOO_DETAIL_POLICY_VERSION,
+            ],
+        ];
+    }
     $refreshChain = !empty($payload[RECIPE_COOKIDOO_CRAWL_REFRESH_FIELD])
         && !empty($request['crawl_all']);
     $bridgeRequest = $request;
@@ -4295,14 +4694,15 @@ function recipeCookidooDispatchDiscovery(PDO $db, array $job, array $payload): a
             array_map('strval', $cachedIds)
         )));
     }
-    $bridgeResult = recipeCookidooBridgeSearch($bridgeRequest);
+    $bridgeResult = recipeCookidooBridgeSearch($db, $bridgeRequest);
     $recipes = $bridgeResult['recipes'];
     $retrievedAt = gmdate('Y-m-d H:i:s');
     $importedIds = [];
     $updatedIds = [];
     $cursorInvalidationRequired = false;
     $existing = $db->prepare("
-        SELECT o.id AS origin_id, o.recipe_id, c.deleted_at
+        SELECT o.id AS origin_id, o.recipe_id, c.deleted_at,
+               o.last_applied_request_epoch
         FROM recipe_origins o
         JOIN recipe_catalog c ON c.id = o.recipe_id
         WHERE o.connector = ? AND o.external_id = ?
@@ -4310,11 +4710,19 @@ function recipeCookidooDispatchDiscovery(PDO $db, array $job, array $payload): a
     ");
     $saveLock = recipeCookidooDiscoveryCatalogLock($db);
     try {
-        $db->beginTransaction();
+        dbBeginImmediateWithRetry($db);
+        recipeJobAssertClaimOwned($db, $job);
         foreach ($recipes as $item) {
             $existing->execute([RECIPE_COOKIDOO_CONNECTOR, $item['external_id']]);
             $existingOrigin = $existing->fetch(PDO::FETCH_ASSOC) ?: null;
             if ($existingOrigin !== null && $existingOrigin['deleted_at'] !== null) {
+                continue;
+            }
+            if (
+                $existingOrigin !== null
+                && (int)$existingOrigin['last_applied_request_epoch']
+                    > (int)$job['request_epoch']
+            ) {
                 continue;
             }
             $existingRecipeId = (int)($existingOrigin['recipe_id'] ?? 0);
@@ -4324,7 +4732,8 @@ function recipeCookidooDispatchDiscovery(PDO $db, array $job, array $payload): a
                     $existingRecipeId,
                     (int)$existingOrigin['origin_id'],
                     $item,
-                    $retrievedAt
+                    $retrievedAt,
+                    (int)$job['request_epoch']
                 );
                 $cursorInvalidationRequired = $cursorInvalidationRequired
                     || !empty($applied['visibility_changed']);
@@ -4361,30 +4770,35 @@ function recipeCookidooDispatchDiscovery(PDO $db, array $job, array $payload): a
                     $savedId,
                     $item['_language_assessment']
                 );
+                $db->prepare("
+                    UPDATE recipe_origins
+                    SET last_applied_request_epoch = MAX(
+                            last_applied_request_epoch,
+                            ?
+                        ),
+                        last_seen_at = CURRENT_TIMESTAMP
+                    WHERE recipe_id = ?
+                      AND connector = ?
+                      AND last_applied_request_epoch <= ?
+                ")->execute([
+                    (int)$job['request_epoch'],
+                    $savedId,
+                    RECIPE_COOKIDOO_CONNECTOR,
+                    (int)$job['request_epoch'],
+                ]);
                 $importedIds[] = $savedId;
             }
         }
         if ($cursorInvalidationRequired) {
             recipeScoreInvalidateCursors($db);
         }
-        $db->commit();
-    } catch (Throwable $e) {
-        if ($db->inTransaction()) {
-            $db->rollBack();
-        }
-        throw $e;
-    } finally {
-        recipeCatalogSaveUnlock($saveLock);
-    }
-    $crawl = recipeCookidooEnqueueNextCrawlPage(
-        $db,
-        $request,
-        $bridgeResult,
-        $refreshChain
-    );
-    return [
-        'status' => 'done',
-        'result' => [
+        $crawl = recipeCookidooEnqueueNextCrawlPage(
+            $db,
+            $request,
+            $bridgeResult,
+            $refreshChain
+        );
+        $result = [
             'search_id' => recipeCookidooSearchId($request),
             'imported_ids' => array_values(array_unique($importedIds)),
             'updated_ids' => array_values(array_unique($updatedIds)),
@@ -4393,11 +4807,31 @@ function recipeCookidooDispatchDiscovery(PDO $db, array $job, array $payload): a
             'pages_scanned' => (int)$bridgeResult['pages_scanned'],
             'last_page' => (int)$bridgeResult['last_page'],
             'next_page' => (int)$bridgeResult['next_page'],
-            'last_page_had_raw_hits' => (bool)$bridgeResult['last_page_had_raw_hits'],
+            'last_page_had_raw_hits' =>
+                (bool)$bridgeResult['last_page_had_raw_hits'],
             'language_rejected_count' =>
                 (int)($bridgeResult['language_rejected_count'] ?? 0),
             'crawl_refresh' => $refreshChain,
-        ] + $crawl,
+        ] + $crawl;
+        recipeJobCompleteClaimInTransaction(
+            $db,
+            $job,
+            'done',
+            $result
+        );
+        $db->exec('COMMIT');
+    } catch (Throwable $e) {
+        if (databaseTransactionIsActive($db)) {
+            $db->exec('ROLLBACK');
+        }
+        throw $e;
+    } finally {
+        recipeCatalogSaveUnlock($saveLock);
+    }
+    return [
+        'status' => 'done',
+        'job_completed' => true,
+        'result' => $result,
     ];
 }
 

@@ -6,6 +6,13 @@ define('CRON_MODE', true);
 define('RECIPE_BACKEND_TEST_MODE', true);
 require_once __DIR__ . '/../api/bootstrap.php';
 
+$GLOBALS[
+    'INGREDIENT_ONTOLOGY_EXACT_SELF_IDENTITY_ENABLED_OVERRIDE'
+] = false;
+$GLOBALS[
+    'INGREDIENT_ONTOLOGY_IDENTITY_READINESS_V2_ENABLED_OVERRIDE'
+] = false;
+
 $assertions = 0;
 function ontologyV3TestAssert(bool $condition, string $message): void {
     global $assertions;
@@ -88,6 +95,69 @@ function ontologyV3TestCookidooMetadataItem(
         'locale' => 'en-GB',
     ];
 }
+
+$providerTerm = [
+    'connector' => 'cookidoo',
+    'metadata_schema_version' => 'ingredient-topology-v1',
+    'namespace' => 'com.vorwerk.ingredients.Ingredient-rpf',
+    'provider_ref' =>
+        'com.vorwerk.ingredients.Ingredient-rpf-267',
+    'title_hash' => hash('sha256', 'pumpkin seeds'),
+    'consistency_state' => 'variant',
+    'mapping_status' => 'accepted',
+    'review_state' => 'accepted',
+    'entity_slug' => 'pumpkin-seed',
+    'attributes_json' => '{}',
+];
+$staleProviderReview = [
+    'term_fingerprint' => hash(
+        'sha256',
+        'stale-provider-review'
+    ),
+    'title_hash' => hash('sha256', 'pumpkin seeds'),
+    'disposition_code' => 'D1',
+    'entity_slug' => 'pumpkin-seed',
+    'attributes_json' => '{}',
+    'rationale' => 'Previously reviewed provider term',
+    'reviewer' => 'test-reviewer',
+];
+$dynamicProviderReview =
+    ingredientOntologyV3ResolveProviderTermReview(
+        $providerTerm,
+        $staleProviderReview,
+        true
+    );
+ontologyV3TestAssert(
+    !empty($dynamicProviderReview['dynamic_unreviewed'])
+    && !empty($dynamicProviderReview['dynamic_stale'])
+    && (string)$dynamicProviderReview['review'][
+        'disposition_code'
+    ] === 'D8'
+    && hash_equals(
+        (string)$dynamicProviderReview['fingerprint'],
+        (string)$dynamicProviderReview['review'][
+            'term_fingerprint'
+        ]
+    ),
+    'Dynamic ontology builds must quarantine stale provider reviews'
+);
+$staticStaleRejected = false;
+try {
+    ingredientOntologyV3ResolveProviderTermReview(
+        $providerTerm,
+        $staleProviderReview,
+        false
+    );
+} catch (RuntimeException $error) {
+    $staticStaleRejected = str_contains(
+        $error->getMessage(),
+        'provider term review is stale'
+    );
+}
+ontologyV3TestAssert(
+    $staticStaleRejected,
+    'Static ontology builds must still reject stale provider reviews'
+);
 
 $dbPath = __DIR__ . '/../data/.ontology-v3-test-' . getmypid() . '.sqlite';
 $legacyCliDbPath = __DIR__ . '/../data/.ontology-v3-legacy-cli-'
@@ -323,6 +393,7 @@ try {
             'id' => $rowId,
             'inventory_revision' => 10 + $rowId,
             'catalog_revision' => 20 + $rowId,
+            'covered_catalog_revision' => 20 + $rowId,
             'inventory_fingerprint' => 'inventory-' . $rowId,
             'score_date' => '2026-08-11',
             'catalog_max_id' => 30 + $rowId,
@@ -330,7 +401,8 @@ try {
             'recipe_count' => 40 + $rowId,
             'ontology_version_id',
             'parent_score_revision_id',
-            'requirement_revision_id' => null,
+            'requirement_revision_id',
+            'corpus_annex_revision_id' => null,
             'scoring_model' => 'legacy-v2',
             'scoring_config_hash',
             'ontology_schema_hash',
@@ -353,9 +425,15 @@ try {
             'match_rows_hash',
             'materialization_hash' => $hashValue($name . '-' . $rowId),
             'ontology_source_revision' => 50 + $rowId,
+            'covered_ontology_source_revision' => 50 + $rowId,
+            'revision_kind' => 'baseline',
             'identity_extension_revision' => 0,
             'identity_extension_hash' =>
                 ingredientOntologyV3IdentityExtensionZeroHash(),
+            'covered_identity_extension_revision' => 0,
+            'covered_identity_extension_hash' =>
+                ingredientOntologyV3IdentityExtensionZeroHash(),
+            'corpus_annex_hash' => null,
             'catalog_fingerprint' => 'catalog-' . $rowId,
             'requirement_model' => null,
             'parity_baseline_score_revision_id' =>
@@ -517,10 +595,6 @@ try {
             $cronFile,
             'scripts/rebuild-recipe-scores.php'
         )
-        && !preg_match(
-            '/flock[^\n]*process-ontology-activation\.php/',
-            $cronFile
-        )
         && is_string($activationScript)
         && str_contains(
             $activationScript,
@@ -542,7 +616,7 @@ try {
             $activationScript,
             "'reason' => 'ontology_activation_backoff'"
         ),
-        'Cron must run copied activation outside the shared lock while the '
+        'Docker cron must retain default copied-recovery fallback while the '
             . 'worker reports bounded live lock and backoff outcomes'
     );
 
@@ -4948,7 +5022,10 @@ try {
     $db->prepare("
         UPDATE recipe_score_revisions
         SET ontology_source_revision = ?,
+            covered_ontology_source_revision = ?,
             ontology_source_hash = ?,
+            corpus_annex_revision_id = NULL,
+            corpus_annex_hash = NULL,
             validation_report_json = json_set(
                 validation_report_json,
                 '$.ontology_source_revision', ?,
@@ -4956,6 +5033,7 @@ try {
             )
         WHERE id = ?
     ")->execute([
+        $activationSourceState['ontology_source_revision'],
         $activationSourceState['ontology_source_revision'],
         $activationSourceHash,
         $activationSourceState['ontology_source_revision'],
@@ -4967,6 +5045,34 @@ try {
         SET ontology_source_hash = ?
         WHERE id = 1
     ")->execute([$activationSourceHash]);
+    $refencedShadowScore = recipeScoreRevision($db, $shadowRevisionId);
+    $freshShadowRoot =
+        ingredientOntologyV3CorpusAnnexCreateCheckpointRoot(
+            $db,
+            $refencedShadowScore
+        );
+    if ($freshShadowRoot === null) {
+        throw new RuntimeException(
+            'Could not reseal the activation fixture corpus annex root'
+        );
+    }
+    ingredientOntologyV3SetPublicationGuard($db, true);
+    $db->prepare("
+        UPDATE ingredient_ontology_corpus_annex_revisions
+        SET status = 'ready', ready_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+    ")->execute([(int)$freshShadowRoot['id']]);
+    ingredientOntologyV3SetPublicationGuard($db, false);
+    $db->prepare("
+        UPDATE recipe_score_revisions
+        SET corpus_annex_revision_id = ?,
+            corpus_annex_hash = ?
+        WHERE id = ?
+    ")->execute([
+        (int)$freshShadowRoot['id'],
+        (string)$freshShadowRoot['revision_hash'],
+        $shadowRevisionId,
+    ]);
     ingredientOntologyV3SetReadyMutationGuard($db, false);
     ingredientOntologyV3SetReadyMutationGuard($db, true);
     $db->beginTransaction();
@@ -5070,11 +5176,11 @@ try {
                 WHERE id = 1
             ");
         };
-    $raceRejected = false;
-    try {
-        ingredientOntologyV3Activate($db, $shadowRevisionId);
-    } catch (RuntimeException $e) {
-        $raceRejected = true;
+        $raceRejected = false;
+        try {
+            ingredientOntologyV3Activate($db, $shadowRevisionId);
+        } catch (RuntimeException $e) {
+            $raceRejected = true;
     }
     unset($GLOBALS['INGREDIENT_ONTOLOGY_V3_BEFORE_ACTIVATION_RESERVATION']);
     ontologyV3TestAssert(
@@ -5323,7 +5429,11 @@ try {
     $db->prepare("
         UPDATE recipe_score_revisions
         SET ontology_source_revision = ?,
+            covered_ontology_source_revision = ?,
             ontology_source_hash = ?,
+            ontology_source_lineage_hash = '',
+            corpus_annex_revision_id = NULL,
+            corpus_annex_hash = NULL,
             validation_report_json = json_set(
                 validation_report_json,
                 '$.ontology_source_revision', ?,
@@ -5332,6 +5442,7 @@ try {
         WHERE id = ?
     ")->execute([
         $raceSourceState['ontology_source_revision'],
+        $raceSourceState['ontology_source_revision'],
         $raceSourceHash,
         $raceSourceState['ontology_source_revision'],
         $raceSourceHash,
@@ -5339,9 +5450,37 @@ try {
     ]);
     $db->prepare("
         UPDATE recipe_score_state
-        SET ontology_source_hash = ?
+            SET ontology_source_hash = ?,
+                ontology_source_lineage_hash = ''
         WHERE id = 1
     ")->execute([$raceSourceHash]);
+    $raceScore = recipeScoreRevision($db, $shadowRevisionId);
+    $raceRoot = ingredientOntologyV3CorpusAnnexCreateCheckpointRoot(
+        $db,
+        $raceScore
+    );
+    if ($raceRoot === null) {
+        throw new RuntimeException(
+            'Could not reseal the scheduled-race corpus annex root'
+        );
+    }
+    ingredientOntologyV3SetPublicationGuard($db, true);
+    $db->prepare("
+        UPDATE ingredient_ontology_corpus_annex_revisions
+        SET status = 'ready', ready_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+    ")->execute([(int)$raceRoot['id']]);
+    ingredientOntologyV3SetPublicationGuard($db, false);
+    $db->prepare("
+        UPDATE recipe_score_revisions
+        SET corpus_annex_revision_id = ?,
+            corpus_annex_hash = ?
+        WHERE id = ?
+    ")->execute([
+        (int)$raceRoot['id'],
+        (string)$raceRoot['revision_hash'],
+        $shadowRevisionId,
+    ]);
     ingredientOntologyV3SetReadyMutationGuard($db, false);
     $legacyRaceState = recipeScoreState($db);
     $legacyRevisionCount = ontologyV3TestCount(
@@ -5368,7 +5507,11 @@ try {
     }
     ontologyV3TestAssert(
         !$legacyModelRace['rebuilt']
-        && $legacyModelRace['reason'] === 'fresh'
+        && in_array(
+            (string)$legacyModelRace['reason'],
+            ['fresh', 'incremental_projection_pending'],
+            true
+        )
         && recipeScoreState($db)['active_score_revision_id']
             === $shadowRevisionId
         && recipeScoreState($db)['cursor_revision']
@@ -5715,11 +5858,52 @@ try {
         'Provider-declared non-optional ingredients must remain required'
     );
 
-    $db->prepare("
-        UPDATE recipe_score_state
-        SET active_score_revision_id = ?
-        WHERE id = 1
-    ")->execute([$shadowRevisionId]);
+    $db->exec('BEGIN IMMEDIATE');
+    try {
+        $db->prepare("
+            UPDATE recipe_score_state
+            SET active_score_revision_id = ?
+            WHERE id = 1
+        ")->execute([$shadowRevisionId]);
+        recipeScoreBuildEffectiveProjection(
+            $db,
+            $shadowRevisionId
+        );
+        $shadowProjection =
+            ingredientOntologyV3CorpusAnnexForScore(
+                $db,
+                recipeScoreRevision($db, $shadowRevisionId)
+            );
+        if ($shadowProjection === null) {
+            throw new RuntimeException(
+                'scheduled shadow projection pin is unavailable'
+            );
+        }
+        ingredientOntologyV3CorpusAnnexEnsureProjection(
+            $db,
+            $shadowProjection
+        );
+        $db->exec('COMMIT');
+    } catch (Throwable $error) {
+        $db->exec('ROLLBACK');
+        throw $error;
+    }
+    if (!ingredientOntologyV3CorpusAnnexProjectionReady(
+        $db,
+        $shadowProjection
+    )) {
+        throw new RuntimeException(
+            'scheduled shadow projection repair failed: '
+                . ingredientOntologyV3Json([
+                    'projection' => $shadowProjection,
+                    'state' => $db->query("
+                        SELECT *
+                        FROM ingredient_ontology_corpus_annex_projection_state
+                        WHERE ontology_version_id = {$versionId}
+                    ")->fetch(PDO::FETCH_ASSOC),
+                ])
+        );
+    }
     $heldScoreLock = recipeScoreAcquireLock($db);
     $lockedScheduled = ingredientOntologyV3ScheduledRebuild(
         $db,
@@ -5806,7 +5990,22 @@ try {
             $db,
             'SELECT COUNT(*) FROM recipe_score_revisions'
         ) === $scheduledRaceRevisionCount,
-        'Scheduled shadows must stay bound to the selected parent and ontology'
+        'Scheduled shadows must stay bound to the selected parent and '
+            . 'ontology: '
+            . ingredientOntologyV3Json([
+                'selected_parent' => $selectedRaceParentId,
+                'expected_parent' => $shadowRevisionId,
+                'result' => $scheduledParentRace,
+                'active' => $scheduledRaceActive,
+                'expected_active' => $concurrentRevisionId,
+                'state_before' => $scheduledRaceState,
+                'state_after' => recipeScoreState($db),
+                'count_before' => $scheduledRaceRevisionCount,
+                'count_after' => ontologyV3TestCount(
+                    $db,
+                    'SELECT COUNT(*) FROM recipe_score_revisions'
+                ),
+            ])
     );
     $scheduledRaceRollback = ingredientOntologyV3Rollback(
         $db,
@@ -5963,18 +6162,17 @@ try {
         && recipeScoreRevisionStatus(
             $db,
             recipeScoreRevision($db, $scheduledActiveId)
-        ) === 'stale'
+        ) === 'partial'
         && !$providerOptionalScheduled['rebuilt']
-        && $providerOptionalScheduled['reason'] === 'ontology_stale'
-        && in_array(
-            'source owner fingerprints changed after ontology build',
-            $providerOptionalScheduled['errors'] ?? [],
-            true
+        && $providerOptionalScheduled['reason']
+            === 'incremental_projection_pending'
+        && !empty(
+            $providerOptionalScheduled['projection']['handled']
         )
-        && in_array(
-            'ontology corpus hash changed',
-            $providerOptionalScheduled['errors'] ?? [],
-            true
+        && empty(
+            $providerOptionalScheduled[
+                'projection'
+            ]['requires_full_seal']
         )
         && recipeScoreState($db)['active_score_revision_id']
             === $scheduledActiveId
@@ -5983,7 +6181,17 @@ try {
             'SELECT COUNT(*) FROM recipe_score_revisions'
         ) === $providerRevisionCount,
         'Provider optionality changes must preserve score/catalog state while '
-            . 'hash validation fails closed'
+            . 'requesting selective projection: '
+            . ingredientOntologyV3Json([
+                'refresh' => $providerOptionalRefresh,
+                'before' => $providerOptionalStateBefore,
+                'after' => $providerOptionalStateAfter,
+                'scheduled' => $providerOptionalScheduled,
+                'status' => recipeScoreRevisionStatus(
+                    $db,
+                    recipeScoreRevision($db, $scheduledActiveId)
+                ),
+            ])
     );
     $providerTextStateBefore = recipeScoreState($db);
     $providerTextRefresh = recipeCookidooApplyMetadataV2(
@@ -6017,15 +6225,20 @@ try {
             > $providerTextStateBefore['ontology_source_revision']
         && $providerTextStateAfter['ontology_source_hash'] === ''
         && !$providerTextScheduled['rebuilt']
-        && $providerTextScheduled['reason'] === 'ontology_stale'
+        && $providerTextScheduled['reason']
+            === 'incremental_projection_pending'
+        && !empty($providerTextScheduled['projection']['handled'])
+        && empty(
+            $providerTextScheduled['projection']['requires_full_seal']
+        )
         && recipeScoreState($db)['active_score_revision_id']
             === $scheduledActiveId
         && ontologyV3TestCount(
             $db,
             'SELECT COUNT(*) FROM recipe_score_revisions'
         ) === $providerRevisionCount,
-        'Provider source-text changes must fail closed without dirtying score '
-            . 'state or creating revision storms'
+        'Provider source-text changes must request selective projection '
+            . 'without dirtying catalog state or creating revision storms'
     );
     $providerRestored = recipeCookidooApplyMetadataV2(
         $db,
@@ -6049,9 +6262,16 @@ try {
         !empty($providerRestored['ontology_source_changed'])
         && empty($providerRestored['score_catalog_dirty_required'])
         && !$providerRestoredScheduled['rebuilt']
-        && $providerRestoredScheduled['reason'] === 'ontology_stale'
+        && $providerRestoredScheduled['reason']
+            === 'incremental_projection_pending'
+        && !empty($providerRestoredScheduled['projection']['handled'])
+        && empty(
+            $providerRestoredScheduled[
+                'projection'
+            ]['requires_full_seal']
+        )
         && $providerRestoredActiveId === $scheduledActiveId,
-        'Restoring provider identity must retain monotonic source staleness '
+        'Restoring provider identity must retain selective source work '
             . 'without a hidden rebuild or pointer change'
     );
     $scheduledActiveId = $providerRestoredActiveId;
@@ -6061,7 +6281,11 @@ try {
     $db->prepare("
         UPDATE recipe_score_revisions
         SET ontology_source_revision = ?,
+            covered_ontology_source_revision = ?,
             ontology_source_hash = ?,
+            ontology_source_lineage_hash = '',
+            corpus_annex_revision_id = NULL,
+            corpus_annex_hash = NULL,
             validation_report_json = json_set(
                 validation_report_json,
                 '$.ontology_source_revision', ?,
@@ -6070,6 +6294,7 @@ try {
         WHERE id = ?
     ")->execute([
         $gateSourceState['ontology_source_revision'],
+        $gateSourceState['ontology_source_revision'],
         $gateSourceHash,
         $gateSourceState['ontology_source_revision'],
         $gateSourceHash,
@@ -6077,9 +6302,45 @@ try {
     ]);
     $db->prepare("
         UPDATE recipe_score_state
-        SET ontology_source_hash = ?
+            SET ontology_source_hash = ?,
+                ontology_source_lineage_hash = ''
         WHERE id = 1
     ")->execute([$gateSourceHash]);
+    $gateScore = recipeScoreRevision($db, $scheduledActiveId);
+    $gateRoot = ingredientOntologyV3CorpusAnnexCreateCheckpointRoot(
+        $db,
+        $gateScore
+    );
+    if ($gateRoot === null) {
+        throw new RuntimeException(
+            'Could not reseal the quantity-gate corpus annex root'
+        );
+    }
+    ingredientOntologyV3SetPublicationGuard($db, true);
+    $db->prepare("
+        UPDATE ingredient_ontology_corpus_annex_revisions
+        SET status = 'ready', ready_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+    ")->execute([(int)$gateRoot['id']]);
+    ingredientOntologyV3SetPublicationGuard($db, false);
+    $gateRoot = ingredientOntologyV3CorpusAnnexRevision(
+        $db,
+        (int)$gateRoot['id']
+    );
+    ingredientOntologyV3CorpusAnnexRebuildEffectiveProjection(
+        $db,
+        $gateRoot
+    );
+    $db->prepare("
+        UPDATE recipe_score_revisions
+        SET corpus_annex_revision_id = ?,
+            corpus_annex_hash = ?
+        WHERE id = ?
+    ")->execute([
+        (int)$gateRoot['id'],
+        (string)$gateRoot['revision_hash'],
+        $scheduledActiveId,
+    ]);
     ingredientOntologyV3SetReadyMutationGuard($db, false);
     $GLOBALS['INGREDIENT_ONTOLOGY_V3_QUANTITY_GATE'] = true;
     $gateOnScheduled = ingredientOntologyV3ScheduledRebuild(
@@ -6100,7 +6361,14 @@ try {
         && ingredientOntologyV3ScoringConfigAudit(
             $gateOnRevision
         )['current']['quantity_sufficiency_gate'] === true,
-        'Enabling the quantity gate must rebuild instead of reusing incompatible scores'
+        'Enabling the quantity gate must rebuild instead of reusing '
+            . 'incompatible scores: '
+            . ingredientOntologyV3Json([
+                'result' => $gateOnScheduled,
+                'active_id' => $gateOnActiveId,
+                'previous_id' => $scheduledActiveId,
+                'revision' => $gateOnRevision,
+            ])
     );
     unset($GLOBALS['INGREDIENT_ONTOLOGY_V3_QUANTITY_GATE']);
     $gateOffScheduled = ingredientOntologyV3ScheduledRebuild(
@@ -6874,6 +7142,169 @@ try {
             [$dynamicVersionId]
         ) === 1,
         'Dynamic reviewed candidates must seal the live corpus and current Eggplant manifest'
+    );
+    ontologyV3TestAssert(
+        ontologyV3TestCount(
+            $db,
+            "SELECT COUNT(*)
+             FROM ingredient_ontology_entities child
+             JOIN ingredient_ontology_relations relation
+               ON relation.from_entity_id = child.id
+              AND relation.ontology_version_id =
+                    child.ontology_version_id
+              AND relation.relation = 'is_a'
+              AND relation.is_primary = 1
+              AND relation.review_state = 'accepted'
+             JOIN ingredient_ontology_entities parent
+               ON parent.id = relation.to_entity_id
+             WHERE child.ontology_version_id = ?
+               AND child.slug = 'pecorino'
+               AND child.identity_role = 'identity_leaf'
+               AND child.provenance = 'full-resolution-v3'
+               AND parent.slug = 'cheese'",
+            [$dynamicVersionId]
+        ) === 1
+        && ontologyV3TestCount(
+            $db,
+            "SELECT COUNT(*)
+             FROM ingredient_ontology_labels label
+             JOIN ingredient_ontology_entities entity
+               ON entity.id = label.entity_id
+             WHERE label.ontology_version_id = ?
+               AND entity.slug = 'pecorino'
+               AND label.normalized_label IN (
+                   'pecorino', 'pecorino cheese'
+               )
+               AND label.language = 'en'
+               AND label.kind = 'exact_alias'
+               AND label.review_state = 'accepted'",
+            [$dynamicVersionId]
+        ) === 2
+        && ontologyV3TestCount(
+            $db,
+            "SELECT COUNT(*)
+             FROM ingredient_ontology_entities child
+             JOIN ingredient_ontology_relations parent_relation
+               ON parent_relation.from_entity_id = child.id
+              AND parent_relation.ontology_version_id =
+                    child.ontology_version_id
+              AND parent_relation.relation = 'is_a'
+              AND parent_relation.is_primary = 1
+              AND parent_relation.review_state = 'accepted'
+             JOIN ingredient_ontology_entities parent
+               ON parent.id = parent_relation.to_entity_id
+             JOIN ingredient_ontology_relations variant
+               ON variant.ontology_version_id =
+                    child.ontology_version_id
+              AND variant.from_entity_id = child.id
+              AND variant.to_entity_id = parent.id
+              AND variant.relation = 'variant_of'
+              AND variant.is_primary = 0
+              AND variant.satisfies_required = 0
+              AND variant.review_state = 'accepted'
+             WHERE child.ontology_version_id = ?
+               AND child.slug = 'pecorino-romano'
+               AND child.identity_role = 'identity_leaf'
+               AND parent.slug = 'pecorino'",
+            [$dynamicVersionId]
+        ) === 1,
+        'Dynamic reviewed candidates must seal generic Pecorino and '
+            . 'the non-satisfying Pecorino Romano variant'
+    );
+    $dynamicEntities = $db->prepare("
+        SELECT slug, id
+        FROM ingredient_ontology_entities
+        WHERE ontology_version_id = ?
+          AND slug IN ('cheese', 'pecorino', 'pecorino-romano')
+    ");
+    $dynamicEntities->execute([$dynamicVersionId]);
+    $dynamicEntityIds = [];
+    foreach ($dynamicEntities->fetchAll(PDO::FETCH_ASSOC) as $row) {
+        $dynamicEntityIds[(string)$row['slug']] = (int)$row['id'];
+    }
+    $dynamicVersionRow = ingredientOntologyV3Version(
+        $db,
+        $dynamicVersionId
+    );
+    $pecorinoResolution =
+        ingredientOntologyV3RecipeAnnexResolution(
+            $db,
+            $dynamicVersionRow,
+            'Pecorino cheese',
+            'en',
+            true
+        );
+    $romanoResolution =
+        ingredientOntologyV3RecipeAnnexResolution(
+            $db,
+            $dynamicVersionRow,
+            'Pecorino Romano',
+            'en',
+            true
+        );
+    $dynamicMatcher = new IngredientOntologyV3MatcherContext(
+        $db,
+        $dynamicVersionId
+    );
+    $genericExact = ingredientOntologyV3MatchWithContext(
+        $dynamicMatcher,
+        [
+            'entity_id' => $dynamicEntityIds['pecorino'],
+            'status' => 'accepted',
+            'mapping_source' => 'test',
+            'attributes' => [],
+        ],
+        [
+            'entity_id' => $dynamicEntityIds['pecorino'],
+            'status' => 'accepted',
+            'mapping_source' => 'test',
+            'attributes' => [],
+        ]
+    );
+    $romanoVariant = ingredientOntologyV3MatchWithContext(
+        $dynamicMatcher,
+        [
+            'entity_id' => $dynamicEntityIds['pecorino-romano'],
+            'status' => 'accepted',
+            'mapping_source' => 'test',
+            'attributes' => [],
+        ],
+        [
+            'entity_id' => $dynamicEntityIds['pecorino'],
+            'status' => 'accepted',
+            'mapping_source' => 'test',
+            'attributes' => [],
+        ]
+    );
+    $bareCheese = ingredientOntologyV3MatchWithContext(
+        $dynamicMatcher,
+        [
+            'entity_id' => $dynamicEntityIds['pecorino'],
+            'status' => 'accepted',
+            'mapping_source' => 'test',
+            'attributes' => [],
+        ],
+        [
+            'entity_id' => $dynamicEntityIds['cheese'],
+            'status' => 'accepted',
+            'mapping_source' => 'test',
+            'attributes' => [],
+        ]
+    );
+    ontologyV3TestAssert(
+        (int)$pecorinoResolution['effective_entity_id']
+            === $dynamicEntityIds['pecorino']
+        && (int)$romanoResolution['effective_entity_id']
+            === $dynamicEntityIds['pecorino-romano']
+        && !empty($genericExact['satisfies_required'])
+        && (string)$genericExact['outcome'] === 'exact'
+        && empty($romanoVariant['satisfies_required'])
+        && (string)$romanoVariant['outcome']
+            === 'compatible_variant'
+        && abs((float)$romanoVariant['score'] - 0.82) < 0.000001
+        && empty($bareCheese['satisfies_required']),
+        'Pecorino aliases must converge exactly while Romano and bare '
+            . 'cheese remain non-satisfying evidence'
     );
     ontologyV3TestAssert(
         ontologyV3TestCount(

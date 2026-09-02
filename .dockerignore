@@ -54,6 +54,7 @@ assets/css/*.min.css
 
 # Config (mounted as volume)
 .env
+.build-revision
 
 # Isolated optional service (built from its own context)
 cookidoo-bridge/
