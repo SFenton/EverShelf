@@ -60,6 +60,9 @@ final class OntologyControllerTransientBusyPdo extends PDO
 
 $dbPath = __DIR__ . '/../data/.ontology-controller-test-'
     . getmypid() . '.sqlite';
+$canonicalQueueLockPath = $dbPath . '.canonical.lock';
+$GLOBALS['CANONICAL_QUEUE_TEST_LOCK_PATH'] =
+    $canonicalQueueLockPath;
 $occurrenceMigrationDbPath =
     __DIR__ . '/../data/.ontology-occurrence-migration-test-'
     . getmypid() . '.sqlite';
@@ -94,6 +97,7 @@ $cleanup = [
     $dbPath,
     $dbPath . '-wal',
     $dbPath . '-shm',
+    $canonicalQueueLockPath,
     dirname($dbPath) . '/.' . basename($dbPath) . '.recipe-score.lock',
     $occurrenceMigrationDbPath,
     $occurrenceMigrationDbPath . '-wal',
@@ -6670,7 +6674,9 @@ try {
         && $burstDrain['succeeded'] === 12
         && $burstDrain['pending'] === 0
         && $burstDrain['batches'] === 3,
-        'One canonical wake cycle must drain a burst larger than the batch limit'
+        'One canonical wake cycle must drain a burst larger than the '
+            . 'batch limit: '
+            . recipeCatalogJsonEncode($burstDrain)
     );
     $burstIds = implode(',', $burstProductIds);
     controllerTestAssert(
@@ -10384,7 +10390,7 @@ try {
         $bundleSet['schema_version']
             === 'ontology-activation-bundle-set-v2'
         && count($bundleSet['ontology']['tables']) === 32
-        && count($bundleSet['score']['tables']) === 6
+        && count($bundleSet['score']['tables']) === 8
         && $bundleSet['ontology']['database_lineage_uuid']
             === ingredientOntologyActivationLineageUuid($db)
         && $bundleSet['ontology']['candidate']['ontology_version_id']
@@ -11252,7 +11258,21 @@ try {
             ]
         )['revision']
             >= (int)$postValidationExtension['created_revision'],
-        'Score activation must atomically publish ranking and consume intents'
+        'Score activation must atomically publish ranking and consume '
+            . 'intents: '
+            . ingredientOntologyV3Json([
+                'transport' => $scoreTransport,
+                'candidate_protected' => $importCandidateProtected,
+                'import' => $scoreImport,
+                'recovery' => $activationRecovery,
+                'activated_score_id' => $activatedScoreId,
+                'state' => recipeScoreState($activationTarget),
+                'active_version' =>
+                    ingredientOntologyV3ActiveVersion(
+                        $activationTarget
+                    ),
+                'extension' => $postValidationExtension,
+            ])
     );
     $activationTarget->exec('BEGIN IMMEDIATE');
     try {
@@ -11304,7 +11324,29 @@ try {
                 $activationTarget
             ),
             'Approved maintenance score debt must outrank advisory intents '
-                . 'when the active ontology itself is current'
+                . 'when the active ontology itself is current: '
+                . ingredientOntologyV3Json([
+                    'score_build' =>
+                        ingredientOntologyActivationNeedsScoreBuild(
+                            $activationTarget
+                        ),
+                    'ontology_build' =>
+                        ingredientOntologyActivationNeedsOntologyBuild(
+                            $activationTarget
+                        ),
+                    'state_build' =>
+                        ingredientOntologyActivationOntologyStateRequiresBuild(
+                            $activationTarget
+                        ),
+                    'priority' =>
+                        ingredientOntologyActivationShouldPrioritizeMaintenanceScoreRefresh(
+                            $activationTarget
+                        ),
+                    'annex' =>
+                        ingredientOntologyV3CorpusAnnexDriftDecision(
+                            $activationTarget
+                        ),
+                ])
         );
         $activationTarget->exec('ROLLBACK');
     } catch (Throwable $error) {
@@ -12468,7 +12510,10 @@ try {
             ingredientOntologyActivationValidationCopy(
                 $activationTarget,
                 (int)$refreshImport['id'],
-                ['allow_test_fixture' => true]
+                [
+                    'allow_test_fixture' => true,
+                    'work_directory' => $payloadDirectory,
+                ]
             );
         ingredientOntologyActivationStoreValidation(
             $activationTarget,
@@ -13421,7 +13466,9 @@ try {
             UPDATE recipe_score_revisions
             SET ontology_source_revision = ?,
                 ontology_source_hash = ?,
-                ontology_source_lineage_hash = ''
+                ontology_source_lineage_hash = '',
+                corpus_annex_revision_id = NULL,
+                corpus_annex_hash = NULL
             WHERE id = ?
         ")->execute([
             (int)$driftScoreState['ontology_source_revision'],
@@ -13442,6 +13489,20 @@ try {
         ]);
         $db->exec("DELETE FROM recipe_score_pending_products");
         $db->exec("DELETE FROM recipe_score_pending_recipes");
+        $activeDriftScore = recipeScoreRevision(
+            $db,
+            (int)$activeDriftScore['id']
+        );
+        if (
+            ingredientOntologyV3CorpusProjectionV2EnsureScoreRoot(
+                $db,
+                $activeDriftScore
+            ) === null
+        ) {
+            throw new RuntimeException(
+                'Product drift fixture could not reseed its annex root'
+            );
+        }
         $driftBeforeProduct =
             ingredientOntologyActivationCorpusDrifted(
                 $db
@@ -13500,6 +13561,10 @@ try {
                     'before' => $driftBeforeProduct,
                     'after' => $driftAfterProduct,
                     'handled' => $driftHandledByAnnex,
+                    'annex_decision' =>
+                        ingredientOntologyV3CorpusAnnexDriftDecision(
+                            $db
+                        ),
                     'needs_ontology_build' =>
                         $driftNeedsOntologyBuild,
                     'within_incremental_limit' =>
@@ -13547,9 +13612,25 @@ try {
             !ingredientOntologyActivationProductDriftWithinLimit(
                 $db
             )
-            && ingredientOntologyActivationNeedsOntologyBuild($db),
-            'Annex-handled product drift must escalate to copied ontology '
-                . 'refresh when the incremental product limit is exceeded'
+            && !ingredientOntologyActivationNeedsOntologyBuild($db),
+            'Annex-handled product drift must not create ontology build '
+                . 'intent solely because one batch limit is exceeded: '
+                . ingredientOntologyV3Json([
+                    'within_limit' =>
+                        ingredientOntologyActivationProductDriftWithinLimit(
+                            $db
+                        ),
+                    'score_build' =>
+                        ingredientOntologyActivationNeedsScoreBuild($db),
+                    'ontology_build' =>
+                        ingredientOntologyActivationNeedsOntologyBuild(
+                            $db
+                        ),
+                    'status' => recipeScoreRevisionStatus(
+                        $db,
+                        recipeScoreActiveRevision($db)
+                    ),
+                ])
         );
     } finally {
         ingredientOntologyV3SetReadyMutationGuard(

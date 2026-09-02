@@ -145,10 +145,10 @@ identifiers remain untouched and ineligible.
 CDN transform alongside the original URL. Disable it to use only the original;
 clients retain the original URL as an image-error fallback.
 
-`RECIPE_SCORE_SYNC_BOOTSTRAP_LIMIT=250` controls whether a small catalog may build
-its first score revision during a request. Larger catalogs return a temporary 503
-until `scripts/rebuild-recipe-scores.php` (installed in the cron image) activates
-the revision.
+Recipe reads never build or repair score/projection state. Until the score
+worker or `scripts/rebuild-recipe-scores.php` publishes the first revision,
+requests return a temporary 503; stale derived corpus projection state is
+reported for worker repair without taking a request-path write lock.
 
 `RECIPE_SCORE_PREVIEW_REVISION_ID=` is a development/testing-only read override
 and is refused unless `EVERSHELF_ENV` normalizes to `development` or `test`.
@@ -173,6 +173,7 @@ INGREDIENT_ONTOLOGY_V3_PROMPT_MAX_ITEMS=50
 INGREDIENT_ONTOLOGY_V3_RAW_JSON_MAX_BYTES=65536
 INGREDIENT_ONTOLOGY_V3_QUANTITY_SUFFICIENCY_GATE=false
 RECIPE_SCORE_PREVIEW_REVISION_ID=
+RECIPE_SCORE_INCREMENTAL_PRODUCT_LIMIT=250
 
 INGREDIENT_ONTOLOGY_CONTROLLER_ENABLED=false
 INGREDIENT_ONTOLOGY_CONTROLLER_MODEL_ENABLED=false
@@ -545,6 +546,13 @@ directory.
 EverShelf uses **SQLite** stored at `data/evershelf.db`. The file is created automatically on first run.
 
 Schema migrations run automatically whenever `database.php` is loaded — no manual migration steps needed.
+
+`SQLITE_BUSY_TIMEOUT_MS` defaults to `1500` and is capped at five seconds.
+Sparse score publication keeps each contiguous writer reservation within that
+budget; aggregate resolution runs on a WAL read snapshot. The incremental score
+and identity work cap defaults to
+`RECIPE_SCORE_INCREMENTAL_PRODUCT_LIMIT=250`, the largest production-validated
+setting that stayed below the 256 MiB worker RSS gate.
 
 To back up the database:
 

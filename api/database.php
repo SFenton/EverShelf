@@ -11,7 +11,7 @@ require_once __DIR__ . '/lib/recipes/schema.php';
 
 define('DB_PATH', __DIR__ . '/../data/evershelf.db');
 // Bump whenever migrateDB() or a nested schema migration changes.
-const EVERSHELF_DATABASE_SCHEMA_VERSION = 2026082308;
+const EVERSHELF_DATABASE_SCHEMA_VERSION = 2026090101;
 
 /**
  * Ensure the data directory exists and is writable by the web-server user.
@@ -58,9 +58,13 @@ function _ensureDbWritable(): void {
 }
 
 function databaseConfiguredBusyTimeoutMs(): int {
+    $configured = getenv('SQLITE_BUSY_TIMEOUT_MS');
+    if ($configured === false || trim((string)$configured) === '') {
+        $configured = '1500';
+    }
     return max(
         100,
-        min(5000, (int)(getenv('SQLITE_BUSY_TIMEOUT_MS') ?: 1500))
+        min(5000, (int)$configured)
     );
 }
 
@@ -565,6 +569,8 @@ function initializeDB(PDO $db): void {
         CREATE INDEX IF NOT EXISTS idx_product_ingredients_product ON product_ingredients(product_id);
         CREATE INDEX IF NOT EXISTS idx_product_ingredients_ingredient ON product_ingredients(ingredient_id);
         CREATE INDEX IF NOT EXISTS idx_product_ingredients_role ON product_ingredients(role);
+        CREATE INDEX IF NOT EXISTS idx_products_normalized_name
+            ON products(lower(trim(name)), id);
         CREATE INDEX IF NOT EXISTS idx_product_tags_product ON product_tags(product_id);
         CREATE INDEX IF NOT EXISTS idx_product_tags_facet_value ON product_tags(facet, value);
         CREATE INDEX IF NOT EXISTS idx_canonical_queue_status ON canonical_processing_queue(status, requested_at);
@@ -1328,6 +1334,8 @@ function migrateDB(PDO $db): void {
         CREATE INDEX IF NOT EXISTS idx_product_ingredients_product ON product_ingredients(product_id);
         CREATE INDEX IF NOT EXISTS idx_product_ingredients_ingredient ON product_ingredients(ingredient_id);
         CREATE INDEX IF NOT EXISTS idx_product_ingredients_role ON product_ingredients(role);
+        CREATE INDEX IF NOT EXISTS idx_products_normalized_name
+            ON products(lower(trim(name)), id);
         CREATE INDEX IF NOT EXISTS idx_product_tags_product ON product_tags(product_id);
         CREATE INDEX IF NOT EXISTS idx_product_tags_facet_value ON product_tags(facet, value);
         CREATE INDEX IF NOT EXISTS idx_canonical_queue_status ON canonical_processing_queue(status, requested_at);

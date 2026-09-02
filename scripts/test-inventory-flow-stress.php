@@ -7,6 +7,8 @@ putenv('ONTOLOGY_AUTONOMOUS_ENABLED=false');
 putenv('COOKIDOO_DETAIL_HYDRATION_ENABLED=false');
 putenv('COOKIDOO_METADATA_BACKFILL_ENABLED=false');
 putenv('SHOPPING_MODE=internal');
+putenv('BRING_EMAIL=');
+putenv('BRING_PASSWORD=');
 define('CRON_MODE', true);
 define('RECIPE_BACKEND_TEST_MODE', true);
 require_once __DIR__ . '/../api/bootstrap.php';
@@ -162,6 +164,7 @@ if ($settlerMode) {
     $cycles = 0;
     $lockRetries = 0;
     $scoreCycles = 0;
+    $scoreTiming = [];
     $settledCycles = 0;
     $scoreBackgroundLock =
         $databasePath . '.score-background.lock';
@@ -181,6 +184,9 @@ if ($settlerMode) {
                     SELECT COUNT(*)
                     FROM recipe_score_pending_recipes
                     WHERE lane = 'serving'
+                ) + (
+                    SELECT COUNT(*)
+                    FROM recipe_score_identity_projection_work
                 )
             ")->fetchColumn();
             if ($pendingScore > 0) {
@@ -201,6 +207,7 @@ if ($settlerMode) {
                         '--status-file=' . $scoreStatus,
                         '--force',
                         '--json',
+                        '--benchmark-metrics',
                     ],
                     [
                         0 => ['pipe', 'r'],
@@ -239,10 +246,39 @@ if ($settlerMode) {
                     );
                 }
                 $scoreCycles++;
+                $timing = (array)($score['timing_ms'] ?? []);
+                $metrics = (array)(
+                    $score['benchmark_metrics'] ?? []
+                );
+                $scoreTiming[] = [
+                    'reason' => $score['reason'] ?? null,
+                    'affected_recipe_count' => (int)(
+                        $score['affected_recipe_count'] ?? 0
+                    ),
+                    'snapshot_write_lock_ms' => (float)(
+                        $timing['snapshot_write_lock'] ?? 0
+                    ),
+                    'snapshot_write_total_ms' => (float)(
+                        $timing['snapshot_write_total'] ?? 0
+                    ),
+                    'publish_write_lock_ms' => (float)(
+                        $timing['publish_write_lock']
+                            ?? $timing['publish']
+                            ?? 0
+                    ),
+                    'peak_rss_bytes' => (int)(
+                        $metrics['peak_rss_bytes'] ?? 0
+                    ),
+                ];
                 if (
                     in_array(
                         (string)($score['reason'] ?? ''),
-                        ['failed', 'full_rebuild_required'],
+                        [
+                            'failed',
+                            'corpus_annex_repair_required',
+                            'score_projection_repair_required',
+                            'semantic_generation_transition_required',
+                        ],
                         true
                     )
                 ) {
@@ -267,10 +303,15 @@ if ($settlerMode) {
                 FROM recipe_score_pending_recipes
                 WHERE lane = 'serving'
             ")->fetchColumn();
+            $pendingIdentityRecipes = (int)$db->query("
+                SELECT COUNT(*)
+                FROM recipe_score_identity_projection_work
+            ")->fetchColumn();
             $settled = is_file($doneFile)
                 && $openJobs === 0
                 && $pendingProducts === 0
                 && $pendingRecipes === 0
+                && $pendingIdentityRecipes === 0
                 && (int)($canonical['pending'] ?? 0) === 0
                 && (int)($canonical['in_progress'] ?? 0) === 0;
             $settledCycles = $settled
@@ -282,6 +323,7 @@ if ($settlerMode) {
                     'cycles' => $cycles,
                     'lock_retries' => $lockRetries,
                     'score_cycles' => $scoreCycles,
+                    'score_timing' => $scoreTiming,
                     'score_worker_status' =>
                         is_file($scoreStatus)
                             ? trim((string)file_get_contents(
@@ -305,6 +347,7 @@ if ($settlerMode) {
         'cycles' => $cycles,
         'lock_retries' => $lockRetries,
         'score_cycles' => $scoreCycles,
+        'score_timing' => $scoreTiming,
         'done' => is_file($doneFile),
         'canonical' => $canonical,
         'recipe_jobs' => $db->query("
@@ -324,6 +367,10 @@ if ($settlerMode) {
         'maintenance_recipes' => (int)$db->query("
             SELECT COUNT(*) FROM recipe_score_pending_recipes
             WHERE lane = 'maintenance'
+        ")->fetchColumn(),
+        'identity_recipes' => (int)$db->query("
+            SELECT COUNT(*)
+            FROM recipe_score_identity_projection_work
         ")->fetchColumn(),
         'work_state' => $db->query("
             SELECT * FROM recipe_score_work_state WHERE id = 1
@@ -1267,7 +1314,12 @@ $settle = static function (PDO $db): array {
         if (
             in_array(
                 (string)($score['reason'] ?? ''),
-                ['failed', 'full_rebuild_required'],
+                [
+                    'failed',
+                    'corpus_annex_repair_required',
+                    'score_projection_repair_required',
+                    'semantic_generation_transition_required',
+                ],
                 true
             )
         ) {
@@ -1349,6 +1401,10 @@ $maintenancePendingRecipes = (int)$db->query("
     SELECT COUNT(*) FROM recipe_score_pending_recipes
     WHERE lane = 'maintenance'
 ")->fetchColumn();
+$pendingIdentityRecipes = (int)$db->query("
+    SELECT COUNT(*)
+    FROM recipe_score_identity_projection_work
+")->fetchColumn();
 $openRecipeJobs = (int)$db->query("
     SELECT COUNT(*) FROM recipe_jobs
     WHERE status IN ('pending', 'retry', 'in_progress')
@@ -1358,6 +1414,7 @@ $canonicalStats = canonicalIngredientQueueStats($db, 3);
 $assert(
     $pendingProducts === 0
     && $pendingRecipes === 0
+    && $pendingIdentityRecipes === 0
     && $openRecipeJobs === 0
     && (int)($canonicalStats['pending'] ?? 0) === 0
     && (int)($canonicalStats['in_progress'] ?? 0) === 0,
@@ -1712,6 +1769,7 @@ $report = [
         'products' => $pendingProducts,
         'recipes' => $pendingRecipes,
         'maintenance_recipes' => $maintenancePendingRecipes,
+        'identity_recipes' => $pendingIdentityRecipes,
         'deferred_mutations' => $deferredMutationCount,
         'recipe_jobs' => $openRecipeJobs,
         'canonical' => (int)($canonicalStats['pending'] ?? 0),

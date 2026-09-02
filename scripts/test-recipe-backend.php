@@ -466,6 +466,33 @@ try {
             prepared_food INTEGER NOT NULL DEFAULT 0
         );
         INSERT INTO products (name) VALUES ('Legacy migration product');
+        CREATE TABLE product_ingredients (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            product_id INTEGER NOT NULL,
+            ingredient_id INTEGER NOT NULL,
+            role TEXT NOT NULL DEFAULT 'primary',
+            confidence REAL NOT NULL DEFAULT 0,
+            source TEXT NOT NULL DEFAULT '',
+            evidence TEXT NOT NULL DEFAULT ''
+        );
+        CREATE TABLE taxonomy_aliases (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            tree_id INTEGER NOT NULL,
+            node_id INTEGER NOT NULL,
+            alias TEXT NOT NULL,
+            normalized_alias TEXT NOT NULL,
+            source TEXT NOT NULL DEFAULT '',
+            active INTEGER NOT NULL DEFAULT 1
+        );
+        CREATE TABLE canonical_ingredients (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            slug TEXT NOT NULL,
+            name TEXT NOT NULL,
+            parent_slug TEXT DEFAULT NULL,
+            category TEXT NOT NULL DEFAULT '',
+            source TEXT NOT NULL DEFAULT '',
+            external_ids_json TEXT NOT NULL DEFAULT '{}'
+        );
         CREATE TABLE recipe_origins (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             recipe_id INTEGER NOT NULL,
@@ -705,7 +732,26 @@ try {
             FROM recipe_score_state
             WHERE id = 1
         ")->fetchColumn() === $cursorBeforeRecipeMigration,
-        'Stale cursor marker and bump must roll back together inside a raw caller transaction'
+        'Stale cursor marker and bump must roll back together inside a raw '
+            . 'caller transaction: '
+            . recipeCatalogJsonEncode([
+                'fault' => $staleCursorMigrationFault,
+                'transaction_retained' =>
+                    $rawMigrationTransactionRetained,
+                'marker_count' => recipeTestCount(
+                    $upgradeDb,
+                    "SELECT COUNT(*)
+                     FROM recipe_schema_migrations
+                     WHERE migration_key =
+                        'recipe_stale_while_revalidate_v1'"
+                ),
+                'cursor_before' => $cursorBeforeRecipeMigration,
+                'cursor_after' => (int)$upgradeDb->query("
+                    SELECT cursor_revision
+                    FROM recipe_score_state
+                    WHERE id = 1
+                ")->fetchColumn(),
+            ])
     );
     recipeSchemaMigrate($upgradeDb);
     $cursorAfterRecipeMigration = (int)$upgradeDb->query("
@@ -1219,7 +1265,7 @@ try {
             'name', 'brand', 'category', 'prepared_food',
         ],
         'recipe_ontology_source_catalog_update' => [
-            'primary_connector', 'language',
+            'primary_connector', 'language', 'deleted_at',
         ],
         'recipe_ontology_source_origins_update' => [
             'recipe_id', 'connector', 'external_id', 'locale',
@@ -1300,7 +1346,7 @@ try {
     ")->fetchColumn();
     recipeTestAssert(
         $sourceRevisionAfterTriggerRepair
-            === $sourceRevisionBeforeTriggerRepair + 1
+            === $sourceRevisionBeforeTriggerRepair
         && recipeTestCount(
             $upgradeDb,
             "SELECT COUNT(*)
@@ -1320,7 +1366,7 @@ try {
             WHERE id = 1
         ")->fetchColumn()) === 64,
         'Schema checks must atomically repair any drifted source trigger and '
-            . 'invalidate the sealed source once'
+            . 'preserve unchanged semantic source fences'
     );
     recipeSchemaMigrate($upgradeDb);
     recipeTestAssert(
@@ -2738,6 +2784,12 @@ try {
         'ingredients' => [['name' => 'Tomato Test', 'qty' => '1 pz']],
         'steps' => ['Serve.'],
     ], ['connector' => 'manual', 'external_id' => 'exact-title-search']);
+    $scoreBootstrap = recipeScoreRebuild($db, true);
+    recipeTestAssert(
+        !empty($scoreBootstrap['rebuilt']),
+        'The maintenance score worker must bootstrap browse scores '
+            . 'before query-only recipe reads'
+    );
     $exactTitleSearch = recipeCatalogSearchResult($db, [
         'query' => 'Marry Me Chicken',
         'mode' => 'stocked',
@@ -9098,6 +9150,7 @@ try {
         !recipeCatalogRankRecipe($db, $chickenRecipe, recipeInventoryCandidates($db))['cookable'],
         'A name substring must not satisfy a required raw ingredient'
     );
+    recipeScoreRebuild($db, true);
     $noQuerySuggestions = recipeCatalogSearchResult($db, [
         'query' => '',
         'mode' => 'stocked',
@@ -9133,6 +9186,7 @@ try {
         ],
         'steps' => ['Serve.'],
     ], ['connector' => 'manual', 'external_id' => 'ranked-missing']);
+    recipeScoreRebuild($db, true);
     foreach (['stocked', 'expiring'] as $rankMode) {
         $rankedSearch = recipeCatalogSearchResult($db, [
             'query' => 'ranked',
@@ -11637,6 +11691,36 @@ try {
         && ($refreshedFoodOn['foodon']['hierarchy'] ?? null) === []
         && !isset($refreshedFoodOn['foodon']['resolved_parent']),
         'A FoodOn identity refresh must replace stale hierarchy proof atomically'
+    );
+    canonicalIngredientUpsert($db, [
+        'slug' => 'foodon-child-test',
+        'name' => 'Product-local Link Only',
+        'parent_slug' => 'different-parent',
+        'category' => 'different-category',
+        'external_ids' => [
+            'foodon' => [
+                'id' => 'FOODON:PRODUCT_LOCAL_ONLY',
+            ],
+        ],
+    ], false);
+    $linkOnlyFoodOn = $db->query("
+        SELECT name, parent_slug, category, external_ids_json
+        FROM canonical_ingredients
+        WHERE slug = 'foodon-child-test'
+    ")->fetch(PDO::FETCH_ASSOC);
+    $linkOnlyExternalIds = json_decode(
+        (string)$linkOnlyFoodOn['external_ids_json'],
+        true
+    );
+    recipeTestAssert(
+        (string)$linkOnlyFoodOn['name'] === 'FoodOn Child Test'
+        && (string)$linkOnlyFoodOn['parent_slug']
+            === 'curated-parent-test'
+        && (string)$linkOnlyFoodOn['category'] === ''
+        && ($linkOnlyExternalIds['foodon']['id'] ?? null)
+            === 'FOODON:TEST_REPLACED_CHILD',
+        'Product-local canonical linking must not rewrite shared '
+            . 'canonical metadata'
     );
     $db->prepare("
         INSERT INTO canonical_ingredients (

@@ -5,6 +5,8 @@ require_once __DIR__ . '/schema.php';
 require_once __DIR__ . '/core.php';
 require_once __DIR__ . '/resolution.php';
 require_once __DIR__ . '/identity_annex.php';
+require_once __DIR__ . '/corpus_annex.php';
+require_once __DIR__ . '/corpus_projection_v2.php';
 require_once __DIR__ . '/curated_product_manifest.php';
 require_once __DIR__ . '/curated.php';
 require_once __DIR__ . '/matcher.php';

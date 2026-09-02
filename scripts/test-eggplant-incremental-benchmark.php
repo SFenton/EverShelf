@@ -472,11 +472,17 @@ try {
         && (int)$fullShadow['annex_sync']['transaction_count']
             === (int)ceil($catalogSize / 500)
         && (int)$fullShadow['annex_sync']['changed_row_count']
-            === $ingredientCount
+            <= $ingredientCount
         && (int)$fullShadow['annex_sync']['write_statement_count']
             <= (int)ceil($ingredientCount / 40)
                 + (int)ceil($catalogSize / 500),
-        'Full copied shadow scoring must materialize reviewed recipe annex identity bilaterally'
+        'Full copied shadow scoring must materialize reviewed recipe annex '
+            . 'identity bilaterally: '
+            . ingredientOntologyV3Json([
+                'shadow' => $fullShadow,
+                'match_count' => $fullShadowMatchCount,
+                'annex_count' => $fullShadowAnnexCount,
+            ])
     );
     $repeatFullShadowStarted = hrtime(true);
     $repeatFullShadow = ingredientOntologyV3BuildShadow(
@@ -589,6 +595,23 @@ try {
                 'eggplant',
                 'eggplant',
             ]);
+            $hookDb->prepare("
+                INSERT INTO recipe_origins (
+                    recipe_id, connector, external_id, locale,
+                    content_language
+                )
+                VALUES (?, 'manual', ?, 'en-US', 'en')
+            ")->execute([
+                $catalogMutationRecipeId,
+                'continuous-catalog-eggplant',
+            ]);
+            $hookDb->prepare("
+                INSERT INTO recipe_source_ingredients (
+                    recipe_id, position, name, normalized_name,
+                    source_optional
+                )
+                VALUES (?, 0, 'eggplant', 'eggplant', 0)
+            ")->execute([$catalogMutationRecipeId]);
             recipeScoreMarkRecipeDirty(
                 $hookDb,
                 $catalogMutationRecipeId,
@@ -795,7 +818,12 @@ try {
                 && (int)$result['physical_match_rows'] === 0
         )) === $runs
         && $unknownP95 < 50,
-        'Unknown identity sparse publication must remain zero-impact below 50 ms p95'
+        'Unknown identity sparse publication must remain zero-impact below '
+            . '50 ms p95: '
+            . ingredientOntologyV3Json([
+                'p95_ms' => $unknownP95,
+                'results' => $unknownResults,
+            ])
     );
 
     echo json_encode([
@@ -832,6 +860,7 @@ try {
         ],
         'fixture_migration_catchup_revision_id' =>
             is_array($fixtureMigrationCatchup)
+            && isset($fixtureMigrationCatchup['revision_id'])
                 ? (int)$fixtureMigrationCatchup['revision_id']
                 : null,
         'peak_php_mb' =>

@@ -1016,38 +1016,6 @@ function ingredientOntologyV3IdentityAdmissionSync(
             )
         ) {
             $scoreState = recipeScoreState($db);
-            if (
-                $recipeResolverChanged
-                && $discoveryActiveScoreId > 0
-                && (int)($discoveryActiveScore[
-                    'ontology_version_id'
-                ] ?? 0) > 0
-            ) {
-                $db->exec("
-                    UPDATE recipe_score_state
-                    SET ontology_source_revision =
-                            ontology_source_revision + 1,
-                        ontology_source_hash = '',
-                        dirty_at = CURRENT_TIMESTAMP,
-                        updated_at = CURRENT_TIMESTAMP
-                    WHERE id = 1
-                ");
-                $scoreState = recipeScoreState($db);
-                $db->prepare("
-                    INSERT INTO recipe_score_mutations (
-                        domain, revision, lane,
-                        owner_type, owner_id,
-                        operation, reason
-                    )
-                    VALUES (
-                        'source', ?, 'maintenance',
-                        'global', NULL, 'global',
-                        'recipe_identity_resolver_changed'
-                    )
-                ")->execute([
-                    (int)$scoreState['ontology_source_revision'],
-                ]);
-            }
             $inventoryRevision = (int)$scoreState['inventory_revision'];
             if ($productIds) {
                 $inventoryRevision = recipeScoreMarkDirty($db);
@@ -1245,6 +1213,10 @@ function ingredientOntologyV3IdentityExtensionIntegrityAudit(
     int $throughRevision,
     string $expectedHash
 ): array {
+    ingredientOntologyV3TrackCorpusOperation(
+        'identity_extension_deep_audit',
+        true
+    );
     $throughRevision = max(0, $throughRevision);
     $zeroHash = ingredientOntologyV3IdentityExtensionZeroHash();
     if ($throughRevision === 0) {
@@ -3524,6 +3496,8 @@ function ingredientOntologyV3IdentityAnnexRefreshProduct(
         'extension_entity_id' =>
             $resolution['extension_entity_id'] ?? null,
         'previous_entity_id' => $previousEffectiveEntityId,
+        'previous_extension_entity_id' =>
+            $previousExtensionEntityId,
         'previous_status' => $previous['status'] ?? null,
         'entity_slug' => $resolution['entity_slug'] ?? null,
         'attributes' => $attributes,
@@ -3541,7 +3515,8 @@ function ingredientOntologyV3IdentityAnnexRefreshProduct(
 function ingredientOntologyV3IdentityExtensionRecipeIdsForProducts(
     PDO $db,
     int $versionId,
-    array $productIds
+    array $productIds,
+    ?int $limit = null
 ): array {
     $productIds = array_values(array_unique(array_filter(
         array_map('intval', $productIds),
@@ -3557,6 +3532,1191 @@ function ingredientOntologyV3IdentityExtensionRecipeIdsForProducts(
     ) {
         return [];
     }
+    $limit = max(
+        1,
+        $limit ?? (
+            function_exists('ingredientOntologyV3IncrementalProductLimit')
+                ? ingredientOntologyV3IncrementalProductLimit()
+                : 250
+        )
+    );
+    return ingredientOntologyV3IdentityExtensionRecipeIdsForProductsQuery(
+        $db,
+        $versionId,
+        $productIds,
+        $limit
+    );
+}
+
+function ingredientOntologyV3IdentityProjectionHashAtRevision(
+    PDO $db,
+    int $versionId,
+    int $revision
+): string {
+        if ($revision <= 0) {
+            return ingredientOntologyV3IdentityExtensionZeroHash();
+        }
+        $stmt = $db->prepare("
+            SELECT content_hash
+            FROM ingredient_ontology_identity_extension_entities
+            WHERE ontology_version_id = ?
+              AND created_revision = ?
+        ");
+        $stmt->execute([$versionId, $revision]);
+        $hash = $stmt->fetchColumn();
+        if ($hash === false || strlen((string)$hash) !== 64) {
+            throw new RuntimeException(
+                'identity projection prefix hash is unavailable'
+            );
+        }
+        return (string)$hash;
+    }
+
+function ingredientOntologyV3IdentityProjectionPendingCount(
+    PDO $db,
+    int $versionId
+): int {
+        if (
+            $versionId <= 0
+            || !ingredientOntologyV3TableExists(
+                $db,
+                'recipe_score_identity_projection_work'
+            )
+        ) {
+            return 0;
+        }
+        $stmt = $db->prepare("
+            SELECT
+                (SELECT COUNT(*)
+                 FROM recipe_score_identity_projection_work
+                 WHERE ontology_version_id = ?)
+                +
+                (SELECT COUNT(*)
+                 FROM recipe_score_identity_projection_events
+                 WHERE ontology_version_id = ?
+                   AND completed = 0)
+        ");
+        $stmt->execute([$versionId, $versionId]);
+        return (int)$stmt->fetchColumn();
+    }
+
+function ingredientOntologyV3IdentityProjectionWorkState(
+    PDO $db,
+    int $versionId
+): ?array {
+        if (
+            $versionId <= 0
+            || !ingredientOntologyV3TableExists(
+                $db,
+                'recipe_score_identity_projection_state'
+            )
+        ) {
+            return null;
+        }
+        $stmt = $db->prepare("
+            SELECT *
+            FROM recipe_score_identity_projection_state
+            WHERE ontology_version_id = ?
+        ");
+        $stmt->execute([$versionId]);
+        $row = $stmt->fetch(PDO::FETCH_ASSOC);
+        if (!$row) {
+            return null;
+        }
+        foreach ([
+            'ontology_version_id',
+            'work_head_annex_revision_id',
+            'discovered_revision',
+            'covered_revision',
+        ] as $key) {
+            $row[$key] = $row[$key] !== null
+                ? (int)$row[$key]
+                : null;
+        }
+        return $row;
+    }
+
+function ingredientOntologyV3IdentityProjectionUpsertSql(
+    string $selectSql
+): string {
+        return "
+            INSERT INTO recipe_score_identity_projection_work (
+                ontology_version_id, recipe_id,
+                first_event_id, latest_event_id,
+                first_required_revision, latest_required_revision,
+                latest_required_hash, created_at, updated_at
+            )
+            {$selectSql}
+            ON CONFLICT(ontology_version_id, recipe_id) DO UPDATE SET
+                first_required_revision = MIN(
+                    recipe_score_identity_projection_work
+                        .first_required_revision,
+                    excluded.first_required_revision
+                ),
+                first_event_id = CASE
+                    WHEN recipe_score_identity_projection_work
+                        .first_event_id = 0
+                    THEN excluded.first_event_id
+                    ELSE MIN(
+                        recipe_score_identity_projection_work
+                            .first_event_id,
+                        excluded.first_event_id
+                    )
+                END,
+                latest_event_id = MAX(
+                    recipe_score_identity_projection_work
+                        .latest_event_id,
+                    excluded.latest_event_id
+                ),
+                latest_required_hash = CASE
+                    WHEN excluded.latest_required_revision >=
+                        recipe_score_identity_projection_work
+                            .latest_required_revision
+                    THEN excluded.latest_required_hash
+                    ELSE recipe_score_identity_projection_work
+                        .latest_required_hash
+                END,
+                latest_required_revision = MAX(
+                    recipe_score_identity_projection_work
+                        .latest_required_revision,
+                    excluded.latest_required_revision
+                ),
+                updated_at = CURRENT_TIMESTAMP
+        ";
+    }
+
+function ingredientOntologyV3IdentityProjectionLanguageSql(
+    string $column
+): string {
+    return "
+        CASE
+            WHEN lower(replace({$column}, '_', '-')) = 'und'
+            THEN 'und'
+            ELSE substr(
+                lower(replace({$column}, '_', '-')) || '-',
+                1,
+                instr(
+                    lower(replace({$column}, '_', '-')) || '-',
+                    '-'
+                ) - 1
+            )
+        END
+    ";
+}
+
+function ingredientOntologyV3IdentityProjectionDependencyExistsSql(
+    string $extensionAlias,
+    string $afterRecipeSql,
+    ?string $requiredRevisionSql = null,
+    string $resolutionInputSql = '',
+    ?string $eventAlias = null
+): string {
+    $mappingLanguage =
+        ingredientOntologyV3IdentityProjectionLanguageSql(
+            'mapping.language'
+        );
+    $annexLanguage =
+        ingredientOntologyV3IdentityProjectionLanguageSql(
+            'recipe_annex.language'
+        );
+    $extensionLanguage =
+        ingredientOntologyV3IdentityProjectionLanguageSql(
+            $extensionAlias . '.language'
+        );
+    $requiresWork = (
+        $requiredRevisionSql !== null
+        && $resolutionInputSql !== ''
+    ) ? ingredientOntologyV3IdentityProjectionRecipeNeedsWorkSql(
+        'ingredient.recipe_id',
+        $extensionAlias,
+        $requiredRevisionSql,
+        $resolutionInputSql
+    ) : '1 = 1';
+    if ($eventAlias !== null && $requiresWork !== '1 = 1') {
+        $requiresWork = "(
+            {$eventAlias}.product_id IS NOT NULL
+            OR {$eventAlias}.source_revision IS NOT NULL
+            OR {$requiresWork}
+        )";
+    }
+    return "
+        (
+            EXISTS (
+                SELECT 1
+                FROM ingredient_ontology_mappings mapping
+                JOIN recipe_ingredients ingredient
+                  ON ingredient.id = mapping.owner_id
+                JOIN recipe_catalog recipe
+                  ON recipe.id = ingredient.recipe_id
+                 AND recipe.deleted_at IS NULL
+                WHERE mapping.ontology_version_id =
+                    {$extensionAlias}.ontology_version_id
+                  AND mapping.owner_type = 'recipe_ingredient'
+                  AND mapping.normalized_label =
+                    {$extensionAlias}.normalized_label
+                  AND {$mappingLanguage} = {$extensionLanguage}
+                  AND ingredient.recipe_id >
+                    CAST({$afterRecipeSql} AS INTEGER)
+                  AND {$requiresWork}
+            )
+            OR EXISTS (
+                SELECT 1
+                FROM ingredient_ontology_recipe_identity_annex
+                    recipe_annex
+                JOIN recipe_ingredients ingredient
+                  ON ingredient.id =
+                    recipe_annex.recipe_ingredient_id
+                JOIN recipe_catalog recipe
+                  ON recipe.id = ingredient.recipe_id
+                 AND recipe.deleted_at IS NULL
+                WHERE recipe_annex.ontology_version_id =
+                    {$extensionAlias}.ontology_version_id
+                  AND recipe_annex.ontology_content_hash =
+                    {$extensionAlias}.ontology_content_hash
+                  AND recipe_annex.ontology_seal_hash =
+                    {$extensionAlias}.ontology_seal_hash
+                  AND recipe_annex.normalized_label =
+                    {$extensionAlias}.normalized_label
+                  AND recipe_annex.resolver_version = ?
+                  AND recipe_annex.review_manifest_hash = ?
+                  AND {$annexLanguage} = {$extensionLanguage}
+                  AND ingredient.recipe_id >
+                    CAST({$afterRecipeSql} AS INTEGER)
+                  AND {$requiresWork}
+            )
+        )
+    ";
+}
+
+function ingredientOntologyV3IdentityProjectionRecipeNeedsWorkSql(
+    string $recipeIdSql,
+    string $extensionAlias,
+    string $requiredRevisionSql,
+    string $resolutionInputSql
+): string {
+    return "
+        NOT EXISTS (
+            SELECT 1
+            FROM recipe_score_effective_sources effective
+            JOIN recipe_score_revisions score_revision
+              ON score_revision.id = effective.score_revision_id
+             AND score_revision.status = 'ready'
+            JOIN ingredient_ontology_corpus_annex_revisions score_annex
+              ON score_annex.id =
+                    score_revision.corpus_annex_revision_id
+             AND score_annex.status = 'ready'
+             AND score_annex.revision_hash =
+                    score_revision.corpus_annex_hash
+            WHERE effective.recipe_id = {$recipeIdSql}
+              AND score_revision.ontology_version_id =
+                    {$extensionAlias}.ontology_version_id
+              AND score_revision.identity_extension_revision >=
+                    CAST({$requiredRevisionSql} AS INTEGER)
+              AND (
+                    score_revision.covered_identity_extension_revision >=
+                        CAST({$requiredRevisionSql} AS INTEGER)
+                    OR json_extract(
+                        score_revision.validation_report_json,
+                        '$.materialized_hash_algorithm'
+                    ) = 'parent-delta-v2'
+                    AND EXISTS (
+                        SELECT 1
+                        FROM
+                            ingredient_ontology_corpus_annex_effective_aggregates
+                                recipe_aggregate
+                        WHERE recipe_aggregate.ontology_version_id =
+                                {$extensionAlias}.ontology_version_id
+                          AND recipe_aggregate.aggregate_type = 'recipe'
+                          AND recipe_aggregate.aggregate_id =
+                                {$recipeIdSql}
+                          AND recipe_aggregate.head_revision_id =
+                                score_annex.id
+                          AND recipe_aggregate.head_revision_hash =
+                                score_annex.revision_hash
+                    )
+              )
+              AND score_annex.ontology_version_id =
+                    {$extensionAlias}.ontology_version_id
+              AND score_annex.identity_extension_revision >=
+                    CAST({$requiredRevisionSql} AS INTEGER)
+              AND score_annex.resolution_input_hash =
+                    {$resolutionInputSql}
+        )
+    ";
+}
+
+function ingredientOntologyV3IdentityProjectionSeedEvents(
+    PDO $db,
+    int $versionId,
+    int $discoveredRevision,
+    int $targetRevision,
+    int $sourceThroughRevision,
+    array $productIds
+): void {
+    $dependencyExists =
+        ingredientOntologyV3IdentityProjectionDependencyExistsSql(
+            'extension',
+            '0'
+        );
+    $db->prepare("
+        INSERT OR IGNORE INTO recipe_score_identity_projection_events (
+            ontology_version_id, event_key,
+            required_revision, required_hash,
+            extension_entity_id, product_id, source_revision,
+            after_recipe_id, completed, created_at, updated_at
+        )
+        SELECT extension.ontology_version_id,
+               'extension:' || extension.created_revision,
+               extension.created_revision, extension.content_hash,
+               extension.id, NULL, NULL, 0, 0,
+               CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+        FROM ingredient_ontology_identity_extension_entities extension
+        WHERE extension.ontology_version_id = ?
+          AND extension.created_revision > ?
+          AND extension.created_revision <= ?
+          AND extension.status = 'active'
+          AND {$dependencyExists}
+        ORDER BY extension.created_revision
+    ")->execute([
+        $versionId,
+        $discoveredRevision,
+        $targetRevision,
+        ingredientOntologyV3RecipeIdentityResolverVersion(),
+        ingredientOntologyV3IdentityAnnexReviewManifestHash(),
+    ]);
+    $productIds = array_values(array_unique(array_filter(
+        array_map('intval', $productIds),
+        static fn(int $productId): bool => $productId > 0
+    )));
+    if (!$productIds || $targetRevision <= 0) {
+        return;
+    }
+    $targetHash = ingredientOntologyV3IdentityProjectionHashAtRevision(
+        $db,
+        $versionId,
+        $targetRevision
+    );
+    foreach (array_chunk($productIds, 200) as $chunk) {
+        $placeholders = implode(
+            ',',
+            array_fill(0, count($chunk), '?')
+        );
+        $db->prepare("
+            INSERT OR IGNORE INTO
+                recipe_score_identity_projection_events (
+                ontology_version_id, event_key,
+                required_revision, required_hash,
+                extension_entity_id, product_id, source_revision,
+                after_recipe_id, completed, created_at, updated_at
+            )
+            SELECT annex.ontology_version_id,
+                   'product:' || annex.product_id || ':'
+                       || ? || ':' || annex.extension_entity_id
+                       || ':' || annex.evidence_hash,
+                   ?, ?, annex.extension_entity_id,
+                   annex.product_id, ?, 0, 0,
+                   CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+            FROM ingredient_ontology_identity_annex annex
+            WHERE annex.ontology_version_id = ?
+              AND annex.product_id IN ({$placeholders})
+              AND annex.status = 'accepted'
+              AND annex.extension_entity_id IS NOT NULL
+        ")->execute([
+            $sourceThroughRevision,
+            $targetRevision,
+            $targetHash,
+            $sourceThroughRevision,
+            $versionId,
+            ...$chunk,
+        ]);
+        $db->prepare("
+            INSERT OR IGNORE INTO
+                recipe_score_identity_projection_events (
+                ontology_version_id, event_key,
+                required_revision, required_hash,
+                extension_entity_id, product_id, source_revision,
+                after_recipe_id, completed, created_at, updated_at
+            )
+            SELECT history.ontology_version_id,
+                   'history:' || history.id,
+                   ?, ?, history.extension_entity_id,
+                   history.product_id, history.source_revision,
+                   0, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+            FROM ingredient_ontology_identity_annex_history history
+            WHERE history.ontology_version_id = ?
+              AND history.product_id IN ({$placeholders})
+              AND history.source_revision <= ?
+              AND history.status = 'accepted'
+              AND history.extension_entity_id IS NOT NULL
+        ")->execute([
+            $targetRevision,
+            $targetHash,
+            $versionId,
+            ...$chunk,
+            $sourceThroughRevision,
+        ]);
+    }
+}
+
+function ingredientOntologyV3IdentityProjectionCompleteEmptyEvents(
+    PDO $db,
+    int $versionId,
+    int $limit,
+    string $resolutionInputHash = ''
+): int {
+    $limit = max(1, min(10000, $limit));
+    $hasResolutionInput =
+        strlen($resolutionInputHash) === 64;
+    $dependencyExists =
+        ingredientOntologyV3IdentityProjectionDependencyExistsSql(
+            'extension',
+            'event.after_recipe_id',
+            $hasResolutionInput
+                ? 'event.required_revision'
+                : null,
+            $hasResolutionInput ? '?' : '',
+            $hasResolutionInput ? 'event' : null
+        );
+    $stmt = $db->prepare("
+        UPDATE recipe_score_identity_projection_events
+        SET completed = 1,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id IN (
+            SELECT event.id
+            FROM recipe_score_identity_projection_events event
+            JOIN ingredient_ontology_identity_extension_entities
+                extension
+              ON extension.id = event.extension_entity_id
+             AND extension.ontology_version_id =
+                event.ontology_version_id
+            WHERE event.ontology_version_id = ?
+              AND event.completed = 0
+              AND NOT {$dependencyExists}
+            ORDER BY event.id
+            LIMIT {$limit}
+        )
+    ");
+    $params = [$versionId];
+    if ($hasResolutionInput) {
+        $params[] = $resolutionInputHash;
+    }
+    $params[] =
+        ingredientOntologyV3RecipeIdentityResolverVersion();
+    $params[] =
+        ingredientOntologyV3IdentityAnnexReviewManifestHash();
+    if ($hasResolutionInput) {
+        $params[] = $resolutionInputHash;
+    }
+    $stmt->execute($params);
+    return $stmt->rowCount();
+}
+
+function ingredientOntologyV3IdentityProjectionProcessEvents(
+    PDO $db,
+    int $versionId,
+    int $limit,
+    string $resolutionInputHash = ''
+): int {
+    $remaining = max(0, $limit);
+    $inserted = 0;
+    $loops = 0;
+    $maximumLoops = max(
+        32,
+        min(2000, max(1, $limit) * 2)
+    );
+    $mappingLanguage =
+        ingredientOntologyV3IdentityProjectionLanguageSql(
+            'mapping.language'
+        );
+    $annexLanguage =
+        ingredientOntologyV3IdentityProjectionLanguageSql(
+            'recipe_annex.language'
+        );
+    $extensionLanguage =
+        ingredientOntologyV3IdentityProjectionLanguageSql(
+            'extension.language'
+        );
+    $hasResolutionInput =
+        strlen($resolutionInputHash) === 64;
+    ingredientOntologyV3IdentityProjectionCompleteEmptyEvents(
+        $db,
+        $versionId,
+        max(1000, min(10000, max(1, $limit) * 20)),
+        $resolutionInputHash
+    );
+    while ($remaining > 0 && $loops++ < $maximumLoops) {
+        $eventStmt = $db->prepare("
+            SELECT event.*, extension.normalized_label,
+                   extension.language
+            FROM recipe_score_identity_projection_events event
+            JOIN ingredient_ontology_identity_extension_entities extension
+              ON extension.id = event.extension_entity_id
+             AND extension.ontology_version_id =
+                 event.ontology_version_id
+            WHERE event.ontology_version_id = ?
+              AND event.completed = 0
+            ORDER BY event.id
+            LIMIT 1
+        ");
+        $eventStmt->execute([$versionId]);
+        $event = $eventStmt->fetch(PDO::FETCH_ASSOC);
+        if (!$event) {
+            break;
+        }
+        $skipCoveredGenericEvent =
+            $hasResolutionInput
+            && $event['product_id'] === null
+            && $event['source_revision'] === null;
+        $requiresWork = $skipCoveredGenericEvent
+            ? ingredientOntologyV3IdentityProjectionRecipeNeedsWorkSql(
+                'ingredient.recipe_id',
+                'extension',
+                '?',
+                '?'
+            )
+            : '1 = 1';
+        $rowLimit = $remaining + 1;
+        $recipeStmt = $db->prepare("
+            SELECT DISTINCT dependency.recipe_id
+            FROM (
+                SELECT ingredient.recipe_id
+                FROM ingredient_ontology_identity_extension_entities
+                    extension
+                JOIN ingredient_ontology_mappings mapping
+                  ON mapping.ontology_version_id =
+                     extension.ontology_version_id
+                 AND mapping.owner_type = 'recipe_ingredient'
+                 AND mapping.normalized_label =
+                     extension.normalized_label
+                 AND {$mappingLanguage} = {$extensionLanguage}
+                JOIN recipe_ingredients ingredient
+                  ON ingredient.id = mapping.owner_id
+                JOIN recipe_catalog recipe
+                  ON recipe.id = ingredient.recipe_id
+                 AND recipe.deleted_at IS NULL
+                WHERE extension.id = ?
+                  AND ingredient.recipe_id > CAST(? AS INTEGER)
+                  AND {$requiresWork}
+                UNION
+                SELECT ingredient.recipe_id
+                FROM ingredient_ontology_identity_extension_entities
+                    extension
+                JOIN ingredient_ontology_recipe_identity_annex recipe_annex
+                  ON recipe_annex.ontology_version_id =
+                     extension.ontology_version_id
+                 AND recipe_annex.ontology_content_hash =
+                     extension.ontology_content_hash
+                 AND recipe_annex.ontology_seal_hash =
+                     extension.ontology_seal_hash
+                 AND recipe_annex.normalized_label =
+                     extension.normalized_label
+                 AND recipe_annex.resolver_version = ?
+                 AND recipe_annex.review_manifest_hash = ?
+                 AND {$annexLanguage} = {$extensionLanguage}
+                JOIN recipe_ingredients ingredient
+                  ON ingredient.id =
+                     recipe_annex.recipe_ingredient_id
+                JOIN recipe_catalog recipe
+                  ON recipe.id = ingredient.recipe_id
+                 AND recipe.deleted_at IS NULL
+                WHERE extension.id = ?
+                  AND ingredient.recipe_id > CAST(? AS INTEGER)
+                  AND {$requiresWork}
+            ) dependency
+            ORDER BY dependency.recipe_id
+            LIMIT {$rowLimit}
+        ");
+        $afterRecipeId = (int)$event['after_recipe_id'];
+        $params = [
+            (int)$event['extension_entity_id'],
+            $afterRecipeId,
+        ];
+        if ($skipCoveredGenericEvent) {
+            $params[] = (int)$event['required_revision'];
+            $params[] = (int)$event['required_revision'];
+            $params[] = $resolutionInputHash;
+        }
+        $params[] =
+            ingredientOntologyV3RecipeIdentityResolverVersion();
+        $params[] =
+            ingredientOntologyV3IdentityAnnexReviewManifestHash();
+        $params[] =
+            (int)$event['extension_entity_id'];
+        $params[] =
+            $afterRecipeId;
+        if ($skipCoveredGenericEvent) {
+            $params[] = (int)$event['required_revision'];
+            $params[] = (int)$event['required_revision'];
+            $params[] = $resolutionInputHash;
+        }
+        $recipeStmt->execute($params);
+        $recipeIds = array_map(
+            'intval',
+            $recipeStmt->fetchAll(PDO::FETCH_COLUMN)
+        );
+        $hasMore = count($recipeIds) > $remaining;
+        if ($hasMore) {
+            $recipeIds = array_slice($recipeIds, 0, $remaining);
+        }
+        if ($recipeIds) {
+            $placeholders = implode(
+                ',',
+                array_fill(0, count($recipeIds), '?')
+            );
+            $select = "
+                SELECT ?, recipe.id, ?, ?, ?, ?, ?,
+                       CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                FROM recipe_catalog recipe
+                WHERE recipe.id IN ({$placeholders})
+                  AND recipe.deleted_at IS NULL
+            ";
+            $upsert = $db->prepare(
+                ingredientOntologyV3IdentityProjectionUpsertSql(
+                    $select
+                )
+            );
+            $upsert->execute([
+                $versionId,
+                (int)$event['id'],
+                (int)$event['id'],
+                (int)$event['required_revision'],
+                (int)$event['required_revision'],
+                (string)$event['required_hash'],
+                ...$recipeIds,
+            ]);
+            $lastRecipeId =
+                $recipeIds[array_key_last($recipeIds)];
+            $inserted += count($recipeIds);
+            $remaining -= count($recipeIds);
+        } else {
+            $lastRecipeId = $afterRecipeId;
+        }
+        $db->prepare("
+            UPDATE recipe_score_identity_projection_events
+            SET after_recipe_id = ?,
+                completed = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ? AND after_recipe_id = ?
+        ")->execute([
+            $lastRecipeId,
+            $hasMore ? 0 : 1,
+            (int)$event['id'],
+            $afterRecipeId,
+        ]);
+        if ($hasMore) {
+            break;
+        }
+    }
+    return $inserted;
+}
+
+function ingredientOntologyV3IdentityProjectionDiscover(
+    PDO $db,
+    array $parentAnnex,
+    array $targetSnapshot,
+    array $productIds = []
+): array {
+        if (!databaseTransactionIsActive($db)) {
+            throw new RuntimeException(
+                'identity projection discovery requires a transaction'
+            );
+        }
+        $versionId = (int)$parentAnnex['ontology_version_id'];
+        $parentCovered = (int)(
+            $parentAnnex['covered_identity_extension_revision']
+                ?? $parentAnnex['identity_extension_revision']
+        );
+        $parentCoveredHash = (string)(
+            $parentAnnex['covered_identity_extension_hash']
+                ?? $parentAnnex['identity_extension_hash']
+        );
+        $targetRevision = max(
+            0,
+            (int)($targetSnapshot['revision'] ?? 0)
+        );
+        $targetHash = (string)($targetSnapshot['hash'] ?? '');
+        if (
+            $targetRevision < $parentCovered
+            || !ingredientOntologyV3IdentityExtensionSnapshotMatches(
+                $db,
+                $versionId,
+                $targetSnapshot
+            )
+        ) {
+            throw new RuntimeException(
+                'identity projection discovery fence is invalid'
+            );
+        }
+        $state = ingredientOntologyV3IdentityProjectionWorkState(
+            $db,
+            $versionId
+        );
+        $headMatches =
+            $state !== null
+            && (int)($state['work_head_annex_revision_id'] ?? 0)
+                === (int)$parentAnnex['id']
+            && hash_equals(
+                (string)($state['work_head_annex_hash'] ?? ''),
+                (string)$parentAnnex['revision_hash']
+            )
+            && (int)$state['covered_revision'] === $parentCovered
+            && hash_equals(
+                (string)$state['covered_hash'],
+                $parentCoveredHash
+            );
+        if (!$headMatches) {
+            $db->prepare("
+                INSERT INTO recipe_score_identity_projection_state (
+                    ontology_version_id,
+                    work_head_annex_revision_id,
+                    work_head_annex_hash,
+                    discovered_revision, discovered_hash,
+                    covered_revision, covered_hash, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(ontology_version_id) DO UPDATE SET
+                    work_head_annex_revision_id =
+                        excluded.work_head_annex_revision_id,
+                    work_head_annex_hash =
+                        excluded.work_head_annex_hash,
+                    discovered_revision = MAX(
+                        recipe_score_identity_projection_state
+                            .discovered_revision,
+                        excluded.discovered_revision
+                    ),
+                    discovered_hash = CASE
+                        WHEN excluded.discovered_revision >=
+                            recipe_score_identity_projection_state
+                                .discovered_revision
+                        THEN excluded.discovered_hash
+                        ELSE recipe_score_identity_projection_state
+                            .discovered_hash
+                    END,
+                    covered_revision = excluded.covered_revision,
+                    covered_hash = excluded.covered_hash,
+                    updated_at = CURRENT_TIMESTAMP
+            ")->execute([
+                $versionId,
+                (int)$parentAnnex['id'],
+                (string)$parentAnnex['revision_hash'],
+                $parentCovered,
+                $parentCoveredHash,
+                $parentCovered,
+                $parentCoveredHash,
+            ]);
+            $state = ingredientOntologyV3IdentityProjectionWorkState(
+                $db,
+                $versionId
+            );
+        }
+        $discovered = (int)($state['discovered_revision'] ?? 0);
+        if ($discovered > $targetRevision) {
+            throw new RuntimeException(
+                'identity projection discovery revision regressed'
+            );
+        }
+        $scoreState = recipeScoreState($db);
+        ingredientOntologyV3IdentityProjectionSeedEvents(
+            $db,
+            $versionId,
+            $discovered,
+            $targetRevision,
+            (int)$scoreState['ontology_source_revision'],
+            $productIds
+        );
+        if ($targetRevision > $discovered) {
+            $db->prepare("
+                UPDATE recipe_score_identity_projection_state
+                SET discovered_revision = ?,
+                    discovered_hash = ?,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE ontology_version_id = ?
+                  AND discovered_revision = ?
+            ")->execute([
+                $targetRevision,
+                $targetHash,
+                $versionId,
+                $discovered,
+            ]);
+        }
+        $discoveryLimit = function_exists(
+            'ingredientOntologyV3IncrementalProductLimit'
+        ) ? ingredientOntologyV3IncrementalProductLimit() : 250;
+        ingredientOntologyV3IdentityProjectionProcessEvents(
+            $db,
+            $versionId,
+            $discoveryLimit,
+            (string)$parentAnnex['resolution_input_hash']
+        );
+        $capturedEventId = (int)$db->query("
+            SELECT COALESCE(MAX(id), 0)
+            FROM recipe_score_identity_projection_events
+            WHERE ontology_version_id = {$versionId}
+        ")->fetchColumn();
+        return [
+            'captured_revision' => $targetRevision,
+            'captured_hash' => $targetHash,
+            'captured_event_id' => $capturedEventId,
+            'covered_revision' => $parentCovered,
+            'covered_hash' => $parentCoveredHash,
+            'pending_recipe_count' =>
+                ingredientOntologyV3IdentityProjectionPendingCount(
+                    $db,
+                    $versionId
+                ),
+        ];
+    }
+
+function ingredientOntologyV3IdentityProjectionPendingRecipes(
+    PDO $db,
+    int $versionId,
+    int $limit
+): array {
+        $limit = max(0, $limit);
+        if ($versionId <= 0 || $limit === 0) {
+            return [];
+        }
+        $stmt = $db->prepare("
+            SELECT recipe_id, first_event_id, latest_event_id,
+                   first_required_revision,
+                   latest_required_revision, latest_required_hash,
+                   created_at, updated_at
+            FROM recipe_score_identity_projection_work
+            WHERE ontology_version_id = ?
+            ORDER BY first_required_revision, updated_at, recipe_id
+            LIMIT ?
+        ");
+        $stmt->bindValue(1, $versionId, PDO::PARAM_INT);
+        $stmt->bindValue(2, $limit, PDO::PARAM_INT);
+        $stmt->execute();
+        return array_map(static fn(array $row): array => [
+            'recipe_id' => (int)$row['recipe_id'],
+            'first_event_id' => (int)$row['first_event_id'],
+            'latest_event_id' => (int)$row['latest_event_id'],
+            'first_required_revision' =>
+                (int)$row['first_required_revision'],
+            'latest_required_revision' =>
+                (int)$row['latest_required_revision'],
+            'latest_required_hash' =>
+                (string)$row['latest_required_hash'],
+            'created_at' => (string)$row['created_at'],
+            'updated_at' => (string)$row['updated_at'],
+        ], $stmt->fetchAll(PDO::FETCH_ASSOC));
+    }
+
+function ingredientOntologyV3IdentityProjectionCoverageAfter(
+    PDO $db,
+    int $versionId,
+    int $parentCoveredRevision,
+    int $capturedRevision,
+    array $processedRecipeIds,
+    ?int $maximumEventId = null
+): array {
+        $processedRecipeIds = array_values(array_unique(array_filter(
+            array_map('intval', $processedRecipeIds),
+            static fn(int $recipeId): bool => $recipeId > 0
+        )));
+        $state = ingredientOntologyV3IdentityProjectionWorkState(
+            $db,
+            $versionId
+        );
+        if (
+            $state === null
+            || (int)$state['discovered_revision'] < $capturedRevision
+        ) {
+            throw new RuntimeException(
+                'identity projection discovery is incomplete'
+            );
+        }
+        $minimums = [];
+        $params = [$versionId];
+        $selectedWhere = '';
+        $eventWhere = '';
+        if ($maximumEventId !== null) {
+            $eventWhere = ' AND first_event_id <= ?';
+            $params[] = max(0, $maximumEventId);
+        }
+        if ($processedRecipeIds) {
+            $selectedWhere = ' AND recipe_id NOT IN ('
+                . implode(
+                    ',',
+                    array_fill(0, count($processedRecipeIds), '?')
+                )
+                . ')';
+            array_push($params, ...$processedRecipeIds);
+        }
+        $remaining = $db->prepare("
+            SELECT MIN(first_required_revision)
+            FROM recipe_score_identity_projection_work
+            WHERE ontology_version_id = ?
+              {$eventWhere}
+              {$selectedWhere}
+        ");
+        $remaining->execute($params);
+        $minimum = $remaining->fetchColumn();
+        if ($minimum !== false && $minimum !== null) {
+            $minimums[] = (int)$minimum;
+        }
+        if ($processedRecipeIds && $maximumEventId === null) {
+            $selected = $db->prepare("
+                SELECT MIN(MAX(first_required_revision, ?))
+                FROM recipe_score_identity_projection_work
+                WHERE ontology_version_id = ?
+                  AND latest_required_revision > ?
+                  AND recipe_id IN ("
+                    . implode(
+                        ',',
+                        array_fill(0, count($processedRecipeIds), '?')
+                    )
+                    . ")
+            ");
+            $selected->execute([
+                $capturedRevision + 1,
+                $versionId,
+                $capturedRevision,
+                ...$processedRecipeIds,
+            ]);
+            $minimum = $selected->fetchColumn();
+            if ($minimum !== false && $minimum !== null) {
+                $minimums[] = (int)$minimum;
+            }
+        }
+        $undiscovered = $db->prepare("
+            SELECT MIN(required_revision)
+            FROM recipe_score_identity_projection_events
+            WHERE ontology_version_id = ?
+              AND completed = 0
+              " . ($maximumEventId !== null ? "AND id <= ?" : "") . "
+        ");
+        $undiscovered->execute(
+            $maximumEventId !== null
+                ? [$versionId, max(0, $maximumEventId)]
+                : [$versionId]
+        );
+        $minimum = $undiscovered->fetchColumn();
+        if ($minimum !== false && $minimum !== null) {
+            $minimums[] = (int)$minimum;
+        }
+        $coveredRevision = $minimums
+            ? min($capturedRevision, min($minimums) - 1)
+            : $capturedRevision;
+        $coveredRevision = max(
+            $parentCoveredRevision,
+            min(
+                $coveredRevision,
+                (int)$state['discovered_revision']
+            )
+        );
+        return [
+            'revision' => $coveredRevision,
+            'hash' => ingredientOntologyV3IdentityProjectionHashAtRevision(
+                $db,
+                $versionId,
+                $coveredRevision
+            ),
+        ];
+    }
+
+function ingredientOntologyV3IdentityProjectionPublish(
+    PDO $db,
+    array $parentAnnex,
+    array $publishedAnnex,
+    int $capturedRevision,
+    int $capturedEventId,
+    array $processedRecipeIds,
+    array $coveredSnapshot
+): void {
+        if (!databaseTransactionIsActive($db)) {
+            throw new RuntimeException(
+                'identity projection publication requires a transaction'
+            );
+        }
+        $versionId = (int)$publishedAnnex['ontology_version_id'];
+        $processedRecipeIds = array_values(array_unique(array_filter(
+            array_map('intval', $processedRecipeIds),
+            static fn(int $recipeId): bool => $recipeId > 0
+        )));
+        if ($processedRecipeIds) {
+            $placeholders = implode(
+                ',',
+                array_fill(0, count($processedRecipeIds), '?')
+            );
+            $db->prepare("
+                DELETE FROM recipe_score_identity_projection_work
+                WHERE ontology_version_id = ?
+                  AND latest_required_revision <= ?
+                  AND latest_event_id <= ?
+                  AND recipe_id IN ({$placeholders})
+            ")->execute([
+                $versionId,
+                $capturedRevision,
+                $capturedEventId,
+                ...$processedRecipeIds,
+            ]);
+            $db->prepare("
+                UPDATE recipe_score_identity_projection_work
+                SET first_required_revision = MAX(
+                        first_required_revision,
+                        ?
+                    ),
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE ontology_version_id = ?
+                  AND first_required_revision <= ?
+                  AND latest_required_revision > ?
+                  AND latest_event_id <= ?
+                  AND recipe_id IN ({$placeholders})
+            ")->execute([
+                $capturedRevision + 1,
+                $versionId,
+                $capturedRevision,
+                $capturedRevision,
+                $capturedEventId,
+                ...$processedRecipeIds,
+            ]);
+        }
+        $db->prepare("
+            UPDATE recipe_score_identity_projection_state
+            SET work_head_annex_revision_id = ?,
+                work_head_annex_hash = ?,
+                covered_revision = ?,
+                covered_hash = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE ontology_version_id = ?
+              AND work_head_annex_revision_id = ?
+              AND work_head_annex_hash = ?
+        ")->execute([
+            (int)$publishedAnnex['id'],
+            (string)$publishedAnnex['revision_hash'],
+            (int)$coveredSnapshot['revision'],
+            (string)$coveredSnapshot['hash'],
+            $versionId,
+            (int)$parentAnnex['id'],
+            (string)$parentAnnex['revision_hash'],
+        ]);
+        $state = ingredientOntologyV3IdentityProjectionWorkState(
+            $db,
+            $versionId
+        );
+        if (
+            $state === null
+            || (int)$state['work_head_annex_revision_id']
+                !== (int)$publishedAnnex['id']
+            || (int)$state['covered_revision']
+                !== (int)$coveredSnapshot['revision']
+            || !hash_equals(
+                (string)$state['covered_hash'],
+                (string)$coveredSnapshot['hash']
+            )
+        ) {
+            throw new RuntimeException(
+                'identity projection publication state changed'
+            );
+        }
+    }
+
+function ingredientOntologyV3IdentityProjectionRebaseHead(
+    PDO $db,
+    array $parentAnnex,
+    array $publishedAnnex
+): void {
+    $versionId = (int)$publishedAnnex['ontology_version_id'];
+    $db->prepare("
+        UPDATE recipe_score_identity_projection_state
+        SET work_head_annex_revision_id = ?,
+            work_head_annex_hash = ?,
+            covered_revision = ?,
+            covered_hash = ?,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE ontology_version_id = ?
+          AND (
+              work_head_annex_revision_id IS NULL
+              OR (
+                  work_head_annex_revision_id = ?
+                  AND work_head_annex_hash = ?
+              )
+          )
+    ")->execute([
+        (int)$publishedAnnex['id'],
+        (string)$publishedAnnex['revision_hash'],
+        (int)$publishedAnnex[
+            'covered_identity_extension_revision'
+        ],
+        (string)$publishedAnnex[
+            'covered_identity_extension_hash'
+        ],
+        $versionId,
+        (int)$parentAnnex['id'],
+        (string)$parentAnnex['revision_hash'],
+    ]);
+}
+
+function ingredientOntologyV3IdentityHistoricalBindingsForProducts(
+    PDO $db,
+    int $versionId,
+    array $productIds,
+    int $throughSourceRevision
+): array {
+    $productIds = array_values(array_unique(array_filter(
+        array_map('intval', $productIds),
+        static fn(int $productId): bool => $productId > 0
+    )));
+    $result = [
+        'entity_ids' => [],
+        'extension_entity_ids' => [],
+    ];
+    if (!$productIds || $throughSourceRevision <= 0) {
+        return $result;
+    }
+    foreach (array_chunk($productIds, 200) as $chunk) {
+        $placeholders = implode(
+            ',',
+            array_fill(0, count($chunk), '?')
+        );
+        $stmt = $db->prepare("
+            SELECT entity_id, extension_entity_id
+            FROM ingredient_ontology_identity_annex_history
+            WHERE ontology_version_id = ?
+              AND product_id IN ({$placeholders})
+              AND source_revision <= ?
+              AND status = 'accepted'
+            ORDER BY source_revision, id
+        ");
+        $stmt->execute([
+            $versionId,
+            ...$chunk,
+            $throughSourceRevision,
+        ]);
+        while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
+            if ($row['entity_id'] !== null) {
+                $result['entity_ids'][(int)$row['entity_id']] = true;
+            }
+            if ($row['extension_entity_id'] !== null) {
+                $result['extension_entity_ids'][
+                    (int)$row['extension_entity_id']
+                ] = true;
+            }
+        }
+    }
+    return [
+        'entity_ids' => array_map(
+            'intval',
+            array_keys($result['entity_ids'])
+        ),
+        'extension_entity_ids' => array_map(
+            'intval',
+            array_keys($result['extension_entity_ids'])
+        ),
+    ];
+}
+
+function ingredientOntologyV3IdentityExtensionRecipeIdsForProductsQuery(
+    PDO $db,
+    int $versionId,
+    array $productIds,
+    int $limit
+): array {
+    $limit = max(1, $limit);
+    $rowLimit = $limit + 1;
     $placeholders = implode(
         ',',
         array_fill(0, count($productIds), '?')
@@ -3617,6 +4777,7 @@ function ingredientOntologyV3IdentityExtensionRecipeIdsForProducts(
           AND product_annex.resolver_version = ?
           AND product_annex.review_manifest_hash = ?
         ORDER BY ingredient.recipe_id
+        LIMIT {$rowLimit}
     ");
     $stmt->execute([
         $versionId,
@@ -3624,10 +4785,111 @@ function ingredientOntologyV3IdentityExtensionRecipeIdsForProducts(
         ingredientOntologyV3ProductIdentityResolverVersion(),
         ingredientOntologyV3IdentityAnnexReviewManifestHash(),
     ]);
-    return array_map(
-        'intval',
-        $stmt->fetchAll(PDO::FETCH_COLUMN)
-    );
+    $recipeIds = [];
+    while (($recipeId = $stmt->fetchColumn()) !== false) {
+        if (count($recipeIds) >= $limit) {
+            break;
+        }
+        $recipeIds[(int)$recipeId] = true;
+    }
+    if (ingredientOntologyV3TableExists(
+        $db,
+        'ingredient_ontology_recipe_identity_annex'
+    )) {
+        $annex = $db->prepare("
+            SELECT DISTINCT ingredient.recipe_id
+            FROM ingredient_ontology_identity_annex product_annex
+            JOIN ingredient_ontology_identity_extension_entities extension
+              ON extension.id = product_annex.extension_entity_id
+             AND extension.ontology_version_id =
+                 product_annex.ontology_version_id
+             AND extension.ontology_content_hash =
+                 product_annex.ontology_content_hash
+             AND extension.ontology_seal_hash =
+                 product_annex.ontology_seal_hash
+             AND extension.status = 'active'
+            JOIN ingredient_ontology_recipe_identity_annex recipe_annex
+              ON recipe_annex.ontology_version_id =
+                 product_annex.ontology_version_id
+             AND recipe_annex.ontology_content_hash =
+                 product_annex.ontology_content_hash
+             AND recipe_annex.ontology_seal_hash =
+                 product_annex.ontology_seal_hash
+             AND recipe_annex.normalized_label =
+                 extension.normalized_label
+             AND recipe_annex.resolver_version = ?
+             AND recipe_annex.review_manifest_hash = ?
+             AND (
+                 CASE
+                     WHEN lower(replace(
+                         recipe_annex.language, '_', '-'
+                     )) = 'und'
+                     THEN 'und'
+                     ELSE substr(
+                         lower(replace(
+                             recipe_annex.language, '_', '-'
+                         )) || '-',
+                         1,
+                         instr(
+                             lower(replace(
+                                 recipe_annex.language, '_', '-'
+                             )) || '-',
+                             '-'
+                         ) - 1
+                     )
+                 END
+             ) = (
+                 CASE
+                     WHEN lower(replace(
+                         extension.language, '_', '-'
+                     )) = 'und'
+                     THEN 'und'
+                     ELSE substr(
+                         lower(replace(
+                             extension.language, '_', '-'
+                         )) || '-',
+                         1,
+                         instr(
+                             lower(replace(
+                                 extension.language, '_', '-'
+                             )) || '-',
+                             '-'
+                         ) - 1
+                     )
+                 END
+             )
+            JOIN recipe_ingredients ingredient
+              ON ingredient.id = recipe_annex.recipe_ingredient_id
+            JOIN recipe_catalog recipe
+              ON recipe.id = ingredient.recipe_id
+             AND recipe.deleted_at IS NULL
+            WHERE product_annex.ontology_version_id = ?
+              AND product_annex.product_id IN ({$placeholders})
+              AND product_annex.status = 'accepted'
+              AND product_annex.extension_entity_id IS NOT NULL
+              AND product_annex.resolver_version = ?
+              AND product_annex.review_manifest_hash = ?
+            ORDER BY ingredient.recipe_id
+            LIMIT {$rowLimit}
+        ");
+        $annex->execute([
+            ingredientOntologyV3RecipeIdentityResolverVersion(),
+            ingredientOntologyV3IdentityAnnexReviewManifestHash(),
+            $versionId,
+            ...$productIds,
+            ingredientOntologyV3ProductIdentityResolverVersion(),
+            ingredientOntologyV3IdentityAnnexReviewManifestHash(),
+        ]);
+        while (($recipeId = $annex->fetchColumn()) !== false) {
+            if (count($recipeIds) >= $limit) {
+                break;
+            }
+            $recipeIds[(int)$recipeId] = true;
+        }
+    }
+    $result = array_map('intval', array_keys($recipeIds));
+    sort($result, SORT_NUMERIC);
+    return $result;
 }
 
 function ingredientOntologyV3ProductReadinessTableExists(

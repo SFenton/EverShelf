@@ -553,7 +553,11 @@ function ingredientOntologyV3ActiveVersion(PDO $db): ?array {
     $row = $db->query("
         SELECT v.*, r.id AS score_revision_id,
                r.identity_extension_revision,
-               r.identity_extension_hash
+               r.identity_extension_hash,
+               r.covered_identity_extension_revision,
+               r.covered_identity_extension_hash,
+               r.corpus_annex_revision_id,
+               r.corpus_annex_hash
         FROM recipe_score_state s
         JOIN recipe_score_revisions r
           ON r.id = s.active_score_revision_id
@@ -571,6 +575,14 @@ function ingredientOntologyV3ActiveVersion(PDO $db): ?array {
     $row['score_revision_id'] = (int)$row['score_revision_id'];
     $row['identity_extension_revision'] =
         (int)($row['identity_extension_revision'] ?? 0);
+    $row['covered_identity_extension_revision'] =
+        (int)($row[
+            'covered_identity_extension_revision'
+        ] ?? 0);
+    $row['corpus_annex_revision_id'] =
+        ($row['corpus_annex_revision_id'] ?? null) !== null
+            ? (int)$row['corpus_annex_revision_id']
+            : null;
     $row['effective_status'] = 'active';
     return $row;
 }
@@ -3016,7 +3028,46 @@ function ingredientOntologyV3MappingAttributeIntegrityAudit(
     ];
 }
 
+function ingredientOntologyV3TrackCorpusOperation(
+    string $operation,
+    bool $fullScan = false
+): void {
+    $tracking =
+        (
+            defined('RECIPE_BACKEND_TEST_MODE')
+            && RECIPE_BACKEND_TEST_MODE
+        )
+        || !empty($GLOBALS[
+            'INGREDIENT_ONTOLOGY_V3_TRACK_FULL_CORPUS_SCANS'
+        ]);
+    if (!$tracking) {
+        return;
+    }
+    if (!isset(
+        $GLOBALS['INGREDIENT_ONTOLOGY_V3_CORPUS_OPERATION_COUNTS']
+    ) || !is_array(
+        $GLOBALS['INGREDIENT_ONTOLOGY_V3_CORPUS_OPERATION_COUNTS']
+    )) {
+        $GLOBALS['INGREDIENT_ONTOLOGY_V3_CORPUS_OPERATION_COUNTS'] = [];
+    }
+    $GLOBALS['INGREDIENT_ONTOLOGY_V3_CORPUS_OPERATION_COUNTS'][
+        $operation
+    ] = (int)($GLOBALS[
+        'INGREDIENT_ONTOLOGY_V3_CORPUS_OPERATION_COUNTS'
+    ][$operation] ?? 0) + 1;
+    if ($fullScan) {
+        $GLOBALS['INGREDIENT_ONTOLOGY_V3_CORPUS_FULL_SCAN_COUNT'] =
+            (int)($GLOBALS[
+                'INGREDIENT_ONTOLOGY_V3_CORPUS_FULL_SCAN_COUNT'
+            ] ?? 0) + 1;
+    }
+}
+
 function ingredientOntologyV3CorpusHash(PDO $db): string {
+    ingredientOntologyV3TrackCorpusOperation(
+        'legacy_corpus_hash',
+        true
+    );
     $hash = hash_init('sha256');
     $sources = [
         'products' => [

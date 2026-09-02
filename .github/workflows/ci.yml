@@ -60,8 +60,10 @@ jobs:
         run: |
           php scripts/test-incremental-score-overlay.php
           php scripts/test-sparse-score-projection.php
+          php scripts/test-corpus-annex.php
           php scripts/test-recipe-score-deltas.php
           php -d memory_limit=128M scripts/test-incremental-mutation-memory.php
+          php -d memory_limit=128M scripts/test-corpus-annex-checkpoint-memory.php
 
       - name: Test activation runtime and bounded-memory contract
         run: php scripts/test-ontology-activation-runtime.php

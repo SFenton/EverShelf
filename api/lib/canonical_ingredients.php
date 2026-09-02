@@ -1994,9 +1994,13 @@ function canonicalIngredientResolveFoodOnParents(
     return $mappings;
 }
 
-function canonicalIngredientUpsert(PDO $db, array $mapping): int {
+function canonicalIngredientUpsert(
+    PDO $db,
+    array $mapping,
+    bool $updateExisting = true
+): int {
     $externalIds = $mapping['external_ids'] ?? [];
-    if (!empty($externalIds)) {
+    if ($updateExisting && !empty($externalIds)) {
         $existing = $db->prepare("SELECT external_ids_json FROM canonical_ingredients WHERE slug = ?");
         $existing->execute([$mapping['slug']]);
         $existingJson = $existing->fetchColumn() ?: null;
@@ -2006,9 +2010,8 @@ function canonicalIngredientUpsert(PDO $db, array $mapping): int {
             $externalIds
         );
     }
-    $stmt = $db->prepare("
-        INSERT INTO canonical_ingredients (slug, name, parent_slug, category, source, external_ids_json, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+    $conflictSql = $updateExisting
+        ? "
         ON CONFLICT(slug) DO UPDATE SET
             name = excluded.name,
             parent_slug = COALESCE(excluded.parent_slug, canonical_ingredients.parent_slug),
@@ -2016,6 +2019,29 @@ function canonicalIngredientUpsert(PDO $db, array $mapping): int {
             source = excluded.source,
             external_ids_json = COALESCE(excluded.external_ids_json, canonical_ingredients.external_ids_json),
             updated_at = CURRENT_TIMESTAMP
+        WHERE canonical_ingredients.name IS NOT excluded.name
+           OR canonical_ingredients.parent_slug IS NOT
+                COALESCE(
+                    excluded.parent_slug,
+                    canonical_ingredients.parent_slug
+                )
+           OR canonical_ingredients.category IS NOT
+                COALESCE(
+                    NULLIF(excluded.category, ''),
+                    canonical_ingredients.category
+                )
+           OR canonical_ingredients.source IS NOT excluded.source
+           OR canonical_ingredients.external_ids_json IS NOT
+                COALESCE(
+                    excluded.external_ids_json,
+                    canonical_ingredients.external_ids_json
+                )
+        "
+        : 'ON CONFLICT(slug) DO NOTHING';
+    $stmt = $db->prepare("
+        INSERT INTO canonical_ingredients (slug, name, parent_slug, category, source, external_ids_json, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        {$conflictSql}
     ");
     $externalJson = !empty($externalIds)
         ? json_encode($externalIds, JSON_UNESCAPED_UNICODE)
@@ -2154,7 +2180,11 @@ function canonicalIngredientApplyPreparedProduct(
             updated_at = CURRENT_TIMESTAMP
     ");
     foreach ((array)($result['mappings'] ?? []) as $mapping) {
-        $ingredientId = canonicalIngredientUpsert($db, $mapping);
+        $ingredientId = canonicalIngredientUpsert(
+            $db,
+            $mapping,
+            false
+        );
         $link->execute([
             $productId,
             $ingredientId,

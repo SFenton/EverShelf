@@ -1032,20 +1032,58 @@ $migratedGarlicsReadiness =
         $db,
         $productIds['garlics']
     );
+$resolverMigrationEvidence = [
+    'source_revision_before' => $sourceRevisionBeforeResolverMigration,
+    'source_revision_after' =>
+        (int)recipeScoreState($db)['ontology_source_revision'],
+    'global_mutation_count' => (int)$db->query("
+        SELECT COUNT(*)
+        FROM recipe_score_mutations
+        WHERE domain = 'source'
+          AND owner_type = 'global'
+          AND reason = 'recipe_identity_resolver_changed'
+    ")->fetchColumn(),
+    'durable_global_event_count' => (int)$db->query("
+        SELECT COUNT(*)
+        FROM recipe_score_source_reconciliation_events
+        WHERE event_owner_type = 'global'
+          AND event_reason = 'recipe_identity_resolver_changed'
+    ")->fetchColumn(),
+    'pending_recipe_count' => (int)$db->query("
+        SELECT COUNT(*) FROM recipe_score_pending_recipes
+    ")->fetchColumn(),
+    'score_status' => recipeScoreRevisionStatus(
+        $db,
+        recipeScoreActiveRevision($db)
+    ),
+    'projection_decision' =>
+        ingredientOntologyV3CorpusProjectionV2DriftDecision($db),
+    'maintenance_incremental' =>
+        ingredientOntologyActivationMaintenanceDriftIsIncremental(
+            $db,
+            recipeScoreActiveRevision($db)
+        ),
+    'requires_score_build' =>
+        ingredientOntologyActivationNeedsScoreBuild($db),
+];
 $assert(
     !empty($resolverMigration['changed'])
     && !empty($resolverMigration['recipe_resolver_changed'])
     && (int)recipeScoreState($db)['ontology_source_revision']
-        === $sourceRevisionBeforeResolverMigration + 1
+        === $sourceRevisionBeforeResolverMigration
     && (int)$db->query("
         SELECT COUNT(*)
         FROM recipe_score_mutations
         WHERE domain = 'source'
           AND owner_type = 'global'
           AND reason = 'recipe_identity_resolver_changed'
-          AND revision = "
-            . ($sourceRevisionBeforeResolverMigration + 1)
-    )->fetchColumn() === 1
+    ")->fetchColumn() === 0
+    && (int)$db->query("
+        SELECT COUNT(*)
+        FROM recipe_score_source_reconciliation_events
+        WHERE event_owner_type = 'global'
+          AND event_reason = 'recipe_identity_resolver_changed'
+    ")->fetchColumn() === 0
     && ingredientOntologyActivationNeedsScoreBuild($db)
     && (int)(
         $resolverMigration[
@@ -1086,8 +1124,10 @@ $assert(
         FROM recipe_score_pending_products
         WHERE product_id = {$productIds['garlics']}
     ")->fetchColumn() === 0,
-    'Resolver migration must backfill unchanged product readiness and '
-        . 'force copied refresh of stale recipe identities'
+    'Resolver migration must preserve the source fence, backfill unchanged '
+        . 'product readiness, and queue bounded copied refresh of stale '
+        . 'recipe identities without a global source event: '
+        . ingredientOntologyV3Json($resolverMigrationEvidence)
 );
 $assert(
     (string)$db->query("

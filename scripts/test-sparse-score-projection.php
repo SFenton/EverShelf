@@ -128,6 +128,20 @@ $revision->execute([
     ]),
 ]);
 $parentRevisionId = (int)$db->lastInsertId();
+$db->prepare("
+    UPDATE recipe_score_revisions
+    SET ontology_portable_content_hash = ?,
+        ontology_review_manifest_hash = ?,
+        ontology_resolution_gold_hash = ?,
+        ontology_seal_hash = ?
+    WHERE id = ? AND status = 'building'
+")->execute([
+    $hash,
+    $hash,
+    $hash,
+    $hash,
+    $parentRevisionId,
+]);
 
 $score = $db->prepare("
     INSERT INTO recipe_inventory_scores (
@@ -199,6 +213,16 @@ $db->exec("DELETE FROM recipe_score_mutations");
 $db->exec('BEGIN IMMEDIATE');
 recipeScoreBuildEffectiveProjection($db, $parentRevisionId);
 $db->exec('COMMIT');
+$baselinePhysicalRevisionId = $parentRevisionId;
+$root = ingredientOntologyV3CorpusAnnexEnsureScoreRoot(
+    $db,
+    recipeScoreActiveRevision($db)
+);
+$assert(
+    $root !== null,
+    'Sparse projection fixture must establish a corpus checkpoint'
+);
+$parentRevisionId = (int)recipeScoreActiveRevision($db)['id'];
 
 $childReport = ingredientOntologyV3Json([
     'materialized_hash_algorithm' => 'parent-delta-v2',
@@ -235,6 +259,20 @@ $revision->execute([
 ]);
 $childRevisionId = (int)$db->lastInsertId();
 $db->prepare("
+    UPDATE recipe_score_revisions
+    SET ontology_portable_content_hash = ?,
+        ontology_review_manifest_hash = ?,
+        ontology_resolution_gold_hash = ?,
+        ontology_seal_hash = ?
+    WHERE id = ? AND status = 'building'
+")->execute([
+    $hash,
+    $hash,
+    $hash,
+    $hash,
+    $childRevisionId,
+]);
+$db->prepare("
     INSERT INTO recipe_score_recipe_operations (
         score_revision_id, recipe_id, operation
     )
@@ -256,6 +294,13 @@ $match->execute([
     1,
     'exact',
 ]);
+$assert(
+    ingredientOntologyV3CorpusAnnexEnsureScoreRoot(
+        $db,
+        recipeScoreRevision($db, $childRevisionId)
+    ) !== null,
+    'A building sparse child must inherit its parent projection pin'
+);
 $db->prepare("
     INSERT INTO recipe_score_recipe_ingredients (
         score_revision_id, recipe_id, recipe_ingredient_id
@@ -352,7 +397,7 @@ $sources = $db->query("
     ORDER BY recipe_id
 ")->fetchAll(PDO::FETCH_KEY_PAIR);
 $assert(
-    (int)$sources[$firstRecipeId] === $parentRevisionId
+    (int)$sources[$firstRecipeId] === $baselinePhysicalRevisionId
     && (int)$sources[$secondRecipeId] === $childRevisionId
     && (int)$db->query("
         SELECT COUNT(*) FROM recipe_inventory_scores
@@ -420,7 +465,7 @@ $sources = $db->query("
     ORDER BY recipe_id
 ")->fetchAll(PDO::FETCH_KEY_PAIR);
 $assert(
-    (int)$sources[$firstRecipeId] === $parentRevisionId
+    (int)$sources[$firstRecipeId] === $baselinePhysicalRevisionId
     && (int)$sources[$secondRecipeId] === $childRevisionId,
     'Projection reconstruction must replay the immutable delta chain'
 );
@@ -454,7 +499,8 @@ $depthGate = ingredientOntologyV3IncrementalRebuild($db, true);
 $assert(
     empty($depthGate['rebuilt'])
     && (string)$depthGate['reason'] === 'compaction_required',
-    'Sparse publication must stop before the hard ancestry limit'
+    'Sparse publication must stop before the hard ancestry limit: '
+        . ingredientOntologyV3Json($depthGate)
 );
 $db->prepare("
     DELETE FROM recipe_ingredients

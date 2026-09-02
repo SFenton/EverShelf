@@ -41,173 +41,47 @@ function ingredientOntologyActivationProductDriftHandledByAnnex(
     PDO $db,
     ?array $activeScore = null
 ): bool {
-    $activeScore ??= recipeScoreActiveRevision($db);
-    if (
-        $activeScore === null
-        || $activeScore['ontology_version_id'] === null
-    ) {
-        return false;
-    }
-    $state = recipeScoreState($db);
-    $activeScoreId = (int)$activeScore['id'];
-    $sourceRevision = (int)$state['ontology_source_revision'];
-    if (
-        (int)$activeScore['ontology_source_revision']
-            !== $sourceRevision
-    ) {
-        $from = (int)$activeScore['ontology_source_revision'];
-        $through = $sourceRevision;
-        if ($through <= $from) {
-            return false;
-        }
-        $mutations = $db->prepare("
-            SELECT owner_type, owner_id
-            FROM recipe_score_mutations
-            WHERE domain = 'source'
-              AND revision > ?
-              AND revision <= ?
-            ORDER BY revision
-        ");
-        $mutations->execute([$from, $through]);
-        $rows = $mutations->fetchAll(PDO::FETCH_ASSOC);
-        if (count($rows) !== $through - $from) {
-            return false;
-        }
-        $version = ingredientOntologyV3Version(
+    return !empty(
+        ingredientOntologyV3CorpusProjectionV2DriftDecision(
             $db,
-            (int)$activeScore['ontology_version_id']
-        );
-        if ($version === null || (string)$version['status'] !== 'ready') {
-            return false;
-        }
-        $productIds = [];
-        foreach ($rows as $row) {
-            if ((string)$row['owner_type'] !== 'product') {
-                return false;
-            }
-            $productIds[(int)$row['owner_id']] = true;
-        }
-        $product = $db->prepare("
-            SELECT id, name, brand, category, prepared_food
-            FROM products
-            WHERE id = ?
-        ");
-        $annex = $db->prepare("
-            SELECT ontology_version_id, ontology_content_hash,
-                   ontology_seal_hash, owner_fingerprint,
-                   resolver_version, review_manifest_hash
-            FROM ingredient_ontology_identity_annex
-            WHERE product_id = ?
-        ");
-        foreach (array_keys($productIds) as $productId) {
-            $product->execute([$productId]);
-            $productRow = $product->fetch(PDO::FETCH_ASSOC);
-            if (!$productRow) {
-                continue;
-            }
-            $annex->execute([$productId]);
-            $annexRow = $annex->fetch(PDO::FETCH_ASSOC);
-            if (
-                !$annexRow
-                || (int)$annexRow['ontology_version_id']
-                    !== (int)$version['id']
-                || !hash_equals(
-                    (string)$version['content_hash'],
-                    (string)$annexRow['ontology_content_hash']
-                )
-                || !hash_equals(
-                    (string)$version['seal_hash'],
-                    (string)$annexRow['ontology_seal_hash']
-                )
-                || !hash_equals(
-                    ingredientOntologyV3ProductOwnerFingerprint(
-                        $productRow
-                    ),
-                    (string)$annexRow['owner_fingerprint']
-                )
-                || (string)$annexRow['resolver_version']
-                    !== ingredientOntologyV3ProductIdentityResolverVersion()
-                || !hash_equals(
-                    ingredientOntologyV3IdentityAnnexReviewManifestHash(),
-                    (string)$annexRow['review_manifest_hash']
-                )
-            ) {
-                return false;
-            }
-        }
-        $currentActive = recipeScoreActiveRevision($db);
-        $currentState = recipeScoreState($db);
-        return $currentActive !== null
-            && (int)$currentActive['id'] === $activeScoreId
-            && (int)$currentState['ontology_source_revision']
-                === $sourceRevision;
-    }
-    if (
-        (string)(
-            $activeScore['ontology_source_lineage_hash'] ?? ''
-        ) === ''
-    ) {
-        return false;
-    }
-    $report = recipeScoreRevisionReport($activeScore);
-    $expectedHash = (string)(
-        $report['product_identity_semantic_hash'] ?? ''
+            $activeScore
+        )['handled']
     );
-    if (
-        (string)($report['ontology_source_scope'] ?? '')
-            !== 'product_identity_annex'
-        || strlen($expectedHash) !== 64
-    ) {
-        return false;
-    }
-    $currentHash = ingredientOntologyV3IdentityAnnexSemanticHash(
-        $db,
-        (int)$activeScore['ontology_version_id']
-    );
-    $currentActive = recipeScoreActiveRevision($db);
-    $currentState = recipeScoreState($db);
-    return strlen($currentHash) === 64
-        && hash_equals($expectedHash, $currentHash)
-        && $currentActive !== null
-        && (int)$currentActive['id'] === $activeScoreId
-        && (int)$currentState['ontology_source_revision']
-            === $sourceRevision;
 }
 
 function ingredientOntologyActivationProductDriftIsIncremental(
     PDO $db,
     array $active
 ): bool {
+    $decision =
+        ingredientOntologyV3CorpusProjectionV2DriftDecision(
+            $db,
+            $active
+        );
+    if (empty($decision['handled'])) {
+        return false;
+    }
+    $productIds = array_map(
+        static fn(array $row): int => (int)$row['product_id'],
+        ingredientOntologyV3IncrementalPendingProducts($db)
+    );
+    $productIds = array_values(array_unique(array_merge(
+        $productIds,
+        array_map('intval', (array)($decision['product_ids'] ?? []))
+    )));
     if (
-        !function_exists(
-            'ingredientOntologyV3IncrementalScopedParentErrors'
-        )
-        || !ingredientOntologyV3TableExists(
-            $db,
-            'recipe_score_pending_products'
-        )
-        || !ingredientOntologyV3TableExists(
-            $db,
-            'recipe_score_pending_recipes'
-        )
+        !$productIds
+        || (array)($decision['recipe_ids'] ?? [])
     ) {
         return false;
     }
-    if (!ingredientOntologyActivationProductDriftWithinLimit($db)) {
-        return false;
-    }
-    $pendingProducts = $db->query("
-        SELECT product_id
-        FROM recipe_score_pending_products
-        ORDER BY product_id
-    ")->fetchAll(PDO::FETCH_COLUMN);
-    $productIds = array_map('intval', $pendingProducts);
     return !ingredientOntologyV3IncrementalScopedParentErrors(
         $db,
         $active,
         recipeScoreState($db),
         $productIds,
-        []
+        [],
+        true
     );
 }
 
@@ -230,40 +104,50 @@ function ingredientOntologyActivationMaintenanceDriftIsIncremental(
     ) {
         return false;
     }
-    if ((int)$db->query("
-        SELECT COUNT(*) FROM recipe_score_pending_products
-    ")->fetchColumn() > 0) {
+    $decision =
+        ingredientOntologyV3CorpusProjectionV2DriftDecision(
+            $db,
+            $active
+        );
+    if (empty($decision['handled'])) {
         return false;
     }
-    $limit = ingredientOntologyV3IncrementalProductLimit();
+    $pendingRecipes =
+        ingredientOntologyV3IncrementalPendingRecipes(
+            $db,
+            'maintenance'
+        );
     $recipeIds = array_map(
-        'intval',
-        $db->query("
-            SELECT recipe_id
-            FROM recipe_score_pending_recipes
-            WHERE lane = 'maintenance'
-            ORDER BY updated_at, recipe_id
-            LIMIT " . ($limit + 1)
-        )->fetchAll(PDO::FETCH_COLUMN)
+        static fn(array $row): int => (int)$row['recipe_id'],
+        $pendingRecipes
     );
-    if (!$recipeIds || count($recipeIds) > $limit) {
+    $productIds = array_map(
+        static fn(array $row): int => (int)$row['product_id'],
+        ingredientOntologyV3IncrementalPendingProducts($db)
+    );
+    $recipeIds = array_values(array_unique(array_merge(
+        $recipeIds,
+        array_map('intval', (array)($decision['recipe_ids'] ?? []))
+    )));
+    $productIds = array_values(array_unique(array_merge(
+        $productIds,
+        array_map('intval', (array)($decision['product_ids'] ?? []))
+    )));
+    if (
+        !$recipeIds
+        && !$productIds
+        && empty($decision['pending_suffix'])
+    ) {
         return false;
     }
-    $state = recipeScoreState($db);
-    $productIds = ingredientOntologyV3IncrementalSourceProductIds(
+    return !ingredientOntologyV3IncrementalScopedParentErrors(
         $db,
         $active,
-        $state
+        recipeScoreState($db),
+        $productIds,
+        $recipeIds,
+        false
     );
-    return count($productIds) <= $limit
-        && !ingredientOntologyV3IncrementalScopedParentErrors(
-            $db,
-            $active,
-            $state,
-            $productIds,
-            $recipeIds,
-            false
-        );
 }
 
 function ingredientOntologyActivationProductDriftWithinLimit(
@@ -308,11 +192,16 @@ function ingredientOntologyActivationNeedsReviewedManifestRefresh(
     if ($active === null) {
         return false;
     }
-    if (
-        ingredientOntologyActivationCorpusDrifted($db, $active)
-        && !ingredientOntologyActivationProductDriftHandledByAnnex(
+    $annexDecision =
+        ingredientOntologyV3CorpusProjectionV2DriftDecision(
             $db
-        )
+        );
+    if (!empty($annexDecision['requires_full_seal'])) {
+        return true;
+    }
+    if (
+        empty($annexDecision['handled'])
+        && ingredientOntologyActivationCorpusDrifted($db, $active)
     ) {
         return true;
     }
@@ -1841,6 +1730,66 @@ function ingredientOntologyActivationQuoteIdentifier(
                               ingredient_ontology_identity_extension_entities
                                   .created_revision
                               <= score.identity_extension_revision
+                    )
+                ',
+                'selector_kind' => 'score_revision',
+                'root' => false,
+                'after_snapshot_sequence' => true,
+                'append_only' => true,
+                'retain_on_cleanup' => true,
+            ],
+            [
+                'phase' => 6,
+                'table' =>
+                    'ingredient_ontology_corpus_annex_revisions',
+                'cursor' => 'id',
+                'selector' => '
+                    id IN (
+                        WITH RECURSIVE annex_chain(id) AS (
+                            SELECT score.corpus_annex_revision_id
+                            FROM main.recipe_score_revisions score
+                            WHERE score.id = ?
+                              AND score.corpus_annex_revision_id
+                                  IS NOT NULL
+                            UNION ALL
+                            SELECT annex.parent_revision_id
+                            FROM main.ingredient_ontology_corpus_annex_revisions
+                                annex
+                            JOIN annex_chain
+                              ON annex.id = annex_chain.id
+                            WHERE annex.parent_revision_id IS NOT NULL
+                        )
+                        SELECT id FROM annex_chain
+                    )
+                ',
+                'selector_kind' => 'score_revision',
+                'root' => false,
+                'after_snapshot_sequence' => true,
+                'append_only' => true,
+                'retain_on_cleanup' => true,
+            ],
+            [
+                'phase' => 7,
+                'table' =>
+                    'ingredient_ontology_corpus_annex_entries',
+                'cursor' => 'id',
+                'selector' => '
+                    corpus_annex_revision_id IN (
+                        WITH RECURSIVE annex_chain(id) AS (
+                            SELECT score.corpus_annex_revision_id
+                            FROM main.recipe_score_revisions score
+                            WHERE score.id = ?
+                              AND score.corpus_annex_revision_id
+                                  IS NOT NULL
+                            UNION ALL
+                            SELECT annex.parent_revision_id
+                            FROM main.ingredient_ontology_corpus_annex_revisions
+                                annex
+                            JOIN annex_chain
+                              ON annex.id = annex_chain.id
+                            WHERE annex.parent_revision_id IS NOT NULL
+                        )
+                        SELECT id FROM annex_chain
                     )
                 ',
                 'selector_kind' => 'score_revision',
@@ -4609,6 +4558,9 @@ function ingredientOntologyActivationAssertActiveDatabase(PDO $db): void {
         $lease = ingredientOntologyActivationClaimImport($db, $importId);
         $row = $lease['row'];
         $bundle = ingredientOntologyActivationImportBundle($row);
+        $specs = ingredientOntologyActivationSpecsForKind(
+            (string)$row['bundle_kind']
+        );
         $payloadPath = (string)$row['payload_path'];
         $resolvedPayloadPath =
             ingredientOntologyActivationUseVerifiedPayload(
@@ -4715,6 +4667,7 @@ function ingredientOntologyActivationAssertActiveDatabase(PDO $db): void {
                     break;
                 }
                 $tableName = (string)$table['table_name'];
+                $spec = $specs[$tableName] ?? [];
                 $cursor = (string)$table['cursor_column'];
                 $expectedRows = (int)$table['expected_row_count'];
                 $started = hrtime(true);
@@ -4782,20 +4735,38 @@ function ingredientOntologyActivationAssertActiveDatabase(PDO $db): void {
                         $upper->closeCursor();
                         $upper = null;
                         if ($upperCursor !== false && $upperCursor !== null) {
-                            $insert = $db->prepare("
-                                INSERT INTO main.{$tableSql}
-                                SELECT * FROM activation_payload.{$tableSql}
-                                WHERE {$cursorSql} > ?
-                                  AND {$cursorSql} <= ?
-                                ORDER BY {$cursorSql}
-                            ");
-                            $insert->execute([
-                                (int)$table['source_cursor'],
-                                (int)$upperCursor,
-                            ]);
-                            $inserted = $insert->rowCount();
-                            $insert->closeCursor();
-                            $insert = null;
+                            $readyGuardWasEnabled =
+                                ingredientOntologyV3ReadyMutationGuardEnabled(
+                                    $db
+                                );
+                            try {
+                                if (!empty($spec['append_only'])) {
+                                    ingredientOntologyV3SetReadyMutationGuard(
+                                        $db,
+                                        true
+                                    );
+                                }
+                                $insert = $db->prepare("
+                                    INSERT INTO main.{$tableSql}
+                                    SELECT *
+                                    FROM activation_payload.{$tableSql}
+                                    WHERE {$cursorSql} > ?
+                                      AND {$cursorSql} <= ?
+                                    ORDER BY {$cursorSql}
+                                ");
+                                $insert->execute([
+                                    (int)$table['source_cursor'],
+                                    (int)$upperCursor,
+                                ]);
+                                $inserted = $insert->rowCount();
+                                $insert->closeCursor();
+                                $insert = null;
+                            } finally {
+                                ingredientOntologyV3SetReadyMutationGuard(
+                                    $db,
+                                    $readyGuardWasEnabled
+                                );
+                            }
                             $newCursor = (int)$upperCursor;
                         }
                     }
@@ -5742,6 +5713,35 @@ function ingredientOntologyActivationAssertActiveDatabase(PDO $db): void {
                 'ontology activation attestation hash changed'
             );
         }
+        if (
+            (string)$row['bundle_kind'] === 'score'
+            && (int)($row['candidate_score_revision_id'] ?? 0) > 0
+        ) {
+            $candidateScore = recipeScoreRevision(
+                $db,
+                (int)$row['candidate_score_revision_id']
+            );
+            $activeScore = recipeScoreActiveRevision($db);
+            $candidateProjection = $candidateScore !== null
+                ? ingredientOntologyV3CorpusAnnexForScore(
+                    $db,
+                    $candidateScore
+                )
+                : null;
+            if (
+                $candidateProjection !== null
+                && (
+                    $activeScore === null
+                    || (int)$candidateScore['ontology_version_id']
+                        !== (int)$activeScore['ontology_version_id']
+                )
+            ) {
+                ingredientOntologyV3CorpusAnnexEnsureProjection(
+                    $db,
+                    $candidateProjection
+                );
+            }
+        }
         $reservationStarted = hrtime(true);
         dbBeginImmediateWithRetry($db);
         try {
@@ -5873,18 +5873,30 @@ function ingredientOntologyActivationAssertActiveDatabase(PDO $db): void {
                 recipeScoreClearPendingRecipes(
                     $db,
                     (int)$root['catalog_revision'],
-                    (int)$root['ontology_source_revision']
+                    (int)$root[
+                        'covered_ontology_source_revision'
+                    ]
                 );
                 $db->prepare("
                     DELETE FROM recipe_score_mutations
-                    WHERE (
-                        domain = 'catalog' AND revision <= ?
-                    ) OR (
-                        domain = 'source' AND revision <= ?
-                    )
+                    WHERE domain = 'catalog' AND revision <= ?
+                ")->execute([(int)$root['catalog_revision']]);
+                $db->prepare("
+                    DELETE FROM recipe_score_mutations
+                    WHERE domain = 'source'
+                      AND revision <= ?
+                      AND EXISTS (
+                          SELECT 1
+                          FROM
+                              recipe_score_source_reconciliation_backfill
+                          WHERE id = 1
+                            AND complete = 1
+                            AND scope_backfill_version >= 1
+                      )
                 ")->execute([
-                    (int)$root['catalog_revision'],
-                    (int)$root['ontology_source_revision'],
+                    (int)$root[
+                        'covered_ontology_source_revision'
+                    ],
                 ]);
                 recipeScoreSetWorkState(
                     $db,
@@ -7593,25 +7605,24 @@ function ingredientOntologyActivationAssertActiveDatabase(PDO $db): void {
         if ($active === null || $active['ontology_version_id'] === null) {
             return false;
         }
-        $productDriftHandled =
-            ingredientOntologyActivationProductDriftHandledByAnnex(
+        $annexDecision =
+            ingredientOntologyV3CorpusProjectionV2DriftDecision(
                 $db,
                 $active
             );
-        $productDriftIsIncremental = $productDriftHandled
-            && ingredientOntologyActivationProductDriftIsIncremental(
-                $db,
-                $active
-            );
+        if (!empty($annexDecision['requires_full_seal'])) {
+            return true;
+        }
+        $annexHandled = !empty($annexDecision['handled']);
         if (
-            ingredientOntologyActivationCorpusDrifted($db)
-            && !$productDriftIsIncremental
+            !$annexHandled
+            && ingredientOntologyActivationCorpusDrifted($db)
         ) {
             return true;
         }
         $state = recipeScoreState($db);
         if (
-            !$productDriftIsIncremental
+            !$annexHandled
             && (
                 (string)(
                     $active['ontology_source_lineage_hash'] ?? ''
@@ -7624,7 +7635,7 @@ function ingredientOntologyActivationAssertActiveDatabase(PDO $db): void {
             return true;
         }
         if (
-            !$productDriftIsIncremental
+            !$annexHandled
             && (
                 (int)($active['ontology_source_revision'] ?? -1)
                     !== (int)$state['ontology_source_revision']

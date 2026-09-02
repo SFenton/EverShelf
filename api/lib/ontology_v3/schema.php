@@ -1,7 +1,7 @@
 <?php
 declare(strict_types=1);
 
-const INGREDIENT_ONTOLOGY_V3_SCHEMA_VERSION = 'ingredient-ontology-v3.19';
+const INGREDIENT_ONTOLOGY_V3_SCHEMA_VERSION = 'ingredient-ontology-v3.20';
 const INGREDIENT_ONTOLOGY_V3_PROMPT_SCHEMA_VERSION =
     'ingredient_topology_benchmark_v3';
 const INGREDIENT_ONTOLOGY_V3_DEFAULT_MODEL = 'gemini-3.5-flash';
@@ -1758,6 +1758,960 @@ function ingredientOntologyV3EnsurePendingEdgeReviewDisposition(
     }
 }
 
+function ingredientOntologyV3MigrateCorpusAnnexSchema(PDO $db): void {
+    $zeroHash = str_repeat('0', 64);
+    $db->exec("
+        CREATE TABLE IF NOT EXISTS
+            ingredient_ontology_corpus_annex_revisions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ontology_version_id INTEGER NOT NULL,
+            ontology_content_hash TEXT NOT NULL
+                CHECK(length(ontology_content_hash) = 64),
+            ontology_seal_hash TEXT NOT NULL
+                CHECK(length(ontology_seal_hash) = 64),
+            parent_revision_id INTEGER DEFAULT NULL,
+            parent_revision_hash TEXT NOT NULL
+                DEFAULT '{$zeroHash}'
+                CHECK(length(parent_revision_hash) = 64),
+            hash_version INTEGER NOT NULL DEFAULT 2
+                CHECK(hash_version IN (1, 2)),
+            revision_hash TEXT NOT NULL
+                CHECK(length(revision_hash) = 64),
+            base_corpus_hash TEXT NOT NULL
+                CHECK(length(base_corpus_hash) = 64),
+            captured_corpus_hash TEXT NOT NULL
+                CHECK(length(captured_corpus_hash) = 64),
+            base_products_max_id INTEGER NOT NULL DEFAULT 0
+                CHECK(base_products_max_id >= 0),
+            base_recipe_catalog_max_id INTEGER NOT NULL DEFAULT 0
+                CHECK(base_recipe_catalog_max_id >= 0),
+            base_recipe_origins_max_id INTEGER NOT NULL DEFAULT 0
+                CHECK(base_recipe_origins_max_id >= 0),
+            base_recipe_ingredients_max_id INTEGER NOT NULL DEFAULT 0
+                CHECK(base_recipe_ingredients_max_id >= 0),
+            base_recipe_source_ingredients_max_id INTEGER NOT NULL DEFAULT 0
+                CHECK(base_recipe_source_ingredients_max_id >= 0),
+            captured_ontology_source_revision INTEGER NOT NULL
+                CHECK(captured_ontology_source_revision > 0),
+            covered_ontology_source_revision INTEGER NOT NULL
+                CHECK(covered_ontology_source_revision > 0),
+            mutation_manifest_hash TEXT NOT NULL
+                CHECK(length(mutation_manifest_hash) = 64),
+            mutation_manifest_json TEXT NOT NULL DEFAULT '[]'
+                CHECK(
+                    json_valid(mutation_manifest_json)
+                    AND json_type(mutation_manifest_json)
+                        IN ('array', 'object')
+                    AND length(mutation_manifest_json) <= 1048576
+                ),
+            entry_set_hash TEXT NOT NULL
+                CHECK(length(entry_set_hash) = 64),
+            projection_root_hash TEXT NOT NULL
+                DEFAULT '{$zeroHash}'
+                CHECK(length(projection_root_hash) = 64),
+            resolution_input_hash TEXT NOT NULL
+                DEFAULT '{$zeroHash}'
+                CHECK(length(resolution_input_hash) = 64),
+            identity_extension_revision INTEGER NOT NULL DEFAULT 0
+                CHECK(identity_extension_revision >= 0),
+            identity_extension_hash TEXT NOT NULL
+                DEFAULT '{$zeroHash}'
+                CHECK(length(identity_extension_hash) = 64),
+            covered_identity_extension_revision INTEGER NOT NULL
+                DEFAULT 0
+                CHECK(covered_identity_extension_revision >= 0),
+            covered_identity_extension_hash TEXT NOT NULL
+                DEFAULT '{$zeroHash}'
+                CHECK(length(covered_identity_extension_hash) = 64),
+            entry_count INTEGER NOT NULL DEFAULT 0
+                CHECK(entry_count >= 0),
+            aggregate_count INTEGER NOT NULL DEFAULT 0
+                CHECK(aggregate_count >= 0),
+            reconciliation_mode TEXT NOT NULL DEFAULT 'journal'
+                CHECK(reconciliation_mode IN (
+                    'checkpoint', 'journal', 'authoritative'
+                )),
+            status TEXT NOT NULL DEFAULT 'building'
+                CHECK(status IN ('building', 'ready', 'failed')),
+            last_error TEXT NOT NULL DEFAULT ''
+                CHECK(length(last_error) <= 1000),
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            ready_at DATETIME DEFAULT NULL,
+            failed_at DATETIME DEFAULT NULL,
+            FOREIGN KEY (ontology_version_id)
+                REFERENCES ingredient_ontology_versions(id)
+                    ON DELETE RESTRICT,
+            FOREIGN KEY (parent_revision_id)
+                REFERENCES ingredient_ontology_corpus_annex_revisions(id)
+                    ON DELETE RESTRICT,
+            CHECK(
+                covered_ontology_source_revision
+                    <= captured_ontology_source_revision
+            ),
+            CHECK(
+                covered_identity_extension_revision
+                    <= identity_extension_revision
+            ),
+            CHECK(
+                (parent_revision_id IS NULL
+                    AND parent_revision_hash = '{$zeroHash}')
+                OR
+                (parent_revision_id IS NOT NULL
+                    AND parent_revision_hash <> '{$zeroHash}')
+            )
+        );
+
+        CREATE TABLE IF NOT EXISTS
+            ingredient_ontology_corpus_annex_entries (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            corpus_annex_revision_id INTEGER NOT NULL,
+            ordinal INTEGER NOT NULL CHECK(ordinal > 0),
+            entry_type TEXT NOT NULL
+                CHECK(entry_type IN (
+                    'product', 'recipe_scope', 'recipe_origin',
+                    'recipe_ingredient', 'recipe_source_ingredient'
+                )),
+            operation TEXT NOT NULL
+                CHECK(operation IN ('replace', 'delete')),
+            owner_type TEXT NOT NULL
+                CHECK(owner_type IN (
+                    'product', 'recipe', 'recipe_origin',
+                    'recipe_ingredient', 'recipe_source_ingredient'
+                )),
+            owner_id INTEGER NOT NULL CHECK(owner_id > 0),
+            recipe_id INTEGER DEFAULT NULL
+                CHECK(recipe_id IS NULL OR recipe_id > 0),
+            owner_fingerprint TEXT NOT NULL
+                CHECK(length(owner_fingerprint) = 64),
+            identity_status TEXT NOT NULL
+                CHECK(identity_status IN (
+                    'accepted', 'unresolved', 'rejected',
+                    'not_applicable'
+                )),
+            identity_disposition TEXT NOT NULL
+                CHECK(length(identity_disposition) BETWEEN 1 AND 80),
+            satisfies_required INTEGER NOT NULL DEFAULT 0
+                CHECK(satisfies_required IN (0, 1)),
+            native_entity_slug TEXT DEFAULT NULL
+                CHECK(
+                    native_entity_slug IS NULL
+                    OR length(native_entity_slug) BETWEEN 1 AND 160
+                ),
+            identity_extension_key_hash TEXT DEFAULT NULL
+                CHECK(
+                    identity_extension_key_hash IS NULL
+                    OR length(identity_extension_key_hash) = 64
+                ),
+            resolver_version TEXT NOT NULL
+                CHECK(length(resolver_version) BETWEEN 1 AND 120),
+            review_manifest_hash TEXT NOT NULL
+                CHECK(length(review_manifest_hash) = 64),
+            evidence_hash TEXT NOT NULL
+                CHECK(length(evidence_hash) = 64),
+            aggregate_source_hash TEXT NOT NULL
+                CHECK(length(aggregate_source_hash) = 64),
+            resolution_input_hash TEXT NOT NULL
+                CHECK(length(resolution_input_hash) = 64),
+            aggregate_hash TEXT NOT NULL
+                CHECK(length(aggregate_hash) = 64),
+            member_count INTEGER NOT NULL DEFAULT 0
+                CHECK(member_count >= 0),
+            identity_json TEXT NOT NULL DEFAULT '{}'
+                CHECK(
+                    json_valid(identity_json)
+                    AND json_type(identity_json) = 'object'
+                    AND length(identity_json) <= 262144
+                ),
+            payload_json TEXT NOT NULL
+                CHECK(
+                    json_valid(payload_json)
+                    AND json_type(payload_json) = 'object'
+                    AND length(payload_json) <= 1048576
+                ),
+            row_hash TEXT NOT NULL CHECK(length(row_hash) = 64),
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(corpus_annex_revision_id, ordinal),
+            UNIQUE(
+                corpus_annex_revision_id, entry_type, owner_id
+            ),
+            FOREIGN KEY (corpus_annex_revision_id)
+                REFERENCES ingredient_ontology_corpus_annex_revisions(id)
+                    ON DELETE RESTRICT,
+            CHECK(
+                satisfies_required = 0
+                OR identity_status = 'accepted'
+            ),
+            CHECK(
+                native_entity_slug IS NULL
+                OR identity_extension_key_hash IS NULL
+            )
+        );
+
+        CREATE TABLE IF NOT EXISTS
+            ingredient_ontology_corpus_annex_effective_aggregates (
+            ontology_version_id INTEGER NOT NULL,
+            aggregate_type TEXT NOT NULL
+                CHECK(aggregate_type IN ('product', 'recipe')),
+            aggregate_id INTEGER NOT NULL CHECK(aggregate_id > 0),
+            operation TEXT NOT NULL
+                CHECK(operation IN ('replace', 'delete')),
+            source_hash TEXT NOT NULL CHECK(length(source_hash) = 64),
+            resolution_input_hash TEXT NOT NULL
+                CHECK(length(resolution_input_hash) = 64),
+            aggregate_hash TEXT NOT NULL
+                CHECK(length(aggregate_hash) = 64),
+            member_count INTEGER NOT NULL DEFAULT 0
+                CHECK(member_count >= 0),
+            head_revision_id INTEGER NOT NULL,
+            head_revision_hash TEXT NOT NULL
+                CHECK(length(head_revision_hash) = 64),
+            head_entry_id INTEGER NOT NULL,
+            payload_json TEXT NOT NULL
+                CHECK(
+                    json_valid(payload_json)
+                    AND json_type(payload_json) = 'object'
+                    AND length(payload_json) <= 1048576
+                ),
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (
+                ontology_version_id, aggregate_type, aggregate_id
+            ),
+            FOREIGN KEY (ontology_version_id)
+                REFERENCES ingredient_ontology_versions(id)
+                    ON DELETE RESTRICT,
+            FOREIGN KEY (head_revision_id)
+                REFERENCES ingredient_ontology_corpus_annex_revisions(id)
+                    ON DELETE RESTRICT,
+            FOREIGN KEY (head_entry_id)
+                REFERENCES ingredient_ontology_corpus_annex_entries(id)
+                    ON DELETE RESTRICT
+        );
+
+        CREATE TABLE IF NOT EXISTS
+            ingredient_ontology_corpus_annex_effective_members (
+            ontology_version_id INTEGER NOT NULL,
+            aggregate_type TEXT NOT NULL
+                CHECK(aggregate_type IN ('product', 'recipe')),
+            aggregate_id INTEGER NOT NULL CHECK(aggregate_id > 0),
+            entry_type TEXT NOT NULL,
+            owner_type TEXT NOT NULL,
+            owner_id INTEGER NOT NULL CHECK(owner_id > 0),
+            recipe_id INTEGER DEFAULT NULL,
+            owner_fingerprint TEXT NOT NULL
+                CHECK(length(owner_fingerprint) = 64),
+            identity_status TEXT NOT NULL,
+            satisfies_required INTEGER NOT NULL DEFAULT 0
+                CHECK(satisfies_required IN (0, 1)),
+            entity_key TEXT DEFAULT NULL,
+            native_entity_slug TEXT DEFAULT NULL,
+            identity_extension_key_hash TEXT DEFAULT NULL,
+            attributes_json TEXT NOT NULL DEFAULT '{}'
+                CHECK(json_valid(attributes_json)),
+            relations_json TEXT NOT NULL DEFAULT '[]'
+                CHECK(json_valid(relations_json)),
+            evidence_hash TEXT NOT NULL
+                CHECK(length(evidence_hash) = 64),
+            normalized_source_label TEXT NOT NULL DEFAULT ''
+                CHECK(length(normalized_source_label) <= 320),
+            member_hash TEXT NOT NULL CHECK(length(member_hash) = 64),
+            head_revision_id INTEGER NOT NULL,
+            head_entry_id INTEGER NOT NULL,
+            payload_json TEXT NOT NULL CHECK(json_valid(payload_json)),
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (
+                ontology_version_id, aggregate_type, aggregate_id,
+                entry_type, owner_id
+            ),
+            FOREIGN KEY (head_revision_id)
+                REFERENCES ingredient_ontology_corpus_annex_revisions(id)
+                    ON DELETE RESTRICT,
+            FOREIGN KEY (head_entry_id)
+                REFERENCES ingredient_ontology_corpus_annex_entries(id)
+                    ON DELETE RESTRICT
+        );
+
+        CREATE TABLE IF NOT EXISTS
+            ingredient_ontology_corpus_annex_effective_entities (
+            ontology_version_id INTEGER NOT NULL,
+            entity_key TEXT NOT NULL CHECK(length(entity_key) > 0),
+            aggregate_type TEXT NOT NULL
+                CHECK(aggregate_type IN ('product', 'recipe')),
+            aggregate_id INTEGER NOT NULL CHECK(aggregate_id > 0),
+            owner_type TEXT NOT NULL,
+            owner_id INTEGER NOT NULL CHECK(owner_id > 0),
+            head_revision_id INTEGER NOT NULL,
+            PRIMARY KEY (
+                ontology_version_id, entity_key,
+                aggregate_type, aggregate_id, owner_type, owner_id
+            ),
+            FOREIGN KEY (head_revision_id)
+                REFERENCES ingredient_ontology_corpus_annex_revisions(id)
+                    ON DELETE RESTRICT
+        );
+
+        CREATE TABLE IF NOT EXISTS
+            ingredient_ontology_corpus_annex_projection_state (
+            ontology_version_id INTEGER PRIMARY KEY,
+            materialized_revision_id INTEGER NOT NULL,
+            materialized_revision_hash TEXT NOT NULL
+                CHECK(length(materialized_revision_hash) = 64),
+            projection_root_hash TEXT NOT NULL
+                CHECK(length(projection_root_hash) = 64),
+            aggregate_count INTEGER NOT NULL DEFAULT 0
+                CHECK(aggregate_count >= 0),
+            member_count INTEGER NOT NULL DEFAULT 0
+                CHECK(member_count >= 0),
+            cache_schema_version INTEGER NOT NULL DEFAULT 0
+                CHECK(cache_schema_version >= 0),
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (materialized_revision_id)
+                REFERENCES ingredient_ontology_corpus_annex_revisions(id)
+                    ON DELETE RESTRICT
+        );
+
+        CREATE INDEX IF NOT EXISTS
+            idx_ontology_corpus_annex_parent
+            ON ingredient_ontology_corpus_annex_revisions(
+                ontology_version_id, parent_revision_id, status, id
+            );
+        CREATE INDEX IF NOT EXISTS
+            idx_ontology_corpus_annex_hash
+            ON ingredient_ontology_corpus_annex_revisions(
+                revision_hash, status, id
+            );
+        CREATE INDEX IF NOT EXISTS
+            idx_ontology_corpus_annex_coverage
+            ON ingredient_ontology_corpus_annex_revisions(
+                ontology_version_id,
+                covered_ontology_source_revision,
+                status, id
+            );
+        CREATE INDEX IF NOT EXISTS
+            idx_ontology_corpus_annex_entries_owner
+            ON ingredient_ontology_corpus_annex_entries(
+                entry_type, owner_id, corpus_annex_revision_id
+            );
+        CREATE INDEX IF NOT EXISTS
+            idx_ontology_corpus_annex_entries_recipe
+            ON ingredient_ontology_corpus_annex_entries(
+                recipe_id, entry_type, owner_id
+            );
+        CREATE INDEX IF NOT EXISTS
+            idx_ontology_corpus_annex_effective_head
+            ON ingredient_ontology_corpus_annex_effective_aggregates(
+                ontology_version_id, head_revision_id,
+                aggregate_type, aggregate_id
+            );
+        CREATE INDEX IF NOT EXISTS
+            idx_ontology_corpus_annex_effective_member_owner
+            ON ingredient_ontology_corpus_annex_effective_members(
+                ontology_version_id, owner_type, owner_id
+            );
+        CREATE INDEX IF NOT EXISTS
+            idx_ontology_corpus_annex_effective_entity
+            ON ingredient_ontology_corpus_annex_effective_entities(
+                ontology_version_id, entity_key,
+                aggregate_type, aggregate_id
+            );
+
+        CREATE TRIGGER IF NOT EXISTS
+            ingredient_ontology_corpus_annex_parent_insert
+        BEFORE INSERT
+        ON ingredient_ontology_corpus_annex_revisions
+        WHEN NEW.parent_revision_id IS NOT NULL
+         AND NOT EXISTS (
+             SELECT 1
+             FROM ingredient_ontology_corpus_annex_revisions parent
+             WHERE parent.id = NEW.parent_revision_id
+               AND parent.status = 'ready'
+               AND parent.revision_hash = NEW.parent_revision_hash
+               AND parent.ontology_version_id =
+                   NEW.ontology_version_id
+               AND parent.ontology_content_hash =
+                   NEW.ontology_content_hash
+               AND parent.ontology_seal_hash =
+                   NEW.ontology_seal_hash
+               AND parent.base_corpus_hash =
+                   NEW.base_corpus_hash
+               AND parent.base_products_max_id =
+                   NEW.base_products_max_id
+               AND parent.base_recipe_catalog_max_id =
+                   NEW.base_recipe_catalog_max_id
+               AND parent.base_recipe_origins_max_id =
+                   NEW.base_recipe_origins_max_id
+               AND parent.base_recipe_ingredients_max_id =
+                   NEW.base_recipe_ingredients_max_id
+               AND parent.base_recipe_source_ingredients_max_id =
+                   NEW.base_recipe_source_ingredients_max_id
+               AND parent.captured_ontology_source_revision
+                   <= NEW.captured_ontology_source_revision
+               AND parent.covered_ontology_source_revision
+                   <= NEW.covered_ontology_source_revision
+               AND parent.identity_extension_revision
+                   <= NEW.identity_extension_revision
+               AND parent.covered_identity_extension_revision
+                   <= NEW.covered_identity_extension_revision
+         )
+        BEGIN
+            SELECT RAISE(
+                ABORT,
+                'invalid corpus annex parent or fence'
+            );
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS
+            ingredient_ontology_corpus_annex_ready_publish
+        BEFORE UPDATE OF status
+        ON ingredient_ontology_corpus_annex_revisions
+        WHEN NEW.status = 'ready'
+         AND OLD.status <> 'ready'
+         AND ingredient_ontology_publication_guard() <> 1
+        BEGIN
+            SELECT RAISE(
+                ABORT,
+                'corpus annex publication requires an explicit guard'
+            );
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS
+            ingredient_ontology_corpus_annex_ready_complete
+        BEFORE UPDATE OF status
+        ON ingredient_ontology_corpus_annex_revisions
+        WHEN NEW.status = 'ready'
+         AND (
+             NEW.ready_at IS NULL
+             OR NEW.entry_count <> (
+                 SELECT COUNT(*)
+                 FROM ingredient_ontology_corpus_annex_entries entry
+                 WHERE entry.corpus_annex_revision_id = NEW.id
+             )
+             OR NEW.aggregate_count <> (
+                 SELECT COUNT(*)
+                 FROM ingredient_ontology_corpus_annex_entries entry
+                 WHERE entry.corpus_annex_revision_id = NEW.id
+                   AND entry.entry_type IN (
+                       'product', 'recipe_scope'
+                   )
+             )
+             OR (
+                 NEW.entry_count > 0
+                 AND (
+                     (
+                         SELECT MIN(entry.ordinal)
+                         FROM ingredient_ontology_corpus_annex_entries entry
+                         WHERE entry.corpus_annex_revision_id = NEW.id
+                     ) <> 1
+                     OR (
+                         SELECT MAX(entry.ordinal)
+                         FROM ingredient_ontology_corpus_annex_entries entry
+                         WHERE entry.corpus_annex_revision_id = NEW.id
+                     ) <> NEW.entry_count
+                 )
+             )
+         )
+        BEGIN
+            SELECT RAISE(
+                ABORT,
+                'corpus annex publication is incomplete'
+            );
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS
+            ingredient_ontology_corpus_annex_immutable_update
+        BEFORE UPDATE
+        ON ingredient_ontology_corpus_annex_revisions
+        WHEN OLD.status = 'ready'
+        BEGIN
+            SELECT RAISE(
+                ABORT,
+                'ready corpus annex revisions are immutable'
+            );
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS
+            ingredient_ontology_corpus_annex_immutable_delete
+        BEFORE DELETE
+        ON ingredient_ontology_corpus_annex_revisions
+        WHEN OLD.status = 'ready'
+          OR ingredient_ontology_prune_guard() <> 1
+        BEGIN
+            SELECT RAISE(
+                ABORT,
+                'corpus annex revision deletion is not permitted'
+            );
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS
+            ingredient_ontology_corpus_annex_entries_immutable_update
+        BEFORE UPDATE
+        ON ingredient_ontology_corpus_annex_entries
+        BEGIN
+            SELECT RAISE(ABORT, 'corpus annex entries are immutable');
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS
+            ingredient_ontology_corpus_annex_entries_immutable_delete
+        BEFORE DELETE
+        ON ingredient_ontology_corpus_annex_entries
+        WHEN ingredient_ontology_prune_guard() <> 1
+          OR EXISTS (
+              SELECT 1
+              FROM ingredient_ontology_corpus_annex_revisions revision
+              WHERE revision.id = OLD.corpus_annex_revision_id
+                AND revision.status = 'ready'
+          )
+        BEGIN
+            SELECT RAISE(ABORT, 'corpus annex entries are immutable');
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS
+            ingredient_ontology_corpus_annex_entries_ready_insert
+        BEFORE INSERT
+        ON ingredient_ontology_corpus_annex_entries
+        WHEN ingredient_ontology_ready_mutation_guard() <> 1
+         AND EXISTS (
+            SELECT 1
+            FROM ingredient_ontology_corpus_annex_revisions revision
+            WHERE revision.id = NEW.corpus_annex_revision_id
+              AND revision.status = 'ready'
+        )
+        BEGIN
+            SELECT RAISE(
+                ABORT,
+                'ready corpus annex entries are immutable'
+            );
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS
+            ingredient_ontology_corpus_annex_projection_state_valid
+        BEFORE INSERT
+        ON ingredient_ontology_corpus_annex_projection_state
+        WHEN NOT EXISTS (
+            SELECT 1
+            FROM ingredient_ontology_corpus_annex_revisions revision
+            WHERE revision.id = NEW.materialized_revision_id
+              AND revision.ontology_version_id =
+                  NEW.ontology_version_id
+              AND revision.status = 'ready'
+              AND revision.revision_hash =
+                  NEW.materialized_revision_hash
+              AND revision.projection_root_hash =
+                  NEW.projection_root_hash
+        )
+        BEGIN
+            SELECT RAISE(
+                ABORT,
+                'corpus projection state is not a ready revision'
+            );
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS
+            ingredient_ontology_corpus_annex_projection_state_update_valid
+        BEFORE UPDATE
+        ON ingredient_ontology_corpus_annex_projection_state
+        WHEN NOT EXISTS (
+            SELECT 1
+            FROM ingredient_ontology_corpus_annex_revisions revision
+            WHERE revision.id = NEW.materialized_revision_id
+              AND revision.ontology_version_id =
+                  NEW.ontology_version_id
+              AND revision.status = 'ready'
+              AND revision.revision_hash =
+                  NEW.materialized_revision_hash
+              AND revision.projection_root_hash =
+                  NEW.projection_root_hash
+        )
+        BEGIN
+            SELECT RAISE(
+                ABORT,
+                'corpus projection state is not a ready revision'
+            );
+        END;
+    ");
+
+    foreach ([
+        'ingredient_ontology_corpus_annex_effective_aggregates',
+        'ingredient_ontology_corpus_annex_effective_members',
+        'ingredient_ontology_corpus_annex_effective_entities',
+        'ingredient_ontology_corpus_annex_projection_state',
+    ] as $table) {
+        foreach (['insert', 'update', 'delete'] as $operation) {
+            $db->exec("
+                CREATE TRIGGER IF NOT EXISTS
+                    {$table}_guard_{$operation}
+                BEFORE " . strtoupper($operation) . " ON {$table}
+                WHEN ingredient_ontology_ready_mutation_guard() <> 1
+                BEGIN
+                    SELECT RAISE(
+                        ABORT,
+                        'corpus projection cache mutation requires a guard'
+                    );
+                END
+            ");
+        }
+    }
+
+    foreach ([
+        'projection_root_hash' =>
+            "TEXT NOT NULL DEFAULT '{$zeroHash}'",
+        'resolution_input_hash' =>
+            "TEXT NOT NULL DEFAULT '{$zeroHash}'",
+        'aggregate_count' => 'INTEGER NOT NULL DEFAULT 0',
+        'reconciliation_mode' =>
+            "TEXT NOT NULL DEFAULT 'journal'",
+        'covered_identity_extension_revision' =>
+            'INTEGER NOT NULL DEFAULT 0',
+        'covered_identity_extension_hash' =>
+            "TEXT NOT NULL DEFAULT '{$zeroHash}'",
+        'hash_version' => 'INTEGER NOT NULL DEFAULT 1',
+    ] as $column => $definition) {
+        ingredientOntologyV3AddColumn(
+            $db,
+            'ingredient_ontology_corpus_annex_revisions',
+            $column,
+            $definition
+        );
+    }
+    foreach ([
+        'aggregate_source_hash' =>
+            "TEXT NOT NULL DEFAULT '{$zeroHash}'",
+        'resolution_input_hash' =>
+            "TEXT NOT NULL DEFAULT '{$zeroHash}'",
+        'aggregate_hash' =>
+            "TEXT NOT NULL DEFAULT '{$zeroHash}'",
+        'member_count' => 'INTEGER NOT NULL DEFAULT 0',
+        'identity_json' => "TEXT NOT NULL DEFAULT '{}'",
+    ] as $column => $definition) {
+        ingredientOntologyV3AddColumn(
+            $db,
+            'ingredient_ontology_corpus_annex_entries',
+            $column,
+            $definition
+        );
+    }
+    ingredientOntologyV3AddColumn(
+        $db,
+        'ingredient_ontology_corpus_annex_effective_members',
+        'normalized_source_label',
+        "TEXT NOT NULL DEFAULT ''"
+    );
+    ingredientOntologyV3AddColumn(
+        $db,
+        'ingredient_ontology_corpus_annex_projection_state',
+        'cache_schema_version',
+        'INTEGER NOT NULL DEFAULT 0'
+    );
+    $db->exec("
+        CREATE INDEX IF NOT EXISTS
+            idx_ontology_corpus_annex_effective_source_label
+            ON ingredient_ontology_corpus_annex_effective_members(
+                ontology_version_id, aggregate_type,
+                normalized_source_label, aggregate_id
+            );
+        CREATE INDEX IF NOT EXISTS
+            idx_ontology_corpus_annex_cleanup
+            ON ingredient_ontology_corpus_annex_revisions(
+                status, created_at, id
+            );
+        CREATE INDEX IF NOT EXISTS
+            idx_ontology_corpus_annex_effective_canonical
+            ON ingredient_ontology_corpus_annex_effective_members(
+                ontology_version_id,
+                json_extract(
+                    payload_json,
+                    '$.canonical_ingredient_id'
+                ),
+                aggregate_type, aggregate_id
+            );
+        CREATE INDEX IF NOT EXISTS
+            idx_ontology_identity_annex_normalized_dependency
+            ON ingredient_ontology_identity_annex(
+                ontology_version_id, normalized_label, product_id
+            );
+    ");
+
+    if (!ingredientOntologyV3TableExists(
+        $db,
+        'recipe_score_revisions'
+    )) {
+        return;
+    }
+    ingredientOntologyV3AddColumn(
+        $db,
+        'recipe_score_revisions',
+        'corpus_annex_revision_id',
+        'INTEGER DEFAULT NULL'
+    );
+    ingredientOntologyV3AddColumn(
+        $db,
+        'recipe_score_revisions',
+        'corpus_annex_hash',
+        'TEXT DEFAULT NULL CHECK('
+            . 'corpus_annex_hash IS NULL '
+            . 'OR length(corpus_annex_hash) = 64)'
+    );
+    ingredientOntologyV3AddColumn(
+        $db,
+        'recipe_score_revisions',
+        'covered_identity_extension_revision',
+        'INTEGER NOT NULL DEFAULT 0'
+    );
+    ingredientOntologyV3AddColumn(
+        $db,
+        'recipe_score_revisions',
+        'covered_identity_extension_hash',
+        "TEXT NOT NULL DEFAULT '{$zeroHash}'"
+    );
+    $triggerSql = static function (
+        PDO $database,
+        string $name
+    ): string {
+        $stmt = $database->prepare("
+            SELECT sql
+            FROM sqlite_master
+            WHERE type = 'trigger' AND name = ?
+        ");
+        $stmt->execute([$name]);
+        return (string)($stmt->fetchColumn() ?: '');
+    };
+    $parentTriggerSql = $triggerSql(
+        $db,
+        'ingredient_ontology_corpus_annex_parent_insert'
+    );
+    if (
+        !str_contains(
+            $parentTriggerSql,
+            'parent.captured_ontology_source_revision'
+        )
+        || !str_contains(
+            $parentTriggerSql,
+            'parent.covered_identity_extension_revision'
+        )
+    ) {
+        $db->exec("
+            DROP TRIGGER IF EXISTS
+                ingredient_ontology_corpus_annex_parent_insert;
+            CREATE TRIGGER
+                ingredient_ontology_corpus_annex_parent_insert
+            BEFORE INSERT
+            ON ingredient_ontology_corpus_annex_revisions
+            WHEN NEW.parent_revision_id IS NOT NULL
+             AND NOT EXISTS (
+                 SELECT 1
+                 FROM ingredient_ontology_corpus_annex_revisions parent
+                 WHERE parent.id = NEW.parent_revision_id
+                   AND parent.status = 'ready'
+                   AND parent.revision_hash = NEW.parent_revision_hash
+                   AND parent.ontology_version_id =
+                       NEW.ontology_version_id
+                   AND parent.ontology_content_hash =
+                       NEW.ontology_content_hash
+                   AND parent.ontology_seal_hash =
+                       NEW.ontology_seal_hash
+                   AND parent.base_corpus_hash =
+                       NEW.base_corpus_hash
+                   AND parent.base_products_max_id =
+                       NEW.base_products_max_id
+                   AND parent.base_recipe_catalog_max_id =
+                       NEW.base_recipe_catalog_max_id
+                   AND parent.base_recipe_origins_max_id =
+                       NEW.base_recipe_origins_max_id
+                   AND parent.base_recipe_ingredients_max_id =
+                       NEW.base_recipe_ingredients_max_id
+                   AND parent.base_recipe_source_ingredients_max_id =
+                       NEW.base_recipe_source_ingredients_max_id
+                   AND parent.captured_ontology_source_revision
+                       <= NEW.captured_ontology_source_revision
+                   AND parent.covered_ontology_source_revision
+                       <= NEW.covered_ontology_source_revision
+                   AND parent.identity_extension_revision
+                       <= NEW.identity_extension_revision
+                   AND parent.covered_identity_extension_revision
+                       <= NEW.covered_identity_extension_revision
+             )
+            BEGIN
+                SELECT RAISE(
+                    ABORT,
+                    'invalid corpus annex parent or fence'
+                );
+            END;
+        ");
+    }
+    foreach ([
+        'recipe_score_revisions_corpus_annex_ready_insert',
+        'recipe_score_revisions_corpus_annex_ready_update',
+    ] as $readyTriggerName) {
+        $readyTriggerSql = $triggerSql($db, $readyTriggerName);
+        $updateHeaderExact = true;
+        if (
+            $readyTriggerName
+                === 'recipe_score_revisions_corpus_annex_ready_update'
+        ) {
+            $updateHeaderExact =
+                preg_match(
+                    '/BEFORE UPDATE OF(.*?)ON recipe_score_revisions/is',
+                    $readyTriggerSql,
+                    $headerMatch
+                ) === 1
+                && str_contains(
+                    (string)($headerMatch[1] ?? ''),
+                    'covered_identity_extension_hash'
+                );
+        }
+        if (
+            $readyTriggerSql !== ''
+            && (
+                !str_contains(
+                    $readyTriggerSql,
+                    'annex.captured_ontology_source_revision'
+                )
+                || !str_contains(
+                    $readyTriggerSql,
+                    'annex.covered_identity_extension_revision'
+                )
+                || !str_contains(
+                    $readyTriggerSql,
+                    'annex.identity_extension_hash'
+                )
+                || !$updateHeaderExact
+            )
+        ) {
+            $db->exec(
+                'DROP TRIGGER IF EXISTS ' . $readyTriggerName
+            );
+        }
+    }
+    $db->exec("
+        CREATE INDEX IF NOT EXISTS
+            idx_recipe_score_revisions_corpus_annex
+            ON recipe_score_revisions(
+                corpus_annex_revision_id, corpus_annex_hash, status
+            );
+
+        CREATE TRIGGER IF NOT EXISTS
+            recipe_score_revisions_corpus_annex_pair_insert
+        BEFORE INSERT ON recipe_score_revisions
+        WHEN (
+            NEW.corpus_annex_revision_id IS NULL
+        ) <> (
+            NEW.corpus_annex_hash IS NULL
+        )
+        BEGIN
+            SELECT RAISE(
+                ABORT,
+                'score corpus annex pin is incomplete'
+            );
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS
+            recipe_score_revisions_corpus_annex_pair_update
+        BEFORE UPDATE OF corpus_annex_revision_id, corpus_annex_hash
+        ON recipe_score_revisions
+        WHEN (
+            NEW.corpus_annex_revision_id IS NULL
+        ) <> (
+            NEW.corpus_annex_hash IS NULL
+        )
+        BEGIN
+            SELECT RAISE(
+                ABORT,
+                'score corpus annex pin is incomplete'
+            );
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS
+            recipe_score_revisions_corpus_annex_ready_insert
+        BEFORE INSERT ON recipe_score_revisions
+        WHEN NEW.status = 'ready'
+         AND NEW.corpus_annex_revision_id IS NOT NULL
+         AND ingredient_ontology_ready_mutation_guard() <> 1
+         AND NOT EXISTS (
+             SELECT 1
+             FROM ingredient_ontology_corpus_annex_revisions annex
+             WHERE annex.id = NEW.corpus_annex_revision_id
+               AND annex.status = 'ready'
+               AND annex.revision_hash = NEW.corpus_annex_hash
+               AND annex.ontology_version_id =
+                   NEW.ontology_version_id
+               AND annex.ontology_content_hash =
+                   NEW.ontology_content_hash
+               AND annex.ontology_seal_hash =
+                   NEW.ontology_seal_hash
+               AND annex.covered_ontology_source_revision =
+                   COALESCE(
+                       NEW.covered_ontology_source_revision,
+                       NEW.ontology_source_revision
+                   )
+               AND annex.captured_ontology_source_revision =
+                   NEW.ontology_source_revision
+               AND annex.identity_extension_revision =
+                   NEW.identity_extension_revision
+               AND annex.identity_extension_hash =
+                   NEW.identity_extension_hash
+               AND annex.covered_identity_extension_revision =
+                   NEW.covered_identity_extension_revision
+               AND annex.covered_identity_extension_hash =
+                   NEW.covered_identity_extension_hash
+         )
+        BEGIN
+            SELECT RAISE(
+                ABORT,
+                'score corpus annex pin is invalid'
+            );
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS
+            recipe_score_revisions_corpus_annex_ready_update
+        BEFORE UPDATE OF status, corpus_annex_revision_id,
+                         corpus_annex_hash, ontology_version_id,
+                         ontology_content_hash, ontology_seal_hash,
+                         ontology_source_revision,
+                         covered_ontology_source_revision,
+                         identity_extension_revision,
+                         identity_extension_hash,
+                         covered_identity_extension_revision,
+                         covered_identity_extension_hash
+        ON recipe_score_revisions
+        WHEN NEW.status = 'ready'
+         AND NEW.corpus_annex_revision_id IS NOT NULL
+         AND ingredient_ontology_ready_mutation_guard() <> 1
+         AND NOT EXISTS (
+             SELECT 1
+             FROM ingredient_ontology_corpus_annex_revisions annex
+             WHERE annex.id = NEW.corpus_annex_revision_id
+               AND annex.status = 'ready'
+               AND annex.revision_hash = NEW.corpus_annex_hash
+               AND annex.ontology_version_id =
+                   NEW.ontology_version_id
+               AND annex.ontology_content_hash =
+                   NEW.ontology_content_hash
+               AND annex.ontology_seal_hash =
+                   NEW.ontology_seal_hash
+               AND annex.covered_ontology_source_revision =
+                   COALESCE(
+                       NEW.covered_ontology_source_revision,
+                       NEW.ontology_source_revision
+                   )
+               AND annex.captured_ontology_source_revision =
+                   NEW.ontology_source_revision
+               AND annex.identity_extension_revision =
+                   NEW.identity_extension_revision
+               AND annex.identity_extension_hash =
+                   NEW.identity_extension_hash
+               AND annex.covered_identity_extension_revision =
+                   NEW.covered_identity_extension_revision
+               AND annex.covered_identity_extension_hash =
+                   NEW.covered_identity_extension_hash
+         )
+        BEGIN
+            SELECT RAISE(
+                ABORT,
+                'score corpus annex pin is invalid'
+            );
+        END;
+    ");
+}
+
 function ingredientOntologyV3SchemaMigrate(PDO $db): void {
     ingredientOntologyV3RegisterGuardFunctions($db);
     $db->exec("
@@ -2185,6 +3139,112 @@ function ingredientOntologyV3SchemaMigrate(PDO $db): void {
                 REFERENCES ingredient_ontology_identity_extension_entities(id)
                     ON DELETE SET NULL
         );
+
+        CREATE TABLE IF NOT EXISTS
+            ingredient_ontology_identity_annex_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            product_id INTEGER NOT NULL,
+            ontology_version_id INTEGER NOT NULL,
+            source_revision INTEGER NOT NULL
+                CHECK(source_revision > 0),
+            change_kind TEXT NOT NULL
+                CHECK(change_kind IN ('update', 'delete')),
+            owner_fingerprint TEXT NOT NULL
+                CHECK(length(owner_fingerprint) = 64),
+            normalized_label TEXT NOT NULL DEFAULT '',
+            language TEXT NOT NULL DEFAULT 'und',
+            status TEXT NOT NULL,
+            entity_id INTEGER DEFAULT NULL,
+            extension_entity_id INTEGER DEFAULT NULL,
+            evidence_hash TEXT NOT NULL
+                CHECK(length(evidence_hash) = 64),
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(
+                product_id, source_revision, change_kind, evidence_hash
+            )
+        );
+        CREATE INDEX IF NOT EXISTS
+            idx_identity_annex_history_product_revision
+            ON ingredient_ontology_identity_annex_history(
+                ontology_version_id, product_id, source_revision, id
+            );
+
+        CREATE TRIGGER IF NOT EXISTS
+            ingredient_ontology_identity_annex_history_update
+        BEFORE UPDATE ON ingredient_ontology_identity_annex
+        WHEN OLD.ontology_version_id IS NOT NEW.ontology_version_id
+          OR OLD.owner_fingerprint IS NOT NEW.owner_fingerprint
+          OR OLD.normalized_label IS NOT NEW.normalized_label
+          OR OLD.language IS NOT NEW.language
+          OR OLD.status IS NOT NEW.status
+          OR OLD.entity_id IS NOT NEW.entity_id
+          OR OLD.extension_entity_id IS NOT NEW.extension_entity_id
+          OR OLD.evidence_hash IS NOT NEW.evidence_hash
+        BEGIN
+            INSERT OR IGNORE INTO
+                ingredient_ontology_identity_annex_history (
+                product_id, ontology_version_id, source_revision,
+                change_kind, owner_fingerprint, normalized_label,
+                language, status, entity_id, extension_entity_id,
+                evidence_hash
+            )
+            SELECT OLD.product_id, OLD.ontology_version_id,
+                   MAX(1, state.ontology_source_revision),
+                   'update', OLD.owner_fingerprint,
+                   OLD.normalized_label, OLD.language, OLD.status,
+                   OLD.entity_id, OLD.extension_entity_id,
+                   OLD.evidence_hash
+            FROM recipe_score_state state
+            WHERE state.id = 1;
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS
+            ingredient_ontology_identity_annex_history_delete
+        BEFORE DELETE ON ingredient_ontology_identity_annex
+        WHEN EXISTS (
+            SELECT 1
+            FROM products
+            WHERE id = OLD.product_id
+        )
+        BEGIN
+            INSERT OR IGNORE INTO
+                ingredient_ontology_identity_annex_history (
+                product_id, ontology_version_id, source_revision,
+                change_kind, owner_fingerprint, normalized_label,
+                language, status, entity_id, extension_entity_id,
+                evidence_hash
+            )
+            SELECT OLD.product_id, OLD.ontology_version_id,
+                   MAX(1, state.ontology_source_revision),
+                   'delete', OLD.owner_fingerprint,
+                   OLD.normalized_label, OLD.language, OLD.status,
+                   OLD.entity_id, OLD.extension_entity_id,
+                   OLD.evidence_hash
+            FROM recipe_score_state state
+            WHERE state.id = 1;
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS
+            ingredient_ontology_identity_annex_history_product_delete
+        BEFORE DELETE ON products
+        BEGIN
+            INSERT OR IGNORE INTO
+                ingredient_ontology_identity_annex_history (
+                product_id, ontology_version_id, source_revision,
+                change_kind, owner_fingerprint, normalized_label,
+                language, status, entity_id, extension_entity_id,
+                evidence_hash
+            )
+            SELECT annex.product_id, annex.ontology_version_id,
+                   MAX(1, state.ontology_source_revision + 1),
+                   'delete', annex.owner_fingerprint,
+                   annex.normalized_label, annex.language, annex.status,
+                   annex.entity_id, annex.extension_entity_id,
+                   annex.evidence_hash
+            FROM ingredient_ontology_identity_annex annex
+            JOIN recipe_score_state state ON state.id = 1
+            WHERE annex.product_id = OLD.id;
+        END;
 
         CREATE TABLE IF NOT EXISTS ingredient_ontology_product_readiness (
             product_id INTEGER PRIMARY KEY,
@@ -3227,6 +4287,12 @@ function ingredientOntologyV3SchemaMigrate(PDO $db): void {
             ON ingredient_ontology_identity_annex(
                 product_id, owner_fingerprint, status
             );
+        CREATE INDEX IF NOT EXISTS
+            idx_ontology_identity_annex_extension_dependency
+            ON ingredient_ontology_identity_annex(
+                ontology_version_id, extension_entity_id, status,
+                resolver_version, review_manifest_hash, product_id
+            );
         CREATE INDEX IF NOT EXISTS idx_ontology_product_readiness_due
             ON ingredient_ontology_product_readiness(
                 status, next_retry_at, requested_at, product_id
@@ -3578,6 +4644,13 @@ function ingredientOntologyV3SchemaMigrate(PDO $db): void {
                 idx_recipe_annex_extension_entity
                 ON ingredient_ontology_recipe_identity_annex(
                     ontology_version_id, extension_entity_id, status
+                );
+            CREATE INDEX IF NOT EXISTS
+                idx_recipe_annex_dependency_label
+                ON ingredient_ontology_recipe_identity_annex(
+                    ontology_version_id, normalized_label, language,
+                    resolver_version, review_manifest_hash,
+                    recipe_ingredient_id
                 )
         ");
     }
@@ -4346,6 +5419,7 @@ function ingredientOntologyV3SchemaMigrate(PDO $db): void {
             END
         ");
     }
+    ingredientOntologyV3MigrateCorpusAnnexSchema($db);
     ingredientOntologyV3EnsureHistoricalShadowMatchOwners($db);
     ingredientOntologyV3EnsurePendingEdgeReviewDisposition($db);
     if (function_exists('ingredientOntologyControllerSchemaMigrate')) {

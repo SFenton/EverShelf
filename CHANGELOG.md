@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.20.24] - 2026-09-01
+
+### Added
+- Immutable sparse Corpus Annex revisions and inherited score projections now
+  publish bounded product/recipe `REPLACE` and `DELETE` deltas while retaining
+  exact historical identity, source, and rollback evidence.
+- Durable identity and source-reconciliation queues preserve old/new bindings,
+  page high-fan-out work, expose named corpus-operation metrics, and support
+  production-sized timing and memory benchmarks.
+
+### Changed
+- Routine inventory, recipe, alias, taxonomy, re-parent, and journal-gap
+  changes reconcile only affected aggregates and recipes. Shared canonical
+  evidence is no longer rewritten by product-local linking, and non-identity
+  derivation/component evidence no longer widens score fan-out.
+- Incremental scoring uses short, fenced write phases around WAL read
+  snapshots, defaults to a production-validated 250-item work cap, and keeps
+  provider discovery asynchronous from local score convergence.
+- Corpus projection cache schema v4 rebuilds reverse dependencies once during
+  migration, then serves bounded selective updates.
+
+### Fixed
+- Full score compaction can no longer manufacture per-recipe identity
+  freshness or retire unprocessed generic identity events.
+- Deep integrity audits now traverse rollover checkpoint sources, verify every
+  immutable entry set, and refuse corrupted replay.
+- Historical reconciliation backfill now copies mutation scopes with headers
+  before source journals or durable evidence may be pruned.
+
 ## [1.20.23] - 2026-08-30
 
 ### Fixed
