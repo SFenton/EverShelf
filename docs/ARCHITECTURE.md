@@ -372,9 +372,16 @@ dispensa/
   Canonical/alias dependency closure may republish existing product aggregates,
   but only an actually pending product, a direct product-owner source event, or
   a non-scope-directed authoritative product mismatch opens a score fan-out
-  cursor. Routine product classification links existing canonical slugs without
-  rewriting their shared taxonomy/provider evidence; explicit enrichment jobs
-  own those shared canonical updates.
+  cursor. An open cursor expands current identity dependencies only when the
+  product is present in the captured scoring inventory; otherwise it processes
+  prior effective contributors only. This lets a new no-stock product publish
+  its aggregate and readiness with zero recipe score rows, while first stock
+  and removal-to-zero remain selective and complete. If the parent effective
+  score projection is unavailable, the worker fails safe to the prior broader
+  expansion until projection repair completes. Routine product classification
+  links existing canonical slugs without rewriting their shared
+  taxonomy/provider evidence; explicit enrichment jobs own those shared
+  canonical updates.
 - The reverse dependency cache indexes each accepted identity plus only
   mapping-specific `equivalent_to`, `variant_of`, and `substitutes_for`
   evidence. Non-satisfying `derived_from` and `component_of` relations remain

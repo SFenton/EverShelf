@@ -1876,6 +1876,29 @@ function ingredientOntologyV3IncrementalPreviousRecipeIds(
     return $ids;
 }
 
+function ingredientOntologyV3IncrementalCurrentExpansionEnabled(
+    PDO $db,
+    int $parentRevisionId,
+    array $inventory,
+    int $productId,
+    ?array $state = null
+): bool {
+    if (
+        !recipeScoreEffectiveProjectionReady(
+            $db,
+            $parentRevisionId,
+            $state
+        )
+    ) {
+        return true;
+    }
+    $byProduct = $inventory['by_product'] ?? null;
+    if (!is_array($byProduct)) {
+        return true;
+    }
+    return array_key_exists($productId, $byProduct);
+}
+
 function ingredientOntologyV3IncrementalAffectedRecipeIds(
     PDO $db,
     int $versionId,
@@ -1887,7 +1910,8 @@ function ingredientOntologyV3IncrementalAffectedRecipeIds(
     ?array $corpusAnnex = null,
     int $afterRecipeId = 0,
     ?int $limit = null,
-    ?bool &$hasMore = null
+    ?bool &$hasMore = null,
+    bool $currentExpansionEnabled = true
 ): array {
     $productIds = array_values(array_unique(array_filter(
         array_map('intval', $productIds),
@@ -1913,6 +1937,14 @@ function ingredientOntologyV3IncrementalAffectedRecipeIds(
         ),
         true
     );
+    if (!$currentExpansionEnabled) {
+        $ids = array_map('intval', array_keys($recipeIds));
+        sort($ids, SORT_NUMERIC);
+        $hasMore = $pageLimit !== null && count($ids) > $pageLimit;
+        return $pageLimit !== null
+            ? array_slice($ids, 0, $pageLimit)
+            : $ids;
+    }
     $productPlaceholders = implode(
         ',',
         array_fill(0, count($productIds), '?')
@@ -4338,6 +4370,14 @@ function ingredientOntologyV3IncrementalRebuild(
                 $pageRecipeIds = [];
                 $hasMore = $fanoutCapacity === 0;
                 if ($fanoutCapacity > 0) {
+                    $currentExpansionEnabled =
+                        ingredientOntologyV3IncrementalCurrentExpansionEnabled(
+                            $db,
+                            (int)$parent['id'],
+                            $inventory,
+                            $productFanoutProductId,
+                            $state
+                        );
                     $pageRecipeIds =
                     ingredientOntologyV3IncrementalAffectedRecipeIds(
                         $db,
@@ -4350,7 +4390,8 @@ function ingredientOntologyV3IncrementalRebuild(
                         $parentAnnex,
                         $afterRecipeId,
                         $fanoutCapacity,
-                        $hasMore
+                        $hasMore,
+                        $currentExpansionEnabled
                     );
                 }
                 foreach ($pageRecipeIds as $recipeId) {

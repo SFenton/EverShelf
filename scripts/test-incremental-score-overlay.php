@@ -419,6 +419,160 @@ $assert(
     (int)$rows[0]['id'] === $firstRecipeId,
     'Clearing the overlay must restore the immutable parent ranking'
 );
+$fanoutGatePath = $path . '.fanout-gate';
+@unlink($fanoutGatePath);
+databaseMaintenanceOnlineBackup($path, $fanoutGatePath);
+$fanoutGateDb = new PDO('sqlite:' . $fanoutGatePath);
+$fanoutGateDb->setAttribute(
+    PDO::ATTR_ERRMODE,
+    PDO::ERRMODE_EXCEPTION
+);
+$fanoutGateDb->setAttribute(
+    PDO::ATTR_DEFAULT_FETCH_MODE,
+    PDO::FETCH_ASSOC
+);
+$fanoutGateDb->exec('PRAGMA foreign_keys=ON');
+ingredientOntologyV3RegisterGuardFunctions($fanoutGateDb);
+ingredientOntologyV3SetReadyMutationGuard($fanoutGateDb, true);
+try {
+    $fanoutGateDb->prepare("
+        INSERT INTO ingredient_ontology_entities (
+            ontology_version_id, local_key, slug,
+            canonical_name, entity_kind, identity_role,
+            provenance
+        )
+        VALUES (
+            1, 'overlay:red-onion', 'red-onion',
+            'Red Onion', 'ingredient', 'identity_leaf',
+            'test_fixture'
+        )
+    ")->execute();
+    $overlayEntityId = (int)$fanoutGateDb->lastInsertId();
+    $overlayOwner = $fanoutGateDb->prepare("
+        SELECT ingredient.*, recipe.language,
+               recipe.primary_connector,
+               '' AS origin_external_id,
+               '' AS origin_locale
+        FROM recipe_ingredients ingredient
+        JOIN recipe_catalog recipe
+          ON recipe.id = ingredient.recipe_id
+        WHERE ingredient.id = ?
+    ");
+    $overlayOwner->execute([$overlayIngredientId]);
+    $overlayOwner = $overlayOwner->fetch(PDO::FETCH_ASSOC);
+    $fanoutGateDb->prepare("
+        INSERT INTO ingredient_ontology_mappings (
+            ontology_version_id, owner_type, owner_id,
+            owner_fingerprint, source_label, normalized_label,
+            language, entity_id, status, confidence,
+            mapping_source, evidence_json, attributes_json,
+            is_staple
+        )
+        VALUES (
+            1, 'recipe_ingredient', ?, ?,
+            'red onion', 'red onion', 'en', ?,
+            'accepted', 1, 'test_fixture', '{}', '{}', 0
+        )
+    ")->execute([
+        $overlayIngredientId,
+        ingredientOntologyV3RecipeOwnerFingerprint(
+            'recipe_ingredient',
+            $overlayOwner
+        ),
+        $overlayEntityId,
+    ]);
+} finally {
+    ingredientOntologyV3SetReadyMutationGuard(
+        $fanoutGateDb,
+        false
+    );
+}
+$emptyInventory = ['by_product' => []];
+$assert(
+    ingredientOntologyV3IncrementalCurrentExpansionEnabled(
+        $fanoutGateDb,
+        $parentRevisionId,
+        $emptyInventory,
+        999
+    ),
+    'A missing effective projection must retain conservative current '
+        . 'dependency expansion'
+);
+recipeScoreBuildEffectiveProjection(
+    $fanoutGateDb,
+    $parentRevisionId
+);
+$assert(
+    !ingredientOntologyV3IncrementalCurrentExpansionEnabled(
+        $fanoutGateDb,
+        $parentRevisionId,
+        $emptyInventory,
+        999
+    )
+    && ingredientOntologyV3IncrementalCurrentExpansionEnabled(
+        $fanoutGateDb,
+        $parentRevisionId,
+        ['by_product' => [999 => null]],
+        999
+    )
+    && ingredientOntologyV3IncrementalCurrentExpansionEnabled(
+        $fanoutGateDb,
+        $parentRevisionId,
+        [],
+        999
+    ),
+    'A ready projection must suppress only products definitively absent '
+        . 'from the captured scoring inventory'
+);
+$context = new IngredientOntologyV3MatcherContext(
+    $fanoutGateDb,
+    1,
+    0
+);
+$suppressedHasMore = null;
+$suppressedRecipeIds =
+    ingredientOntologyV3IncrementalAffectedRecipeIds(
+        $fanoutGateDb,
+        1,
+        $parentRevisionId,
+        [999],
+        $emptyInventory,
+        $context,
+        [$overlayEntityId],
+        $projectionRoot,
+        0,
+        10,
+        $suppressedHasMore,
+        false
+    );
+$expandedHasMore = null;
+$expandedRecipeIds =
+    ingredientOntologyV3IncrementalAffectedRecipeIds(
+        $fanoutGateDb,
+        1,
+        $parentRevisionId,
+        [999],
+        ['by_product' => [999 => null]],
+        $context,
+        [$overlayEntityId],
+        $projectionRoot,
+        0,
+        10,
+        $expandedHasMore,
+        true
+    );
+$assert(
+    $suppressedRecipeIds === []
+    && $suppressedHasMore === false
+    && $expandedRecipeIds === [$secondRecipeId]
+    && $expandedHasMore === false,
+    'Current identity closure must be optional while prior contributor '
+        . 'selection remains independently available'
+);
+$fanoutGateDb = null;
+@unlink($fanoutGatePath);
+@unlink($fanoutGatePath . '-wal');
+@unlink($fanoutGatePath . '-shm');
 $assert(
     ingredientOntologyV3IncrementalChainPolicy([
         'materialized_hash_algorithm' => 'full-v1',

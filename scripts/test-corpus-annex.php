@@ -630,6 +630,311 @@ $assert(
         . 'pinning the root'
 );
 
+$prestockPath = $path . '.prestock-fanout';
+$artifacts[] = $prestockPath;
+databaseMaintenanceOnlineBackup($path, $prestockPath);
+$prestockDb = $open($prestockPath);
+ingredientOntologyV3SetReadyMutationGuard($prestockDb, true);
+try {
+    $prestockDb->prepare("
+        INSERT INTO ingredient_ontology_entities (
+            ontology_version_id, local_key, slug,
+            canonical_name, entity_kind, identity_role,
+            provenance
+        )
+        VALUES (
+            ?, 'test:baseline-native', 'baseline-native',
+            'Baseline Native', 'ingredient', 'identity_leaf',
+            'test_fixture'
+        )
+    ")->execute([$versionId]);
+    $prestockEntityId = (int)$prestockDb->lastInsertId();
+    $prestockDb->prepare("
+        INSERT INTO ingredient_ontology_labels (
+            ontology_version_id, entity_id, language,
+            label, normalized_label, kind, review_state,
+            provenance, source_ref
+        )
+        VALUES (
+            ?, ?, 'en', 'Baseline Native', 'baseline native',
+            'exact_alias', 'accepted', 'test_fixture',
+            'prestock-fanout'
+        )
+    ")->execute([$versionId, $prestockEntityId]);
+    $baselineOwner = $prestockDb->prepare("
+        SELECT ingredient.*, recipe.language,
+               recipe.primary_connector,
+               '' AS origin_external_id,
+               '' AS origin_locale
+        FROM recipe_ingredients ingredient
+        JOIN recipe_catalog recipe
+          ON recipe.id = ingredient.recipe_id
+        WHERE ingredient.id = ?
+    ");
+    $baselineOwner->execute([$baselineIngredientId]);
+    $baselineOwner = $baselineOwner->fetch(PDO::FETCH_ASSOC);
+    $prestockDb->prepare("
+        INSERT INTO ingredient_ontology_mappings (
+            ontology_version_id, owner_type, owner_id,
+            owner_fingerprint, source_label, normalized_label,
+            language, entity_id, status, confidence,
+            mapping_source, evidence_json, attributes_json,
+            is_staple
+        )
+        VALUES (
+            ?, 'recipe_ingredient', ?, ?,
+            'baseline ingredient', 'baseline ingredient',
+            'en', ?, 'accepted', 1,
+            'test_fixture', '{}', '{}', 0
+        )
+    ")->execute([
+        $versionId,
+        $baselineIngredientId,
+        ingredientOntologyV3RecipeOwnerFingerprint(
+            'recipe_ingredient',
+            $baselineOwner
+        ),
+        $prestockEntityId,
+    ]);
+} finally {
+    ingredientOntologyV3SetReadyMutationGuard($prestockDb, false);
+}
+$fixtureSetup = [];
+for ($pass = 0; $pass < 10; $pass++) {
+    $fixtureSetup[] = ingredientOntologyV3IncrementalRebuild(
+        $prestockDb,
+        true
+    );
+    if (
+        (int)$prestockDb->query("
+            SELECT COUNT(*) FROM recipe_score_pending_recipes
+        ")->fetchColumn() === 0
+        && (int)$prestockDb->query("
+            SELECT COUNT(*)
+            FROM recipe_score_identity_projection_work
+        ")->fetchColumn() === 0
+    ) {
+        break;
+    }
+}
+$assert(
+    (int)$prestockDb->query("
+        SELECT COUNT(*) FROM recipe_score_pending_recipes
+    ")->fetchColumn() === 0
+    && (int)$prestockDb->query("
+        SELECT COUNT(*)
+        FROM recipe_score_identity_projection_work
+    ")->fetchColumn() === 0,
+    'The isolated native recipe mapping must settle before the '
+        . 'pre-stock product mutation'
+);
+$prestockDb->exec("
+    INSERT INTO products (name, brand, category, prepared_food)
+    VALUES ('Baseline Native', '', 'food', 0)
+");
+$prestockProductId = (int)$prestockDb->lastInsertId();
+$prestockProduct = $prestockDb->prepare("
+    SELECT id, name, brand, category, prepared_food
+    FROM products
+    WHERE id = ?
+");
+$prestockProduct->execute([$prestockProductId]);
+$prestockProduct = $prestockProduct->fetch(PDO::FETCH_ASSOC);
+ingredientOntologyV3SetReadyMutationGuard($prestockDb, true);
+try {
+    $prestockDb->prepare("
+        INSERT INTO ingredient_ontology_mappings (
+            ontology_version_id, owner_type, owner_id,
+            owner_fingerprint, source_label, normalized_label,
+            language, entity_id, status, confidence,
+            mapping_source, evidence_json, attributes_json,
+            is_staple
+        )
+        VALUES (
+            ?, 'product', ?, ?, 'Baseline Native',
+            'baseline native', 'en', ?, 'accepted', 1,
+            'test_fixture', '{}', '{}', 0
+        )
+    ")->execute([
+        $versionId,
+        $prestockProductId,
+        ingredientOntologyV3ProductOwnerFingerprint(
+            $prestockProduct
+        ),
+        $prestockEntityId,
+    ]);
+} finally {
+    ingredientOntologyV3SetReadyMutationGuard($prestockDb, false);
+}
+$runProductFlow = static function (
+    PDO $fixtureDb,
+    int $productId
+): array {
+    $result = ingredientOntologyV3IncrementalRebuild(
+        $fixtureDb,
+        true
+    );
+    $affected = $fixtureDb->prepare("
+        SELECT recipe_id
+        FROM recipe_score_incremental_recipes
+        WHERE score_revision_id = ?
+        ORDER BY recipe_id
+    ");
+    $affected->execute([(int)($result['revision_id'] ?? 0)]);
+    $result['affected_recipe_ids'] = array_map(
+        'intval',
+        $affected->fetchAll(PDO::FETCH_COLUMN)
+    );
+    $result['pending_for_product'] =
+        (int)$fixtureDb->query("
+            SELECT COUNT(*)
+            FROM recipe_score_pending_products
+            WHERE product_id = {$productId}
+        ")->fetchColumn()
+        + (int)$fixtureDb->query("
+            SELECT COUNT(*)
+            FROM recipe_score_product_fanout_state
+            WHERE product_id = {$productId}
+        ")->fetchColumn();
+    return $result;
+};
+recipeScoreMarkProductDirty(
+    $prestockDb,
+    $prestockProductId,
+    'prestock_fanout_suppression'
+);
+$prestockFlow = $runProductFlow(
+    $prestockDb,
+    $prestockProductId
+);
+$prestockHead =
+    ingredientOntologyV3CorpusAnnexEffectiveHead(
+        $prestockDb,
+        $versionId,
+        'product',
+        $prestockProductId
+    );
+$prestockReadiness =
+    ingredientOntologyV3ProductReadinessRow(
+        $prestockDb,
+        $prestockProductId
+    );
+$assert(
+    $prestockFlow['affected_recipe_count'] === 0
+    && $prestockFlow['physical_score_rows'] === 0
+    && $prestockFlow['pending_for_product'] === 0
+    && in_array(
+        $prestockProductId,
+        $prestockFlow['product_ids'],
+        true
+    )
+    && in_array(
+        $prestockProductId,
+        $prestockFlow['score_fanout_product_ids'],
+        true
+    )
+    && $prestockHead !== null
+    && is_array($prestockReadiness)
+    && (string)$prestockReadiness['identity_status'] === 'accepted'
+    && (string)$prestockReadiness['status'] === 'ready'
+    && (int)$prestockReadiness['affected_recipe_count'] === 0,
+    'A projected identity with no current or previous stock contribution '
+        . 'must drain without recipe score work: '
+        . ingredientOntologyV3Json([
+            'flow' => $prestockFlow,
+            'head' => $prestockHead,
+            'readiness' => $prestockReadiness,
+        ])
+);
+$prestockDb->prepare("
+    INSERT INTO inventory (
+        product_id, location, quantity, expiry_date,
+        expiry_user_set
+    )
+    VALUES (?, 'dispensa', 1, '2030-01-01', 1)
+")->execute([$prestockProductId]);
+recipeScoreMarkProductDirty(
+    $prestockDb,
+    $prestockProductId,
+    'prestock_first_inventory'
+);
+$firstStockFlow = $runProductFlow(
+    $prestockDb,
+    $prestockProductId
+);
+$stockAvailability = $prestockDb->prepare("
+    SELECT score.availability_score,
+           score.matched_required_count,
+           score.cookable
+    FROM recipe_score_effective_sources source
+    JOIN recipe_inventory_scores score
+      ON score.score_revision_id = source.score_revision_id
+     AND score.recipe_id = source.recipe_id
+    WHERE source.recipe_id = ?
+");
+$stockAvailability->execute([$baselineRecipeId]);
+$stockScore = $stockAvailability->fetch(PDO::FETCH_ASSOC);
+$assert(
+    $firstStockFlow['affected_recipe_ids'] === [$baselineRecipeId]
+    && $firstStockFlow['affected_recipe_count'] === 1
+    && $firstStockFlow['physical_score_rows'] === 1
+    && $firstStockFlow['pending_for_product'] === 0
+    && is_array($stockScore)
+    && (float)$stockScore['availability_score'] > 0
+    && (int)$stockScore['matched_required_count'] === 1
+    && (int)$stockScore['cookable'] === 1,
+    'The first positive inventory must restore the exact bounded '
+        . 'dependency closure: '
+        . ingredientOntologyV3Json([
+            'flow' => $firstStockFlow,
+            'score' => $stockScore,
+        ])
+);
+$prestockDb->prepare("
+    UPDATE inventory
+    SET quantity = 0, updated_at = CURRENT_TIMESTAMP
+    WHERE product_id = ?
+")->execute([$prestockProductId]);
+recipeScoreMarkProductDirty(
+    $prestockDb,
+    $prestockProductId,
+    'prestock_inventory_removed'
+);
+$removedStockFlow = $runProductFlow(
+    $prestockDb,
+    $prestockProductId
+);
+$removedAvailability = $prestockDb->prepare("
+    SELECT score.availability_score,
+           score.matched_required_count,
+           score.cookable
+    FROM recipe_score_effective_sources source
+    JOIN recipe_inventory_scores score
+      ON score.score_revision_id = source.score_revision_id
+     AND score.recipe_id = source.recipe_id
+    WHERE source.recipe_id = ?
+");
+$removedAvailability->execute([$baselineRecipeId]);
+$removedScore = $removedAvailability->fetch(PDO::FETCH_ASSOC);
+$assert(
+    $removedStockFlow['affected_recipe_ids']
+        === [$baselineRecipeId]
+    && $removedStockFlow['affected_recipe_count'] === 1
+    && $removedStockFlow['physical_score_rows'] === 1
+    && $removedStockFlow['pending_for_product'] === 0
+    && is_array($removedScore)
+    && (float)$removedScore['availability_score']
+        < (float)$stockScore['availability_score']
+    && (int)$removedScore['matched_required_count'] === 0
+    && (int)$removedScore['cookable'] === 0,
+    'Removing the last stock must retain previous-contributor invalidation: '
+        . ingredientOntologyV3Json([
+            'flow' => $removedStockFlow,
+            'score' => $removedScore,
+        ])
+);
+$prestockDb = null;
+
 $resolverUpgradePath = $path . '.resolver-upgrade';
 $artifacts[] = $resolverUpgradePath;
 databaseMaintenanceOnlineBackup($path, $resolverUpgradePath);
@@ -3634,21 +3939,25 @@ if ($fanoutPreviousLimit === false) {
 $contributorFanoutRecipeIds = array_values(array_unique(
     $contributorFanoutRecipeIds
 ));
+$contributorFanoutRemainingState =
+    (bool)$identityFanoutDb->query("
+        SELECT 1
+        FROM recipe_score_product_fanout_state
+        WHERE product_id = {$identityFanoutProductId}
+    ")->fetchColumn();
+$contributorFanoutMaximumAffected = max(array_map(
+    static fn(array $result): int => (int)(
+        $result['affected_recipe_count'] ?? 0
+    ),
+    $contributorFanoutResults
+));
 $assert(
     $contributorFanoutObservedCursor
     && $contributorFanoutPartialStatus
     && count($contributorFanoutRecipeIds)
         === $identityFanoutCount
-    && !(bool)$identityFanoutDb->query("
-        SELECT 1
-        FROM recipe_score_product_fanout_state
-        WHERE product_id = {$identityFanoutProductId}
-    ")->fetchColumn()
-    && !array_filter(
-        $contributorFanoutResults,
-        static fn(array $result): bool =>
-            (int)($result['affected_recipe_count'] ?? 0) > 10
-    ),
+    && !$contributorFanoutRemainingState
+    && $contributorFanoutMaximumAffected <= 10,
     'Materialized product contributors must drain through a durable '
         . 'bounded cursor rather than one all-recipe PHP fan-out: '
         . ingredientOntologyV3Json([
@@ -3659,6 +3968,10 @@ $assert(
                 $contributorFanoutObservedCursor,
             'partial_status' =>
                 $contributorFanoutPartialStatus,
+            'remaining_state' =>
+                $contributorFanoutRemainingState,
+            'maximum_affected' =>
+                $contributorFanoutMaximumAffected,
         ])
 );
 $identityFanoutDb = null;
