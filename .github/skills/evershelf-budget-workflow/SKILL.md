@@ -1,0 +1,41 @@
+---
+name: evershelf-budget-workflow
+description: Budget-aware EverShelf research and delivery with copied-database experiments, frozen semantic gold, bounded queries and explicit release gates.
+---
+
+# EverShelf budget workflow
+
+Use global `budget-workflow` when installed, with `.github/agent-budget.json`.
+The shared CLI lives at `$HOME/.copilot/skills/budget-workflow/scripts/`.
+Otherwise apply this bounded workflow directly; no Portal service is needed.
+
+Use `evidence/research.mjs plan` with `evidencePolicy`: repository-only for
+existing request/query behavior, hybrid for database/provider guidance that must
+fit local boundaries, and neutral external-only for unrelated public questions.
+Use current-owner `init`/`evidence`, not a mini-reader handoff. Hybrid research
+first records a small opened-source ownership/reuse contract, then investigates
+only approved public gaps. No private source or provider content in web queries.
+Phase selection avoids unrelated release prose but never waives the mandatory
+domain contract or copied-data safeguards.
+
+1. Read `.github/reference/recipe-contract.md` before domain/release work.
+2. Distinguish mechanical endpoint/config wiring from novel ontology identity,
+   ranking, concurrency, provider compliance, or activation questions. The latter
+   need frontier research and primary evidence, not a cheap summarizer.
+3. Discover exact symbols and tests before reading whole large PHP modules.
+   Existing deterministic classifiers, fixtures, and query plans are evidence;
+   generated accepted snapshots are not independent semantic gold.
+4. Implement only against copied fixtures/databases. Select affected existing
+   `scripts/test-*.php` suites with their real inputs; use 128 MB for list/
+   catalog memory claims. Read test entry points before execution because some
+   scripts are explicitly live probes, not safe unit suites.
+5. Use a supported isolated PHP or bridge environment if dependencies are
+   absent locally; do not mount writable production databases into test runs.
+6. Preserve all integrity, frozen-gold, source fingerprint, idempotency,
+   bounded-SQL, provider field, shadow and rollback gates. Revise once, escalate
+   an unresolved reasoning gap once, then report remaining blockers.
+7. Release only when authorized and only to the operator's fork. Verify the
+   remote identity before any push.
+
+Saving tokens never permits weakening semantic review, treating proposals as
+facts, or evaluating on a contaminated/changed gold set.
