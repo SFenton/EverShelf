@@ -1,0 +1,173 @@
+{
+  "version": 1,
+  "project": "evershelf",
+  "tools": [
+    {
+      "id": "test-recipe-backend",
+      "kind": "command",
+      "argv": ["php", "-d", "memory_limit=128M", "scripts/test-recipe-backend.php"],
+      "cwd": ".",
+      "timeoutSeconds": 1800,
+      "sideEffect": "workspace",
+      "environment": []
+    },
+    {
+      "id": "test-quantity-parser",
+      "kind": "command",
+      "argv": ["php", "-d", "memory_limit=128M", "scripts/test-recipe-quantity-parser.php"],
+      "cwd": ".",
+      "timeoutSeconds": 600,
+      "sideEffect": "workspace",
+      "environment": []
+    },
+    {
+      "id": "test-cookidoo-bridge",
+      "kind": "command",
+      "argv": ["python", "-m", "unittest", "discover", "-s", "cookidoo-bridge/tests"],
+      "cwd": ".",
+      "timeoutSeconds": 1800,
+      "sideEffect": "workspace",
+      "environment": ["PYTHONPATH"]
+    },
+    {
+      "id": "test-database-runtime",
+      "kind": "command",
+      "argv": ["php", "scripts/test-database-runtime.php"],
+      "cwd": ".",
+      "timeoutSeconds": 900,
+      "sideEffect": "workspace",
+      "environment": []
+    },
+    {
+      "id": "test-ontology-v3",
+      "kind": "command",
+      "argv": ["php", "-d", "memory_limit=128M", "scripts/test-ingredient-ontology-v3.php"],
+      "cwd": ".",
+      "timeoutSeconds": 1800,
+      "sideEffect": "workspace",
+      "environment": []
+    },
+    {
+      "id": "test-ontology-admission",
+      "kind": "command",
+      "argv": ["php", "scripts/test-ontology-admission-coverage.php"],
+      "cwd": ".",
+      "timeoutSeconds": 1800,
+      "sideEffect": "workspace",
+      "environment": []
+    },
+    {
+      "id": "test-exact-identity",
+      "kind": "command",
+      "argv": ["php", "scripts/test-exact-identity-product-save.php"],
+      "cwd": ".",
+      "timeoutSeconds": 1800,
+      "sideEffect": "workspace",
+      "environment": []
+    },
+    {
+      "id": "test-score-deltas",
+      "kind": "command",
+      "argv": ["php", "scripts/test-recipe-score-deltas.php"],
+      "cwd": ".",
+      "timeoutSeconds": 1800,
+      "sideEffect": "workspace",
+      "environment": []
+    },
+    {
+      "id": "test-provider-contract",
+      "kind": "disabled",
+      "reason": "The focused provider suite currently fails its upgrade fixture because recipe schema migration reaches ontology tables before the fixture creates products",
+      "sideEffect": "workspace",
+      "environment": []
+    },
+    {
+      "id": "test-ontology-controller",
+      "kind": "command",
+      "argv": ["php", "scripts/test-ontology-controller.php"],
+      "cwd": ".",
+      "timeoutSeconds": 1800,
+      "sideEffect": "workspace",
+      "environment": []
+    },
+    {
+      "id": "test-ontology-activation",
+      "kind": "command",
+      "argv": ["php", "scripts/test-ontology-activation-runtime.php"],
+      "cwd": ".",
+      "timeoutSeconds": 1800,
+      "sideEffect": "workspace",
+      "environment": []
+    },
+    {
+      "id": "build-assets",
+      "kind": "disabled",
+      "reason": "The current npx build is network-dependent and its generated assets are not shipped",
+      "sideEffect": "workspace",
+      "environment": []
+    },
+    {
+      "id": "build-release-images",
+      "kind": "disabled",
+      "reason": "Local Docker image build driver is not sandboxed and fault-tested",
+      "sideEffect": "production",
+      "environment": []
+    },
+    {
+      "id": "develop-pr-disabled",
+      "kind": "disabled",
+      "reason": "GitHub develop pull-request driver is not implemented",
+      "sideEffect": "github",
+      "environment": []
+    },
+    {
+      "id": "observe-required-ci-disabled",
+      "kind": "disabled",
+      "reason": "GitHub required-check observation driver is not implemented",
+      "sideEffect": "github",
+      "environment": []
+    },
+    {
+      "id": "observe-main-merge-disabled",
+      "kind": "disabled",
+      "reason": "Develop-to-main merge observation driver is not implemented",
+      "sideEffect": "github",
+      "environment": []
+    },
+    {
+      "id": "observe-release-disabled",
+      "kind": "disabled",
+      "reason": "Automatic GitHub Release observation driver is not implemented",
+      "sideEffect": "github",
+      "environment": []
+    },
+    {
+      "id": "verify-release-disabled",
+      "kind": "disabled",
+      "reason": "GitHub Release and runtime verification driver is not implemented",
+      "sideEffect": "production",
+      "environment": []
+    },
+    {
+      "id": "rollback-release-disabled",
+      "kind": "disabled",
+      "reason": "GitHub release rollback driver is not implemented",
+      "sideEffect": "github",
+      "environment": []
+    },
+    {
+      "id": "rollback-git-disabled",
+      "kind": "disabled",
+      "reason": "Develop/main revert driver is not implemented",
+      "sideEffect": "github",
+      "environment": []
+    },
+    {
+      "id": "cleanup-release-disabled",
+      "kind": "disabled",
+      "reason": "Release cleanup driver is not implemented",
+      "sideEffect": "workspace",
+      "environment": []
+    }
+  ]
+}

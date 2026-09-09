@@ -1,0 +1,33 @@
+{
+  "version": 1,
+  "project": "evershelf",
+  "profiles": [
+    {
+      "id": "evershelf-focused-tests",
+      "capability": "evershelf-focused-tests",
+      "candidateFile": "scripts/test-recipe-quantity-parser.php",
+      "validator": {
+        "argv": ["php", "-d", "memory_limit=128M", "scripts/test-recipe-quantity-parser.php"],
+        "timeoutSeconds": 600
+      },
+      "sandbox": {
+        "provider": "docker",
+        "image": "php:8.3-cli",
+        "expectedImageId": "sha256:6cb44388b6ffc8c9a35b4cfdf518d0565e0cf9150e479add338b498874d7e971",
+        "memoryMb": 512,
+        "pidsLimit": 64,
+        "allowedCollateralPaths": ["data/logs", "data/recipe_catalog.lock"],
+        "includePaths": ["api", "scripts", "tests", "docs", "translations", "assets", "manifest.json"],
+        "writablePaths": ["data"],
+        "containerEnvironment": {},
+        "dependencyMounts": [],
+        "runtimeChecks": [
+          {
+            "argv": ["php", "-r", "foreach(['pdo_sqlite','curl','mbstring'] as $e){if(!extension_loaded($e)){fwrite(STDERR,$e);exit(9);}}"],
+            "timeoutSeconds": 30
+          }
+        ]
+      }
+    }
+  ]
+}

@@ -1,0 +1,53 @@
+{
+  "version": 1,
+  "project": "evershelf",
+  "opportunity": "focused-tests",
+  "cases": [
+    {
+      "id": "focused-tests-quantity-locales",
+      "target": "scripts/test-recipe-quantity-parser.php",
+      "instruction": "Add focused assertions for locale normalization and separator profiles, including script/region casing, underscore folding, invalid fallback, and locale-specific decimal and grouping rules.",
+      "sources": [
+        { "file": "api/lib/recipes/quantity.php", "start": 11, "end": 34 },
+        { "file": "api/lib/recipes/quantity.php", "start": 89, "end": 170 },
+        { "file": "scripts/test-recipe-quantity-parser.php", "start": 300, "end": 390 }
+      ],
+      "failureCriteria": [
+        "Script and region casing, underscore folding, or invalid-locale fallback is untested.",
+        "At least one comma-decimal and one dot-decimal separator profile is untested."
+      ],
+      "requiredPatterns": ["recipeQuantityNormalizeLocale", "quantityTestAssert("],
+      "validator": ["docker", "run", "--rm", "-v", ".:/app", "-w", "/app", "php:8.3-cli", "php", "-d", "memory_limit=128M", "scripts/test-recipe-quantity-parser.php"]
+    },
+    {
+      "id": "focused-tests-quantity-numbers",
+      "target": "scripts/test-recipe-quantity-parser.php",
+      "instruction": "Add focused assertions for number-token parsing, including vulgar and mixed fractions, zero-denominator rejection, locale-specific grouped values, ambiguous locale-less values, and non-numeric input.",
+      "sources": [
+        { "file": "api/lib/recipes/quantity.php", "start": 171, "end": 308 },
+        { "file": "scripts/test-recipe-quantity-parser.php", "start": 300, "end": 390 }
+      ],
+      "failureCriteria": [
+        "Vulgar fractions, mixed fractions, or zero denominators are untested.",
+        "Locale-specific grouped values or ambiguous locale-less rejection is untested."
+      ],
+      "requiredPatterns": ["recipeQuantityParseNumberToken", "quantityTest"],
+      "validator": ["docker", "run", "--rm", "-v", ".:/app", "-w", "/app", "php:8.3-cli", "php", "-d", "memory_limit=128M", "scripts/test-recipe-quantity-parser.php"]
+    },
+    {
+      "id": "focused-tests-quantity-units",
+      "target": "scripts/test-recipe-quantity-parser.php",
+      "instruction": "Add focused assertions for unit alias folding and canonicalization, including punctuation, apostrophe variants, whitespace, case, multilingual aliases, and unknown-unit rejection.",
+      "sources": [
+        { "file": "api/lib/recipes/quantity.php", "start": 309, "end": 509 },
+        { "file": "scripts/test-recipe-quantity-parser.php", "start": 300, "end": 390 }
+      ],
+      "failureCriteria": [
+        "Punctuation, apostrophe, whitespace, or case folding is untested.",
+        "A multilingual alias and unknown-unit rejection are not both tested."
+      ],
+      "requiredPatterns": ["recipeQuantityCanonicalUnit", "quantityTestAssert("],
+      "validator": ["docker", "run", "--rm", "-v", ".:/app", "-w", "/app", "php:8.3-cli", "php", "-d", "memory_limit=128M", "scripts/test-recipe-quantity-parser.php"]
+    }
+  ]
+}

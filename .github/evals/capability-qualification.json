@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "project": "evershelf",
+  "capabilities": [
+    {
+      "id": "evershelf-focused-tests",
+      "status": "provisional",
+      "trustTier": "provisional-staging",
+      "reviewedApplication": false,
+      "unattendedApplication": false,
+      "currentCases": 3,
+      "minimumCases": 30,
+      "remainingCases": 27,
+      "automaticApplication": false,
+      "scope": "Pure recipe quantity-parser PHP tests represented by the current worker fixtures",
+      "allLegBenchmark": "planned-no-run",
+      "studyBudget": { "missingCases": 27, "modelCalls": 0, "maximumCredits": 0, "maximumTokens": 0, "selected": false, "runStudy": false, "reason": "complete mandatory production topology evidence is unavailable" },
+      "sandbox": {
+        "status": "qualified",
+        "provider": "docker",
+        "image": "php:8.3-cli",
+        "profile": ".github/sandbox-profiles.json#evershelf-focused-tests",
+        "profileHash": "0cb3a00e5f4de428387dab292c3f8afa8e9c69f6d1770bc288d9d36595e50ade",
+        "network": "none",
+        "imageId": "sha256:6cb44388b6ffc8c9a35b4cfdf518d0565e0cf9150e479add338b498874d7e971",
+        "dependencyPolicyHash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "dependencyMode": "container PHP extensions with disposable data writes",
+        "qualification": "pdo_sqlite, curl and mbstring checks plus 625 quantity-parser assertions and declared disposable write paths"
+      }
+    }
+  ]
+}

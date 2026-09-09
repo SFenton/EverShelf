@@ -1,6 +1,14 @@
 {
   "version": 1,
   "project": "evershelf",
+  "opportunityPolicy": ".github/agent-opportunities.json",
+  "toolRegistry": ".github/agent-tools.json",
+  "releaseMachine": ".github/release-machine.json",
+  "opportunityEvaluation": ".github/evals/agent-opportunity-cases.json",
+  "workerEvaluation": ".github/evals/agent-worker-cases.json",
+  "capabilityEvaluation": ".github/evals/capability-qualification.json",
+  "sandboxProfiles": ".github/sandbox-profiles.json",
+  "learningPolicy": ".github/agent-learning.json",
   "instructions": [".github/copilot-instructions.md", ".github/skills/evershelf-budget-workflow/SKILL.md"],
   "riskTerms": ["ontology", "identity", "cookability", "cursor", "gold", "provider", "sqlite", "ranking"],
   "gates": [
@@ -10,6 +18,11 @@
     "Run affected existing PHP fixture suites under 128 MB; bridge tests in its supported environment",
     "Release only to SFenton/EverShelf with explicit authorization"
   ],
+  "delegation": {
+    "allowedClasses": ["test-generation"],
+    "requireCleanTargets": true,
+    "requireDeterministicValidator": true
+  },
   "evidencePolicy": {
     "always": ["Keep secrets out of evidence; do not inspect or retain official Cookidoo steps or unapproved provider content.", "Backend data ownership, immutable versions and explicit activation boundaries remain authoritative."],
     "phases": {

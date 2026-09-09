@@ -1,0 +1,1342 @@
+{
+  "version": 1,
+  "project": "evershelf",
+  "opportunities": [
+    {
+      "id": "sql-query-semantics",
+      "cases": [
+        {
+          "id": "sql_query_semantics_card_search_paginates_before_hydration",
+          "question": "Can compact card search paginate and bound the result set before hydration?",
+          "sources": [
+            {
+              "file": ".github/instructions/recipe-contract.instructions.md",
+              "start": 5,
+              "end": 10
+            },
+            {
+              "file": "api/lib/recipes/search.php",
+              "start": 124,
+              "end": 240
+            },
+            {
+              "file": "scripts/test-recipe-backend.php",
+              "start": 9584,
+              "end": 9592
+            }
+          ],
+          "criteria": [
+            "card response shape stays compact and uses dedupe_key",
+            "limit is honored before hydration, keeping payload size bounded",
+            "the result surface does not widen to full hydrated results"
+          ],
+          "failureCriteria": [
+            "hydrating the full candidate set before limiting",
+            "returning the wrong payload shape or omitting dedupe keys",
+            "client-side reranking after the backend has already paginated"
+          ],
+          "validator": "Existing assertions in scripts/test-recipe-backend.php fail if the compact card result shape, limit, or size bound changes.",
+          "discriminator": "A cheaper challenger can describe search code, but usually misses the ordering of pagination, hydration, and bounded output that the frozen test enforces."
+        },
+        {
+          "id": "sql_query_semantics_minimum_coverage_filters_before_pagination",
+          "question": "Does minimum coverage filter the candidate set before page slicing?",
+          "sources": [
+            {
+              "file": ".github/instructions/recipe-contract.instructions.md",
+              "start": 5,
+              "end": 10
+            },
+            {
+              "file": "api/lib/recipes/search.php",
+              "start": 124,
+              "end": 240
+            },
+            {
+              "file": "scripts/test-recipe-backend.php",
+              "start": 9598,
+              "end": 9606
+            }
+          ],
+          "criteria": [
+            "every returned item satisfies the coverage threshold",
+            "pagination happens after thresholding, not before",
+            "the returned page is not padded with below-threshold items"
+          ],
+          "failureCriteria": [
+            "filtering after pagination and accidentally leaking low-coverage rows",
+            "using reranked client state instead of the backend filter",
+            "returning a page that is underfilled because thresholding happened too late"
+          ],
+          "validator": "The backend test asserts the coverage condition directly and will fail if any returned item falls below 1.0 coverage.",
+          "discriminator": "A cheaper challenger often treats coverage as a soft preference; the frozen case requires it to be a hard pre-pagination gate."
+        },
+        {
+          "id": "sql_query_semantics_snapshot_cursor_survives_imports_but_not_order_changes",
+          "question": "Do cursors stay pinned to their score/catalog snapshot during imports, and invalidate when ordering changes?",
+          "sources": [
+            {
+              "file": ".github/instructions/recipe-contract.instructions.md",
+              "start": 5,
+              "end": 10
+            },
+            {
+              "file": "api/lib/recipes/scores.php",
+              "start": 50,
+              "end": 89
+            },
+            {
+              "file": "api/lib/recipes/scores.php",
+              "start": 230,
+              "end": 359
+            },
+            {
+              "file": "api/lib/recipes/scores.php",
+              "start": 501,
+              "end": 558
+            },
+            {
+              "file": "scripts/test-recipe-backend.php",
+              "start": 9646,
+              "end": 9673
+            }
+          ],
+          "criteria": [
+            "page 2 keeps the same snapshot_id and total as page 1",
+            "late imports do not leak into an already-issued cursor",
+            "ordering-changing updates invalidate the old cursor"
+          ],
+          "failureCriteria": [
+            "reading current state instead of the pinned snapshot",
+            "allowing a stale cursor to continue after an ordering change",
+            "recomputing totals or page content from the latest catalog state"
+          ],
+          "validator": "The test asserts snapshot_id equality, late-import exclusion, and cursor rejection after an order-changing update.",
+          "discriminator": "A cheaper challenger may understand pagination in the abstract but miss the snapshot pinning and invalidation boundary that protects cursor correctness."
+        }
+      ]
+    },
+    {
+      "id": "ranking",
+      "cases": [
+        {
+          "id": "ranking_text_search_applies_pantry_order_before_pagination",
+          "question": "Does text search apply pantry ranking before slicing each page in both stocked and expiring modes?",
+          "sources": [
+            {
+              "file": ".github/instructions/recipe-contract.instructions.md",
+              "start": 5,
+              "end": 10
+            },
+            {
+              "file": "api/lib/recipes/search.php",
+              "start": 124,
+              "end": 240
+            },
+            {
+              "file": "scripts/test-recipe-backend.php",
+              "start": 8790,
+              "end": 8808
+            }
+          ],
+          "criteria": [
+            "the first ranked result is the cookable recipe in both modes",
+            "ranking is evaluated before the limit is applied",
+            "the backend order, not a frontend rerank, determines the page"
+          ],
+          "failureCriteria": [
+            "ranking after pagination",
+            "ignoring the mode-specific ranking path",
+            "changing the first item because of client-side reranking"
+          ],
+          "validator": "The test compares the first result id in both stocked and expiring modes against the expected cookable recipe.",
+          "discriminator": "A cheaper challenger tends to collapse search and ranking into one generic score; this case checks the backend mode split and the ordering boundary explicitly."
+        },
+        {
+          "id": "ranking_stocked_ignores_expiry_expiring_uses_it",
+          "question": "Does stocked ranking ignore expiry while expiring ranking uses it and still gates cookability?",
+          "sources": [
+            {
+              "file": ".github/instructions/recipe-contract.instructions.md",
+              "start": 5,
+              "end": 10
+            },
+            {
+              "file": "api/lib/recipes/search.php",
+              "start": 29,
+              "end": 37
+            },
+            {
+              "file": "api/lib/recipes/search.php",
+              "start": 114,
+              "end": 122
+            },
+            {
+              "file": "api/lib/recipes/search.php",
+              "start": 124,
+              "end": 240
+            },
+            {
+              "file": "scripts/test-recipe-backend.php",
+              "start": 8808,
+              "end": 8850
+            }
+          ],
+          "criteria": [
+            "stocked scores are insensitive to expiry changes",
+            "expiring scores change when expiry becomes relevant",
+            "missing required ingredients still gate cookability"
+          ],
+          "failureCriteria": [
+            "leaking expiry into stocked ranking",
+            "letting expiry rescue an un-cookable recipe",
+            "ignoring the hard missing-ingredient gate"
+          ],
+          "validator": "The test asserts equal stocked scores across far-apart expiries and a lower expiring score for the same recipe, plus a cookability check.",
+          "discriminator": "A cheaper challenger may treat all ranking modes the same; the frozen case proves the mode-specific score model matters."
+        },
+        {
+          "id": "ranking_recommendations_remain_unique_and_ordered",
+          "question": "Do recommendations preserve unique ordered card summaries at both 30 and 70 item limits?",
+          "sources": [
+            {
+              "file": ".github/instructions/recipe-contract.instructions.md",
+              "start": 5,
+              "end": 10
+            },
+            {
+              "file": "api/lib/recipes/search.php",
+              "start": 124,
+              "end": 240
+            },
+            {
+              "file": "scripts/test-recipe-backend.php",
+              "start": 9678,
+              "end": 9698
+            }
+          ],
+          "criteria": [
+            "30-item recommendations contain 30 unique dedupe keys",
+            "70-item recommendations also contain 70 unique dedupe keys",
+            "the response stays non-degraded"
+          ],
+          "failureCriteria": [
+            "front-end reranking or post-hoc dedupe",
+            "duplicate dedupe keys in the ordered summary list",
+            "dropping the higher requested limit or degrading the response"
+          ],
+          "validator": "The test checks exact counts, dedupe-key uniqueness, and the degraded flag for both limits.",
+          "discriminator": "A cheaper challenger can generate plausible ranking language, but this case measures the exact uniqueness and order contract at two different page sizes."
+        }
+      ]
+    },
+    {
+      "id": "ontology",
+      "cases": [
+        {
+          "id": "ontology_gold_corpus_count_and_false_pairs_hold",
+          "question": "Does the frozen ontology gold still expand to the required food-case and false-equivalence counts?",
+          "sources": [
+            {
+              "file": ".github/instructions/recipe-contract.instructions.md",
+              "start": 5,
+              "end": 10
+            },
+            {
+              "file": ".github/reference/recipe-contract.md",
+              "start": 23,
+              "end": 45
+            },
+            {
+              "file": "tests/fixtures/ontology_admission_gold_v1.json",
+              "start": 1,
+              "end": 126
+            },
+            {
+              "file": "scripts/test-ontology-admission-coverage.php",
+              "start": 32,
+              "end": 65
+            },
+            {
+              "file": "scripts/test-ontology-admission-coverage.php",
+              "start": 126,
+              "end": 170
+            }
+          ],
+          "criteria": [
+            "generated food cases meet the minimum corpus size",
+            "false-equivalence pairs meet the minimum threshold",
+            "legitimate food cases reach exact identity and not review/failure"
+          ],
+          "failureCriteria": [
+            "contaminating the frozen gold set",
+            "shrinking the corpus or the false-equivalence coverage",
+            "treating the gold fixture as a generated snapshot instead of frozen evaluation data"
+          ],
+          "validator": "The coverage script deterministically counts generated cases, false pairs, and per-case exact-identity admissions.",
+          "discriminator": "A cheaper challenger can summarize ontology rules, but this case requires the exact frozen corpus expansion and threshold logic from the repository."
+        },
+        {
+          "id": "ontology_representative_locale_and_taxonomy_traps_do_not_collapse",
+          "question": "Do representative cases preserve locale isolation and refuse taxonomy-trap equivalence?",
+          "sources": [
+            {
+              "file": ".github/instructions/recipe-contract.instructions.md",
+              "start": 5,
+              "end": 10
+            },
+            {
+              "file": ".github/reference/recipe-contract.md",
+              "start": 23,
+              "end": 45
+            },
+            {
+              "file": "tests/fixtures/ontology_admission_gold_v1.json",
+              "start": 70,
+              "end": 126
+            },
+            {
+              "file": "scripts/test-ontology-admission-coverage.php",
+              "start": 175,
+              "end": 245
+            },
+            {
+              "file": "scripts/test-ontology-admission-coverage.php",
+              "start": 529,
+              "end": 560
+            }
+          ],
+          "criteria": [
+            "representative cases admit exact identity for the intended language",
+            "taxonomy-trap sea lavender stays distinct from lavender",
+            "English locale variants converge while de and und stay isolated"
+          ],
+          "failureCriteria": [
+            "using taxonomy ancestry as identity",
+            "collapsing multilingual cases into one entity",
+            "letting undetermined locale bleed into language-specific resolution"
+          ],
+          "validator": "The coverage script asserts representative admissions, false-pair rejection, and locale-specific resolution behavior.",
+          "discriminator": "A cheaper challenger is likely to overgeneralize synonym or locale logic; this case checks the precise trap and isolation boundaries."
+        },
+        {
+          "id": "ontology_invalid_labels_and_prepared_products_fail_closed",
+          "question": "Do invalid labels and prepared products fail closed without retry churn?",
+          "sources": [
+            {
+              "file": ".github/instructions/recipe-contract.instructions.md",
+              "start": 5,
+              "end": 10
+            },
+            {
+              "file": ".github/reference/recipe-contract.md",
+              "start": 56,
+              "end": 80
+            },
+            {
+              "file": "api/lib/ontology_v3/identity_annex.php",
+              "start": 2968,
+              "end": 2976
+            },
+            {
+              "file": "api/lib/ontology_v3/identity_annex.php",
+              "start": 3238,
+              "end": 3355
+            },
+            {
+              "file": "scripts/test-ontology-admission-coverage.php",
+              "start": 429,
+              "end": 526
+            }
+          ],
+          "criteria": [
+            "prepared products are rejected with the prepared_food reason",
+            "empty and punctuation-only labels resolve unresolved and null",
+            "permanently unsupported labels do not churn into needs_review or retry"
+          ],
+          "failureCriteria": [
+            "promoting malformed labels into identity admissions",
+            "turning prepared products into reviewable candidates",
+            "spinning retry loops for permanently unsupported inputs"
+          ],
+          "validator": "The coverage script asserts prepared-product rejection, unresolved empty-label behavior, and bounded retry counters for unsupported labels.",
+          "discriminator": "A cheaper challenger often misses the fail-closed terminal state and retries; the frozen case checks both the rejection reason and the absence of churn."
+        }
+      ]
+    },
+    {
+      "id": "identity",
+      "cases": [
+        {
+          "id": "identity_exact_self_toggle_and_no_needs_review",
+          "question": "Does exact-self admission stay off when disabled and publish immediately when enabled without creating needs_review rows?",
+          "sources": [
+            {
+              "file": ".github/instructions/recipe-contract.instructions.md",
+              "start": 5,
+              "end": 10
+            },
+            {
+              "file": "api/lib/ontology_v3/identity_annex.php",
+              "start": 46,
+              "end": 67
+            },
+            {
+              "file": "api/lib/ontology_v3/identity_annex.php",
+              "start": 1560,
+              "end": 1618
+            },
+            {
+              "file": "scripts/test-exact-identity-product-save.php",
+              "start": 34,
+              "end": 38
+            },
+            {
+              "file": "scripts/test-exact-identity-product-save.php",
+              "start": 174,
+              "end": 259
+            }
+          ],
+          "criteria": [
+            "exact-self admission is on by default but can be forced off in test mode",
+            "disabled baseline saves do not admit identity",
+            "enabled saves admit exact_self_identity and do not create needs_review rows"
+          ],
+          "failureCriteria": [
+            "publishing identity while the toggle is disabled",
+            "creating review churn for ordinary exact-self saves",
+            "failing to keep the admitted entity_id negative and exact-self sourced"
+          ],
+          "validator": "The exact-identity product-save script asserts toggle behavior, accepted source, negative runtime entity ids, and zero needs_review rows.",
+          "discriminator": "A cheaper challenger can narrate product-save flow, but this case requires the exact toggle semantics and the absence of review churn."
+        },
+        {
+          "id": "identity_background_admission_is_independent_of_provider_and_queue_work",
+          "question": "Can background exact-self admission succeed even when canonical/provider queue work is absent?",
+          "sources": [
+            {
+              "file": ".github/instructions/recipe-contract.instructions.md",
+              "start": 5,
+              "end": 10
+            },
+            {
+              "file": "api/lib/ontology_v3/identity_annex.php",
+              "start": 2968,
+              "end": 3130
+            },
+            {
+              "file": "scripts/test-exact-identity-product-save.php",
+              "start": 262,
+              "end": 291
+            }
+          ],
+          "criteria": [
+            "the background job finishes and the annex status is accepted",
+            "the admission source remains exact_self_identity",
+            "canonical queue deletion does not block background admission"
+          ],
+          "failureCriteria": [
+            "coupling exact-self admission to canonical or provider work",
+            "leaving the background job unfinished",
+            "changing the admission source away from exact_self_identity"
+          ],
+          "validator": "The script deletes queue work, processes the queue batch, and then asserts the background admission and annex status.",
+          "discriminator": "A cheaper challenger may assume the admission pipeline depends on unrelated queue stages; this case proves the independence boundary."
+        },
+        {
+          "id": "identity_replay_preserves_extension_snapshot_and_entity_binding",
+          "question": "Does replaying exact identity refresh preserve the entity binding and snapshot prefix?",
+          "sources": [
+            {
+              "file": ".github/instructions/recipe-contract.instructions.md",
+              "start": 5,
+              "end": 10
+            },
+            {
+              "file": "api/lib/ontology_v3/identity_annex.php",
+              "start": 152,
+              "end": 166
+            },
+            {
+              "file": "api/lib/ontology_v3/identity_annex.php",
+              "start": 325,
+              "end": 328
+            },
+            {
+              "file": "scripts/test-ontology-admission-coverage.php",
+              "start": 327,
+              "end": 372
+            }
+          ],
+          "criteria": [
+            "replaying an admitted product returns the same entity_id",
+            "the identity extension snapshot does not change across replay",
+            "a later snapshot advances exactly one revision and the old context cannot see the new entity"
+          ],
+          "failureCriteria": [
+            "appending extension revisions on an idempotent replay",
+            "allowing the old pinned context to see late-added entities",
+            "changing the admitted entity binding during replay"
+          ],
+          "validator": "The coverage script snapshots before and after replay and asserts equality, then checks the late snapshot revision and context visibility.",
+          "discriminator": "A cheaper challenger often misses pinned-prefix semantics; this case checks that replay is idempotent and that later context remains isolated."
+        }
+      ]
+    },
+    {
+      "id": "providers",
+      "qualificationStatus": "invalidated-current-validator-failure",
+      "cases": [
+        {
+          "id": "providers_title_acceptance_and_quarantine_boundaries",
+          "question": "Which provider titles auto-accept, and which ones must fail closed or quarantine?",
+          "sources": [
+            {
+              "file": ".github/instructions/recipe-contract.instructions.md",
+              "start": 5,
+              "end": 10
+            },
+            {
+              "file": ".github/reference/recipe-contract.md",
+              "start": 105,
+              "end": 111
+            },
+            {
+              "file": ".github/reference/recipe-contract.md",
+              "start": 151,
+              "end": 155
+            },
+            {
+              "file": "api/lib/ontology_v3/provider_requirements.php",
+              "start": 310,
+              "end": 415
+            },
+            {
+              "file": "scripts/test-ingredient-provider-requirements.php",
+              "start": 1016,
+              "end": 1116
+            }
+          ],
+          "criteria": [
+            "exact consistent provider titles auto-accept",
+            "generic, missing, and oversize-normalized titles stay unresolved or D8",
+            "provider text is treated as factual metadata only, not semantic gold"
+          ],
+          "failureCriteria": [
+            "treating provider text as ontology creation",
+            "auto-accepting generic any-type titles",
+            "accepting overlong normalized labels instead of quarantining them"
+          ],
+          "validator": "The provider test counts accepted, unresolved, and D8 terminal dispositions directly from the database.",
+          "discriminator": "A cheaper challenger often over-trusts provider text; this case checks the allowlist and the quarantine boundary explicitly."
+        },
+        {
+          "id": "providers_local_and_base_conflicts_stay_quarantined",
+          "question": "Do local/provider hard conflicts and base conflicts remain quarantined instead of becoming accepted mappings?",
+          "sources": [
+            {
+              "file": ".github/instructions/recipe-contract.instructions.md",
+              "start": 5,
+              "end": 10
+            },
+            {
+              "file": ".github/reference/recipe-contract.md",
+              "start": 105,
+              "end": 111
+            },
+            {
+              "file": ".github/reference/recipe-contract.md",
+              "start": 151,
+              "end": 155
+            },
+            {
+              "file": "api/lib/ontology_v3/provider_requirements.php",
+              "start": 479,
+              "end": 856
+            },
+            {
+              "file": "scripts/test-ingredient-provider-requirements.php",
+              "start": 1142,
+              "end": 1315
+            }
+          ],
+          "criteria": [
+            "fresh/dried facet conflict maps to provider_local_conflict",
+            "provider/base conflicts are separated from hard facet conflicts",
+            "generic or conflicting titles never auto-accept"
+          ],
+          "failureCriteria": [
+            "collapsing base and hard conflicts into one bucket",
+            "leaving provider-local conflicts in accepted state",
+            "letting generic titles silently resolve to accepted mappings"
+          ],
+          "validator": "The provider audit and count assertions verify consistency buckets, local-provider conflict counts, and quarantine outcomes.",
+          "discriminator": "A cheaper challenger tends to resolve all provider signals the same way; this case checks the conflict taxonomy and the quarantine output."
+        },
+        {
+          "id": "providers_owner_fingerprint_changes_invalidate_projection_but_restore_cleanly",
+          "question": "Do default-title edits invalidate the owner fingerprint without dirtying scores, and does restoring the source row make the fingerprint valid again?",
+          "sources": [
+            {
+              "file": ".github/instructions/recipe-contract.instructions.md",
+              "start": 5,
+              "end": 10
+            },
+            {
+              "file": "api/lib/ontology_v3/core.php",
+              "start": 273,
+              "end": 279
+            },
+            {
+              "file": "api/lib/ontology_v3/core.php",
+              "start": 325,
+              "end": 360
+            },
+            {
+              "file": "api/lib/ontology_v3/provider_requirements.php",
+              "start": 1416,
+              "end": 1575
+            },
+            {
+              "file": "scripts/test-ingredient-provider-requirements.php",
+              "start": 1416,
+              "end": 1575
+            }
+          ],
+          "criteria": [
+            "default-title changes invalidate the immutable owner fingerprint",
+            "the score state does not dirty or rebuild unnecessarily",
+            "restoring the source row restores fingerprint validity and projection acceptance"
+          ],
+          "failureCriteria": [
+            "silently reusing a stale fingerprint after source edits",
+            "dirtying or rebuilding scores for metadata-only title changes",
+            "failing to recover validity after the source row is restored"
+          ],
+          "validator": "The test captures the stored fingerprint, mutates the source row, expects a stale projection failure, then restores the source row and re-checks fingerprint validity.",
+          "discriminator": "A cheaper challenger may miss the provenance immutability contract; this case requires exact fingerprint invalidation and recovery behavior."
+        }
+      ]
+    },
+    {
+      "id": "copied-data",
+      "cases": [
+        {
+          "id": "copied_data_online_backup_is_read_only_and_atomic",
+          "question": "Does the online backup path copy from a read-only source, verify quick_check, and publish atomically?",
+          "sources": [
+            {
+              "file": ".github/instructions/recipe-contract.instructions.md",
+              "start": 5,
+              "end": 10
+            },
+            {
+              "file": ".github/reference/recipe-contract.md",
+              "start": 23,
+              "end": 45
+            },
+            {
+              "file": "api/lib/database_maintenance.php",
+              "start": 4,
+              "end": 79
+            },
+            {
+              "file": "scripts/test-recipe-score-deltas.php",
+              "start": 803,
+              "end": 818
+            }
+          ],
+          "criteria": [
+            "the source backup is opened read-only",
+            "quick_check must pass before publication",
+            "publish happens via temp file rename, not overwrite"
+          ],
+          "failureCriteria": [
+            "opening the source database writable",
+            "skipping the integrity check before publishing",
+            "publishing the backup without an atomic rename"
+          ],
+          "validator": "The backup function and its test both assert read-only source access, quick_check success, and final rename publication.",
+          "discriminator": "A cheaper challenger might describe backup in general terms but miss the copied-database atomicity and integrity gate that the repository enforces."
+        },
+        {
+          "id": "copied_data_current_schema_reconnects_are_read_only_and_guarded",
+          "question": "Do current-schema reconnects remain read-only while still registering the ontology guard functions?",
+          "sources": [
+            {
+              "file": ".github/instructions/recipe-contract.instructions.md",
+              "start": 5,
+              "end": 10
+            },
+            {
+              "file": ".github/reference/recipe-contract.md",
+              "start": 23,
+              "end": 45
+            },
+            {
+              "file": "api/database.php",
+              "start": 93,
+              "end": 217
+            },
+            {
+              "file": "scripts/test-database-runtime.php",
+              "start": 39,
+              "end": 113
+            }
+          ],
+          "criteria": [
+            "query_only opens execute no writes on a current schema",
+            "guard functions are still registered on reconnect",
+            "SQLite lock detection and dangling transaction recovery remain intact"
+          ],
+          "failureCriteria": [
+            "writing during a read-only reconnect",
+            "skipping guard registration on an already-migrated database",
+            "misclassifying lock errors or leaking a transaction"
+          ],
+          "validator": "The runtime test checks total_changes before and after query_only, guard return values, lock recognition, and rollback recovery.",
+          "discriminator": "A cheaper challenger can implement a reconnection path, but this case checks the copy-safe no-write behavior and guard registration that make it safe."
+        },
+        {
+          "id": "copied_data_partial_and_older_schemas_are_repaired_not_downgraded",
+          "question": "Do partial databases get repaired and older markers upgrade forward without being downgraded?",
+          "sources": [
+            {
+              "file": ".github/instructions/recipe-contract.instructions.md",
+              "start": 5,
+              "end": 10
+            },
+            {
+              "file": ".github/reference/recipe-contract.md",
+              "start": 23,
+              "end": 45
+            },
+            {
+              "file": "api/database.php",
+              "start": 93,
+              "end": 193
+            },
+            {
+              "file": "scripts/test-database-runtime.php",
+              "start": 153,
+              "end": 228
+            }
+          ],
+          "criteria": [
+            "a previous schema marker upgrades by adding the missing reconciliation columns",
+            "a partial database recreates missing core tables",
+            "a newer-than-build schema fails closed without lowering the marker"
+          ],
+          "failureCriteria": [
+            "downgrading a newer schema marker",
+            "leaving partial databases with missing core tables",
+            "failing to add reconciliation evidence columns during upgrade"
+          ],
+          "validator": "The runtime test asserts exact schema versions, table presence, and the added reconciliation columns after migration.",
+          "discriminator": "A cheaper challenger might repair one path but not preserve forward-only schema safety; this case requires both repair and fail-closed behavior."
+        }
+      ]
+    },
+    {
+      "id": "scaffolds",
+      "cases": [
+        {
+          "id": "scaffolds_controller_cli_requires_write_and_copied_db",
+          "question": "Does the ontology controller scaffold refuse mutating commands unless write access and copied-database gates are present?",
+          "sources": [
+            {
+              "file": ".github/instructions/recipe-contract.instructions.md",
+              "start": 5,
+              "end": 10
+            },
+            {
+              "file": ".github/reference/recipe-contract.md",
+              "start": 23,
+              "end": 45
+            },
+            {
+              "file": "scripts/ontology-controller.php",
+              "start": 8,
+              "end": 31
+            },
+            {
+              "file": "scripts/ontology-controller.php",
+              "start": 58,
+              "end": 101
+            },
+            {
+              "file": "scripts/ontology-controller.php",
+              "start": 226,
+              "end": 244
+            },
+            {
+              "file": "scripts/test-ontology-controller.php",
+              "start": 165,
+              "end": 215
+            }
+          ],
+          "criteria": [
+            "mutating controller commands require --write",
+            "generation work is copied-database only",
+            "the active database remains intake-only"
+          ],
+          "failureCriteria": [
+            "allowing a mutating path without write access",
+            "running generation work on the active database",
+            "omitting the copied-database safety gate from the scaffold"
+          ],
+          "validator": "The CLI usage text and the controller test both assert the write and copied-database gating rules.",
+          "discriminator": "A cheaper challenger may scaffold commands quickly but miss the safety gates that keep the controller from touching the live database."
+        },
+        {
+          "id": "scaffolds_proposal_cli_stays_staging_only",
+          "question": "Does the proposal scaffold remain staging-only, network-gated, and free of automatic activation?",
+          "sources": [
+            {
+              "file": ".github/instructions/recipe-contract.instructions.md",
+              "start": 5,
+              "end": 10
+            },
+            {
+              "file": ".github/reference/recipe-contract.md",
+              "start": 56,
+              "end": 80
+            },
+            {
+              "file": "scripts/recipe-ingredient-proposals.php",
+              "start": 8,
+              "end": 29
+            },
+            {
+              "file": "scripts/recipe-ingredient-proposals.php",
+              "start": 65,
+              "end": 84
+            },
+            {
+              "file": "scripts/recipe-ingredient-proposals.php",
+              "start": 173,
+              "end": 193
+            },
+            {
+              "file": "scripts/test-ingredient-provider-requirements.php",
+              "start": 1016,
+              "end": 1040
+            }
+          ],
+          "criteria": [
+            "proposal output remains staging-only",
+            "work requires --allow-network and uses the configured proposal model without fallback",
+            "nothing in the scaffold auto-activates ontology changes"
+          ],
+          "failureCriteria": [
+            "adding a hidden activation path to the scaffold",
+            "introducing fallback model behavior",
+            "allowing runtime model calls without the explicit network gate"
+          ],
+          "validator": "The script usage text and status output are static and directly expose the staging-only contract.",
+          "discriminator": "A cheaper challenger might create a working skeleton but not preserve the no-activation and no-fallback boundaries that define the scaffold."
+        },
+        {
+          "id": "scaffolds_controller_claims_retry_transient_lock_contention",
+          "question": "Does the controller scaffold retry transient BEGIN IMMEDIATE contention and keep the transaction closed?",
+          "sources": [
+            {
+              "file": ".github/instructions/recipe-contract.instructions.md",
+              "start": 5,
+              "end": 10
+            },
+            {
+              "file": "scripts/ontology-controller.php",
+              "start": 93,
+              "end": 101
+            },
+            {
+              "file": "scripts/ontology-controller.php",
+              "start": 226,
+              "end": 244
+            },
+            {
+              "file": "scripts/test-ontology-controller.php",
+              "start": 165,
+              "end": 215
+            }
+          ],
+          "criteria": [
+            "BEGIN IMMEDIATE contention is retried and then succeeds",
+            "the returned claim token matches the row token",
+            "no transaction remains open after the claim completes"
+          ],
+          "failureCriteria": [
+            "single-shot lock failure without retry",
+            "leaking an open transaction after claim",
+            "returning a token that does not match the persisted claim row"
+          ],
+          "validator": "The test counts immediate-begin attempts, compares token equality, and checks that the database is not left in a transaction.",
+          "discriminator": "A cheaper challenger may wire the command shape but miss the retry-safe claim protocol that the scaffold must preserve."
+        }
+      ]
+    },
+    {
+      "id": "transforms",
+      "cases": [
+        {
+          "id": "transforms_repeated_recipe_migration_preserves_request_order",
+          "question": "Does repeating the migration leave job request order and cursor rollback unchanged?",
+          "sources": [
+            {
+              "file": ".github/instructions/recipe-contract.instructions.md",
+              "start": 5,
+              "end": 10
+            },
+            {
+              "file": "api/database.php",
+              "start": 93,
+              "end": 193
+            },
+            {
+              "file": "scripts/test-recipe-backend.php",
+              "start": 688,
+              "end": 757
+            },
+            {
+              "file": "scripts/test-recipe-backend.php",
+              "start": 930,
+              "end": 945
+            }
+          ],
+          "criteria": [
+            "request_generation and request_epoch remain stable across repeated migration",
+            "cursor marker rollback and reinsertion happen together",
+            "repeating migration does not reorder the job stream"
+          ],
+          "failureCriteria": [
+            "changing request order during a mechanical transform",
+            "bumping cursor state even though the migration rolled back",
+            "creating a partially applied migration marker"
+          ],
+          "validator": "The backend test asserts unchanged request order and exact cursor rollback semantics after a synthetic migration fault.",
+          "discriminator": "A cheaper challenger may rewrite code mechanically but miss the order-preserving and rollback-preserving invariants that the transform must keep."
+        },
+        {
+          "id": "transforms_current_schema_reconnect_and_no_op_save_preserve_identity",
+          "question": "Do read-only reconnects stay no-op, and do no-op saves preserve ranking/source row identity?",
+          "sources": [
+            {
+              "file": ".github/instructions/recipe-contract.instructions.md",
+              "start": 5,
+              "end": 10
+            },
+            {
+              "file": "api/database.php",
+              "start": 93,
+              "end": 217
+            },
+            {
+              "file": "scripts/test-database-runtime.php",
+              "start": 71,
+              "end": 113
+            },
+            {
+              "file": "scripts/test-recipe-backend.php",
+              "start": 10097,
+              "end": 10200
+            }
+          ],
+          "criteria": [
+            "current-schema reconnects cause no writes",
+            "guard functions still resolve on reopen",
+            "a no-op repository save preserves ranking and source row ids plus ontology identity"
+          ],
+          "failureCriteria": [
+            "writing during a reconnect that should be read-only",
+            "changing row ids during a no-op save",
+            "dropping ontology identity or corpus hash on a no-op rewrite"
+          ],
+          "validator": "The runtime test checks total_changes under query_only, and the backend test asserts exact id preservation across no-op saves.",
+          "discriminator": "A cheaper challenger can apply a transform that appears harmless but still alters IDs or writes during reconnect; this case catches both."
+        },
+        {
+          "id": "transforms_restoring_source_rows_restores_fingerprint_validity",
+          "question": "After a mechanical source-row edit, does restoring the row restore fingerprint validity?",
+          "sources": [
+            {
+              "file": ".github/instructions/recipe-contract.instructions.md",
+              "start": 5,
+              "end": 10
+            },
+            {
+              "file": "api/lib/ontology_v3/core.php",
+              "start": 273,
+              "end": 279
+            },
+            {
+              "file": "api/lib/ontology_v3/core.php",
+              "start": 325,
+              "end": 360
+            },
+            {
+              "file": "scripts/test-ingredient-provider-requirements.php",
+              "start": 1416,
+              "end": 1575
+            }
+          ],
+          "criteria": [
+            "the fingerprint audit fails while the source row is stale",
+            "restoring the source row makes the fingerprint audit valid again",
+            "the restore does not require a semantic re-adjudication"
+          ],
+          "failureCriteria": [
+            "treating the stale row as still valid after a transform",
+            "requiring a fresh semantic adjudication for a pure restore",
+            "leaving the audit invalid after the exact source row is restored"
+          ],
+          "validator": "The provider test captures the fingerprint before and after the restore and checks the audit validity and projection failure state directly.",
+          "discriminator": "A cheaper challenger may perform the mechanical edit but miss the exact provenance recovery boundary that makes the transform safe."
+        }
+      ]
+    },
+    {
+      "id": "debugging",
+      "cases": [
+        {
+          "id": "debugging_mutation_after_reserved_snapshot_fails_closed",
+          "question": "When source rows mutate after the reserved snapshot, does final publication fail closed and clean partial output?",
+          "sources": [
+            {
+              "file": ".github/instructions/recipe-contract.instructions.md",
+              "start": 5,
+              "end": 10
+            },
+            {
+              "file": "api/lib/ontology_v3/provider_requirements.php",
+              "start": 1416,
+              "end": 1662
+            },
+            {
+              "file": "scripts/test-ingredient-provider-requirements.php",
+              "start": 1585,
+              "end": 1662
+            }
+          ],
+          "criteria": [
+            "the build throws on stale source mapping fingerprints or input changes",
+            "the failed requirement revision is marked failed",
+            "no partial requirement rows remain"
+          ],
+          "failureCriteria": [
+            "publishing stale data after the snapshot changed",
+            "leaving partial requirement output behind",
+            "masking the fingerprint drift instead of surfacing it"
+          ],
+          "validator": "The test injects a source mutation after snapshot reservation and asserts failure status plus zero partial output rows.",
+          "discriminator": "A cheaper challenger may reproduce the symptom but miss the root cause and cleanup contract that the test is isolating."
+        },
+        {
+          "id": "debugging_publication_race_never_emits_stale_ready_projection",
+          "question": "Can a mutation before publication reservation ever emit a stale ready projection?",
+          "sources": [
+            {
+              "file": ".github/instructions/recipe-contract.instructions.md",
+              "start": 5,
+              "end": 10
+            },
+            {
+              "file": "api/lib/ontology_v3/provider_requirements.php",
+              "start": 1670,
+              "end": 1725
+            },
+            {
+              "file": "scripts/test-ingredient-provider-requirements.php",
+              "start": 1670,
+              "end": 1725
+            }
+          ],
+          "criteria": [
+            "the race is rejected with an input-changed or stale-fingerprint error",
+            "the failed revision is not published as ready",
+            "the repository leaves no stale ready projection behind"
+          ],
+          "failureCriteria": [
+            "publishing a ready projection after the reservation race",
+            "accepting the stale data as valid",
+            "leaving an empty ready snapshot in place of a failed build"
+          ],
+          "validator": "The test injects a publication-race mutation and checks the resulting failure message and the failed revision row counts.",
+          "discriminator": "A cheaper challenger may not model the reservation race; this case proves the publication boundary is enforced and observable."
+        },
+        {
+          "id": "debugging_stale_fingerprint_audit_blocks_projection_until_restored",
+          "question": "Does a stale fingerprint audit block projection until the exact source row is restored?",
+          "sources": [
+            {
+              "file": ".github/instructions/recipe-contract.instructions.md",
+              "start": 5,
+              "end": 10
+            },
+            {
+              "file": "api/lib/ontology_v3/core.php",
+              "start": 273,
+              "end": 279
+            },
+            {
+              "file": "api/lib/ontology_v3/core.php",
+              "start": 325,
+              "end": 360
+            },
+            {
+              "file": "scripts/test-ingredient-provider-requirements.php",
+              "start": 1416,
+              "end": 1575
+            }
+          ],
+          "criteria": [
+            "the audit is invalid while the source row drift exists",
+            "projection throws a stale-fingerprint error",
+            "restoring the source row makes the audit valid again"
+          ],
+          "failureCriteria": [
+            "silently accepting stale source rows",
+            "building a requirement projection despite the audit failure",
+            "failing to recover when the exact original row is restored"
+          ],
+          "validator": "The test checks the audit flag, catches the stale-fingerprint exception, and then restores the source row to revalidate.",
+          "discriminator": "A cheaper challenger may suggest a fix, but the frozen case requires an exact repro of the stale audit and the recovery path."
+        }
+      ]
+    },
+    {
+      "id": "activation",
+      "cases": [
+        {
+          "id": "activation_validation_classification_and_canonical_transition",
+          "question": "Do validation errors classify into the correct activation outcomes, and does canonical source transition only pass on a sealed current corpus?",
+          "sources": [
+            {
+              "file": ".github/instructions/recipe-contract.instructions.md",
+              "start": 5,
+              "end": 10
+            },
+            {
+              "file": "api/lib/ontology_v3/activation.php",
+              "start": 25,
+              "end": 38
+            },
+            {
+              "file": "api/lib/ontology_v3/activation.php",
+              "start": 569,
+              "end": 654
+            },
+            {
+              "file": "scripts/test-ontology-activation-runtime.php",
+              "start": 113,
+              "end": 177
+            }
+          ],
+          "criteria": [
+            "live drift maps to live_inputs_changed",
+            "score-date drift maps to rebase_required",
+            "the canonical source transition only passes for the exact sealed corpus hash"
+          ],
+          "failureCriteria": [
+            "treating derivative errors as primary drift",
+            "accepting an invalid canonical source transition",
+            "collapsing all validation failures into the same outcome kind"
+          ],
+          "validator": "The runtime test feeds synthetic validation errors and compares the returned drift codes and outcome kind exactly.",
+          "discriminator": "A cheaper challenger may flatten the validation taxonomy; this case checks the exact drift-code split and the sealed-base transition rule."
+        },
+        {
+          "id": "activation_live_reservation_and_lock_phases_are_explicit",
+          "question": "Do live reservations and file locks surface explicit phases instead of blocking or swallowing contention?",
+          "sources": [
+            {
+              "file": ".github/instructions/recipe-contract.instructions.md",
+              "start": 5,
+              "end": 10
+            },
+            {
+              "file": "api/lib/ontology_v3/activation.php",
+              "start": 244,
+              "end": 329
+            },
+            {
+              "file": "api/lib/ontology_v3/activation.php",
+              "start": 353,
+              "end": 417
+            },
+            {
+              "file": "scripts/test-ontology-activation-runtime.php",
+              "start": 178,
+              "end": 233
+            },
+            {
+              "file": "scripts/test-ontology-activation-runtime.php",
+              "start": 312,
+              "end": 329
+            }
+          ],
+          "criteria": [
+            "non-blocking file lock contention throws the explicit locked phase",
+            "an available reservation runs exactly one named phase",
+            "optional CDC pruning fails open and does not block the activation cycle"
+          ],
+          "failureCriteria": [
+            "blocking instead of returning an explicit retryable phase",
+            "running multiple phases for one reservation",
+            "making optional pruning block the activation path"
+          ],
+          "validator": "The runtime test checks the lock exception phase, the phase list, and the CDC pruning result exactly.",
+          "discriminator": "A cheaper challenger may implement a reservation callback but not the phase semantics and fail-open pruning boundary that activation requires."
+        },
+        {
+          "id": "activation_streaming_hashes_and_temp_store_remain_canonical",
+          "question": "Do canonical query hashes preserve exact row materialization and key order under the bounded activation runtime?",
+          "sources": [
+            {
+              "file": ".github/instructions/recipe-contract.instructions.md",
+              "start": 5,
+              "end": 10
+            },
+            {
+              "file": "api/lib/ontology_v3/core.php",
+              "start": 32,
+              "end": 167
+            },
+            {
+              "file": "api/lib/ontology_v3/activation.php",
+              "start": 15,
+              "end": 23
+            },
+            {
+              "file": "api/lib/ontology_v3/activation.php",
+              "start": 343,
+              "end": 351
+            },
+            {
+              "file": "scripts/test-ontology-activation-runtime.php",
+              "start": 235,
+              "end": 309
+            }
+          ],
+          "criteria": [
+            "streaming hashes match legacy stable JSON exactly",
+            "row-hash and map-hash outputs remain canonical and ordered",
+            "the activation database uses FILE temp storage and the configured busy timeout"
+          ],
+          "failureCriteria": [
+            "materializing the whole query in memory instead of streaming",
+            "changing JSON key order or row order in the hash",
+            "using the wrong temp store or busy timeout budget"
+          ],
+          "validator": "The runtime test compares legacy and streaming hashes with hash_equals and checks the PRAGMA values directly.",
+          "discriminator": "A cheaper challenger may produce a hash that looks right but does not preserve canonical streaming materialization or the temp-store budget."
+        }
+      ]
+    },
+    {
+      "id": "release",
+      "qualificationStatus": "invalidated-mismatched-topology",
+      "cases": [
+        {
+          "id": "release_dirty_worktree_is_rejected",
+          "question": "Is a dirty worktree rejected before release images are built?",
+          "sources": [
+            {
+              "file": ".github/instructions/recipe-contract.instructions.md",
+              "start": 5,
+              "end": 10
+            },
+            {
+              "file": ".github/reference/recipe-contract.md",
+              "start": 7,
+              "end": 10
+            },
+            {
+              "file": "scripts/build-release-images.sh",
+              "start": 7,
+              "end": 22
+            }
+          ],
+          "criteria": [
+            "dirty worktree exits with a non-zero status",
+            "the script refuses to continue before image tagging",
+            "the release target remains the operator fork only"
+          ],
+          "failureCriteria": [
+            "building or tagging from a dirty tree",
+            "ignoring the release-target restriction",
+            "continuing past the worktree check after a failure"
+          ],
+          "validator": "The shell script exits 2 with a clear message when git status is not clean.",
+          "discriminator": "A cheaper challenger may automate the build but miss the release gate that prevents unsafe publishing from a dirty checkout."
+        },
+        {
+          "id": "release_manifest_version_must_be_numeric_before_tagging",
+          "question": "Does the release script refuse to tag images when the manifest version is invalid?",
+          "sources": [
+            {
+              "file": ".github/instructions/recipe-contract.instructions.md",
+              "start": 5,
+              "end": 10
+            },
+            {
+              "file": ".github/reference/recipe-contract.md",
+              "start": 7,
+              "end": 10
+            },
+            {
+              "file": "scripts/build-release-images.sh",
+              "start": 24,
+              "end": 34
+            }
+          ],
+          "criteria": [
+            "the version is extracted from manifest.json",
+            "the version must be numeric/dot-only",
+            "invalid version text is rejected before the docker build stage"
+          ],
+          "failureCriteria": [
+            "tagging with an empty or malformed version",
+            "building images before validating the manifest version",
+            "accepting non-numeric version text"
+          ],
+          "validator": "The shell script exits before building if the manifest version does not match the numeric pattern.",
+          "discriminator": "A cheaper challenger may hard-code a tag or parse loosely; this case requires the manifest-driven numeric gate."
+        },
+        {
+          "id": "release_both_images_must_carry_exact_revision_labels",
+          "question": "Are both the app image and bridge image built from the exact HEAD revision and verified by OCI label?",
+          "sources": [
+            {
+              "file": ".github/instructions/recipe-contract.instructions.md",
+              "start": 5,
+              "end": 10
+            },
+            {
+              "file": ".github/reference/recipe-contract.md",
+              "start": 7,
+              "end": 10
+            },
+            {
+              "file": "scripts/build-release-images.sh",
+              "start": 36,
+              "end": 60
+            }
+          ],
+          "criteria": [
+            "both the app and bridge images are built with the exact revision as VCS_REF",
+            "the app tag and bridge tag are both emitted",
+            "each image label matches the resolved commit hash exactly"
+          ],
+          "failureCriteria": [
+            "building only one image",
+            "skipping the OCI revision-label verification",
+            "tagging images with a revision that differs from HEAD"
+          ],
+          "validator": "The script inspects each built image and exits if the org.opencontainers.image.revision label does not equal the resolved git revision.",
+          "discriminator": "A cheaper challenger may build images successfully but miss the explicit revision-label check that makes the release reproducible."
+        }
+      ]
+    }
+  ]
+}
