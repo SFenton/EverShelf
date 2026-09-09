@@ -27,4 +27,18 @@ Use `.github/agent-budget.json` and `evershelf-budget-workflow` for research,
 implementation, testing, and iteration. Prefer deterministic probes and focused
 tests. Novel ingredient semantics and data architecture require frontier
 evidence; never route them as boilerplate just because code is repetitive.
+Use `.github/agent-opportunities.json` to pin the exact model, skills, tools, and
+escalation boundary for SQL, ontology, identity, ranking, provider, copied-data,
+scaffold, transform, debugging, activation, and release work.
 Tandem research requires an explicit request.
+
+The version 3 budget route is deterministic first. Overall model identity
+(including Sol or HydraFusion) never bypasses the opportunity's exact medium,
+worker, or conditional profile. Unqualified models may orchestrate and read
+evidence but gain no semantic, repository-apply, provider, activation,
+database, or release authority. Sol max/long requires a named trigger receipt.
+
+The installed continuous-improvement observer is governed by
+`.github/agent-learning.json`. It retains only sanitized metadata, silently
+no-ops below threshold, and grants no provider, activation, database or release
+authority.

@@ -1,0 +1,53 @@
+{
+  "version": 1,
+  "project": "evershelf",
+  "enabled": true,
+  "retentionDays": 45,
+  "thresholds": {
+    "minimumSuccessfulWorkflows": 3,
+    "minimumDistinctSessions": 2,
+    "minimumStability": 0.8,
+    "maximumCandidatesPerWorkflow": 1,
+    "minimumOperationCount": 2,
+    "maximumSubgraphOperations": 6,
+    "maximumAnalysisEvents": 10000
+  },
+  "priorities": [
+    { "id": "copied-database-preparation", "opportunity": "copied-data", "class": "deterministic-tool", "description": "Prepare and verify isolated copied databases for safe tests.", "validators": ["test-database-runtime"], "destination": "tools" },
+    { "id": "query-plan-capture", "opportunity": "sql-query-semantics", "class": "deterministic-tool", "description": "Capture bounded query plans and normalized assertion evidence.", "validators": ["test-recipe-backend"], "destination": "tools" },
+    { "id": "schema-fixture-setup", "opportunity": "copied-data", "class": "deterministic-tool", "description": "Create deterministic schema and synthetic fixture setup.", "validators": ["test-database-runtime"], "destination": "tools" },
+    { "id": "ontology-gold-validation", "opportunity": "ontology", "class": "qualification-fixture", "description": "Package frozen-gold validator fixtures without performing identity adjudication.", "validators": ["test-ontology-v3"], "destination": "fixtures" },
+    { "id": "translation-check", "opportunity": "transforms", "class": "deterministic-tool", "description": "Check translation synchronization without writing generated content.", "validators": ["build-assets"], "destination": "tools" },
+    { "id": "ci-release-topology", "opportunity": "release", "class": "routing-policy", "description": "Observe CI and release topology without provider or release execution.", "validators": ["build-release-images"], "destination": "fixtures" }
+  ],
+  "destinations": {
+    "incubation": ".git/copilot-learning",
+    "tools": ".github/learned-tools",
+    "skills": ".github/skills",
+    "fixtures": ".github/evals/learning"
+  },
+  "eligiblePaths": ["api", "scripts", "tests", "cookidoo-bridge/tests", ".github/evals", ".github/skills"],
+  "excludedPaths": ["api/data", "api/storage", "scripts/evidence", "cookidoo-bridge/__pycache__", ".env"],
+  "riskClasses": ["provider-compliance", "identity-adjudication", "gold-adjudication", "activation", "live-data", "credential", "security", "production", "release", "destructive"],
+  "validators": [
+    { "id": "test-database-runtime", "targets": ["copied-database-preparation", "schema-fixture-setup"] },
+    { "id": "test-recipe-backend", "targets": ["query-plan-capture"] },
+    { "id": "test-ontology-v3", "targets": ["ontology-gold-validation"] },
+    { "id": "build-assets", "targets": ["translation-check"] },
+    { "id": "build-release-images", "targets": ["ci-release-topology"] }
+  ],
+  "knownTools": ["test-recipe-backend", "test-quantity-parser", "test-cookidoo-bridge", "test-database-runtime", "test-ontology-v3", "test-ontology-admission", "test-exact-identity", "test-score-deltas", "test-provider-contract", "test-ontology-controller", "test-ontology-activation", "build-assets", "build-release-images"],
+  "knownSkills": ["evershelf-budget-workflow"],
+  "automaticBuild": true,
+  "automaticPromotion": false,
+  "continuation": { "enabled": true },
+  "promotion": {
+    "allowedSideEffects": ["none", "workspace"],
+    "requireReplay": true,
+    "requireProjectValidation": true,
+    "requireMediumReview": true,
+    "requirePositiveValue": true,
+    "requireScopeCheck": true,
+    "requireRollback": true
+  }
+}
