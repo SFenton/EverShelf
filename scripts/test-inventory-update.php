@@ -105,6 +105,38 @@ try {
         'Atomic decrement must record the actual consumed quantity'
     );
 
+    $GLOBALS['INVENTORY_ADD_INPUT'] = [
+        'product_id' => $productId,
+        'quantity' => 1,
+        'location' => 'dispensa',
+        'expiry_date' => '2027-01-01',
+        'prepared_food' => true,
+    ];
+    ob_start();
+    try {
+        addToInventory($db);
+        $preparedAdd = json_decode((string)ob_get_clean(), true);
+    } finally {
+        unset($GLOBALS['INVENTORY_ADD_INPUT']);
+        if (ob_get_level() > 0) {
+            ob_end_clean();
+        }
+    }
+    $preparedInventoryId = (int)($preparedAdd['inventory_id'] ?? 0);
+    inventoryUpdateTestAssert(
+        !empty($preparedAdd['success'])
+        && $preparedInventoryId > 0
+        && (int)$db->query("
+            SELECT prepared_food FROM inventory
+            WHERE id = {$preparedInventoryId}
+        ")->fetchColumn() === 1
+        && (int)$db->query("
+            SELECT prepared_food FROM products
+            WHERE id = {$productId}
+        ")->fetchColumn() === 0,
+        'An explicit prepared addition must preserve the batch state without changing the product'
+    );
+
     $transactionCount = (int)$db->query("
         SELECT COUNT(*) FROM transactions
         WHERE inventory_id = {$inventoryId}
