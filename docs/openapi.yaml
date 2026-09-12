@@ -319,6 +319,11 @@ paths:
                   type: string
                 vacuum_sealed:
                   type: boolean
+                prepared_food:
+                  type: boolean
+                  description: >-
+                    Optional prepared-food state for the newly added inventory
+                    units. When omitted, the product-level state is inherited.
       responses:
         "200":
           description: Item added or an earlier idempotent success replayed

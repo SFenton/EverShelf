@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.20.25] - 2026-09-11
+
+### Fixed
+- Inventory quantity edits now preserve the prepared-food state of the edited
+  batch instead of inheriting the product-wide aggregate state.
+
 ## [1.20.24] - 2026-09-01
 
 ### Added

@@ -4759,6 +4759,9 @@ function addToInventory(PDO $db): void {
         : null;
     $vacuumSealed = (int)!empty($input['vacuum_sealed']);
     $expiryUserSet = (int)!empty($input['expiry_user_set']);
+    $preparedFoodOverride = array_key_exists('prepared_food', $input)
+        ? (int)filter_var($input['prepared_food'], FILTER_VALIDATE_BOOLEAN)
+        : null;
     try {
         $idempotencyKey = apiIdempotencyKey($input);
     } catch (InvalidArgumentException $error) {
@@ -4769,18 +4772,22 @@ function addToInventory(PDO $db): void {
         ]);
         return;
     }
+    $idempotencyPayload = [
+        'product_id' => $productId,
+        'quantity' => $quantity,
+        'location' => $location,
+        'expiry_date' => $expiry,
+        'unit' => $unit,
+        'package_unit' => $packageUnit,
+        'package_size' => $packageSize,
+        'vacuum_sealed' => $vacuumSealed,
+        'expiry_user_set' => $expiryUserSet,
+    ];
+    if ($preparedFoodOverride !== null) {
+        $idempotencyPayload['prepared_food'] = $preparedFoodOverride;
+    }
     $idempotencyHash = $idempotencyKey !== null
-        ? apiIdempotencyRequestHash([
-            'product_id' => $productId,
-            'quantity' => $quantity,
-            'location' => $location,
-            'expiry_date' => $expiry,
-            'unit' => $unit,
-            'package_unit' => $packageUnit,
-            'package_size' => $packageSize,
-            'vacuum_sealed' => $vacuumSealed,
-            'expiry_user_set' => $expiryUserSet,
-        ])
+        ? apiIdempotencyRequestHash($idempotencyPayload)
         : null;
     
     if (!$productId) {
@@ -4865,10 +4872,15 @@ function addToInventory(PDO $db): void {
         $stmt->execute([$packageUnit, $packageSize ?: 0, $productId]);
     }
 
-    // New stock inherits an explicit/all-prepared product state. Mixed products are false.
-    $preparedStmt = $db->prepare("SELECT prepared_food FROM products WHERE id = ?");
-    $preparedStmt->execute([$productId]);
-    $preparedFood = (int)($preparedStmt->fetchColumn() ?: 0);
+    // Batch edits can preserve their exact state. Other callers retain the existing
+    // product-level inheritance behavior.
+    if ($preparedFoodOverride !== null) {
+        $preparedFood = $preparedFoodOverride;
+    } else {
+        $preparedStmt = $db->prepare("SELECT prepared_food FROM products WHERE id = ?");
+        $preparedStmt->execute([$productId]);
+        $preparedFood = (int)($preparedStmt->fetchColumn() ?: 0);
+    }
 
     // Check if a matching sealed batch exists. New stock only merges into an
     // unopened row when product, location, expiration date, sealed treatment, and
@@ -4960,6 +4972,7 @@ function addToInventory(PDO $db): void {
             'default_quantity' =>
                 (float)($prodInfo['default_quantity'] ?? 0),
             'package_unit' => $prodInfo['package_unit'] ?? null,
+            'prepared_food' => (bool)$preparedFood,
             'removed_from_bring' => false,
             'removed_names' => [],
             'idempotency_key' => $idempotencyKey,

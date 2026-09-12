@@ -142,9 +142,13 @@ Add a product to inventory.
   "quantity": 3,
   "location": "dispensa",
   "expiry_date": "2027-03-01",
-  "vacuum_sealed": false
+  "vacuum_sealed": false,
+  "prepared_food": true
 }
 ```
+
+`prepared_food` is optional. When supplied, the added stock keeps that batch-level
+prepared state; when omitted, the product-level prepared state is inherited.
 
 ### `inventory_search` — GET
 Search active inventory by product name, brand, barcode, category, and canonical taxonomy terms. Uses the same tokenized taxonomy-tree expansion and product de-duping as `products_search`.
