@@ -30,19 +30,10 @@ domain contract or copied-data safeguards.
 
 1. Read `.github/reference/recipe-contract.md` before domain/release work.
 2. Distinguish mechanical endpoint/config wiring from novel ontology identity,
-   ranking, concurrency, provider compliance, or activation questions. The latter
-   need frontier research and primary evidence, not a cheap summarizer.
-   The adapter permits one provisional staged cheap-model result only for low-risk focused tests
-   with complete bounded evidence, clean exact targets, and a
-   qualified Docker-isolated deterministic validator. Required PHP extensions,
-   disposable database writes and declared log/lock paths are verified.
-   The provisional worker has no application authority. A medium reviewer may
-   request one exact revision. Reviewed application requires separate operator
-   apply authorization and identical pre/post validation; only unattended
-   application uses the 30-case promotion floor.
-   SQL/query behavior, ontology/provider semantics,
-   copied-data workflows, debugging, scaffolds, and existing-file
-   transformations remain owner work.
+   ranking, concurrency, provider compliance, or activation questions. The
+   former use the project `gpt-5.4` medium/default owner or the exact qualified
+   Gemini 3.7 bounded worker when the adapter allows it. The latter need
+   receipt-bound Sol research and primary evidence, not a cheap summarizer.
 3. Discover exact symbols and tests before reading whole large PHP modules.
    Existing deterministic classifiers, fixtures, and query plans are evidence;
    generated accepted snapshots are not independent semantic gold.
@@ -53,29 +44,10 @@ domain contract or copied-data safeguards.
 5. Use a supported isolated PHP or bridge environment if dependencies are
    absent locally; do not mount writable production databases into test runs.
 6. Preserve all integrity, frozen-gold, source fingerprint, idempotency,
-   bounded-SQL, provider field, shadow and rollback gates. Revise once from an
-   exact reviewer defect receipt; a second revision fails closed. Critical
-   review requires the named provider, frozen-gold/activation, or release
-   conflict trigger.
+   bounded-SQL, provider field, shadow and rollback gates. Revise once, escalate
+   an unresolved reasoning gap once, then report remaining blockers.
 7. Release only when authorized and only to the operator's fork. Verify the
-   remote identity before any push. The version 3
-   `.github/release-machine.json` remains disabled until every deterministic
-   GitHub, auto-release, verification and rollback driver is fault-tested. The
-   project medium reviewer checks scope, but only the operator authorizes the
-   deterministic release machine. Max/long is limited to
-   `evershelf-release-topology-or-rollback-conflict`.
+   remote identity before any push.
 
 Saving tokens never permits weakening semantic review, treating proposals as
 facts, or evaluating on a contaminated/changed gold set.
-
-The overall interactive model may be Sol, HydraFusion, or another model. Exact
-project pins still apply; an unqualified current model may orchestrate/read but
-gains no semantic, repository-apply, provider, activation, live database, or
-release authority.
-
-The default learning observer follows `.github/agent-learning.json`, retains no
-raw recipe/provider content, and may use `automaticBuild: true` for one exact
-local incubation delegated to the selected opportunity's medium coordinator.
-`automaticPromotion: false` remains unchanged. Provider compliance,
-identity/gold adjudication, activation, live data and release remain
-model-backed policy or fixture evidence only.
