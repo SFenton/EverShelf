@@ -31,7 +31,7 @@ domain contract or copied-data safeguards.
 1. Read `.github/reference/recipe-contract.md` before domain/release work.
 2. Distinguish mechanical endpoint/config wiring from novel ontology identity,
    ranking, concurrency, provider compliance, or activation questions. The
-   former use the project `gpt-5.4` medium/default owner or the exact qualified
+   former use the project `gpt-5.6-luna` medium/default owner or the exact qualified
    Gemini 3.7 bounded worker when the adapter allows it. The latter need
    receipt-bound Sol research and primary evidence, not a cheap summarizer.
 3. Discover exact symbols and tests before reading whole large PHP modules.
