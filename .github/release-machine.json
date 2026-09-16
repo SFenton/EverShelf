@@ -6,25 +6,153 @@
   "operatorAuthorizationRequired": true,
   "reviewer": {
     "role": "medium-review",
-    "profile": { "model": "gpt-5.6-sol", "effort": "medium", "context": "default" },
+    "profile": {
+      "model": "gpt-5.4",
+      "effort": "medium",
+      "context": "default"
+    },
     "authority": "review-only"
   },
   "exception": {
-    "role": "risk-triggered-frontier-review",
-    "profile": { "model": "gpt-5.6-sol", "effort": "max", "context": "long_context" },
-    "triggerIds": ["evershelf-release-topology-or-rollback-conflict"],
+    "role": "research-frontier",
+    "profile": {
+      "model": "gpt-5.6-sol",
+      "effort": "high",
+      "context": "default"
+    },
+    "triggerIds": [
+      "evershelf-release-topology-or-rollback-conflict"
+    ],
     "requiresTriggerReceipt": true
   },
   "steps": [
-    { "id": "validate-backend", "label": "Run bounded recipe validation", "executor": "deterministic", "operation": "command", "tool": "test-recipe-backend", "failure": "rejected", "evidence": ["backend fixture results", "copied-data contract"] },
-    { "id": "validate-bridge", "label": "Run Cookidoo bridge validation", "executor": "deterministic", "operation": "command", "tool": "test-cookidoo-bridge", "failure": "rejected", "evidence": ["bridge regression results"] },
-    { "id": "create-develop-pr", "label": "Create and merge the exact pull request into develop", "executor": "deterministic", "operation": "git-release", "tool": "develop-pr-disabled", "failure": "rollback-git", "evidence": ["branch", "commit", "develop pull request", "merge commit"] },
-    { "id": "observe-required-ci", "label": "Observe every required CI job for the accepted develop SHA", "executor": "deterministic", "operation": "verify", "tool": "observe-required-ci-disabled", "failure": "rollback-git", "evidence": ["required job names", "accepted develop SHA"] },
-    { "id": "observe-main-merge", "label": "Observe the develop-to-main merge", "executor": "deterministic", "operation": "verify", "tool": "observe-main-merge-disabled", "failure": "rollback-git", "evidence": ["develop SHA", "main merge SHA"] },
-    { "id": "observe-auto-release", "label": "Observe exactly one automatic GitHub Release", "executor": "deterministic", "operation": "verify", "tool": "observe-release-disabled", "failure": "rollback-release", "evidence": ["tag", "main target SHA", "single GitHub Release"] },
-    { "id": "verify-release", "label": "Verify release artifacts, provenance and runtime health", "executor": "deterministic", "operation": "verify", "tool": "verify-release-disabled", "failure": "rollback-release", "evidence": ["release URL", "artifact hashes", "image revisions", "health checks"] },
-    { "id": "rollback-release", "label": "Withdraw or supersede the failed release", "executor": "deterministic", "operation": "rollback", "tool": "rollback-release-disabled", "rollbackOnly": true, "rollbackVerificationTool": "verify-release-disabled", "failure": "abnormal", "evidence": ["release state", "counter-release or withdrawal receipt"] },
-    { "id": "rollback-git", "label": "Close the release or create the authorized develop/main revert", "executor": "deterministic", "operation": "rollback", "tool": "rollback-git-disabled", "rollbackOnly": true, "rollbackVerificationTool": "observe-main-merge-disabled", "failure": "abnormal", "evidence": ["closed pull request or revert commit", "restored branch state"] },
-    { "id": "cleanup-release", "label": "Remove exact temporary release artifacts", "executor": "deterministic", "operation": "cleanup", "tool": "cleanup-release-disabled", "failure": "abnormal", "evidence": ["clean workspace", "retained rollback evidence"] }
+    {
+      "id": "validate-backend",
+      "label": "Run bounded recipe validation",
+      "executor": "deterministic",
+      "operation": "command",
+      "tool": "test-recipe-backend",
+      "failure": "rejected",
+      "evidence": [
+        "backend fixture results",
+        "copied-data contract"
+      ]
+    },
+    {
+      "id": "validate-bridge",
+      "label": "Run Cookidoo bridge validation",
+      "executor": "deterministic",
+      "operation": "command",
+      "tool": "test-cookidoo-bridge",
+      "failure": "rejected",
+      "evidence": [
+        "bridge regression results"
+      ]
+    },
+    {
+      "id": "create-develop-pr",
+      "label": "Create and merge the exact pull request into develop",
+      "executor": "deterministic",
+      "operation": "git-release",
+      "tool": "develop-pr-disabled",
+      "failure": "rollback-git",
+      "evidence": [
+        "branch",
+        "commit",
+        "develop pull request",
+        "merge commit"
+      ]
+    },
+    {
+      "id": "observe-required-ci",
+      "label": "Observe every required CI job for the accepted develop SHA",
+      "executor": "deterministic",
+      "operation": "verify",
+      "tool": "observe-required-ci-disabled",
+      "failure": "rollback-git",
+      "evidence": [
+        "required job names",
+        "accepted develop SHA"
+      ]
+    },
+    {
+      "id": "observe-main-merge",
+      "label": "Observe the develop-to-main merge",
+      "executor": "deterministic",
+      "operation": "verify",
+      "tool": "observe-main-merge-disabled",
+      "failure": "rollback-git",
+      "evidence": [
+        "develop SHA",
+        "main merge SHA"
+      ]
+    },
+    {
+      "id": "observe-auto-release",
+      "label": "Observe exactly one automatic GitHub Release",
+      "executor": "deterministic",
+      "operation": "verify",
+      "tool": "observe-release-disabled",
+      "failure": "rollback-release",
+      "evidence": [
+        "tag",
+        "main target SHA",
+        "single GitHub Release"
+      ]
+    },
+    {
+      "id": "verify-release",
+      "label": "Verify release artifacts, provenance and runtime health",
+      "executor": "deterministic",
+      "operation": "verify",
+      "tool": "verify-release-disabled",
+      "failure": "rollback-release",
+      "evidence": [
+        "release URL",
+        "artifact hashes",
+        "image revisions",
+        "health checks"
+      ]
+    },
+    {
+      "id": "rollback-release",
+      "label": "Withdraw or supersede the failed release",
+      "executor": "deterministic",
+      "operation": "rollback",
+      "tool": "rollback-release-disabled",
+      "rollbackOnly": true,
+      "rollbackVerificationTool": "verify-release-disabled",
+      "failure": "abnormal",
+      "evidence": [
+        "release state",
+        "counter-release or withdrawal receipt"
+      ]
+    },
+    {
+      "id": "rollback-git",
+      "label": "Close the release or create the authorized develop/main revert",
+      "executor": "deterministic",
+      "operation": "rollback",
+      "tool": "rollback-git-disabled",
+      "rollbackOnly": true,
+      "rollbackVerificationTool": "observe-main-merge-disabled",
+      "failure": "abnormal",
+      "evidence": [
+        "closed pull request or revert commit",
+        "restored branch state"
+      ]
+    },
+    {
+      "id": "cleanup-release",
+      "label": "Remove exact temporary release artifacts",
+      "executor": "deterministic",
+      "operation": "cleanup",
+      "tool": "cleanup-release-disabled",
+      "failure": "abnormal",
+      "evidence": [
+        "clean workspace",
+        "retained rollback evidence"
+      ]
+    }
   ]
 }
