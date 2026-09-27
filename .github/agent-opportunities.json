@@ -51,9 +51,7 @@
       "enabled": true,
       "evaluationStatus": "provisional-three-cases",
       "casePacketStatus": "provisional-three-cases",
-      "skills": [
-        "evershelf-budget-workflow"
-      ],
+      "skills": [],
       "team": {
         "id": "evershelf-focused-tests-team",
         "topology": "medium-owner-cheap-worker-medium-review",
@@ -189,9 +187,7 @@
       "enabled": true,
       "evaluationStatus": "provisional-three-cases",
       "casePacketStatus": "provisional-three-cases",
-      "skills": [
-        "evershelf-budget-workflow"
-      ],
+      "skills": [],
       "team": {
         "id": "evershelf-sql-query-semantics-team",
         "topology": "medium-owner-only",
@@ -335,9 +331,7 @@
       "enabled": true,
       "evaluationStatus": "provisional-three-cases",
       "casePacketStatus": "provisional-three-cases",
-      "skills": [
-        "evershelf-budget-workflow"
-      ],
+      "skills": [],
       "team": {
         "id": "evershelf-ontology-team",
         "topology": "medium-owner-only",
@@ -487,9 +481,7 @@
       "enabled": true,
       "evaluationStatus": "provisional-three-cases",
       "casePacketStatus": "provisional-three-cases",
-      "skills": [
-        "evershelf-budget-workflow"
-      ],
+      "skills": [],
       "team": {
         "id": "evershelf-identity-team",
         "topology": "medium-owner-only",
@@ -633,9 +625,7 @@
       "enabled": true,
       "evaluationStatus": "provisional-three-cases",
       "casePacketStatus": "provisional-three-cases",
-      "skills": [
-        "evershelf-budget-workflow"
-      ],
+      "skills": [],
       "team": {
         "id": "evershelf-ranking-team",
         "topology": "medium-owner-only",
@@ -756,9 +746,7 @@
       "enabled": false,
       "evaluationStatus": "invalidated-current-validator-failure",
       "casePacketStatus": "invalidated-current-validator-failure",
-      "skills": [
-        "evershelf-budget-workflow"
-      ],
+      "skills": [],
       "team": {
         "id": "evershelf-providers-team",
         "topology": "medium-owner-only",
@@ -903,9 +891,7 @@
       "enabled": true,
       "evaluationStatus": "provisional-three-cases",
       "casePacketStatus": "provisional-three-cases",
-      "skills": [
-        "evershelf-budget-workflow"
-      ],
+      "skills": [],
       "team": {
         "id": "evershelf-copied-data-team",
         "topology": "medium-owner-only",
@@ -1029,9 +1015,7 @@
       "enabled": true,
       "evaluationStatus": "provisional-three-cases",
       "casePacketStatus": "provisional-three-cases",
-      "skills": [
-        "evershelf-budget-workflow"
-      ],
+      "skills": [],
       "team": {
         "id": "evershelf-scaffolds-team",
         "topology": "medium-owner-only",
@@ -1149,9 +1133,7 @@
       "enabled": true,
       "evaluationStatus": "provisional-three-cases",
       "casePacketStatus": "provisional-three-cases",
-      "skills": [
-        "evershelf-budget-workflow"
-      ],
+      "skills": [],
       "team": {
         "id": "evershelf-transforms-team",
         "topology": "medium-owner-only",
@@ -1276,9 +1258,7 @@
       "enabled": true,
       "evaluationStatus": "provisional-three-cases",
       "casePacketStatus": "provisional-three-cases",
-      "skills": [
-        "evershelf-budget-workflow"
-      ],
+      "skills": [],
       "team": {
         "id": "evershelf-debugging-team",
         "topology": "medium-owner-only",
@@ -1425,9 +1405,7 @@
       "enabled": true,
       "evaluationStatus": "provisional-three-cases",
       "casePacketStatus": "provisional-three-cases",
-      "skills": [
-        "evershelf-budget-workflow"
-      ],
+      "skills": [],
       "team": {
         "id": "evershelf-activation-team",
         "topology": "medium-owner-only",
@@ -1571,9 +1549,7 @@
       "enabled": false,
       "evaluationStatus": "invalidated-mismatched-topology",
       "casePacketStatus": "invalidated-mismatched-topology",
-      "skills": [
-        "evershelf-budget-workflow"
-      ],
+      "skills": [],
       "executionMachine": ".github/release-machine.json",
       "executionEnabled": false,
       "team": {
