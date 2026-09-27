@@ -37,7 +37,7 @@
     { "id": "build-release-images", "targets": ["ci-release-topology"] }
   ],
   "knownTools": ["test-recipe-backend", "test-quantity-parser", "test-cookidoo-bridge", "test-database-runtime", "test-ontology-v3", "test-ontology-admission", "test-exact-identity", "test-score-deltas", "test-provider-contract", "test-ontology-controller", "test-ontology-activation", "build-assets", "build-release-images"],
-  "knownSkills": ["evershelf-budget-workflow"],
+  "knownSkills": [],
   "automaticBuild": true,
   "automaticPromotion": false,
   "continuation": { "enabled": true },
